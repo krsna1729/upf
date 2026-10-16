@@ -227,6 +227,36 @@ func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.S
 	)
 }
 
+// A closed gate is not a slow path: the compiler writes the rule's own gate as
+// the drop gate and gives it no action, so the packet is dropped where the
+// session's state says it must be, without a lookup into the action table.
+func TestAClosedGateDropsWithoutAnAction(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x5560, "10.45.0.6")
+	// One QER per session, and the gate is its: the uplink's closed, the
+	// downlink's open.
+	req.CreateQER = []*ie.IE{ie.NewCreateQER(
+		ie.NewQERID(1),
+		ie.NewGateStatus(ie.GateStatusClosed, ie.GateStatusOpen),
+	)}
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 6})
+	if got := r.gate(); got != dropGate {
+		t.Errorf("a closed gate's rule gates %d, want the drop gate %d", got, dropGate)
+	}
+	if got := r.actionID(); got != 0 {
+		t.Errorf("a closed gate's rule names action %d, want none", got)
+	}
+	for _, ch := range rec.last() {
+		if ch.Resource == "at_ul/actions" {
+			t.Error("a closed gate wrote an action record")
+		}
+	}
+}
+
 // cause is the Cause IE of any session-level response. go-pfcp's constructors
 // distribute the IEs into typed fields, so the response's Cause is one.
 func cause(t *testing.T, resp message.Message) uint8 {
