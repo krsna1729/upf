@@ -27,8 +27,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 STAGE=${STAGE:-/home/krsna1729/Projects/bess/.scratch/wt/pkg/build/stage-fast/usr/local}
 DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/.scratch/wt/codecs/deps/dpdk-25.11.3/install/lib}
 PLUG=${PLUG:-$ROOT/datapath/build}
+GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
 SERVER=${SERVER:-127.0.0.1:10514}
-GO=${GO:-mise exec -- go}
+GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 SECONDS_RUN=${SECONDS_RUN:-3}
 
 BESSD=$STAGE/bin/bessd
@@ -61,8 +62,8 @@ if ! "$BESSCTL" status >/dev/null 2>&1; then
   exit 1
 fi
 
-"$BESSCTL" validate "$ROOT/deploy/session-path.yaml" >/dev/null
-"$BESSCTL" apply "$ROOT/deploy/session-path.yaml" >/dev/null
+"$BESSCTL" validate "$GRAPH" >/dev/null
+"$BESSCTL" apply "$GRAPH" >/dev/null
 "$BESSCTL" resume >/dev/null
 
 # The Go half: the control arm (counters zero), the session, then the counters

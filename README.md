@@ -101,8 +101,9 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   Its first run found a real bug (an uninitialized UDP source port), which is the
   point of the check.
 - The deployment graph is in: `deploy/upf.yaml` (N3 and N6 on `PMDPort`s, the
-  TEID table, the two PDR tables with their action resources, both chains, the
-  N6 route) validates against a daemon with the plugin loaded.
+  TEID table, the two PDR tables with their action resources, both chains, and
+  the next hop each direction's action names) validates against a daemon with
+  the plugin loaded.
   `deploy/session-live.yaml` is the same composition without ports, for a host
   with no bound NIC.
 - The N4 node is in (`internal/n4`, `cmd/upfd`): an SMF can associate, heartbeat,

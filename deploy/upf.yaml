@@ -4,7 +4,7 @@
 # data network), with the module names cmd/upfd's flags default to. The Go
 # controller writes every rule, action, meter, tunnel record and TEID rule at
 # session time, in one transaction per session change; this file carries only
-# what a deployment owns: the interfaces, the tables' keys, the route to N6,
+# what a deployment owns: the interfaces, the tables' keys, the next hops,
 # the N3 address the outer headers are built from, and the reader that keeps
 # the decap's session attribute real.
 #
@@ -90,7 +90,7 @@ modules:
 
   # -- the two chains ----------------------------------------------------------
   # Both directions' actions name the next hop of their FAR's destination
-  # interface, and the one Router below resolves it: uplink to the N6 route,
+  # interface, and the one Router below resolves it: uplink toward N6,
   # downlink to the encap, which writes the tunnel the same action names. A
   # chain whose action names no next hop would be dropped wholesale -- the
   # ActionTable fails closed when the id it writes has no reader -- so the
@@ -139,14 +139,13 @@ connections:
   - {upstream: enc, downstream: n3_out}
 
 resources:
-  # The actions' next hops and the N6 route that uses one: the deployment's, not
-  # a session's (a session's action names the next hops by id). One hop per
-  # direction's egress; a deployment with several N3 ports gives each its own.
+  # The actions' next hops: the deployment's, not a session's (a session's
+  # action names the next hops by id). One hop per direction's egress; a
+  # deployment with several N3 ports gives each its own, and one that wants
+  # prefix routing instead of pre-resolved actions uses IPLookup's routes --
+  # a Router's routes table is never consulted when the action names a hop.
   rt/next_hops:
     - key: {id: 1}
       value: {egress_gate: 0}
     - key: {id: 2}
       value: {egress_gate: 1}
-  rt/routes:
-    - key: {ipv4: "0.0.0.0", prefix_length: 0}
-      value: {next_hop_id: 1}

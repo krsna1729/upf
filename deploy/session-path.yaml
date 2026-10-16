@@ -134,16 +134,16 @@ workers:
   - {wid: 0, core: 0}
 
 resources:
-  # The actions' next hops and the routes that use them: the deployment's, not
-  # a session's (a session's action names them by id). Every chain with an
-  # ActionTable routes on the id it writes -- the module fails closed when the
-  # attribute has no reader -- so the downlink has one too, to the encap's gate.
-  # The N6 route here is a default route to the one sink the lab graph has.
+  # The actions' next hops: the deployment's, not a session's (a session's
+  # action names them by id). Every chain with an ActionTable routes on the id
+  # it writes -- the module fails closed when the attribute has no reader -- so
+  # both directions have one: the uplink's leaves by gate 0 toward N6, the
+  # downlink's by gate 1 toward the encap. A `Router`'s `routes` table is not on
+  # this path: an action that names a next hop has already resolved it, and the
+  # table is for a deployment that wants prefix routing instead (module
+  # `IPLookup`, whose routes are gate-valued and are looked up per packet).
   rt/next_hops:
     - key: {id: 1}
       value: {egress_gate: 0}
     - key: {id: 2}
       value: {egress_gate: 1}
-  rt/routes:
-    - key: {ipv4: "0.0.0.0", prefix_length: 0}
-      value: {next_hop_id: 1}
