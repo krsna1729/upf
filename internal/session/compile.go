@@ -512,21 +512,19 @@ func (p *pdr) matchValue(f Field) ([]byte, bool) {
 	}
 	switch f {
 	case SrcIP:
-		// The uplink's UE address is the source; a downlink PDR's SDF can
-		// name either side, and matchValue consults both.
+		// The uplink's UE address is the source. A downlink PDR's SDF may name
+		// either side; when it names no source, the source stays unconstrained
+		// -- the peer on the data network is not the UE, so constraining this
+		// field to the SDF's *destination* would demand the UE's address on
+		// both sides and match no packet at all.
 		if p.srcIfc == ie.SrcInterfaceAccess {
 			if p.sdf != nil && p.sdf.srcOK {
 				return prefix(p.sdf.src.Addr())
 			}
 			return prefix(p.ueIP)
 		}
-		if p.sdf != nil {
-			if p.sdf.srcOK {
-				return prefix(p.sdf.src.Addr())
-			}
-			if p.sdf.dstOK {
-				return prefix(p.sdf.dst.Addr())
-			}
+		if p.sdf != nil && p.sdf.srcOK {
+			return prefix(p.sdf.src.Addr())
 		}
 		return nil, false
 	case DstIP:

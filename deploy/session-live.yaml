@@ -72,15 +72,20 @@ connections:
   - {upstream: mt_ul, downstream: rt}
   - {upstream: pdr_dl, downstream: at_dl}
   - {upstream: at_dl, downstream: mt_dl}
-  - {upstream: mt_dl, downstream: enc}
+  - {upstream: mt_dl, downstream: rt}
+  - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: sink}
 
 resources:
-  # The uplink action's next hop and the route that uses it: the deployment's,
-  # not a session's (a session's action names them by id).
+  # The actions' next hops: the deployment's, not a session's (a session's
+  # action names them by id). Both directions' actions name one, because both
+  # chains hold an ActionTable and the module fails closed when the id it writes
+  # has no reader.
   rt/next_hops:
     - key: {id: 1}
       value: {egress_gate: 0}
+    - key: {id: 2}
+      value: {egress_gate: 1}
   rt/routes:
     - key: {ipv4: "0.0.0.0", prefix_length: 0}
       value: {next_hop_id: 1}

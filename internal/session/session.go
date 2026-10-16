@@ -82,8 +82,12 @@ type Direction struct {
 	Actions string
 	// Meters is the Meter module its QER meters live in.
 	Meters string
-	// NextHop is the Router next hop a forward leaves by (uplink); 0 for a
-	// direction that ends in a tunnel (downlink).
+	// NextHop is the Router next hop a forward leaves by, for either
+	// direction: the uplink's is the N6 route, the downlink's the N3 one.
+	// Every chain that holds an ActionTable must route on the id it writes --
+	// the module fails closed (drops every packet) when the attribute has no
+	// reader, and a Router drops an id it does not know -- so 0 here is only
+	// correct for a graph whose chain has no ActionTable at all.
 	NextHop uint32
 	// Tunnels is the GtpuEncap module whose per-session records the direction
 	// writes (downlink only; empty for the uplink).

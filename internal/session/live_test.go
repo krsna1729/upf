@@ -33,6 +33,7 @@ func liveConfig() Config {
 		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
 		Actions:   "at_dl",
 		Meters:    "mt_dl",
+		NextHop:   2,
 		Tunnels:   "enc",
 	}
 	cfg.N3Addr = netip.MustParseAddr("192.0.2.1")

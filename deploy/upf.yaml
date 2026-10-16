@@ -87,9 +87,13 @@ modules:
       action_resource: at_dl/actions
 
   # -- the two chains ----------------------------------------------------------
-  # Uplink: the action's next hop is the N6 route. Downlink: the action names
-  # the tunnel the encap reads, and the packet leaves the action table toward
-  # the encap's gate. Meters are per-chain for the same reason the tables are.
+  # Both directions' actions name the next hop of their FAR's destination
+  # interface, and the one Router below resolves it: uplink to the N6 route,
+  # downlink to the encap, which writes the tunnel the same action names. A
+  # chain whose action names no next hop would be dropped wholesale -- the
+  # ActionTable fails closed when the id it writes has no reader -- so the
+  # downlink does not go straight from the table to the encap. Meters are
+  # per-chain for the same reason the tables are.
   - name: at_ul
     mclass: ActionTable
     arg: {meters: mt_ul/meters, next_hops: rt/next_hops}
@@ -128,15 +132,19 @@ connections:
   - {upstream: n6_in, downstream: pdr_dl}
   - {upstream: pdr_dl, downstream: at_dl}
   - {upstream: at_dl, downstream: mt_dl}
-  - {upstream: mt_dl, downstream: enc}
+  - {upstream: mt_dl, downstream: rt}
+  - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: n3_out}
 
 resources:
-  # The uplink action's next hop and the route that uses it: the deployment's,
-  # not a session's (a session's action names them by id).
+  # The actions' next hops and the N6 route that uses one: the deployment's, not
+  # a session's (a session's action names the next hops by id). One hop per
+  # direction's egress; a deployment with several N3 ports gives each its own.
   rt/next_hops:
     - key: {id: 1}
       value: {egress_gate: 0}
+    - key: {id: 2}
+      value: {egress_gate: 1}
   rt/routes:
     - key: {ipv4: "0.0.0.0", prefix_length: 0}
       value: {next_hop_id: 1}

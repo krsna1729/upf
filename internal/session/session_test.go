@@ -149,7 +149,12 @@ func testConfig() Config {
 			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
 			Actions:   "at_dl",
 			Meters:    "mt_dl",
-			Tunnels:   "enc",
+			// The access-side route: the downlink's chain holds an ActionTable
+			// too, and a chain whose action names no next hop is a chain the
+			// module fails closed on (deploy/session-path.yaml routes it to the
+			// encap through this hop).
+			NextHop: 2,
+			Tunnels: "enc",
 		},
 		// The F-TEID match, as deploy/smoke-gtpu.yaml wires it: the rule table
 		// in front of the decap, one rule per TEID.
@@ -308,6 +313,16 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 	if !bytes.Equal(ports, []byte{0, 53}) {
 		t.Errorf("the downlink rule's destination port is %v, want 53", ports)
 	}
+	// The downlink SDF names the destination side only ("permit out udp from
+	// any to assigned 53"), so its source must stay masked out: a rule that put
+	// the UE's address on both sides of the tuple would match no packet at all,
+	// and the traffic a session exists for would be dropped.
+	if m := dl.mask(0); !bytes.Equal(m, []byte{0, 0, 0, 0}) {
+		t.Errorf("the downlink rule constrains the source its SDF left open: mask %v", m)
+	}
+	if m := ul.mask(0); !bytes.Equal(m, []byte{0xff, 0xff, 0xff, 0xff}) {
+		t.Errorf("the uplink rule does not constrain the UE's address: mask %v", m)
+	}
 	if m := ul.mask(4); !bytes.Equal(m, []byte{0, 0}) {
 		t.Errorf("the uplink rule constrains a port it does not name: mask %v", m)
 	}
@@ -321,8 +336,8 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 		t.Error("a PDR whose QER has an MBR must name its meter")
 	}
 	dlAction := find(t, changes, testConfig().Down.Actions+"/actions", "id", dl.actionID())
-	if got := dlAction.Value["next_hop_id"]; got != uint32(0) {
-		t.Errorf("the downlink action forwards straight to the tunnel, but its next hop is %v", got)
+	if got := dlAction.Value["next_hop_id"]; got != uint32(2) {
+		t.Errorf("the downlink action's next hop is %v, want the access side's (2)", got)
 	}
 
 	// The downlink FAR's tunnel is keyed by the same ActionId the rule carries.
