@@ -35,10 +35,20 @@ LIVE_BENCH=${LIVE_BENCH:-$WT/../codecs/build/perf-release/tests/perf/live_transa
 MODE=${MODE:-full}                     # full | n4
 SESSIONS=${SESSIONS:-512}
 WORKERS=${WORKERS:-16}
-MODES=${MODES:-"establish cycle bulk"}  # the n4bench phases to run
+# One mode per run: PFCP has one association per peer, so a second n4bench
+# against the same upfd gets cause 64 rather than joining the first. establish
+# is the session's birth, cycle its whole life (establish, modify, delete,
+# interleaved across the workers), bulk the same three phases each at full
+# rate. Run the script again with MODES=bulk for the other number.
+MODES=${MODES:-cycle}
 N4_PORT=${N4_PORT:-8805}
 BESS_PORT=${BESS_PORT:-10514}
 N3_ADDR=${N3_ADDR:-192.0.2.1}
+
+case "$MODES" in
+  establish|cycle|bulk) ;;
+  *) echo "bench-n4: MODES=$MODES: want establish, cycle or bulk" >&2; exit 2 ;;
+esac
 
 BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
