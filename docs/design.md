@@ -300,6 +300,17 @@ sustains 695K sessions/s (519K in the other profile), and with the writer flat
 out at 194K sessions/s four readers still do 44.8 Mpps each, from 49.3 at rest.
 A million sessions is therefore seconds of control traffic, not a migration.
 
+The deployment's own numbers, through the whole N4 path (a PFCP message, the
+session compiler, one transaction, the daemon's answer) with one client in
+flight, 64 sessions, `ci/bench-n4.sh` MODE=full: establish 786 µs p50 (1,184/s),
+modify 353 µs p50 (2,595/s), delete 213 µs p50 (4,256/s); p99 1.54 ms, 636 µs
+and 471 µs. That is the rate an SMF sees today, and it is per session in flight,
+not per core: with eight in flight the same run answers 7 of 256 establishments
+within 5 s and the rest minutes later (the daemon logs those as "answer to no
+request"), so the runway to the transaction numbers above is a client-side
+stall, not the compiler -- the next thing to fix, and the reason the bench's
+default is one worker.
+
 The walls, in order:
 
 1. **Per-worker tables.** Classifier rules and action records are per-worker

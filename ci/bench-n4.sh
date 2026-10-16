@@ -34,7 +34,14 @@ LIVE_BENCH=${LIVE_BENCH:-$WT/../codecs/build/perf-release/tests/perf/live_transa
 
 MODE=${MODE:-full}                     # full | n4
 SESSIONS=${SESSIONS:-512}
-WORKERS=${WORKERS:-16}
+# One worker in flight: the client-side stall below is what happens otherwise,
+# and it measures the client's own queue rather than the path. With WORKERS=8,
+# SESSIONS=256 this script's establish phase answered 7 of 256 within the 5 s
+# timeout and the rest minutes later (upfd: "answer to no request"), while one
+# worker sustains establish 786 us p50 / modify 353 us / delete 213 us. That
+# stall is the control path's next piece of work, not a property of the
+# compiler.
+WORKERS=${WORKERS:-1}
 # One mode per run: PFCP has one association per peer, so a second n4bench
 # against the same upfd gets cause 64 rather than joining the first. establish
 # is the session's birth, cycle its whole life (establish, modify, delete,
