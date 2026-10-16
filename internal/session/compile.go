@@ -45,6 +45,14 @@ const dropGate = 8192 // DROP_GATE (core/gate.h)
 // wrong.
 var errNotExpressible = errors.New("the rule cannot be expressed by a mask")
 
+// errNoResources marks a session the UPF cannot carry for want of a resource:
+// an F-TEID the allocator has none of, or one another session already holds.
+// The SMF is told cause 74 ("no resources available"), which is what it retries
+// or reconciles against; a rule failure (cause 73) would say the filter was
+// wrong, and an accepted answer with no usable F-TEID would blackhole the
+// uplink while claiming success.
+var errNoResources = errors.New("no resources available")
+
 // idsOf returns a table's keys in order. Every transaction this compiler
 // writes is built from these: a map's iteration order must never decide what
 // the dataplane is told, or which id an object gets.
@@ -147,13 +155,17 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 		QERs:      map[uint32]*qer{},
 		URRs:      map[uint32]*urr{},
 	}
-	c.merge(s, pdrs, fars, qers, nil, nil, nil)
+	if err := c.merge(s, pdrs, fars, qers, nil, nil, nil); err != nil {
+		c.log.Warn("session: cannot carry the establishment request",
+			"cp_seid", cpSEID, "error", err)
+		return establishResponse(req, local, compileCause(err), nil)
+	}
 
 	changes, created, err := c.compile(s)
 	if err != nil {
 		c.log.Warn("session: cannot compile the establishment request",
 			"cp_seid", cpSEID, "error", err)
-		return establishResponse(req, local, ie.CauseRuleCreationModificationFailure, nil)
+		return establishResponse(req, local, compileCause(err), nil)
 	}
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
 		c.log.Warn("session: the dataplane refused the session",
@@ -199,12 +211,15 @@ func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Messa
 	removePDRs, removeFARs := parseRemovals(ies)
 
 	// merge takes the lock itself.
-	c.merge(s, pdrs, fars, qers, nil, removePDRs, removeFARs)
+	if err := c.merge(s, pdrs, fars, qers, nil, removePDRs, removeFARs); err != nil {
+		c.log.Warn("session: cannot carry the modification request", "seid", seid, "error", err)
+		return modifyResponse(req, seid, compileCause(err), nil)
+	}
 
 	changes, created, err := c.compile(s)
 	if err != nil {
 		c.log.Warn("session: cannot compile the modification request", "seid", seid, "error", err)
-		return modifyResponse(req, seid, ie.CauseRuleCreationModificationFailure, nil)
+		return modifyResponse(req, seid, compileCause(err), nil)
 	}
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
 		c.log.Warn("session: the dataplane refused the modification", "seid", seid, "error", err)
@@ -244,7 +259,7 @@ func (c *Compiler) Delete(req *message.SessionDeletionRequest) message.Message {
 
 // merge folds a request's objects into the session's model.
 func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq,
-	urrs []urrReq, removePDRs []uint16, removeFARs []uint32) {
+	urrs []urrReq, removePDRs []uint16, removeFARs []uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -314,13 +329,28 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		}
 		if p.hasFTEID && p.srcIfc == ie.SrcInterfaceAccess {
 			if p.teid != 0 {
+				// An F-TEID the SMF pinned is ours to use and ours to keep out
+				// of the allocator's way: another session handed the same
+				// value would share the TEID rule, and its uplink packets
+				// would land in whichever session wrote the rule last.
+				if other := c.byTEID[p.teid]; other != nil && other != s {
+					return fmt.Errorf(
+						"%w: the pinned F-TEID %#x is session %d's",
+						errNoResources, p.teid, other.LocalSEID)
+				}
 				pdr.teid = p.teid
+				c.teids.reserve(p.teid)
 			} else if pdr.teid == 0 {
 				// The SMF left the F-TEID to us (TEID 0): allocate one and
-				// report it in the Created PDR.
-				if id, err := c.teids.alloc(); err == nil {
-					pdr.teid = id
+				// report it in the Created PDR. Failing to is not something to
+				// shrug at -- a session with TEID 0 has no rule to be selected
+				// by, so the uplink would blackhole while the SMF was told the
+				// establishment succeeded.
+				id, err := c.teids.alloc()
+				if err != nil {
+					return fmt.Errorf("%w: %v", errNoResources, err)
 				}
+				pdr.teid = id
 			}
 		}
 		if p.ueIP.IsValid() {
@@ -365,6 +395,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 			p.ueIP = s.UEIP
 		}
 	}
+	return nil
 }
 
 // compile turns a session's model into the resource changes that program it,
@@ -395,12 +426,16 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 
 	for _, p := range pdrsInOrder(s) {
 		dir := c.direction(p.srcIfc)
+		key, err := p.ruleKey(dir.PDRFields)
+		if err != nil {
+			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
+		}
 		if p.drop && p.actionID == 0 {
 			// A drop needs no action record: the rule's gate is the whole
 			// result, and the packet path pays for nothing else.
 			changes = append(changes, bess.Change{
 				Resource: rulesRes(dir),
-				Key:      p.ruleKey(dir.PDRFields),
+				Key:      key,
 				Value: map[string]any{
 					"priority":  p.precedence,
 					"gate":      uint64(dropGate),
@@ -441,7 +476,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 
 		changes = append(changes, bess.Change{
 			Resource: rulesRes(dir),
-			Key:      p.ruleKey(dir.PDRFields),
+			Key:      key,
 			Value: map[string]any{
 				// The table's own output gate: one chain per direction.
 				"priority":  p.precedence,
@@ -478,7 +513,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 //
 // The value must be canonical (value & ^mask == 0), and the key is the
 // concatenation of mask then value per field.
-func (p *pdr) ruleKey(fields []Field) map[string]any {
+func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 	// The table's key message is WildcardMatchRuleKey: one FieldData per
 	// field, values and masks in two parallel lists (protobuf JSON, which is
 	// how the SDK builds it: a bytes field is base64).
@@ -488,14 +523,18 @@ func (p *pdr) ruleKey(fields []Field) map[string]any {
 		width := f.width()
 		mask := make([]byte, width)
 		value := make([]byte, width)
-		if m, ok := p.matchValue(f); ok {
+		m, ok, err := p.matchValue(f)
+		if err != nil {
+			return nil, fmt.Errorf("the PDI's %s: %w", f, err)
+		}
+		if ok {
 			copy(mask, m.mask)
 			copy(value, m.value)
 		}
 		values = append(values, map[string]any{"value_bin": value})
 		masks = append(masks, map[string]any{"value_bin": mask})
 	}
-	return map[string]any{"values": values, "masks": masks}
+	return map[string]any{"values": values, "masks": masks}, nil
 }
 
 // match is one field's constraint: the bits a PDI fixes, and the mask that says
@@ -516,38 +555,53 @@ func ones(n int) []byte {
 	return b
 }
 
-// host is a field constrained to one IPv4 address.
-func host(a netip.Addr) (match, bool) {
+// host is a field constrained to one IPv4 address. An address the table's four
+// bytes cannot carry is inexpressible, never "unconstrained": a PDI naming an
+// IPv6 UE is a session whose rules must not be written at all, because a masked
+// -out address matches every address -- another session's packets included.
+func host(a netip.Addr) (match, error) {
+	a = a.Unmap()
 	if !a.Is4() {
-		return match{}, false
+		return match{}, fmt.Errorf("%w: address %s is not IPv4", errNotExpressible, a)
 	}
 	b := a.As4()
-	return match{value: b[:], mask: ones(4)}, true
+	return match{value: b[:], mask: ones(4)}, nil
 }
 
 // pref is a field constrained to an IPv4 prefix: the value is its network
 // address (the canonical form the classifier requires, value & ^mask == 0) and
-// the mask its length, bit by bit so a /12 is as expressible as a /16.
-func pref(p netip.Prefix) (match, bool) {
+// the mask its length, bit by bit so a /12 is as expressible as a /16. A
+// filter whose address carries host bits ("10.10.1.5/16") means the network:
+// the Flow Description's form is address/mask, and the mask is what the table
+// carries.
+func pref(p netip.Prefix) (match, error) {
 	a := p.Addr().Unmap()
 	if !a.Is4() {
-		return match{}, false
+		return match{}, fmt.Errorf("%w: prefix %s is not IPv4", errNotExpressible, p)
 	}
-	b := a.As4()
 	bits := p.Bits()
 	if bits < 0 || bits > 32 {
-		return match{}, false
+		return match{}, fmt.Errorf("%w: prefix %s has no IPv4 length", errNotExpressible, p)
 	}
+	b := a.As4()
 	m := make([]byte, 4)
 	for i := 0; i < bits; i++ {
 		m[i/8] |= 0x80 >> (i % 8)
 	}
-	return match{value: b[:], mask: m}, true
+	for i := range b {
+		b[i] &= m[i]
+	}
+	return match{value: b[:], mask: m}, nil
 }
 
-// matchValue is the constraint a PDR puts on one field of its table, and
-// whether it constrains it at all.
-func (p *pdr) matchValue(f Field) (match, bool) {
+// matchValue is the constraint a PDR puts on one field of its table, whether it
+// constrains it at all, and whether the PDI names something the table cannot
+// express. The three states are distinct on purpose: a field the PDI leaves
+// open is masked out (an uplink PDR is chosen by its UE address, not its
+// destination); a field the PDI names is constrained; and one it names in a
+// form a 4-byte mask cannot carry is a session the SMF is told to fix, not one
+// whose rule quietly matches everything.
+func (p *pdr) matchValue(f Field) (match, bool, error) {
 	switch f {
 	case SrcIP:
 		// The uplink's UE address is the source. A downlink PDR's SDF may name
@@ -557,43 +611,48 @@ func (p *pdr) matchValue(f Field) (match, bool) {
 		// both sides and match no packet at all.
 		if p.srcIfc == ie.SrcInterfaceAccess {
 			if p.sdf != nil && p.sdf.srcOK {
-				return pref(p.sdf.src)
+				m, err := pref(p.sdf.src)
+				return m, err == nil, err
 			}
-			return host(p.ueIP)
+			m, err := host(p.ueIP)
+			return m, err == nil, err
 		}
 		if p.sdf != nil && p.sdf.srcOK {
-			return pref(p.sdf.src)
+			m, err := pref(p.sdf.src)
+			return m, err == nil, err
 		}
-		return match{}, false
+		return match{}, false, nil
 	case DstIP:
 		if p.srcIfc == ie.SrcInterfaceAccess {
-			return match{}, false // the uplink is chosen by its UE address
+			return match{}, false, nil // the uplink is chosen by its UE address
 		}
 		if p.sdf != nil && p.sdf.dstOK {
-			return pref(p.sdf.dst)
+			m, err := pref(p.sdf.dst)
+			return m, err == nil, err
 		}
-		return host(p.ueIP)
+		m, err := host(p.ueIP)
+		return m, err == nil, err
 	case Proto:
 		if p.sdf != nil && p.sdf.protoOK {
-			return match{value: []byte{p.sdf.proto}, mask: ones(1)}, true
+			return match{value: []byte{p.sdf.proto}, mask: ones(1)}, true, nil
 		}
-		return match{}, false
+		return match{}, false, nil
 	case SrcPort:
 		if p.sdf != nil && p.sdf.sportOK {
 			b := make([]byte, 2)
 			binary.BigEndian.PutUint16(b, p.sdf.sport)
-			return match{value: b, mask: ones(2)}, true
+			return match{value: b, mask: ones(2)}, true, nil
 		}
-		return match{}, false
+		return match{}, false, nil
 	case DstPort:
 		if p.sdf != nil && p.sdf.dportOK {
 			b := make([]byte, 2)
 			binary.BigEndian.PutUint16(b, p.sdf.dport)
-			return match{value: b, mask: ones(2)}, true
+			return match{value: b, mask: ones(2)}, true, nil
 		}
-		return match{}, false
+		return match{}, false, nil
 	default:
-		return match{}, false
+		return match{}, false, nil
 	}
 }
 
@@ -1066,11 +1125,10 @@ func parseFilterAddr(word string, ue netip.Addr) (netip.Prefix, int, error) {
 		if err != nil {
 			return netip.Prefix{}, 0, fmt.Errorf("invalid address %q", word)
 		}
-		// An address that is a prefix of a range is what a mask can express.
-		if p.Addr() != p.Masked().Addr() {
-			return netip.Prefix{}, 0, fmt.Errorf("%w: address %q is not a network prefix",
-				errNotExpressible, word)
-		}
+		// A Flow Description is address/mask (TS 29.244 8.2.2, by way of TS
+		// 29.212 5.4.2): host bits in the address are not a different filter,
+		// they are bits the mask ignores. The rule the table gets carries the
+		// network address and the mask (compile.go, pref).
 		return p, 1, nil
 	}
 	a, err := netip.ParseAddr(word)
@@ -1139,6 +1197,17 @@ func parseCause(err error) uint8 {
 		return ie.CauseRuleCreationModificationFailure
 	}
 	return ie.CauseRequestRejected
+}
+
+// compileCause maps a compile failure to the cause the SMF sees. A rule the
+// mask cannot express is a rule failure; a resource the UPF has none of is
+// cause 74 ("no resources available"), which is what an SMF retries or
+// reconciles against.
+func compileCause(err error) uint8 {
+	if errors.Is(err, errNoResources) {
+		return ie.CauseNoResourcesAvailable
+	}
+	return ie.CauseRuleCreationModificationFailure
 }
 
 // causeOf maps a failed transaction to the cause the SMF sees. The SDK's

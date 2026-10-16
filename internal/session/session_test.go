@@ -175,6 +175,13 @@ func quietLogger() *slog.Logger {
 // the UPF's to choose, and a downlink one whose FAR carries the gNB's tunnel
 // endpoint and whose SDF filter names a port.
 func establishment(cpSEID uint64, ueIP string) *message.SessionEstablishmentRequest {
+	return establishmentWithFTEID(cpSEID, ueIP, 0)
+}
+
+// establishmentWithFTEID is establishment with the uplink F-TEID spelled out: 0
+// leaves the choice to the UPF (what a conformant SMF does while FTUP is not
+// advertised), and a value pins it.
+func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.SessionEstablishmentRequest {
 	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(cpSEID, nil, nil),
@@ -183,7 +190,7 @@ func establishment(cpSEID uint64, ueIP string) *message.SessionEstablishmentRequ
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x02, 0, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewFTEID(0x02, fteid, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),
@@ -530,19 +537,52 @@ func TestAnSDFPrefixIsAPrefixNotAnAddress(t *testing.T) {
 		t.Errorf("the prefix rule's destination mask is %v, want the /16", got)
 	}
 
-	// An address that is not the prefix's network address has no masked rule:
-	// the session is refused rather than matched too narrowly.
+	// A filter whose address carries host bits means the network: address/mask
+	// is the form, and the mask is what the rule carries. Refusing it would
+	// turn an SMF's slightly sloppy filter into a session that cannot exist.
 	req = message.NewSessionEstablishmentRequest(0, 0, 0x5557, 1, 0,
 		ie.NewFSEID(0x5557, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any to 10.10.0.1/16", "", "", "", 0)),
+				ie.NewSDFFilter("permit out udp from any to 10.10.1.5/16", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a filter with host bits answered cause %d", got)
+	}
+	sloppy := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0})
+	if got := sloppy.value(fieldDstIP); !bytes.Equal(got, []byte{10, 10, 0, 0}) {
+		t.Errorf("the sloppy prefix's value is %v, want the network address", got)
+	}
+	if got := sloppy.mask(fieldDstIP); !bytes.Equal(got, []byte{0xff, 0xff, 0, 0}) {
+		t.Errorf("the sloppy prefix's mask is %v, want the /16", got)
+	}
+}
+
+func TestANonIPv4PDIIsRefusedNotWidened(t *testing.T) {
+	// A table field is four bytes: an IPv6 UE address or SDF prefix cannot be
+	// carried by it. Compiling one as "unconstrained" would write a rule that
+	// matches every address, another session's packets included -- so the
+	// session is refused, which is what the IPv6 gap in docs/compliance.md
+	// means for a PDI that names one.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5558, 1, 0,
+		ie.NewFSEID(0x5558, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 2001:db8::/32 53", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
-		t.Errorf("a non-network prefix answered cause %d, want a rule failure", got)
+		t.Errorf("an IPv6 SDF answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
 	}
 }
 
@@ -606,6 +646,86 @@ func TestTheIDPoolWalksTheSpaceAndWaitsOutTheGrace(t *testing.T) {
 		if id == got {
 			t.Errorf("the pool reissued %d, which a session still holds", id)
 		}
+	}
+}
+
+// reportedTEID is the F-TEID the answer reports for the uplink PDR, or 0.
+func reportedTEID(t *testing.T, resp *message.SessionEstablishmentResponse) uint32 {
+	t.Helper()
+	for _, i := range resp.CreatedPDR {
+		children, err := i.CreatedPDR()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ch := range children {
+			if ch.Type != ie.FTEID {
+				continue
+			}
+			f, err := ch.FTEID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return f.TEID
+		}
+	}
+	return 0
+}
+
+func TestAnExhaustedFTEIDSpaceIsRefused(t *testing.T) {
+	// A session whose uplink PDR has no rule to be selected by is a session
+	// that blackholes the uplink while telling the SMF the establishment
+	// succeeded. When the F-TEID space is empty the answer must be cause 74,
+	// "no resources available", and nothing may reach the dataplane.
+	cfg := testConfig()
+	cfg.MaxTEIDs = 2 // the space is id 1 only (the slots are numbered from 1)
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	first := c.Establish(establishment(0x9101, "10.45.0.9")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, first); got != ie.CauseRequestAccepted {
+		t.Fatalf("the first establishment answered cause %d", got)
+	}
+	before := len(rec.txns)
+
+	second := c.Establish(establishment(0x9102, "10.45.0.10")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, second); got != ie.CauseNoResourcesAvailable {
+		t.Errorf("an exhausted F-TEID space answered cause %d, want no-resources", got)
+	}
+	if len(rec.txns) != before {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+func TestAPinnedFTEIDIsReservedAndOneCollisionIsRefused(t *testing.T) {
+	cfg := testConfig()
+	// A small space so the allocator's walk is easy to reason about.
+	cfg.MaxTEIDs = 8
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	// Session 1 pins the F-TEID, as a compliant SMF does while FTUP is off.
+	pinned := uint32(2)
+	if got := cause(t, c.Establish(establishmentWithFTEID(0x9201, "10.45.0.9", pinned))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the pinned establishment answered cause %d", got)
+	}
+
+	// Session 2 leaves the choice to the UPF, and must not be handed the
+	// pinned value: two sessions sharing a TEID rule send each other's packets.
+	for i := 0; i < 6; i++ {
+		resp := c.Establish(establishment(0x9300+uint64(i), "10.45.0.20")).(*message.SessionEstablishmentResponse)
+		if got := cause(t, resp); got != ie.CauseRequestAccepted {
+			t.Fatalf("establishment %d answered cause %d", i, got)
+		}
+		if got := reportedTEID(t, resp); got == pinned {
+			t.Fatalf("the allocator handed out the pinned F-TEID %#x", pinned)
+		}
+	}
+
+	// A second session pinning what the first pinioned is refused: the SMF is
+	// told the resource is not available, not given a shared rule.
+	dup := c.Establish(establishmentWithFTEID(0x9401, "10.45.0.21", pinned)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, dup); got != ie.CauseNoResourcesAvailable {
+		t.Errorf("a colliding F-TEID answered cause %d, want no-resources", got)
 	}
 }
 

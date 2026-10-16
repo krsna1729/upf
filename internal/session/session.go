@@ -22,9 +22,11 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -61,6 +63,25 @@ func (f Field) width() int {
 		return 2
 	default:
 		return 0
+	}
+}
+
+// String is the field's name as the graph's manifest spells the offset: a cause
+// and a log line that name the field are what an SMF's operator works from.
+func (f Field) String() string {
+	switch f {
+	case SrcIP:
+		return "source address"
+	case DstIP:
+		return "destination address"
+	case Proto:
+		return "protocol"
+	case SrcPort:
+		return "source port"
+	case DstPort:
+		return "destination port"
+	default:
+		return "field " + strconv.Itoa(int(f))
 	}
 }
 
@@ -315,6 +336,11 @@ type idPool struct {
 	grace  time.Duration
 	now    func() time.Time
 	freed  []freedID
+	// taken holds ids the pool must not hand out even though its own books say
+	// nothing about them: an F-TEID an SMF pinned, which another session is
+	// using right now. Pool-owned ids need no entry (the walk visits each once,
+	// and a released one is aged before it is visited again).
+	taken map[uint32]bool
 }
 
 type freedID struct {
@@ -330,7 +356,8 @@ func newIDPool(limit uint32, grace time.Duration) *idPool {
 	if span < 1 {
 		span = 1
 	}
-	p := &idPool{limit: limit, start: 1 + rand.Uint32N(span), grace: grace, now: time.Now}
+	p := &idPool{limit: limit, start: 1 + rand.Uint32N(span), grace: grace,
+		now: time.Now, taken: map[uint32]bool{}}
 	p.next = p.start
 	for {
 		p.stride = 1 + rand.Uint32N(span)
@@ -350,29 +377,47 @@ func gcd(a, b uint32) uint32 {
 // advance is one step of the walk: ids stay in 1..limit-1.
 func (p *idPool) advance(id uint32) uint32 {
 	span := p.limit - 1
+	if span < 1 {
+		span = 1 // a pool with no ids: the walk is one step long
+	}
 	return 1 + (id-1+p.stride)%span
 }
 
 func (p *idPool) alloc() (uint32, error) {
 	// One walk of the space: an id released behind the walk waits for the
 	// round trip, which is what keeps it out of circulation past the grace.
-	if !p.walked {
+	// An id another session pinned is skipped wherever the walk meets it.
+	for !p.walked {
 		id := p.next
 		p.next = p.advance(p.next)
 		if p.next == p.start {
 			p.walked = true
 		}
-		return id, nil
+		if !p.taken[id] {
+			return id, nil
+		}
 	}
 	// The walk is done: a released id, if one has aged.
-	if n := len(p.freed); n != 0 {
+	for n := len(p.freed); n != 0; n = len(p.freed) {
 		oldest := p.freed[0]
-		if p.now().Sub(oldest.at) >= p.grace {
-			p.freed = p.freed[1:]
+		if p.now().Sub(oldest.at) < p.grace {
+			break
+		}
+		p.freed = p.freed[1:]
+		if !p.taken[oldest.id] {
 			return oldest.id, nil
 		}
 	}
 	return 0, errors.New("id space exhausted")
+}
+
+// reserve keeps an id the pool did not hand out out of the walk: an F-TEID an
+// SMF pinned, which another session is using. release clears it.
+func (p *idPool) reserve(id uint32) {
+	if id == 0 {
+		return
+	}
+	p.taken[id] = true
 }
 
 // release takes an id back. A zero grace means the id may be reused as soon as
@@ -382,6 +427,7 @@ func (p *idPool) release(id uint32) {
 	if id == 0 {
 		return
 	}
+	delete(p.taken, id)
 	p.freed = append(p.freed, freedID{id: id, at: p.now()})
 }
 
@@ -411,9 +457,15 @@ func teidRuleKey(teid uint32) map[string]any {
 func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	changes := make([]bess.Change, 0, 4*len(s.PDRs)+2)
 	for _, p := range pdrsInOrder(s) {
-		changes = append(changes, bess.Change{
-			Resource: rulesRes(c.direction(p.srcIfc)),
-			Key:      p.ruleKey(c.direction(p.srcIfc).PDRFields)})
+		dir := c.direction(p.srcIfc)
+		key, err := p.ruleKey(dir.PDRFields)
+		if err != nil {
+			// The session's rules were written with these keys, so this is a
+			// PDI that changed under a live session: fail the deletion rather
+			// than leave the rule behind.
+			return fmt.Errorf("PDR %d: %w", p.id, err)
+		}
+		changes = append(changes, bess.Change{Resource: rulesRes(dir), Key: key})
 	}
 	for _, p := range pdrsInOrder(s) {
 		dir := c.direction(p.srcIfc)
