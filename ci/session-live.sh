@@ -60,4 +60,12 @@ fi
 # the module and its workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ -run TestLiveSessionProgramsTheDaemon -count=1 -v
+  $GO test ./internal/session/ -run TestLiveSessionProgramsTheDaemon -count=1 -v || {
+  echo "session-live: failed; the daemon's log is $LOG" >&2
+  exit 1
+}
+
+# The run's own files, not a result: a failed run keeps them (the message above
+# says where), a green one leaves nothing behind -- the other CI scripts do the
+# same, and this one used to leave a log and a pidfile per run in /tmp.
+rm -f "$LOG" "$PIDFILE"

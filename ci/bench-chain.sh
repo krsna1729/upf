@@ -232,4 +232,8 @@ for v in "${VARIANTS[@]}"; do
 done
 
 kill "$DAEMON" 2>/dev/null || true
-echo "bench: daemon log: $LOG"
+# The numbers are on stdout; the log and the pidfile are the run's own files, so
+# a green run leaves nothing in /tmp (a failed one stops before this line, and
+# the trap keeps its manifest and the log's path is printed).
+echo "bench: daemon log (kept if this run failed): $LOG"
+rm -f "$LOG" "$PIDFILE"

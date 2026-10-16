@@ -113,4 +113,6 @@ echo "         PDR); metered_ul = rt gate 0 (what reached N6 through the SMF's Q
 echo "         the session's MBR shapes it); dl_to_N3 = dump_d's output (the downlink"
 echo "         through the PDR, action, meter and encap, unmetered in this session);"
 echo "         input_Mpps = both chains' input per second, Mpps."
-echo "logs: $WORK (bessd.log, upfd.log)"
+# The run's own files, not a result: a failed run keeps them (the line above
+# says where), a green one leaves nothing behind.
+rm -rf "$WORK"

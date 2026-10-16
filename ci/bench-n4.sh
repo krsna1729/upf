@@ -139,4 +139,9 @@ if [ -x "$LIVE_BENCH" ]; then
     echo "(live_transaction_bench needs a bessd of its own; run it separately)"
 fi
 
-echo "== logs: $WORK (bessd.log, upfd.log, n4bench-*.json)"
+echo "== logs: $WORK (bessd.log, upfd.log, n4bench-*.json; kept only when this"
+echo "   run failed -- the numbers are above and in the JSON it printed)"
+
+# The run's own files, not a result: a failed run keeps them (the line above
+# says where), a green one leaves nothing behind.
+rm -rf "$WORK"
