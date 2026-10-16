@@ -187,6 +187,15 @@ Reproduced the same night by a second `ci/bench-modules.sh` run: delta +13.54 ns
 (+46.1 and +64.4 cycles). The instruction counts reproduce to 0.2, which is what a
 publishable module cost looks like.
 
+**After that measurement** the encap learned to copy the inner packet's TOS to the
+outer header (the DSCP copy; `ci/session-path.sh` checks the outer header carries the
+inner class). The re-run is owed: `ci/bench-modules.sh` with its
+`omarchy-benchmark --isolate` wrapper currently fails silently — the isolation comes
+up, its child writes nothing and exits 1, while the same arms run fine unisolated — so
+there is no isolated number for the changed encap yet. An unisolated cross-check put
+the encap at +16.88 ns over its control against the +18.1 above: inside the
+between-run spread, which is as much as an unpaired run can say.
+
 **Fusion decision from these numbers.** The decap is 44 cycles, the encap 63, and the
 classifier in front of the decap is ~49 (its control above `M.base`, including its rule,
 the attribute reader and two hops). Fusing parse-and-classify would save the hop between

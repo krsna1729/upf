@@ -84,7 +84,7 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAABAgAAAAACCABFAAAlAAFAAEARIIkICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAABAgAAAAACCABFLgAlAAFAAEARIFsICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
   - name: pdr_dl
     mclass: WildcardMatch
     arg:

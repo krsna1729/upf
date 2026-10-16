@@ -98,6 +98,10 @@ check "the inner packet is the UE's" "0a 2d 00 02 08 08 08 08"
 # gNB's TEID (0x55667788) and the inner packet's length (0x0025 = 37).
 check "encap wrote a GTP-U header of the inner packet's length" "30 ff 00 25"
 check "encap used the session's downlink TEID" "55 66 77 88"
+# The graph's inner frame is marked EF (TOS 0x2e) and the outer header must
+# carry it: the RAN's transport is DSCP-marked, so a UPF that dropped the inner
+# class would send every downlink packet as best effort.
+check "the outer header carries the inner DSCP" "45 2e 00 49 00 00 40 00 40 11"
 
 if [ "$FAIL" = 0 ]; then
   echo "session-path: ok (uplink and downlink both carried the session's packets)"

@@ -71,7 +71,7 @@ whose bit is on with nothing behind it is the kind of claim
 | the whole path under one session: UL N3 -> decap -> PDR -> action -> meter -> N6 route, DL N6 -> PDR -> action -> meter -> GTP-U -> N3 | in | `ci/session-path.sh` (counters zero before the session, both directions after) |
 | GTP-U echo request/response | not implemented | — |
 | GTP-U end marker (type 254) | not implemented | — |
-| DSCP copy inner -> outer | not implemented | — |
+| DSCP copy inner -> outer | in: the encap writes the inner packet's TOS on the outer IPv4 header | `ci/session-path.sh` (the outer header carries the graph's EF mark, and fails without the copy) |
 | per-rule counters (packets and bytes per PDR, so a URR can report them) | gate counters are in; per-rule counters arrive with URR | `ci/session-path.sh` reads the gate counters |
 | multi-queue RSS, per-worker tables, RCU rule updates, no locks or allocations in the packet path | in (BESS: D-097's layout, the classifier's per-worker tables, RCU publishing) | BESS `docs/decisions.md`, `docs/performance-contract.md`; `docs/ports.md` |
 | UE IP NAT, ULCL/branching on N9 | not implemented (N9 comes with the route domains) | — |
@@ -92,8 +92,8 @@ whose bit is on with nothing behind it is the kind of claim
    differentiator and the one place the field is weakest.
 2. **End marker and echo** (GTP-U v1): both are three-line packets the SMF's
    handover path depends on.
-3. **DSCP copy**: without it the outer packet loses the inner class, which a
-   QoS-configured transport notices.
+3. **DSCP copy**: in as of 2026-10-17 (the encap copies the inner TOS); the
+   remaining part is the per-QER override the SMF can ask for with the QoS rules.
 4. **BAR + DDN** (8.2.7): the downlink buffering OMEC never had.
 5. **QFI and Network Instance**: one per session today; reading them is what N9
    (ULCL) needs, along with `internal/routing`'s domains.

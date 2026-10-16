@@ -229,8 +229,14 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
                   pkt.head_data<const uint8_t *>(), pkt.head_len()));
 
     // Skip the inner frame's header: its bytes become headroom for the outer
-    // headers the prepend re-exposes, so no payload byte is copied.
+    // headers the prepend re-exposes, so no payload byte is copied. The head
+    // is the inner IPv4 header now, which is where the class byte is read: the
+    // inner packet's TOS (its DSCP and ECN) travels on the outer header,
+    // because the RAN's transport is DSCP-marked and a UPF that dropped it
+    // would send every downlink packet as best effort.
     pkt.adj(static_cast<uint16_t>(bess::tunnel::kEthernetBytes));
+    const uint8_t inner_tos =
+        pkt.head_data<const bess::utils::Ipv4 *>()->type_of_service;
 
     auto *outer = static_cast<uint8_t *>(pkt.prepend(kOuterBytes));
     if (outer == nullptr) [[unlikely]] {
@@ -245,7 +251,8 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     bess::tunnel::WriteIpv4(outer + bess::tunnel::kEthernetBytes, be32_t(src_ip_),
                             be32_t(tunnel->gnb_ip), bess::utils::Ipv4::Proto::kUdp,
                             static_cast<uint16_t>(bess::tunnel::kUdpBytes +
-                                                  bess::tunnel::kGtpuBaseBytes + inner_len));
+                                                  bess::tunnel::kGtpuBaseBytes + inner_len),
+                            /*ttl=*/64, /*tos=*/inner_tos);
     bess::tunnel::WriteUdp(outer + bess::tunnel::kEthernetBytes + bess::tunnel::kIpv4Bytes,
                            src_port, dst_port_,
                            static_cast<uint16_t>(bess::tunnel::kGtpuBaseBytes + inner_len));
