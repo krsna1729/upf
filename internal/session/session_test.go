@@ -247,12 +247,17 @@ func TestAClosedGateDropsWithoutAnAction(t *testing.T) {
 	if got := r.gate(); got != dropGate {
 		t.Errorf("a closed gate's rule gates %d, want the drop gate %d", got, dropGate)
 	}
-	if got := r.actionID(); got != 0 {
-		t.Errorf("a closed gate's rule names action %d, want none", got)
+	// The action_id the compiler writes for a drop is a uint32 zero; a check
+	// against a value of another type would pass whatever the field held.
+	if got, ok := r.change.Value["action_id"].(uint32); !ok || got != 0 {
+		t.Errorf("a closed gate's rule names action %v (%T), want none", got, r.change.Value["action_id"])
 	}
+	// The resource is the compiler's own name for the uplink's actions: a
+	// literal here would keep passing if the config named the table otherwise.
+	actions := actionsRes(c.cfg.Up)
 	for _, ch := range rec.last() {
-		if ch.Resource == "at_ul/actions" {
-			t.Error("a closed gate wrote an action record")
+		if ch.Resource == actions {
+			t.Errorf("a closed gate wrote an action record in %s", actions)
 		}
 	}
 }
@@ -756,6 +761,132 @@ func TestAPinnedFTEIDIsReservedAndOneCollisionIsRefused(t *testing.T) {
 	dup := c.Establish(establishmentWithFTEID(0x9401, "10.45.0.21", pinned)).(*message.SessionEstablishmentResponse)
 	if got := cause(t, dup); got != ie.CauseNoResourcesAvailable {
 		t.Errorf("a colliding F-TEID answered cause %d, want no-resources", got)
+	}
+}
+
+// A PDR without a UE IP IE is not a broken session: the address is simply not
+// constrained (the uplink is chosen by its TEID, an uplink PDR by its F-TEID or
+// its SDF filter). The zero netip.Addr is how that reaches the compiler, and
+// reading it as "not IPv4" turned a valid session into cause 73.
+func TestAPDRWithoutAUEAddressIsUnconstrained(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5561, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(0x5561, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x02, 7, net.ParseIP("192.0.2.1"), nil, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a PDR with no UE IP IE answered cause %d", got)
+	}
+	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{0, 0, 0, 0})
+	if got := r.mask(fieldSrcIP); !bytes.Equal(got, []byte{0, 0, 0, 0}) {
+		t.Errorf("an unconstrained address masks with %v, want it masked out", got)
+	}
+}
+
+// A refused establishment must not shrink the id space. The compile allocates
+// the F-TEID before it can discover that a later PDR names something a
+// four-byte field cannot carry, and nothing else would ever release it.
+func TestARefusedEstablishmentReleasesItsIDs(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxTEIDs = 2 // one usable id: a leak shows up at once
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	// PDR 1 is fine and takes the id (its PDI is an access one with an F-TEID
+	// of zero: the UPF chooses, which is where the allocator runs); PDR 2's SDF
+	// names an IPv6 prefix, which the table cannot carry, so the whole session
+	// is refused.
+	bad := message.NewSessionEstablishmentRequest(0, 0, 0x5562, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(0x5562, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x02, 0, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 2001:db8::/32 53", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Establish(bad)); got != ie.CauseRuleCreationModificationFailure {
+		t.Fatalf("the inexpressible PDI answered cause %d", got)
+	}
+	// With the id back the space still has one; without it, the answer here is
+	// cause 75.
+	good := c.Establish(establishment(0x5563, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, good); got != ie.CauseRequestAccepted {
+		t.Errorf("after a refused establishment the space answered cause %d", got)
+	}
+}
+
+// An F-TEID the SMF pinned belongs to the SMF: when its session goes, the pool
+// must not queue the value, or a later session is handed an id another SMF is
+// about to pin. The walk is consulted before the free list, so the difference
+// only shows once the space is exhausted.
+func TestAPinnedFTEIDIsNotFreedWithItsSession(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxTEIDs = 4 // ids 1..3
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	pinned := uint32(2)
+	resp := c.Establish(establishmentWithFTEID(0x5570, "10.45.0.6", pinned)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the pinned establishment answered cause %d", got)
+	}
+	del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0)
+	if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+
+	// The walk has two ids left (1 and 3) and never the pinned one.
+	for i := 0; i < 2; i++ {
+		r := c.Establish(establishment(0x5580+uint64(i), "10.45.0.20")).(*message.SessionEstablishmentResponse)
+		if got := cause(t, r); got != ie.CauseRequestAccepted {
+			t.Fatalf("establishment %d answered cause %d", i, got)
+		}
+		if got := reportedTEID(t, r); got == pinned {
+			t.Fatalf("the allocator handed out the pinned F-TEID %#x", pinned)
+		}
+	}
+	third := c.Establish(establishment(0x5590, "10.45.0.21")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, third); got != ie.CauseNoResourcesAvailable {
+		t.Errorf("after the pinned value's session went, the space answered cause %d: the pinned F-TEID was freed", got)
+	}
+}
+
+// A capacity of zero or one leaves no id at all: alloc answers no-resources,
+// rather than handing out id 1 (which the modules would refuse) or panicking in
+// the walk's arithmetic.
+func TestAnEmptyIDPoolAnswersNoResources(t *testing.T) {
+	for _, limit := range []uint32{0, 1} {
+		p := newIDPool(limit, 0)
+		if id, err := p.alloc(); err == nil {
+			t.Errorf("a pool of limit %d handed out id %d", limit, id)
+		}
+	}
+}
+
+// A session releases an id once per PDR that names it -- a QER shared by three
+// PDRs is one meter -- and the free list must hold one entry, or the same id is
+// handed to two sessions later.
+func TestARepeatedReleaseQueuesOneID(t *testing.T) {
+	p := newIDPool(4, 0)
+	p.release(3)
+	p.release(3)
+	if n := len(p.freed); n != 1 {
+		t.Errorf("three releases of one id queued %d entries", n)
 	}
 }
 

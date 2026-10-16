@@ -11,7 +11,7 @@
 //	FAR     -> a next hop (forwarding) or a drop; the downlink one also a
 //	           tunnel record, keyed by the same ActionId
 //	QER     -> a meter record per direction, referenced by the action
-//	F-TEID  -> an entry in the decap's session table, so only TEIDs this UPF
+//	F-TEID  -> a rule in the graph's TEID table, so only TEIDs this UPF
 //	           advertised are accepted
 //
 // State here is a cache of what the SMF asked for, not a source of truth --
@@ -342,6 +342,9 @@ type idPool struct {
 	// using right now. Pool-owned ids need no entry (the walk visits each once,
 	// and a released one is aged before it is visited again).
 	taken map[uint32]bool
+	// released is the ids waiting in freed: a session releases an id once per
+	// PDR that names it, and the pool must not queue it twice.
+	released map[uint32]bool
 }
 
 type freedID struct {
@@ -353,12 +356,18 @@ type freedID struct {
 // numbered from 1). The starting point and the stride are random; the stride is
 // coprime with the space, so the walk visits every id.
 func newIDPool(limit uint32, grace time.Duration) *idPool {
-	span := limit - 1
-	if span < 1 {
-		span = 1
+	p := &idPool{limit: limit, grace: grace, now: time.Now,
+		taken: map[uint32]bool{}, released: map[uint32]bool{}}
+	if limit < 2 {
+		// No usable id at all (the slots are numbered from 1): the walk is
+		// over before it starts, so alloc goes straight to the empty free list
+		// and answers no-resources. A misconfigured -capacity must not panic in
+		// the walk's arithmetic (limit 0 would underflow span).
+		p.walked = true
+		return p
 	}
-	p := &idPool{limit: limit, start: 1 + rand.Uint32N(span), grace: grace,
-		now: time.Now, taken: map[uint32]bool{}}
+	span := limit - 1
+	p.start = 1 + rand.Uint32N(span)
 	p.next = p.start
 	for {
 		p.stride = 1 + rand.Uint32N(span)
@@ -405,6 +414,7 @@ func (p *idPool) alloc() (uint32, error) {
 			break
 		}
 		p.freed = p.freed[1:]
+		delete(p.released, oldest.id)
 		if !p.taken[oldest.id] {
 			return oldest.id, nil
 		}
@@ -413,7 +423,9 @@ func (p *idPool) alloc() (uint32, error) {
 }
 
 // reserve keeps an id the pool did not hand out out of the walk: an F-TEID an
-// SMF pinned, which another session is using. release clears it.
+// SMF pinned. It is not released: the pool never owned it, and freeing a
+// foreign value would hand it to a session that did not ask for it (0x11223344
+// is a legal pin and an illegal allocation).
 func (p *idPool) reserve(id uint32) {
 	if id == 0 {
 		return
@@ -421,14 +433,19 @@ func (p *idPool) reserve(id uint32) {
 	p.taken[id] = true
 }
 
-// release takes an id back. A zero grace means the id may be reused as soon as
-// the walk is over -- for a space whose resource has no retire period (the TEID
-// table's rules are keyed, not slotted).
+// release takes back an id the pool handed out. A reserved one is ignored --
+// delete on a session whose SMF pinned the F-TEID must not feed that value into
+// the free list -- and so is one already waiting in the free list: a session
+// says its ids once per PDR, so the same meter arrives several times when its
+// QER is shared, and two entries would later be handed to two sessions. A zero
+// grace means the id may be reused as soon as the walk is over (for a space
+// whose resource has no retire period: the TEID table's rules are keyed, not
+// slotted).
 func (p *idPool) release(id uint32) {
-	if id == 0 {
+	if id == 0 || p.taken[id] || p.released[id] {
 		return
 	}
-	delete(p.taken, id)
+	p.released[id] = true
 	p.freed = append(p.freed, freedID{id: id, at: p.now()})
 }
 
@@ -494,6 +511,17 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 
 	c.mu.Lock()
 	delete(c.sessions, s.LocalSEID)
+	c.releaseSession(s)
+	c.mu.Unlock()
+	return nil
+}
+
+// releaseSession frees the ids a session's records hold, each exactly once: one
+// F-TEID, and one QER's meter, usually appear in several of a session's PDRs,
+// and freeing an id twice would queue it in the free list twice and hand it to
+// two sessions. The caller holds the lock. A reserved id (an F-TEID the SMF
+// pinned) is not freed: the pool never handed it out.
+func (c *Compiler) releaseSession(s *Session) {
 	for _, p := range pdrsInOrder(s) {
 		if p.teid != 0 {
 			delete(c.byTEID, p.teid)
@@ -502,8 +530,8 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		if p.actionID != 0 {
 			c.actions.release(p.actionID)
 		}
-		c.meters.release(p.meterID)
+		if p.meterID != 0 {
+			c.meters.release(p.meterID)
+		}
 	}
-	c.mu.Unlock()
-	return nil
 }

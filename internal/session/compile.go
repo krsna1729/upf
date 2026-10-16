@@ -38,19 +38,20 @@ const (
 // The bytes a rule whose FAR drops leaves on.
 const dropGate = 8192 // DROP_GATE (core/gate.h)
 
-// errNotExpressible marks a well-formed rule the dataplane cannot carry: a
-// port range needs the range kernel of the roadmap's classifier work, and an
-// address that is a prefix of a range needs it too. The request is not
+// errNotExpressible marks a well-formed rule the dataplane cannot carry: a port
+// range needs the range kernel of the roadmap's classifier work, and an address
+// or prefix that is not IPv4 has no four-byte form at all. The request is not
 // malformed, so the SMF is told the rule failed, not that the message was
 // wrong.
 var errNotExpressible = errors.New("the rule cannot be expressed by a mask")
 
 // errNoResources marks a session the UPF cannot carry for want of a resource:
 // an F-TEID the allocator has none of, or one another session already holds.
-// The SMF is told cause 74 ("no resources available"), which is what it retries
+// The SMF is told cause 75 ("no resources available"), which is what it retries
 // or reconciles against; a rule failure (cause 73) would say the filter was
 // wrong, and an accepted answer with no usable F-TEID would blackhole the
-// uplink while claiming success.
+// uplink while claiming success. (Cause 74 is PFCP Entity In Congestion: the
+// answer for a *busy* UPF, not for one whose id space is empty.)
 var errNoResources = errors.New("no resources available")
 
 // idsOf returns a table's keys in order. Every transaction this compiler
@@ -165,11 +166,23 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 	if err != nil {
 		c.log.Warn("session: cannot compile the establishment request",
 			"cp_seid", cpSEID, "error", err)
+		// The compile allocated ids before it hit the error: they are this
+		// session's and it is not becoming a session, so nothing else can
+		// release them.
+		c.mu.Lock()
+		c.releaseSession(s)
+		c.mu.Unlock()
 		return establishResponse(req, local, compileCause(err), nil)
 	}
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
 		c.log.Warn("session: the dataplane refused the session",
 			"cp_seid", cpSEID, "seid", local, "error", err)
+		// All or nothing: nothing of this session reached the dataplane, so
+		// its ids are free again. (A refused *modification* is different -- its
+		// ids belong to a session that is still live; see Modify.)
+		c.mu.Lock()
+		c.releaseSession(s)
+		c.mu.Unlock()
 		return establishResponse(req, local, causeOf(err), nil)
 	}
 
@@ -219,6 +232,11 @@ func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Messa
 	changes, created, err := c.compile(s)
 	if err != nil {
 		c.log.Warn("session: cannot compile the modification request", "seid", seid, "error", err)
+		// What this compile allocated is not released: the session is live and
+		// its records name those ids, so freeing them would let the pool hand
+		// them to a session whose record the live one still selects. The ids of
+		// objects a modification removed are leaked for the same reason; a
+		// provenance-tracked release is the fix (docs/design.md).
 		return modifyResponse(req, seid, compileCause(err), nil)
 	}
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
@@ -439,7 +457,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				Value: map[string]any{
 					"priority":  p.precedence,
 					"gate":      uint64(dropGate),
-					"action_id": 0,
+					"action_id": uint32(0),
 				},
 			})
 			continue
@@ -555,17 +573,25 @@ func ones(n int) []byte {
 	return b
 }
 
-// host is a field constrained to one IPv4 address. An address the table's four
-// bytes cannot carry is inexpressible, never "unconstrained": a PDI naming an
-// IPv6 UE is a session whose rules must not be written at all, because a masked
-// -out address matches every address -- another session's packets included.
-func host(a netip.Addr) (match, error) {
+// host is a field constrained to one IPv4 address: the UE's, where a PDI names
+// it. No address at all is *unconstrained*, not inexpressible -- the zero
+// netip.Addr is how "the PDI says nothing about this field" arrives here (a PDR
+// with no UE IP IE, an SMF that sent the address on the other direction's PDI
+// only), and refusing those would turn a valid session into cause 73. An
+// address the table's four bytes cannot carry is inexpressible, never
+// "unconstrained": a PDI naming an IPv6 UE is a session whose rules must not be
+// written at all, because a masked-out address matches every address --
+// another session's packets included.
+func host(a netip.Addr) (match, bool, error) {
+	if !a.IsValid() {
+		return match{}, false, nil
+	}
 	a = a.Unmap()
 	if !a.Is4() {
-		return match{}, fmt.Errorf("%w: address %s is not IPv4", errNotExpressible, a)
+		return match{}, false, fmt.Errorf("%w: address %s is not IPv4", errNotExpressible, a)
 	}
 	b := a.As4()
-	return match{value: b[:], mask: ones(4)}, nil
+	return match{value: b[:], mask: ones(4)}, true, nil
 }
 
 // pref is a field constrained to an IPv4 prefix: the value is its network
@@ -614,8 +640,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 				m, err := pref(p.sdf.src)
 				return m, err == nil, err
 			}
-			m, err := host(p.ueIP)
-			return m, err == nil, err
+			return host(p.ueIP)
 		}
 		if p.sdf != nil && p.sdf.srcOK {
 			m, err := pref(p.sdf.src)
@@ -630,8 +655,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 			m, err := pref(p.sdf.dst)
 			return m, err == nil, err
 		}
-		m, err := host(p.ueIP)
-		return m, err == nil, err
+		return host(p.ueIP)
 	case Proto:
 		if p.sdf != nil && p.sdf.protoOK {
 			return match{value: []byte{p.sdf.proto}, mask: ones(1)}, true, nil
@@ -1201,7 +1225,7 @@ func parseCause(err error) uint8 {
 
 // compileCause maps a compile failure to the cause the SMF sees. A rule the
 // mask cannot express is a rule failure; a resource the UPF has none of is
-// cause 74 ("no resources available"), which is what an SMF retries or
+// cause 75 ("no resources available"), which is what an SMF retries or
 // reconciles against.
 func compileCause(err error) uint8 {
 	if errors.Is(err, errNoResources) {
