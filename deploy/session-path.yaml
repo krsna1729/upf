@@ -22,9 +22,11 @@
 # The frames are the ones the compiler's session makes match:
 #   uplink    G-PDU to TEID 0x11223344 (the F-TEID the session's SMF pins),
 #             holding the UE's packet 10.45.0.2:5000 -> 8.8.8.8:53
-#   downlink  the data network's answer 8.8.8.8:5000 -> 10.45.0.2:53, which the
-#             downlink PDR matches ("to assigned 53") and the FAR's outer header
-#             creation (TEID 0x55667788 toward the gNB) puts GTP-U around.
+#   downlink  the data network's answer 8.8.8.8:5000 -> 10.45.0.2:53, marked
+#             EF (TOS 0xb8, DSCP 46), which the downlink PDR matches ("to
+#             assigned 53"), the FAR's outer header creation (TEID 0x55667788
+#             toward the gNB) puts GTP-U around, and the encap's DSCP copy
+#             carries onto the outer header.
 #
 # Metadata attributes are laid out in module registration order, so the module
 # that declares "upf_teid" is listed first and the reader that makes it real
@@ -89,7 +91,7 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAABAgAAAAACCABFLgAlAAFAAEARIFsICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAABAgAAAAACCABFuAAlAAFAAEARH9EICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
   - name: pdr_dl
     mclass: WildcardMatch
     arg:

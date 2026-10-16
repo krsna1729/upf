@@ -117,14 +117,16 @@ kill -0 "$UPFD_PID" 2>/dev/null || { echo "n4-path: upfd exited; log follows" >&
 
 sleep 2
 FAIL=0
-# The Dump module wraps sixteen bytes to a line, so a field may straddle two of
-# them: join the hex first, then match (as ci/session-path.sh does).
-HEX=$(awk '/^  [0-9a-f]+: / { for (i = 2; i <= NF; i++) printf "%s ", $i }' "$LOG")
-check() { # check <description> <fixed string the log's hex must contain>
-  if printf '%s\n' "$HEX" | grep -Fq -- "$2"; then
+# The Dump half, per dump: the helper is shared with ci/session-path.sh and its
+# header says why a dump is scoped (the graphs' frames share their openings).
+. "$ROOT/ci/dumphex.sh"
+UP_HEX=$(dump_hex dump_u "$LOG")
+DOWN_HEX=$(dump_hex dump_d "$LOG")
+check() { # check <description> <the dump's hex> <fixed string it must contain>
+  if printf '%s\n' "$2" | grep -Fq -- "$3"; then
     echo "ok: $1"
   else
-    echo "FAIL: $1 (no '$2' in the log)" >&2
+    echo "FAIL: $1 (no '$3' in that dump)" >&2
     FAIL=1
   fi
 }
@@ -132,16 +134,20 @@ check() { # check <description> <fixed string the log's hex must contain>
 # Uplink: the F-TEID the SMF pinned is the graph's G-PDU header's, so the TEID
 # rule selects it, the decap drops the outer headers, and the inner packet --
 # the UE's 10.45.0.2:5000 -> 8.8.8.8:53 -- reaches N6.
-check "the F-TEID the SMF pinned decapsulates the graph's G-PDU" \
+check "the F-TEID the SMF pinned decapsulates the graph's G-PDU" "$UP_HEX" \
       "0a 2d 00 02 08 08 08 08"
 # Downlink: the FAR's outer header creation (TEID 0x100000 toward 10.20.30.2)
 # is what the encap wrote around the data network's answer.
-check "the FAR's TEID is on the wire" "30 ff 00 25 00 10 00 00"
-check "the FAR's gNB is the outer destination" "0a 14 1e 02"
-check "the downlink PDR matched the UE's address" "08 08 08 08 0a 2d 00 02 13 88 00 35"
+check "the FAR's TEID is on the wire" "$DOWN_HEX" "30 ff 00 25 00 10 00 00"
+check "the FAR's gNB is the outer destination" "$DOWN_HEX" "0a 14 1e 02"
+check "the downlink PDR matched the UE's address" "$DOWN_HEX" \
+      "08 08 08 08 0a 2d 00 02 13 88 00 35"
 
 if [ "$FAIL" = 0 ]; then
   echo "n4-path: ok (PFCP -> session -> packets, both ways)"
+  # The work directory is the run's, not a result: a failed run keeps it (the
+  # message above says where), a green one leaves nothing behind.
+  rm -rf "$WORK"
 else
   echo "n4-path: failed; logs are $WORK" >&2
 fi

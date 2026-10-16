@@ -72,42 +72,45 @@ cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
   $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*' -count=1 -v
 
-# The packet half: the graph's Dumps in the daemon's log. The Dump module
-# wraps sixteen bytes to a line, so a field may straddle two of them: join the
-# hex first, then match. (A fixed-string grep over the raw log would miss
-# exactly the fields that happen to fall on a boundary.)
+# The packet half: the graph's Dumps in the daemon's log, per dump (the helper
+# is shared with ci/n4-path.sh; see its header for why a dump is scoped).
 sleep "$SECONDS_RUN"
 FAIL=0
-HEX=$(awk '/^  [0-9a-f]+: / { for (i = 2; i <= NF; i++) printf "%s ", $i }' "$LOG")
-check() { # check <description> <fixed string the log's hex must contain>
-  if printf '%s\n' "$HEX" | grep -Fq -- "$2"; then
+. "$ROOT/ci/dumphex.sh"
+UP_HEX=$(dump_hex dump_u "$LOG")
+DOWN_HEX=$(dump_hex dump_d "$LOG")
+check() { # check <description> <the dump's hex> <fixed string it must contain>
+  if printf '%s\n' "$2" | grep -Fq -- "$3"; then
     echo "ok: $1"
   else
-    echo "FAIL: $1 (no '$2' in the log)" >&2
+    echo "FAIL: $1 (no '$3' in that dump)" >&2
     FAIL=1
   fi
 }
 
 # Uplink: the decap replaced the outer headers with a frame around the inner
 # packet, byte for byte the G-PDU's payload (10.45.0.2:5000 -> 8.8.8.8:53).
-check "decap left the UE's packet in a frame" \
+check "decap left the UE's packet in a frame" "$UP_HEX" \
       "02 00 00 00 00 02 02 00 00 00 00 01 08 00 45 00"
-check "the inner packet is the UE's" "0a 2d 00 02 08 08 08 08"
+check "the inner packet is the UE's" "$UP_HEX" "0a 2d 00 02 08 08 08 08"
 
 # Downlink: the encap wrote the outer headers from the tunnel record the FAR's
 # outer header creation produced -- Eth, IPv4, UDP toward 2152, GTP-U with the
 # gNB's TEID (0x55667788) and the inner packet's length (0x0025 = 37).
-check "encap wrote a GTP-U header of the inner packet's length" "30 ff 00 25"
-check "encap used the session's downlink TEID" "55 66 77 88"
-# The graph's inner frame is marked EF (TOS 0x2e) and the outer header must
+check "encap wrote a GTP-U header of the inner packet's length" "$DOWN_HEX" "30 ff 00 25"
+check "encap used the session's downlink TEID" "$DOWN_HEX" "55 66 77 88"
+# The graph's inner frame is marked EF (TOS 0xb8) and the outer header must
 # carry it: the RAN's transport is DSCP-marked, so a UPF that dropped the inner
-# class would send every downlink packet as best effort.
-check "the outer header carries the inner DSCP" "45 2e 00 49 00 00 40 00 40 11"
+# class would send every downlink packet as best effort. The inner packet's own
+# TOS is b8 as well, and the outer comes first.
+check "the outer header carries the inner DSCP" "$DOWN_HEX" "45 b8 00 49 00 00 40 00 40 11"
 
 if [ "$FAIL" = 0 ]; then
   echo "session-path: ok (uplink and downlink both carried the session's packets)"
+  # The log and the pidfile are the run's, not a result: a failed run keeps both
+  # (the message above says where), a green one leaves nothing behind.
+  rm -f "$LOG" "$PIDFILE"
 else
   echo "session-path: failed; log is $LOG" >&2
-  cp "$LOG" /tmp/upf-path-failed.log 2>/dev/null || true
 fi
 exit "$FAIL"
