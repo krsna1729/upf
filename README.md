@@ -114,8 +114,24 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   (two PDRs, eight changes, one transaction), a repeated establishment (a
   no-op), a modify, and a delete — with every message built from the daemon's
   own schema.
+- The packet path is proven end to end: `ci/session-path.sh` applies the lab
+  graph, programs one session, and shows both halves — the daemon's counters
+  move from zero (the graph's Sources run from the moment it is applied, so a
+  zero is absent state, not absent traffic) and the Dumps carry the bytes: the
+  decapsulated inner packet toward N6, and toward N3 the outer Eth/IPv4/UDP
+  2152/GTP-U the encap built around the UE's packet, with the session's TEID.
+  Its first run found two bugs, which is the point: a downlink rule that
+  demanded the UE's address on both sides, and a downlink action that named no
+  next hop — which a chain holding an ActionTable fails closed on, so
+  `deploy/upf.yaml` had the same blackhole.
+- N4 reaches the datapath: `ci/n4-path.sh` starts `upfd` against the same graph
+  and establishes a session over PFCP (`cmd/n4bench` as the stand-in SMF); the
+  packets that then cross are keyed by the SMF's own values — the F-TEID it
+  pinned, the FAR's TEID and gNB address. `ci/bench-n4.sh` measures the same
+  path's envelope.
 - Next, in this order: a real SMF (open5gs or free5GC) against `upfd` for
   interop and Causes, packets over the bound N3/N6 ports, route domains in
-  `internal/routing` for N9, the classifier's explicit tuple budget
-  (`max_tuples`), then usage reporting. `docs/design.md` holds the milestones
-  and what each one must prove.
+  `internal/routing` for N9 (the downlink's next hop is per-direction today,
+  and the deployment's id 2 stands in for a real N3 domain), the classifier's
+  explicit tuple budget (`max_tuples`), then usage reporting. `docs/design.md`
+  holds the milestones and what each one must prove.

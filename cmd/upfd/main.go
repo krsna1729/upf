@@ -41,6 +41,9 @@ func run() error {
 	n3MAC := flag.String("n3-mac", "02:00:00:00:00:01", "the N3 port's Ethernet address, for the outer header of a downlink packet")
 	peerMAC := flag.String("peer-mac", "02:00:00:00:00:02", "the N3 peer's Ethernet address (the transport next hop)")
 	n6NextHop := flag.Uint("n6-next-hop", 1, "the Router next hop an uplink forward leaves by")
+	n3NextHop := flag.Uint("n3-next-hop", 2,
+		"the Router next hop a downlink forward leaves by: the encap's gate "+
+			"(a chain with an ActionTable fails closed when its action names none)")
 	pdrTableUL := flag.String("pdr-table-ul", "pdr_ul",
 		"the WildcardMatch module holding the uplink PDR rules")
 	pdrTableDL := flag.String("pdr-table-dl", "pdr_dl",
@@ -86,7 +89,8 @@ func run() error {
 		}
 		defer client.Close()
 		graph, err := graphConfig(graphArgs{
-			n3: *n3Addr, n3MAC: *n3MAC, peerMAC: *peerMAC, n6NextHop: uint32(*n6NextHop),
+			n3: *n3Addr, n3MAC: *n3MAC, peerMAC: *peerMAC,
+			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			pdrTableUL: *pdrTableUL, pdrTableDL: *pdrTableDL,
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
 			actionsUL: *actionsUL, metersUL: *metersUL,
@@ -123,6 +127,7 @@ func run() error {
 type graphArgs struct {
 	n3, n3MAC, peerMAC string
 	n6NextHop          uint32
+	n3NextHop          uint32
 	pdrTableUL         string
 	pdrTableDL         string
 	teidTable          string
@@ -165,6 +170,7 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			PDRFields: fields,
 			Actions:   a.actionsDL,
 			Meters:    a.metersDL,
+			NextHop:   a.n3NextHop,
 			Tunnels:   a.tunnels,
 		},
 		N3Addr: addr,

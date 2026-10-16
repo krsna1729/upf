@@ -258,6 +258,9 @@ func run() error {
 	mode := flag.String("mode", "bulk", "establish | cycle | bulk: what the sessions do")
 	rate := flag.Float64("rate", 0, "operations per second (0: as fast as the UPF answers)")
 	timeout := flag.Duration("timeout", 5*time.Second, "per-request timeout")
+	fteid := flag.Uint("fteid", 0,
+		"the uplink F-TEID every session pins (0: the UPF chooses one, which is "+
+			"what a real SMF does)")
 	uePool := flag.String("ue-pool", "10.45.0.0/16", "the UE addresses the sessions use")
 	gnb := flag.String("gnb", "10.20.30.2", "the gNB's N3 address (the outer header's destination)")
 	n3 := flag.String("n3", "192.0.2.1", "the UPF's N3 address (the F-TEID it is asked for)")
@@ -277,7 +280,7 @@ func run() error {
 	if *workers > *sessions {
 		*workers = *sessions
 	}
-	base, err := poolBase(*uePool)
+	base, err := poolBase(*uePool, *sessions)
 	if err != nil {
 		return err
 	}
@@ -299,6 +302,7 @@ func run() error {
 		params[i] = n4sim.Session{
 			CPSEID: uint64(0x1000 + i),
 			TEID:   uint32(0x100000 + i),
+			FTEID:  uint32(*fteid),
 			UEIP:   offsetAddr(base, i),
 			GnBIP:  *gnb,
 			N3IP:   *n3,
@@ -524,7 +528,7 @@ func wire(m message.Message) ([]byte, error) {
 }
 
 // poolBase parses the UE pool into a 32-bit base address.
-func poolBase(pool string) (uint32, error) {
+func poolBase(pool string, sessions int) (uint32, error) {
 	ip, ipnet, err := net.ParseCIDR(pool)
 	if err != nil {
 		return 0, fmt.Errorf("-ue-pool %q: %w", pool, err)
@@ -533,9 +537,14 @@ func poolBase(pool string) (uint32, error) {
 	if v4 == nil {
 		return 0, fmt.Errorf("-ue-pool %q: an IPv4 pool is required", pool)
 	}
+	// The pool must hold the sessions the run covers: a /16 is the scenario this
+	// bench exists for, but one session against one address (a hand-built test)
+	// is a pool too.
 	ones, bits := ipnet.Mask.Size()
-	if bits-ones < 16 {
-		return 0, fmt.Errorf("-ue-pool %q: at least 16 host bits are needed", pool)
+	hostBits := bits - ones
+	if uint64(1)<<hostBits < uint64(sessions) {
+		return 0, fmt.Errorf("-ue-pool %q holds %d addresses, but -sessions is %d",
+			pool, uint64(1)<<hostBits, sessions)
 	}
 	return uint32(v4[0])<<24 | uint32(v4[1])<<16 | uint32(v4[2])<<8 | uint32(v4[3]), nil
 }

@@ -35,6 +35,7 @@ const (
 type Session struct {
 	CPSEID uint64 // this session's CP F-SEID
 	TEID   uint32 // the TEID the gNB expects on the downlink
+	FTEID  uint32 // the uplink F-TEID the SMF pins; 0: the UPF chooses one
 	UEIP   string // the UE's address, an uplink PDR's key and a downlink PDR's
 	GnBIP  string // the gNB's N3 address: the outer header's destination
 	N3IP   string // the UPF's N3 address: the F-TEID the UPF answers with
@@ -70,7 +71,7 @@ func Establish(seq uint32, s Session) *message.SessionEstablishmentRequest {
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x02, 0, net.ParseIP(s.N3IP), nil, 0),
+				ie.NewFTEID(0x02, s.FTEID, net.ParseIP(s.N3IP), nil, 0),
 				ie.NewUEIPAddress(0x02, s.UEIP, "", 0, 0),
 			),
 			ie.NewFARID(1),

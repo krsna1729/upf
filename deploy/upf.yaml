@@ -12,11 +12,13 @@
 #   - deploy/session-live.yaml is this shape without ports, for a host with no
 #     bound NIC; ci/session-live.sh programs a whole session into it.
 #
-# Two values here are the deployment's and must match upfd's flags:
+# Three values here are the deployment's and must match upfd's flags:
 #   enc's src_ip   = -n3-addr   (the UPF's N3 address; 192.0.2.1 is RFC 5737's
 #                                documentation address, replace it)
 #   rt/next_hops   = -n6-next-hop is the id an uplink action names (1 below),
-#                    and its egress_gate is the route's connection to n6_out.
+#                    and -n3-next-hop the one a downlink action names (2
+#                    below, the encap's gate). Both egress_gates are this
+#                    file's connections: 0 toward n6_out, 1 toward enc.
 # The N3 and N6 port names are the manifest's, not the driver's: a PortInc or
 # PortOut names the port this file declares.
 
