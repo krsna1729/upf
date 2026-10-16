@@ -227,10 +227,15 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
    liveness in both directions, and the dispatch to the session layer.
    *Proof:* an SMF associates, heartbeats, and is detected restarting; a
    session request it sends is answered with a Cause, never dropped.
-2. **Graph** — the UPF pipeline as a manifest (`deploy/upf.yaml`) plus the
-   datapath modules; `upfd` boots bessd's graph and verifies it applied.
+2. **Graph** — the UPF pipeline as manifests plus the datapath modules:
+   `deploy/smoke-gtpu.yaml` (the two datapath halves, byte-checked) and
+   `deploy/session-live.yaml` (the two chains the compiler writes into), with
+   `upfd`'s `-bess` wiring the session layer to a running daemon. The graph
+   with real N3/N6 ports is the deployment's, and its proof needs the NIC the
+   hardware items in the roadmap are waiting for.
    *Proof:* a packet on N3 decapsulates, matches a PDR, takes its action and
-   leaves on N6.
+   leaves on N6 -- `ci/smoke-gtpu.sh` for the two halves, `ci/session-live.sh`
+   for what the compiler wrote.
 3. **Session transaction** — PDR/action/meter/route in one transaction;
    establishment, modification, deletion. *Proof:* a session is programmed and
    erased atomically; killing `upfd` mid-change leaves no half-session.
