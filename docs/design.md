@@ -273,6 +273,95 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 Each milestone lands with its tests and a run that shows it, not with a
 scaffold for the next one.
 
+## Session scale: 10^6 sessions, dimensioned by PDR/FAR/QER/URR/MAR
+
+The target is a million sessions on one box, with the packet path unchanged
+while they are programmed. The BESS performance contract already measures every
+structure this design uses, so the arithmetic below is that table at this shape
+(4 PDR, 4 FAR, 2 QER, 2 URR, 1 MAR per session).
+
+| per session | state in BESS | measured bytes | at 10^6 sessions |
+|---|---|---|---|
+| 4 PDR | WildcardMatch rule (masked table, per worker) | not measured: 16-byte key, mask, value, priority, result, cuckoo body | about 360 MB partitioned, about 2.9 GB if every worker holds every rule |
+| 4 FAR | ActionTable record (`ObjectTable`) | 64 B/object | 256 MB |
+| 2 QER | `MeterSet` | 64 B state + 8 B pointer | 144 MB (1,048,576 meters measure 64 MiB) |
+| 2 URR | `CounterSet` block | 4 KiB for three counters (each slot per worker: 64 slots) | the wall: 8 GB if each URR owns a full per-worker block |
+| 1 MAR (ATSSS, P1) | per-session record | not measured, small | about 64 MB |
+| 1 F-TEID | the decap's tunnel table | 64 B/object | 64 MB |
+
+Time is measured at scale where memory is not: the masked table looks up 32
+keys in 556 ns at 10^6 rules with one mask tuple, 1,716 ns with four and
+2,463 ns with eight (17 / 54 / 77 ns per key), and an add+delete costs about
+1 µs up to 100K rules (performance contract row 75). The tuple count is the
+graph's `max_tuples`, so it is a UPF decision, not a default.
+
+Rates, measured (performance contract rows 66-67): one transaction per session
+sustains 695K sessions/s (519K in the other profile), and with the writer flat
+out at 194K sessions/s four readers still do 44.8 Mpps each, from 49.3 at rest.
+A million sessions is therefore seconds of control traffic, not a migration.
+
+The walls, in order:
+
+1. **Per-worker tables.** Classifier rules and action records are per-worker
+   (D-097). Sharding by flow owner -- the worker whose queue sees the session
+   -- measures 3.4x better than one shared table at 3% new flows
+   (`update_scale_bench` E2), so sessions are sharded, not shared.
+2. **URR counters.** A counter block is priced per worker slot (`CounterSet`:
+   4 KiB for three counters): right for a hot counter, wrong for a million
+   mostly-idle sessions. A URR must allocate its block on the worker where the
+   session is live, and a control read must sum the live copies. This is the
+   one structure whose cost model is not in the contract, so it needs its own
+   benchmark (live sessions, counter blocks, read from the control plane).
+3. **The transaction wire.** A typed rule is 131 B and a message is capped at
+   64 MiB, about 510K rules, so bulk programming is chunked. This layer already
+   programs one session per transaction, below the cap by design.
+4. **Restart.** PFCP has no "give me your sessions": if `upfd` restarts the SMF
+   does not re-establish, so the session store needs a checkpoint and a replay
+   path. BESS holds no session state to recover.
+5. **Id and priority space.** uint32 throughout (PDR priority, ActionId, meter
+   id): a million sessions at four PDRs is 4M rules, which fits.
+
+What proves it, on a quiet machine: `BM_ClassifyUnderTransactions` and
+`BM_LookupsUnderTransactions` at this session count, `table_scale_bench`'s
+wildcard row at 10^6 rules for the per-packet cost, `update_scale_bench` E2 for
+the sharding decision at 10^7 keys, a WildcardMatch bytes-per-rule measurement
+to replace the one unmeasured cell above, the URR counter benchmark from wall 2,
+and `ci/bench-n4.sh` for the N4 rate that drives all of it.
+
+### The envelope, measured (2026-10-16)
+
+Three regimes, three tools, one host (`bessd 612cbff1`, no hugepages). Each
+number is the rate of the thing named, and they are not interchangeable:
+
+| path | tool | result |
+|---|---|---|
+| the transaction engine, in process | BESS's `BM_ClassifyUnderTransactions` | 695K sessions/s (the control) |
+| the live API: client, gRPC, daemon | BESS's `live_transaction_bench` | 6.0-6.4K transactions/s; p50 110 us |
+| N4 end to end: PFCP, compile, one transaction, ack | `ci/bench-n4.sh` + `cmd/n4bench`, serial | establish 2,274.8/s (p50 324 us), modify 2,585.6/s, delete 5,379.0/s |
+
+A session is one transaction of eight changes plus an N4 round trip, so 2.3K
+sessions/s against 6K transactions/s is the expected cost of those two hops,
+not a defect. The live rate is wire-bound before it is anything else: a
+transaction's p50 is about 110 us, so one synchronous client cannot ask for much
+more than 9,000/s. The 695K is the same machinery with no wire in the path --
+the two numbers differ by the API, not by a hundredfold regression.
+
+The defect is on the other side of the graph. At 6,000 transactions per second
+the packet path loses 47% of its rate, and the law is linear: 1,000/s costs 8%.
+The cost is about 80 us of datapath time per transaction. That is BESS's to
+carry, it is written down in its performance contract's live-API section, and it
+is the number a session has to be programmed against a million times over.
+Finding which part of a change's publication to the workers costs those 80 us --
+the generation handoff, the per-worker table swap, or the reader's
+next-iteration check -- is the next experiment.
+
+Two operational findings from the same runs. `upfd` must bound how many
+transactions it has in flight: 256 concurrent applies made the node answer eight
+and then stall for thirty seconds at a time (reproduced twice, with the client's
+own SEID bug ruled out), while one worker doing the same 16 sessions never
+missed a reply. And the run that measures this must fail when answers are
+missing, or a starved box and a slow UPF look alike.
+
 ## What proves it
 
 - `ci/smoke-gtpu.sh` — the datapath, byte for byte: it builds the plugin against
