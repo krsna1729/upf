@@ -221,6 +221,10 @@ func (c *client) send(m message.Message, kind opKind, timeout time.Duration) (me
 		c.stats[kind].add(0, err)
 		return nil, 0, err
 	}
+	// One timer per request, not time.After's: a phase runs millions of
+	// requests, and each time.After leaves a timer for the GC to find.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case resp := <-ch:
 		d := time.Since(start)
@@ -236,7 +240,7 @@ func (c *client) send(m message.Message, kind opKind, timeout time.Duration) (me
 		}
 		c.stats[kind].add(d, nil)
 		return resp, d, nil
-	case <-time.After(timeout):
+	case <-timer.C:
 		err := errors.New("no answer within " + timeout.String())
 		c.stats[kind].add(0, err)
 		return nil, 0, err
@@ -259,8 +263,8 @@ func run() error {
 	rate := flag.Float64("rate", 0, "operations per second (0: as fast as the UPF answers)")
 	timeout := flag.Duration("timeout", 5*time.Second, "per-request timeout")
 	fteid := flag.Uint("fteid", 0,
-		"the uplink F-TEID every session pins (0: the UPF chooses one, which is "+
-			"what a real SMF does)")
+		"the F-TEIDs the sessions pin: session i pins value+i, as an SMF does "+
+			"(0: the UPF chooses every one, like an SMF that pins none)")
 	uePool := flag.String("ue-pool", "10.45.0.0/16", "the UE addresses the sessions use")
 	gnb := flag.String("gnb", "10.20.30.2", "the gNB's N3 address (the outer header's destination)")
 	n3 := flag.String("n3", "192.0.2.1", "the UPF's N3 address (the F-TEID it is asked for)")
@@ -299,10 +303,18 @@ func run() error {
 
 	params := make([]n4sim.Session, *sessions)
 	for i := range params {
+		// A pinned F-TEID is the SMF's to make unique. One value for the whole
+		// phase would have the UPF refuse every session after the first (which
+		// it should), and the bench would report a wall of refusals as if they
+		// were the UPF's doing.
+		pinned := uint32(0)
+		if *fteid > 0 {
+			pinned = uint32(*fteid) + uint32(i)
+		}
 		params[i] = n4sim.Session{
 			CPSEID: uint64(0x1000 + i),
 			TEID:   uint32(0x100000 + i),
-			FTEID:  uint32(*fteid),
+			FTEID:  pinned,
 			UEIP:   offsetAddr(base, i),
 			GnBIP:  *gnb,
 			N3IP:   *n3,
