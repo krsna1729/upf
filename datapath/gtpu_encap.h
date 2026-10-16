@@ -3,35 +3,77 @@
 #ifndef UPF_DATAPATH_GTPU_ENCAP_H_
 #define UPF_DATAPATH_GTPU_ENCAP_H_
 
+#include <memory>
+
+#include "dataplane/action_id.h"
+#include "dataplane/slot_resource.h"
+#include "dataplane/slot_table.h"
+#include "framework/resource_bindings.h"
 #include "module.h"
 #include "upf_datapath.pb.h"
+#include "utils/ether.h"
 
 // Writes the outer Ethernet/IPv4/UDP/GTP-U headers of a G-PDU in front of the
-// inner IP packet, through the tunnel library (M19, D-069). A packet whose
-// session metadata is not set, or that has no headroom, is dropped: a packet
-// that cannot be tunnelled must not go out unencapsulated.
+// inner IP packet, through the tunnel library (M19, D-069).
 //
-// It reads four metadata attributes, two of them BESS's own:
+// The packet arrives framed (the graph carries Ethernet frames): a G-PDU's
+// payload is the inner IP packet, so the inner frame's header is skipped and
+// its bytes become headroom for the outer headers -- nothing is copied. A
+// frame that carries anything but IPv4 is dropped: the outer header this
+// module writes is IPv4-only.
 //
-//   ether_src   6 bytes, read   the outer Ethernet source (the N3 interface)
-//   ether_dst   6 bytes, read   the outer Ethernet destination (the gNB)
-//   upf_teid    4 bytes, read   the tunnel endpoint identifier (0: no session)
-//   upf_gnb_ip  4 bytes, read   the gNB's outer IPv4 address (0: unresolved)
+// The per-session parameters are a transactional resource the controller
+// writes, "<name>/tunnels" (TunnelKey -> TunnelEntry), keyed by the ActionId
+// the PDR rule named and the classifier wrote into the packet's `action_id`
+// metadata (BESS D-141). One lookup therefore resolves the session's tunnel,
+// next to the action record's meter and next hop: the packet path holds no
+// relation between PFCP objects.
 //
-// The outer IPv4 source address and the UDP ports are the graph's, so they are
-// arguments of the module, not metadata: `src_ip`, `src_port`, `dst_port`.
+// A packet whose action id is 0, has no tunnel record, or has no headroom is
+// dropped: a packet that cannot be tunnelled must not leave unencapsulated.
+// The outer IPv4 source address and the UDP ports are the graph's -- arguments
+// of the module, not session state -- while the TEID, the gNB's address and
+// the two Ethernet addresses are the session's.
 class GtpuEncap final : public Module {
  public:
+  static const gate_idx_t kNumOGates = 1;
+
+  using ActionId = bess::dataplane::ActionId;
+
+  // One session's downlink path (TS 29.244 8.2.56, Outer Header Creation).
+  struct Tunnel {
+    uint32_t teid;    // network order
+    uint32_t gnb_ip;  // network order
+    bess::utils::Ethernet::Address ether_src;
+    bess::utils::Ethernet::Address ether_dst;
+  };
+
+  // "<module>/tunnels": TunnelKey -> TunnelEntry.
+  static const ResourceTables resource_tables;
+
   GtpuEncap() : Module() { max_allowed_workers_ = Worker::kMaxWorkers; }
 
   CommandResponse Init(const upf::pb::GtpuEncapArg &arg);
+  void DeInit() override;
 
   void ProcessBatch(Context *ctx, bess::PacketBatch *batch) override;
 
+  std::string GetDesc() const override;
+
+  // The tunnel an action id names, or nullptr (one acquire load). The packet
+  // path makes exactly this lookup; tests and introspection use it directly.
+  const Tunnel *LookupTunnel(ActionId id) const noexcept {
+    return id.value() == 0 ? nullptr : tunnels_->Lookup(id);
+  }
+
  private:
-  uint32_t src_ip_ = 0;   // network order
+  uint32_t src_ip_ = 0;    // network order
   uint16_t src_port_ = 0;  // host order; 0 means a per-flow hash
   uint16_t dst_port_ = 0;  // host order
+  int action_attr_ = -1;   // the "action_id" attribute id
+  std::unique_ptr<bess::dataplane::SlotTable<ActionId, Tunnel>> tunnels_;
+  std::unique_ptr<bess::dataplane::SlotResource<ActionId, Tunnel>> resource_;
+  bess::framework::ResourceBinding binding_;  // after resource_ (D-044)
 };
 
 #endif  // UPF_DATAPATH_GTPU_ENCAP_H_

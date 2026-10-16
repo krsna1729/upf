@@ -68,18 +68,45 @@ check() { # check <description> <fixed string the log must contain>
     FAIL=1
   fi
 }
+# check_metadata greps the metadata blocks Dump prints (four lines of hexdump
+# per packet) rather than the packet hexdump: the two share byte strings.
+check_metadata() { # check_metadata <description> <fixed string>
+  if grep -A 5 "Metadata buffer" "$LOG" | grep -q -- "$2"; then
+    echo "smoke: ok    $1"
+  else
+    echo "smoke: FAIL  $1 (no '$2' in a metadata block of $LOG)" >&2
+    FAIL=1
+  fi
+}
 
-# Uplink: the plugin stripped Eth/IPv4/UDP/GTP-U, so Dump printed the 37-byte
-# inner IPv4 packet (10.0.0.1 -> 8.8.8.8, UDP 1234 -> 53, "hello-upf").
-check "decap stripped the tunnel and kept the inner packet" \
-      "45 00 00 25 00 01 40 00 40 11 20 b7 0a 00 00 01"
-# and wrote the TEID into metadata (the byte after it is upf_gnb_ip, then the
-# two Ethernet addresses the downlink setattr wrote).
-check "decap wrote upf_teid into metadata" "11 22 33 44 0A 14 1E 02"
+refute() { # refute <description> <fixed string the log must not contain>
+  if grep -q -- "$2" "$LOG"; then
+    echo "smoke: FAIL  $1 ('$2' is in $LOG)" >&2
+    FAIL=1
+  else
+    echo "smoke: ok    $1"
+  fi
+}
 
-# Downlink: the plugin built the outer headers: Eth (setattr's addresses),
-# IPv4 src 10.20.30.1 -> dst 10.20.30.2 (the metadata) with a correct header
-# checksum (ea 79), UDP -> 2152, GTP-U type 255 (G-PDU), length 37, TEID
+# Uplink: the plugin stripped IP/UDP/GTP-U and left the inner packet in a
+# frame (the outer frame's own Ethernet header + the 37-byte inner IPv4 packet
+# 10.0.0.1 -> 8.8.8.8, UDP 1234 -> 53, "hello-upf").
+check "decap left the inner packet in a frame" \
+      "02 00 00 00 00 01 02 00 00 00 00 02 08 00 45 00"
+# and wrote the TEID into metadata (the mt_md reader makes that attribute a
+# real one; the padding after it is another attribute's, so only the TEID is
+# checked here).
+check_metadata "decap wrote upf_teid into metadata" "11 22 33 44"
+
+# The session table is what makes a TEID ours: the second uplink chain's frame
+# carries TEID 0x55667788, which no entry names, so the decap dropped it -- its
+# inner source address (10.0.0.2) must not appear anywhere in the log.
+refute "decap dropped a G-PDU whose TEID is not a session" "0a 00 00 02"
+
+# Downlink: the plugin resolved the ActionId the packet carried against
+# encap0/tunnels and built the outer headers: Eth (the record's addresses),
+# IPv4 src 10.20.30.1 -> dst 10.20.30.2 (the record's peer) with a correct
+# header checksum (ea 79), UDP -> 2152, GTP-U type 255 (G-PDU), length 37, TEID
 # 0x11223344, then the inner packet byte for byte.
 # (The Dump hexdump is 16 bytes to a line, so each check stays inside one.)
 check "encap built a well-formed outer IPv4 header" \

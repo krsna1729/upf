@@ -14,6 +14,12 @@ package upf.pb;
 
 // GtpuDecapArg configures decapsulation on the N3 side.
 message GtpuDecapArg {
+  // How many sessions the TEID table held. The table is gone: a session's
+  // TEID is a rule of the classifier in front of the decap, so the field is
+  // reserved rather than reused.
+  reserved 2;
+  reserved "max_sessions";
+
   // The UDP port a G-PDU must arrive on. 0 means the standard GTP-U port
   // 2152 (TS 29.281); the codec compares the field exactly.
   uint32 port = 1;
@@ -31,4 +37,62 @@ message GtpuEncapArg {
 
   // The outer UDP destination port. 0 means 2152 (TS 29.281).
   uint32 dst_port = 3;
+
+  // How many tunnels the table holds. 0 means 65536. One record per session,
+  // written in the same transaction as the rules that select it.
+  uint32 max_tunnels = 4;
+}
+
+// -- resources ---------------------------------------------------------------
+//
+// Both modules register one transactional resource (control_v2, D-129): the
+// controller writes it as part of the session's single transaction, in the
+// order docs/design.md gives (resources, then the action record, then the rule
+// that names it). Neither resource references another, so a session change is
+// one flat transaction.
+
+// TeidKey is the key of the decap module's "<module>/sessions" table: the TEID
+// of an uplink G-PDU (TS 29.281). The controller writes one entry per session,
+// and the decap accepts only TEIDs the table holds -- a G-PDU for a session
+// this UPF does not have is dropped, never forwarded into another session's
+// rules.
+message TeidKey {
+  // 0 is invalid: no tunnel carries it, and an unknown TEID is not a session.
+  uint32 teid = 1;
+}
+
+// SessionEntry is what the control plane and an operator can see about a
+// session the decap accepts. The packet path reads no field of it: the
+// entry's existence is the whole test.
+message SessionEntry {
+  // The UE's IPv4 address, dotted: what this session's PDR rules match.
+  string ue_ip = 1;
+}
+
+// TunnelKey is the key of the encap module's "<module>/tunnels" table: the
+// ActionId the PDR rule named, which the classifier wrote into the packet's
+// "action_id" metadata (BESS D-141). Keying the tunnel by the same id is what
+// lets one lookup resolve the whole session: the action record names the meter
+// and the next hop, the tunnel record names the N3 peer and the TEID.
+message TunnelKey {
+  // 0 means "no action", i.e. no session: never a key.
+  uint32 action_id = 1;
+}
+
+// TunnelEntry is the per-session half of a FAR's Outer Header Creation
+// (TS 29.244 8.2.56): how this session's downlink packets leave on N3. The
+// controller resolves the FAR once, at programming time; the packet path does
+// one indexed load and chases no control-plane relation.
+message TunnelEntry {
+  // The gNB's F-TEID for this session: the TEID the gNB expects on downlink.
+  uint32 teid = 1;
+
+  // The gNB's outer IPv4 address, dotted.
+  string gnb_ip = 2;
+
+  // The outer Ethernet source (the N3 port's address), 6 bytes.
+  bytes ether_src = 3;
+
+  // The outer Ethernet destination (the peer's address), 6 bytes.
+  bytes ether_dst = 4;
 }
