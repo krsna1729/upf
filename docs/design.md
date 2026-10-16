@@ -194,6 +194,17 @@ them (2-4 cycles) and the metadata write (one store): under 10% of what the pair
 in exchange for a forked classifier that would have to carry every future WildcardMatch
 change. They stay two modules.
 
+**The composition's rate**, for the shape the lab can offer: the whole graph
+(`deploy/session-path.yaml`: both chains, the plugin's decap and encap, one session
+programmed over N4) carries 7.25 Mpps per direction and 14.5 Mpps together on one
+worker core -- three rounds of `ci/bench-graph.sh`, 7.254/7.273/7.254 Mpps. That is
+the ceiling of the graph's own generator, whose `Source` bursts at most 32 packets
+(about 227K scheduler iterations a second), so it is a floor for the chains rather
+than their limit; the per-packet numbers above are what bound them. The same run
+shows the meter working: the session's QER MBR (1000 kbit/s, from `cmd/n4bench`'s
+message) lets 0.003 Mpps of the uplink's 7.25 through to N6, which is the 0.0025 Mpps
+that MBR allows for 51-byte packets plus a token bucket's slack.
+
 ## What is deliberately not copied from OMEC
 
 | OMEC pattern | Why it is unnecessary here | What this repo does instead |

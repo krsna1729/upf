@@ -16,6 +16,8 @@
 # The two Sources send continuously from the moment the graph is applied, so a
 # sink's counter is zero exactly when no session selects those packets: that is
 # the control arm, and it is why the packets are evidence rather than a picture.
+# They send in bursts of 32 so the *chains* set the rate rather than the
+# generator's one-packet-per-iteration loop (ci/bench-graph.sh measures it).
 #
 # The frames are the ones the compiler's session makes match:
 #   uplink    G-PDU to TEID 0x11223344 (the F-TEID the session's SMF pins),
@@ -41,7 +43,7 @@ modules:
     arg: {interval: 1}
   - name: src_up
     mclass: Source
-    arg: {pkt_size: 87, burst: 1}
+    arg: {pkt_size: 87, burst: 32}
   - name: rewrite_up
     mclass: Rewrite
     arg:
@@ -77,7 +79,7 @@ modules:
 
   - name: src_dn
     mclass: Source
-    arg: {pkt_size: 51, burst: 1}
+    arg: {pkt_size: 51, burst: 32}
   - name: rewrite_dn
     mclass: Rewrite
     arg:
