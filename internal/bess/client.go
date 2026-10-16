@@ -33,9 +33,18 @@ import (
 	pb "github.com/krsna1729/bess/sdk/go/controlv2"
 )
 
+// kMaxInFlight bounds concurrent transactions to one daemon. The engine has a
+// cascade budget: past it every transaction slows and answers `busy`, so a
+// client that fires hundreds of applies at once stalls the control plane
+// instead of going faster (measured: 256 concurrent applies to one session
+// graph answered 8 and then stalled for 30 s at a time).
+const kMaxInFlight = 32
+
 // Client is one bessd's control endpoint plus its schema.
 type Client struct {
 	sdk *sdk.Client
+
+	inFlight chan struct{}
 
 	mu      sync.Mutex
 	files   *protoregistry.Files
@@ -50,7 +59,7 @@ func Dial(ctx context.Context, target string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bess: dial %s: %w", target, err)
 	}
-	c := &Client{sdk: conn}
+	c := &Client{sdk: conn, inFlight: make(chan struct{}, kMaxInFlight)}
 	if err := c.Refresh(ctx); err != nil {
 		conn.Close()
 		return nil, err
@@ -176,6 +185,13 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 	if len(changes) == 0 {
 		return errors.New("bess: empty transaction")
 	}
+	// Bound concurrent transactions. The daemon's engine has a cascade budget,
+	// and past it every transaction slows and answers busy; firing hundreds of
+	// applies at once therefore stalls the control plane instead of going
+	// faster. Holding this slot until the commit returns is the whole fix.
+	c.inFlight <- struct{}{}
+	defer func() { <-c.inFlight }()
+
 	tx := c.sdk.Transaction()
 	for i, ch := range changes {
 		r, err := c.Resource(ch.Resource)
