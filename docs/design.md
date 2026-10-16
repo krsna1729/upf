@@ -122,7 +122,7 @@ costs the arms below are expected to confirm:
 | provisioned | extra work on a packet that uses it | on one that does not |
 |---|---|---|
 | FAR forward | none beyond the record read; the next hop is in the record | — |
-| outer header creation (GTP-U) | header write; outer UDP checksum 0, so no recompute | — |
+| outer header creation (GTP-U) | header write and the tunnel-table lookup: measured +63 cycles/pkt (below); outer UDP checksum 0, so no recompute | — |
 | QER MBR | token-bucket update | 0 |
 | QER gate closed | drop | 0 |
 | URR volume and time | two additions into worker-local counters (relaxed) | 0 |
@@ -161,13 +161,38 @@ ports, workers) goes through `ApplyPipeline`.
 - The obligation in one line: the base-path arm and the arm with the feature
   provisioned must agree to within the feature's own arm. A run where they do not is a
   design bug, not a number to explain away.
-- The plugin's own arms (`GtpuDecap`, `GtpuEncap`, and the fused parse-and-classify
-  module) run the same tool with `--build name=<bessd>,--modules=<plugin dir>`: that is
+- The plugin's own arms (`GtpuDecap`, `GtpuEncap`) run the same tool with
+  `--plugin <plugin dir>`, which appends `--modules=` to the daemon command: that is
   the UPF's perf run, not BESS's, because those modules are not in BESS's tree.
+- `ci/bench-modules.sh` is the thin wrapper: it records the stage and plugin build the
+  numbers came from and prints each arm against its control.
 
-Numbers land in this section as they are taken, with the command that took them. The
-GTP-U arms are the first ones owed: they decide whether the decap and the classifier
-stay two modules or become one.
+**Taken 2026-10-16** on this host (P-cores, performance governor), release daemon and
+release plugin, four rounds on one isolated CPU with the control thread on another:
+
+| arm | ns/pkt (above `M.base`) | instructions/pkt | cycles/pkt | over its control |
+|---|---|---|---|---|
+| `M.base` (the front end) | 8.09 | 119.8 | 25.5 | -- |
+| `M.gtpu_decap.base` | 15.52 | 368.6 | 75.1 | -- |
+| `M.gtpu_decap` | 28.89 | 612.4 | 119.3 | **+13.4 ns, +244 instructions, +44 cycles** |
+| `M.gtpu_encap.base` | 1.19 | 133.8 | 31.9 | -- |
+| `M.gtpu_encap` | 19.32 | 414.5 | 94.9 | **+18.1 ns, +281 instructions, +63 cycles** |
+
+Both instruments agree (44 cycles at ~3.3 GHz is 13.3 ns, 63 is 19.1 ns), which is what
+makes a pair reading trustworthy. The frames are the smoke test's, byte for byte: the
+decap's number is the uplink's F-TEID path, the encap's is the downlink's outer header.
+
+Reproduced the same night by a second `ci/bench-modules.sh` run: delta +13.54 ns and
++244.1 instructions for the decap, +18.21 ns and +280.9 instructions for the encap
+(+46.1 and +64.4 cycles). The instruction counts reproduce to 0.2, which is what a
+publishable module cost looks like.
+
+**Fusion decision from these numbers.** The decap is 44 cycles, the encap 63, and the
+classifier in front of the decap is ~49 (its control above `M.base`, including its rule,
+the attribute reader and two hops). Fusing parse-and-classify would save the hop between
+them (2-4 cycles) and the metadata write (one store): under 10% of what the pair costs,
+in exchange for a forked classifier that would have to carry every future WildcardMatch
+change. They stay two modules.
 
 ## What is deliberately not copied from OMEC
 

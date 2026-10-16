@@ -1,0 +1,70 @@
+#!/bin/bash
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Module costs for the UPF's datapath modules, from BESS's own instrument
+# (tests/perf/live_perf.cc). The arms M.gtpu_decap and M.gtpu_encap each carry
+# a control arm that keeps the shipping graph's front and tail -- the TEID
+# classifier and its rule, the ActionId write, the tunnel record, the reader
+# that keeps the decap's attribute real -- with a Bypass in the module's slot,
+# so the difference of a pair is that module's cost *in composition*, and the
+# frames are deploy/smoke-gtpu.yaml's own bytes.
+#
+#   ci/bench-modules.sh                 # defaults below
+#   BESS=<checkout> ROUNDS=8 ci/bench-modules.sh
+#
+# A perf run holds the machine: it waits for builds, and nothing else should be
+# running. When the host has a perf slot (a lock builds and perf runs share),
+# pass it in:  WRAP="slot perf omarchy-benchmark --isolate --diagnose --cpu 2,4 -- taskset -c 2,4"
+# The numbers and the stage/plugin they came from are printed together: a module
+# cost without its stage and plugin build is unreadable.
+
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+BESS=${BESS:-$HOME/Projects/bess}
+WT=${WT:-$BESS/.scratch/wt/codecs}          # the worktree whose build holds live_perf
+BUILD=${BUILD:-$WT/build/perf-release}      # release: the daemon and the tool
+DAEMON=${DAEMON:-$BUILD/core/bessd}
+LIVE_PERF=${LIVE_PERF:-$BUILD/tests/perf/live_perf}
+PLUG=${PLUG:-$ROOT/datapath/build}
+STAGE=${STAGE:-$BESS/.scratch/wt/pkg/build/stage-fast/usr/local}
+DPDK_LIB=${DPDK_LIB:-$WT/deps/dpdk-25.11.3/install/lib}
+ROUNDS=${ROUNDS:-4}
+CPU=${CPU:-4}
+CONTROL_CPU=${CONTROL_CPU:-2}
+WRAP=${WRAP:-}
+OUT=${OUT:-/tmp/upf-bench-modules.log}
+
+for f in "$LIVE_PERF" "$DAEMON" "$PLUG/libupf_datapath.so"; do
+  [ -e "$f" ] || { echo "bench: missing $f (set LIVE_PERF/DAEMON/PLUG)" >&2; exit 1; }
+done
+
+echo "stage:  $STAGE"
+echo "plugin: $PLUG/libupf_datapath.so ($(stat -c %s "$PLUG/libupf_datapath.so") bytes, $(date -r "$PLUG/libupf_datapath.so" +%Y-%m-%d))"
+echo "daemon: $DAEMON"
+echo "tool:   $LIVE_PERF, $ROUNDS rounds on CPU $CPU (control $CONTROL_CPU)"
+
+export BESS_DPDK_LIB=$DPDK_LIB
+export LD_LIBRARY_PATH=$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+
+$WRAP "$LIVE_PERF" --cpu "$CPU" --control-cpu "$CONTROL_CPU" \
+  --build "name=$DAEMON" --plugin "$PLUG" \
+  --tests M.base,M.gtpu_decap.base,M.gtpu_decap,M.gtpu_encap.base,M.gtpu_encap \
+  --counters --rounds "$ROUNDS" --save "${OUT%.log}.json" >"$OUT"
+
+sed -n '/^test /,/^$/p' "$OUT"
+
+# The pair deltas: the report prints every M row as ns/packet above M.base, so
+# an arm minus its control is the module's cost.
+awk '/^M\.gtpu_(decap|encap)(\.base)? +[0-9]/{ v[$1]=$2 }
+     END {
+       if (!("M.gtpu_decap" in v) || !("M.gtpu_encap" in v)) { exit }
+       printf "\ndecap: %+.2f ns/pkt over its control (%s - %s)\n",
+              v["M.gtpu_decap"] - v["M.gtpu_decap.base"], v["M.gtpu_decap"], v["M.gtpu_decap.base"]
+       printf "encap: %+.2f ns/pkt over its control (%s - %s)\n",
+              v["M.gtpu_encap"] - v["M.gtpu_encap.base"], v["M.gtpu_encap"], v["M.gtpu_encap.base"]
+     }' "$OUT"
+
+echo
+echo "full report: $OUT, raw rounds: ${OUT%.log}.json"
+echo "counters per packet are in the report; contamination (if any) is in its diagnostics."
