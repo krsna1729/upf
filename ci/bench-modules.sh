@@ -47,10 +47,26 @@ echo "tool:   $LIVE_PERF, $ROUNDS rounds on CPU $CPU (control $CONTROL_CPU)"
 export BESS_DPDK_LIB=$DPDK_LIB
 export LD_LIBRARY_PATH=$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
+status=0
 $WRAP "$LIVE_PERF" --cpu "$CPU" --control-cpu "$CONTROL_CPU" \
   --build "name=$DAEMON" --plugin "$PLUG" \
   --tests M.base,M.gtpu_decap.base,M.gtpu_decap,M.gtpu_encap.base,M.gtpu_encap \
-  --counters --rounds "$ROUNDS" --save "${OUT%.log}.json" >"$OUT"
+  --counters --rounds "$ROUNDS" --save "${OUT%.log}.json" >"$OUT" 2>&1 || status=$?
+
+# A wrapper that fails before the tool starts leaves an empty report, and an
+# empty report is indistinguishable from a run with no rows: say which it was and
+# keep its output, rather than `sed`-ing nothing and exiting 0. (On this host
+# `omarchy-benchmark --cpu <list>` exits 1 before running its command; see
+# docs/design.md.)
+if ! grep -q '^test ' "$OUT"; then
+  echo "bench: no report in $OUT -- ${WRAP:-no wrapper} did not run $LIVE_PERF (exit $status):" >&2
+  cat "$OUT" >&2
+  exit 1
+fi
+if [ "$status" != 0 ]; then
+  echo "bench: $LIVE_PERF exited $status; its report is $OUT" >&2
+  exit "$status"
+fi
 
 sed -n '/^test /,/^$/p' "$OUT"
 

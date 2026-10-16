@@ -189,10 +189,13 @@ publishable module cost looks like.
 
 **After that measurement** the encap learned to copy the inner packet's TOS to the
 outer header (the DSCP copy; `ci/session-path.sh` checks the outer header carries the
-inner class). The re-run is owed: `ci/bench-modules.sh` with its
-`omarchy-benchmark --isolate` wrapper currently fails silently — the isolation comes
-up, its child writes nothing and exits 1, while the same arms run fine unisolated — so
-there is no isolated number for the changed encap yet. An unisolated cross-check put
+inner class). The re-run is owed: the wrapper's child writes nothing and exits 1 —
+measured today, and it is **`--cpu` rather than `--isolate`**: `omarchy-benchmark
+--cpu 4 -- /bin/echo` exits 1 without running the command (its launcher's status is
+1, and it restores the machine on the way out), `--cpu 4 --isolate` the same, while
+the same command with no CPU selection runs — so `ci/bench-modules.sh` now fails
+loudly when its report is empty instead of `sed`-ing nothing and exiting 0. There is
+no isolated number for the changed encap yet. An unisolated cross-check put
 the encap at +16.88 ns over its control against the +18.1 above: inside the
 between-run spread, which is as much as an unpaired run can say.
 
