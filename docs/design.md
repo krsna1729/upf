@@ -39,6 +39,136 @@ The datapath therefore never chases relations: the PFCP side resolves
 `PDR → QER/FAR` once, at programming time, and the packet carries an
 `ActionId` that names the resolved object graph.
 
+## The packet path, and how its cost is proven
+
+The mapping above is a claim about *structure*. This section is the claim about
+*cost*, and it is the one that has to be measured.
+
+**Work per packet, in order:** parse up to the key (fixed offsets, no branches on
+well-formed input) → one classifier lookup → one action-record read → the treatment
+the record names → egress (route lookup, or the tunnel header the record carries).
+One lookup and one record read, whatever the session contains: a session with a QER,
+a URR and a BAR costs the same steps as one with none. The compiler resolves
+PDR → QER/FAR/URR at install time; the packet path never chases a relation.
+
+**The key** is what a BESS classifier can read: *packet* bytes at an offset. A
+classifier's fields are `{offset, num_bytes}` (`bess::pb::Field`, `module_msg.proto`;
+`bessctl/conf/samples/session_pipeline.yaml` uses offset 26 for the IPv4 source), and
+metadata attributes are not matchable. The TEID of an uplink G-PDU sits in the outer
+header the decap module strips, so after decap it exists only as metadata -- but
+*before* decap it is packet bytes at a fixed offset (Eth 14 + IPv4 20 + UDP 8 + the
+GTP-U header's flags, type and length 4). The F-TEID is therefore a **rule** of the
+table in front of the decap, one per session:
+
+- `teid/rules` holds one rule per session: the four bytes of the TEID, masked all
+  ones, whose gate is the decap's output. A G-PDU whose TEID no rule names never
+  reaches the decap (the table's default gate drops it), so the decap needs no
+  session table at all: it strips headers, writes `upf_teid` and passes the inner
+  packet on (TS 29.281 answers an Error Indication to the peer; the notification
+  path is a later item). This is also the *whole* cost of the F-TEID match, and it
+  is one hash lookup, the same table machinery every other rule uses.
+- A *session table* in the plugin was the first design, and it does not work: the
+  fork's `SlotResource` keys are dense ids in `1..capacity` (`slot_table.h`), and a
+  TEID is an arbitrary 32-bit id (0x11223344 is a plausible one). The rule table has
+  no such constraint, and it inherits the classifier's transactional model (D-141)
+  and its reference checking.
+- the decap writes `upf_teid` for the modules downstream that read it. A
+  write-only metadata attribute no module reads is not allocated at all -- the
+  pipeline gives it `kMetadataOffsetNoWrite` (`core/metadata.cc`,
+  `FillOffsetArrays`: "attr not read downstream") -- so a graph that wants the TEID
+  in metadata must contain a reader, and `deploy/smoke-gtpu.yaml` has one.
+- the PDR rules match what the PDI names after the F-TEID: the UE IPv4 address and the
+  SDF tuple (protocol, ports, at their fixed offsets). `WildcardMatch` masks make
+  "UE IP only" and "UE IP plus 5-tuple" the same table.
+- a PDR whose PDI names *only* an F-TEID (no UE IP, no SDF) cannot be selected by a
+  packet classifier. The compiler refuses it with a PFCP cause instead of installing a
+  catch-all rule, which would hand one session's traffic to another's action. Real
+  SMFs put the UE IP in the PDI; the interop milestone checks that against open5gs
+  rather than assuming it.
+
+**Framing.** The graph carries Ethernet frames: BESS's core modules read IPv4 behind
+an Ethernet header (`core/modules/ip_lookup.cc` reads `eth + 1`), so the decap leaves
+the inner packet behind a header it writes from the headroom the outer headers
+occupied (the outer frame's addresses, the inner packet's version), and the encap
+takes that header off before it writes the outer one -- a G-PDU's payload is the inner
+IP packet, not a frame (TS 29.281). Neither direction copies a payload byte.
+
+**Two chains, one per direction.** A module has one output gate per path, and a rule
+names an `ActionId` that resolves against the actions resource its table declares
+(D-141). One classifier table and one action table therefore cannot serve both
+directions: the uplink's meter feeds the router toward N6 and the downlink's feeds the
+tunnel toward N3, and a downlink rule's action lives in the downlink table. The graph
+has `pdr_ul → at_ul → mt_ul → rt` and `pdr_dl → at_dl → mt_dl → enc`, each table
+declaring its own chain's actions resource, so every rule's reference is exact.
+`deploy/session-live.yaml` is that graph (module names: the session layer's `Config`).
+
+Both results — the gate and the ActionId — come from one lookup
+(`{gate, ActionId}`, the BESS-side item *Classifier result model*).
+
+**The action record** (one cache line, read once, never written by a worker):
+
+| offset | contents | written by |
+|---|---|---|
+| 0 | treatment (forward / drop / buffer / notify) and the next-hop id | FAR |
+| 8 | route domain and the outer-header template (TEID, peer address, ports) | FAR, Network Instance |
+| 24 | meter id, the QER's gate state, QFI | QER |
+| 32 | counter ids (bytes UL/DL, packets UL/DL) | URR |
+| 48 | buffer class, the BAR's duration, suggested packet count | BAR |
+| 60 | flags: which of the above are present, so an absent feature is a branch not taken | compiler |
+
+**Per feature, per packet** — the "the base path does not move" obligation, as the
+costs the arms below are expected to confirm:
+
+| provisioned | extra work on a packet that uses it | on one that does not |
+|---|---|---|
+| FAR forward | none beyond the record read; the next hop is in the record | — |
+| outer header creation (GTP-U) | header write; outer UDP checksum 0, so no recompute | — |
+| QER MBR | token-bucket update | 0 |
+| QER gate closed | drop | 0 |
+| URR volume and time | two additions into worker-local counters (relaxed) | 0 |
+| BAR | a slot write, only on a buffered packet | 0 |
+| ULCL / branching | one route-domain select from the record | 0 |
+
+**State policy (the path to 400G).** No shared mutable state in the packet path:
+classifiers and records are per-worker copies published by RCU; URR counters are
+worker-local and summed by the reporting task (no atomics in the path); token buckets
+are per flow, and under RSS a flow maps to one worker, so a flow-level QER is enforced
+exactly by that worker. A *session*-level QER spans flows on several workers, which is
+the one place where exactness and scale conflict: the default is a per-worker share of
+the session's MBR (an approximation, bounded by the worker count), with a
+shared-counter mode for deployments that need a hard session limit. The choice is a
+QER property, not a global switch.
+
+**Install order, one transaction.** Resources first (meters, counters, next hops,
+routes), then the action record, then the rule that names it. A worker that wins the
+lookup can then never read a record whose resources are missing — publication is the
+classifier hit. Removal is the reverse, and the record goes after a grace period
+longer than a worker's longest batch.
+
+**Modification.** A QER or FAR parameter change rewrites the record in place (one
+cache line under RCU): no rule change, no classifier touch, no worker pause. A PDR key
+change adds the new rule before removing the old one. Only a graph change (modules,
+ports, workers) goes through `ApplyPipeline`.
+
+**How it is measured** (`tests/perf/live_perf.cc`, the instrument CI runs):
+
+- Every `M.*` test is a chain with a control arm: `M.base/<frame>` is the same chain
+  with `Bypass` in the module's slot, so a test's number is that module's cost *in
+  composition*, not in isolation. A module that needs a different frame (a tunnel)
+  must bring its own control arm, or the frame's size leaks into the delta.
+- `--counters` adds instructions and cycles per packet for the window (`perf stat`).
+  The table above is filled from those arms, same burst size, isolated core.
+- The obligation in one line: the base-path arm and the arm with the feature
+  provisioned must agree to within the feature's own arm. A run where they do not is a
+  design bug, not a number to explain away.
+- The plugin's own arms (`GtpuDecap`, `GtpuEncap`, and the fused parse-and-classify
+  module) run the same tool with `--build name=<bessd>,--modules=<plugin dir>`: that is
+  the UPF's perf run, not BESS's, because those modules are not in BESS's tree.
+
+Numbers land in this section as they are taken, with the command that took them. The
+GTP-U arms are the first ones owed: they decide whether the decap and the classifier
+stay two modules or become one.
+
 ## What is deliberately not copied from OMEC
 
 | OMEC pattern | Why it is unnecessary here | What this repo does instead |
@@ -112,3 +242,20 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 
 Each milestone lands with its tests and a run that shows it, not with a
 scaffold for the next one.
+
+## What proves it
+
+- `ci/smoke-gtpu.sh` — the datapath, byte for byte: it builds the plugin against
+  the staged `bess-dev`, loads it into the staged `bessd`, applies
+  `deploy/smoke-gtpu.yaml`, and checks the decapsulated frame, the TEID in
+  metadata, the drop of a TEID no rule names, and the encapsulated outer headers
+  against the log's packet dumps.
+- `ci/session-live.sh` — the control path against a real daemon:
+  `deploy/session-live.yaml` is the graph, and the Go test it runs programs a
+  whole session into the running `bessd` through the SDK (establish, retransmit,
+  modify, delete, retransmit the delete). Every message is built from the
+  daemon's own schema, so a key or value it does not accept fails the test with
+  what it said -- the class of mistake no recorder catches, and the one this
+  layer made (an F-TEID keyed as a dense id).
+- `ci/bench-chain.sh` — the plugin's arms for the perf tool: a GTP-U decap or
+  encap arm is not BESS's number to take.

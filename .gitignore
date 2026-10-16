@@ -3,3 +3,5 @@
 /upfd
 *.o
 *.so
+go.work
+go.work.sum

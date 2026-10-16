@@ -58,14 +58,53 @@ behind. These numbers are VM-bound and are a *shape*, not a ceiling.
   timers, BAR, QER, DDN, in a 2.7k-star project that runs in production labs.
 * **Nobody has everything.** upg-vpp's URR semantics are the deepest but it has no
   QER/BAR; eUPF is fast but its URR is unwired; OMEC has no URR at all.
-* Therefore: the target is not "copy one project". The target is
-  **open5gs-class PFCP semantics + OAI-class feature breadth, evaluated with a
-  per-packet instruction budget that beats the whole field's throughput.**
+* Therefore: the target is not "copy one project". The target is the spec's Pareto set
+  implemented as fused MVPs (see *Target feature set* above), with a per-packet budget
+  that beats the field's throughput -- the list below is *input* evidence, not the goal.
+* **The order is part of the claim.** 1) the classifier result model `{gate, ActionId}`
+  and the pre-resolved action record; 2) `ExactMatch`/`WildcardMatch` returning that
+  record on per-worker tables (the 400G scale rule); 3) the URR counters folded into the
+  same record (the differentiator, and the cheapest one to get right); 4) the FAR/QER
+  patches on the same record; 5) N4 session lifecycle on top. The PFCP side (1 and 5's
+  control plane) has no datapath dependency and proceeds in parallel; the data path
+  order above is what the throughput claim rests on.
+* **The five-minute test of the central claim.** Run the `live_perf` GTP-U
+  decap-and-forward chain twice on an isolated core: once bare, once with a URR and a
+  QER provisioned. The two numbers must agree to within the action-record cost printed
+  by the same run. If they diverge, the dual objective has failed and no feature count
+  saves the claim -- so this is the first thing to run before any feature is called
+  done.
 
-## Target feature set (Pareto)
+## Target feature set (spec Pareto, not field parity)
 
-Ordered by (spec importance x what the field has). Everything the field agrees on is
-MUST; the differentiators are MUST; the rest is explicitly deferred.
+Three jobs, scored separately. What the field happens to have is an input, never the
+target:
+
+1. **Implement the spec.** A standard exists, so the MVP per feature is unambiguous;
+   only feature interaction and lifecycle are not (see the coverage table above).
+2. **Beat the field where it is broken.** A correct MVP already beats both leaders on
+   URR and BAR (their URR is unwired or absent, their BAR buffers nothing), so this
+   class is won by implementing the spec, not by catching up with the field.
+3. **Sequence by frequency x weight.** A small set of features covers most
+   deployments; that dense set is MUST. What remains is **whitespace**: features the
+   field does not have at all (URR, downlink buffering, IPv6, Ethernet PDU sessions).
+   Leadership there is cheap -- but only with a bar per feature that can be run,
+   otherwise it is a claim without evidence.
+
+**Dual objective.** Feature coverage *and* no throughput loss from what is provisioned
+but not in use: the base path must not move when a QER, URR or BAR is added. The field
+dies exactly there (OMEC's graph walks pdrLookup -> appQER -> sessionQER -> farLookup
+per packet, and its classifier returns a gate rather than an action). The throughput
+floor is the field's throughput with the field's bugs; the per-packet budget below is
+what buys the headroom above it.
+
+**Scale target: a path to 400G.** 400G in one direction at an average frame of 350 B is
+~140 Mpps (both directions double it), which at the budget below (<= 120 cycles/packet,
+~25 Mpps/core at 3 GHz) is ~6 data-plane cores. Reaching it must not require shared
+state: multi-queue RSS with one worker per queue, per-worker tables, no locks, no
+allocations and no control-plane work in the packet path, batched bursts, and the
+per-worker cost measured in cycles rather than argued -- datapath MUST item 9 below is
+that requirement, stated as a build rule.
 
 MUST — PFCP (TS 29.244) and N4 procedures:
 1. Association Setup/Update/Release, heartbeat, restart detection via Recovery Time
@@ -92,9 +131,25 @@ MUST — datapath:
 9. Multi-queue RSS, per-worker tables, RCU rule updates, no locks or allocations in
    the packet path.
 
-DEFER (documented, not silently dropped): MAR/ATSSS-LL, Ethernet PDU sessions,
-IPv6 (own phase), TSCU/URLLC, lawful intercept, PFDM/HEEU/TREU/framed routing,
-advanced DDDS reporting, NAT beyond IPv4.
+Differentiators already inside the MUST lists, each with a bar and an arm -- "done" means
+the bar passes, not that the clause is wired:
+
+| feature | bar for "done" | arm |
+|---|---|---|
+| URR | volume and time per UR-SEQN; thresholds, quota and termination reported so a controller accepts the report | live URR test; `live_perf` cost delta with URR provisioned |
+| BAR / DL buffering | buffer DL packets on downlink data notification, deliver on DDN, drop when the duration expires | live buffering test; burst arm |
+| IPv6 | PFCP UE IP and inner/outer IPv6 for UL/DL and N9, inside the same per-packet budget | dual-stack conformance graph; budget arm |
+
+Phased, each an MVP when its phase opens (own phase; the release plan carries the
+schedule): Ethernet PDU sessions, TSCU/URLLC, lawful intercept (needs a third-party
+LI gateway), MAR/ATSSS-LL.
+
+Excluded (documented, not silently dropped): advanced DDDS reporting,
+PFDM/HEEU/TREU/framed routing, NAT beyond IPv4. Promotion rule for the last two lists:
+an item re-enters the roadmap only with a deployment that needs it or a spec release
+that makes it mandatory -- and then it enters as an MVP with a bar, like everything
+above. Nothing leaves this section silently; a feature either has a bar or it is on one
+of these lists.
 
 ## Per-packet budget (the "minimal instructions" rule)
 
