@@ -27,7 +27,7 @@ to race.
 
 | PFCP | BESS |
 |---|---|
-| PDR (Precedence, PDI: Source Interface, F-TEID, Network Instance, UE IP, SDF filters) | one rule in the PDR table (WildcardMatch for masked keys, a range classifier for port ranges) whose result is `{gate, ActionId}` |
+| PDR (Precedence, PDI: Source Interface, F-TEID, Network Instance, UE IP, SDF filters) | one rule in the PDR table (WildcardMatch over masked keys) whose result is `{gate, ActionId}`; a port *range* is refused today — see the OMEC table below |
 | FAR (Apply Action, Forwarding Parameters: Destination Interface, Network Instance, Outer Header Creation) | a *treatment* resource the action references (forward / drop / buffer / notify) plus the next hop and GTP-U encap parameters |
 | QER (Gate Status, MBR, QFI) | a meter resource per QER, referenced from the action |
 | URR (Measurement Method, Reporting Triggers, thresholds, period) | a counter resource per URR plus a reporting task; reports become PFCP Session Reports |
@@ -194,7 +194,9 @@ measured today, and it is **`--cpu` rather than `--isolate`**: `omarchy-benchmar
 --cpu 4 -- /bin/echo` exits 1 without running the command (its launcher's status is
 1, and it restores the machine on the way out), `--cpu 4 --isolate` the same, while
 the same command with no CPU selection runs — so `ci/bench-modules.sh` now fails
-loudly when its report is empty instead of `sed`-ing nothing and exiting 0. There is
+loudly when its report is empty instead of `sed`-ing nothing and exiting 0. It is
+not a privilege problem: `sudo -n true` succeeds on this host, and the wrapper
+does restore the CPU, turbo and governor state it touched. There is
 no isolated number for the changed encap yet. An unisolated cross-check put
 the encap at +16.88 ns over its control against the +18.1 above: inside the
 between-run spread, which is as much as an unpaired run can say.
@@ -224,7 +226,7 @@ that MBR allows for 51-byte packets plus a token bucket's slack.
 | OMEC pattern | Why it is unnecessary here | What this repo does instead |
 |---|---|---|
 | A goroutine and a `ModuleCommand` per PDR/FAR/QER, unordered; `SendMsgToUPFWithCompletion` per session | BESS's transaction engine orders, validates and rolls back server-side; a client that orders internals has to reimplement all of it | one `Transaction` per session change, `WithExpectedGeneration` when the caller has a generation in hand |
-| Cartesian expansion of port ranges into many rules | not needed, because the compiler refuses a port range in an SDF filter rather than matching more widely than the filter (docs/compliance.md); the classifier itself is not the constraint | one rule per PDR with a masked key, and port ranges wait for their milestone (the classifier's mask limit is configurable, `max_tuples`) |
+| Cartesian expansion of port ranges into many rules | not needed as OMEC does it, because the compiler refuses a non-single-port range rather than matching more widely than the filter (docs/compliance.md). When ranges land they become the minimal set of masked rules (a 16-bit range is at most 2·16 prefixes), not a Cartesian product | one rule per PDR with a masked key today; ranges wait for their milestone (the classifier's tuple budget is configurable, `max_tuples`) |
 | Client-side establishment, then a second pass to modify | desired state is the model: `ApplyPipeline` diffs and plans, and resource contents ride along in the same call | `Pipeline` + `PlanPipeline` before a change, `ApplyPipeline` for topology |
 | Retries, idempotency and "did it apply?" reinvented in the client | the SDK owns it: one request id per logical transaction, `GetTransaction` after an unanswered send, `DaemonRestartedError` when the epoch moved | `internal/bess` wraps exactly that and nothing else |
 | State in the controller that the dataplane also holds (and they drift) | the dataplane is the state of record; sessions are reconstructible | the controller keeps only what PFCP needs (session ids, SEIDs, the last reported counters) |
@@ -281,12 +283,16 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 - `upfd` restarts: its PFCP state (CP F-SEIDs, session identity, URR
   configuration) is in memory only, and its id pools start empty while BESS
   still holds the previous incarnation's records -- the pools hand out the
-  same ids, so a rule that outlives its controller can come to name another
-  session's action (on the downlink, another session's tunnel). There is no
-  checkpoint and no replay path yet: a restart is followed by emptying the
-  session tables (or by a `bessd` restart) and by the SMF re-establishing,
-  which its own path management forces once the Recovery Time Stamp changes.
-  Wall 4 below is that work.
+  same ids, and an action's object is changed id by id
+  (`core/modules/action_table.h`: immutable, one id at a time), so a write to
+  an occupied id replaces it: a rule that outlives its controller can come to
+  name another session's action, and on the downlink another session's tunnel.
+  There is no checkpoint and no replay path yet, so a restart is followed by
+  emptying the session tables -- by the operator, or by `upfd` itself in one
+  transaction at startup, which is the small fix worth having -- or by a
+  `bessd` restart, and by the SMF re-establishing, which its own path
+  management forces once the Recovery Time Stamp changes. Wall 4 below is that
+  work.
 - Either restart must be a *reapply*, never a trust fall: the controller
   verifies by reading back what it wrote (the SDK's readback and
   `ReadBackDiffers`-style comparison exist for this).
@@ -343,11 +349,14 @@ graph's `max_tuples`, so it is a UPF decision, not a default.
 Rates, measured (performance contract rows 66-67): one transaction per session
 sustains 695K sessions/s (519K in the other profile), and with the writer flat
 out at 194K sessions/s four readers still do 44.8 Mpps each, from 49.3 at rest.
-A million sessions at the N4 rate measured below (2,274.8/s, one client in
-flight) is 440 seconds of control traffic; at the transaction engine's ceiling
-it is 1.4 s. Either way it is a campaign, not a migration -- and which of the
-two you get is decided by how many answers the client keeps in flight, which is
-what "the deployment's own numbers" below is about.
+A million establishments at the N4 rate measured below (1,184 a second, one
+client in flight) is 845 seconds -- 14 minutes -- of control traffic; at the
+transaction engine's ceiling it is 1.4 s. (The envelope table further down
+reports 2,274.8/s for another run of the same script: the p50s differ, 324 vs
+786 µs, so those are two runs of a quiet machine, not two paths.) Either way a
+million sessions is a campaign, not a migration -- and which of the two you get
+is decided by how many answers the client keeps in flight, which is what "the
+deployment's own numbers" below is about.
 
 The deployment's own numbers, through the whole N4 path (a PFCP message, the
 session compiler, one transaction, the daemon's answer) with one client in

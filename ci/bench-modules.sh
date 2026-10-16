@@ -15,6 +15,15 @@
 # A perf run holds the machine: it waits for builds, and nothing else should be
 # running. When the host has a perf slot (a lock builds and perf runs share),
 # pass it in:  WRAP="slot perf omarchy-benchmark --isolate --diagnose --cpu 2,4 -- taskset -c 2,4"
+#
+# On this host that wrapper currently loses the run: `omarchy-benchmark` exits 1
+# before it starts the command whenever a CPU selection is given (`--cpu 4 --
+# /bin/echo` prints nothing, with or without `--isolate`; with no `--cpu` the
+# command runs), and it restores governors, turbo and CPU-online on the way out.
+# It is not a privilege or tty problem: `sudo -n true` succeeds here. The script
+# therefore checks its own report and fails loudly when the wrapper ate the run
+# (docs/design.md, "After that measurement").
+#
 # The numbers and the stage/plugin they came from are printed together: a module
 # cost without its stage and plugin build is unreadable.
 

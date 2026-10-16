@@ -25,7 +25,7 @@ Two optional behaviours *are* implemented without being declared:
 
 | bit | implemented where | why the bit is still off |
 |---|---|---|
-| FTUP | the compiler allocates an F-TEID when the SMF sends TEID 0 and reports it in the Created PDR (`internal/session/compile.go`) | the milestone turns the bit on; until then a conformant SMF simply never asks, and the path is exercised by the live tests instead |
+| FTUP | the compiler allocates an F-TEID when a PDI's F-TEID IE carries no TEID (the field is absent exactly when the CH flag asks the UPF to choose) and reports it in the Created PDR (`internal/session/compile.go`) | the milestone turns the bit on; until then a conformant SMF simply never asks, and the path is exercised by the live tests instead. **CHID is not read**: PDIs sharing one CHID should share one F-TEID, and today each PDI gets its own, so a CH-using SMF sees several where it expected one |
 | UEIP | the UE IP IE is a rule key and the session's UE address (`internal/session/compile.go`) | same: the behaviour is what the tests assert, the bit is a promise about the rest of the feature |
 
 A milestone that implements a feature turns its bit on in `cmd/upfd`; a feature
@@ -59,6 +59,8 @@ whose bit is on with nothing behind it is the kind of claim
 | 7.5.2.2 (Create PDR); 8.2.36 PDR ID, 8.2.11 precedence, 8.2.2 source interface, 8.2.3 F-TEID, 8.2.62 UE IP address, 8.2.5 SDF filter, 8.2.74 FAR ID, 8.2.75 QER ID | PDR and its PDI, correlated with the FAR and QER | in | `internal/session`: TestEstablishCompilesTheSessionIntoOneTransaction |
 | 8.2.5 | SDF filter: source and destination addresses **and prefixes**, protocol, single ports | in: the key is canonical, the mask says which fields the filter constrains, and a prefix's mask is its length | TestRuleKeysAreCanonical, TestAnSDFPrefixIsAPrefixNotAnAddress (and the live arm with it); `ci/session-path.sh` |
 | — | a port **range** in an SDF filter | refused, deliberately: a rule that cannot express the range must not match more widely than the filter | TestPortRangeIsRefusedNotMatchedTooWidely |
+| — | a PDI naming an address or prefix that is not IPv4, and an SDF prefix whose address carries host bits | refused with cause 73 (an IPv6 address cannot be masked into four bytes, and widening it would match another session's packets); a sloppy prefix means its network (`10.10.1.5/16` compiles to `10.10.0.0/16`) | TestANonIPv4PDIIsRefusedNotWidened, TestAnSDFPrefixIsAPrefixNotAnAddress |
+| — | a PDI with no UE IP IE (an uplink PDR chosen by its F-TEID, or an SMF that sent the address on one direction only) | in: the field is left unconstrained rather than refused | TestAPDRWithoutAUEAddressIsUnconstrained |
 | 8.2.89 QFI, 8.2.4 network instance | not read: one QFI per session, one network instance (N6) | — | — |
 | 7.5.2.3 (Create FAR); 8.2.26 apply action, 8.2.24 destination interface | FAR: apply action FORW; destination interface | in | the live tests, and `ci/n4-path.sh` for the downlink's |
 | 8.2.56 | FAR: outer header creation GTP-U/UDP/IPv4 with a TEID toward the gNB | in | `ci/n4-path.sh` (the FAR's TEID is on the wire) |
@@ -76,7 +78,7 @@ whose bit is on with nothing behind it is the kind of claim
 | GTP-U v1 decapsulation: TEID match, outer headers removed, `upf_teid` reported | in | `datapath/`; `ci/smoke-gtpu.sh` (six checks, including that a TEID no session names is dropped) |
 | GTP-U v1 encapsulation: outer Eth/IPv4/UDP 2152/GTP-U from the FAR's parameters | in | `ci/session-path.sh`, `ci/n4-path.sh` (byte-level, from the daemon's Dumps) |
 | the whole path under one session: UL N3 (TEID table -> decap) -> PDR -> action -> meter -> the next hop's gate (N6), DL N6 -> PDR -> action -> meter -> GTP-U -> N3 | in | `ci/session-path.sh` (counters zero before the session, both directions after) |
-| GTP-U echo request/response | not implemented — and an echo request is a G-PDU with TEID 0 targeting no tunnel, so it is dropped rather than answered: a peer running path management reads that as a dead path, which is the honest symptom until the milestone lands | — |
+| GTP-U echo request/response | not implemented, and no test drives one: an Echo Request (GTP-U type 1, TEID 0) names no session's F-TEID, so the TEID table drops it like any G-PDU whose TEID no rule matches (the drop `ci/smoke-gtpu.sh` checks). A peer running path management reads that as a dead path — the honest symptom until the milestone lands | `ci/smoke-gtpu.sh` for the drop, by inference for the message type |
 | GTP-U end marker (type 254) | not implemented | — |
 | DSCP copy inner -> outer | in: the encap writes the inner packet's TOS on the outer IPv4 header | `ci/session-path.sh` (the outer header carries the graph's EF mark, and fails without the copy) |
 | per-rule counters (packets and bytes per PDR, so a URR can report them) | gate counters are in; per-rule counters arrive with URR | `ci/session-path.sh` reads the gate counters |
@@ -108,3 +110,13 @@ Association Setup Response declares no optional feature it cannot honour.
 4. **BAR + DDN** (7.5.2.6 + 7.5.8.2): the downlink buffering OMEC never had.
 5. **QFI and Network Instance** (8.2.89, 8.2.4): one per session today; reading
    them is what N9 (ULCL) needs, along with `internal/routing`'s domains.
+6. **IPv6** — an explicit refusal, not a silent gap: a PDI naming an IPv6 UE
+   address or SDF prefix is answered cause 73, because the classifier's four
+   bytes cannot carry it and widening it would match other sessions' packets
+   (TestANonIPv4PDIIsRefusedNotWidened). The dataplane's tables, the two
+   address fields and the TEID rule key would all need a second form; until
+   then refusing is the honest behaviour, and this is what "IPv6 not
+   implemented" means here.
+7. **FTUP's CHID** (8.2.3): several PDIs that share a CHID should share one
+   F-TEID. One TEID per CHID per session is a small change; the compiler reads
+   no flags today, so each such PDI gets its own.

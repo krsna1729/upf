@@ -297,25 +297,7 @@ func run() error {
 		return fmt.Errorf("association with %s: %w", *target, err)
 	}
 
-	params := make([]n4sim.Session, *sessions)
-	for i := range params {
-		// A pinned F-TEID is the SMF's to make unique. One value for the whole
-		// phase would have the UPF refuse every session after the first (which
-		// it should), and the bench would report a wall of refusals as if they
-		// were the UPF's doing.
-		pinned := uint32(0)
-		if *fteid > 0 {
-			pinned = uint32(*fteid) + uint32(i)
-		}
-		params[i] = n4sim.Session{
-			CPSEID: uint64(0x1000 + i),
-			TEID:   uint32(0x100000 + i),
-			FTEID:  pinned,
-			UEIP:   offsetAddr(base, i),
-			GnBIP:  *gnb,
-			N3IP:   *n3,
-		}
-	}
+	params := sessionParams(*sessions, uint32(*fteid), base, *gnb, *n3)
 	seids := make([]uint64, *sessions) // the UPF-side SEID of each session
 
 	phase := newPacer(*rate)
@@ -555,6 +537,32 @@ func poolBase(pool string, sessions int) (uint32, error) {
 			pool, uint64(1)<<hostBits, sessions)
 	}
 	return uint32(v4[0])<<24 | uint32(v4[1])<<16 | uint32(v4[2])<<8 | uint32(v4[3]), nil
+}
+
+// sessionParams is the phase's sessions: what an SMF would ask for, one per
+// index. A pinned F-TEID is the SMF's to make unique, so session i pins
+// fteid+i -- one value for the whole phase would have the UPF refuse every
+// session after the first (which it should), and the bench would report a wall
+// of refusals as if they were the UPF's doing. An fteid of 0 pins nothing:
+// every session asks the UPF to choose, which is what an SMF that never pins
+// does.
+func sessionParams(n int, fteid, base uint32, gnb, n3 string) []n4sim.Session {
+	params := make([]n4sim.Session, n)
+	for i := range params {
+		pinned := uint32(0)
+		if fteid > 0 {
+			pinned = fteid + uint32(i)
+		}
+		params[i] = n4sim.Session{
+			CPSEID: uint64(0x1000 + i),
+			TEID:   uint32(0x100000 + i),
+			FTEID:  pinned,
+			UEIP:   offsetAddr(base, i),
+			GnBIP:  gnb,
+			N3IP:   n3,
+		}
+	}
+	return params
 }
 
 // offsetAddr is the i-th address of the pool as a string.
