@@ -49,7 +49,7 @@ func pathEstablishmentWithSDF(cpSEID uint64, ueIP string, sdf string) *message.S
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x02, pathUpTEID, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewFTEID(0x01, pathUpTEID, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),

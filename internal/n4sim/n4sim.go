@@ -50,6 +50,18 @@ func (s Session) sdf() string {
 	return s.SDF
 }
 
+// fteidIE is the F-TEID IE an SMF sends. With a value pinned, that is a V4
+// F-TEID (flag 0x01 -- go-pfcp's HasIPv4 is the first bit; 0x02 is V6) carrying
+// the TEID and the UPF's N3 address. With nothing pinned it is the CH request
+// (flag 0x04) with no TEID at all: a TEID of zero *with* the V4 flag is a
+// pinned zero, a shape no SMF sends and only a lenient UPF reads as "choose".
+func fteidIE(s Session) *ie.IE {
+	if s.FTEID == 0 {
+		return ie.NewFTEID(0x04, 0, nil, nil, 0)
+	}
+	return ie.NewFTEID(0x01, s.FTEID, net.ParseIP(s.N3IP), nil, 0)
+}
+
 // Associate is an Association Setup Request from an SMF named nodeID.
 func Associate(seq uint32, nodeID string) *message.AssociationSetupRequest {
 	return message.NewAssociationSetupRequest(seq,
@@ -71,7 +83,7 @@ func Establish(seq uint32, s Session) *message.SessionEstablishmentRequest {
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x02, s.FTEID, net.ParseIP(s.N3IP), nil, 0),
+				fteidIE(s),
 				ie.NewUEIPAddress(0x02, s.UEIP, "", 0, 0),
 			),
 			ie.NewFARID(1),

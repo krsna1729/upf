@@ -159,6 +159,13 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 	if err := c.merge(s, pdrs, fars, qers, nil, nil, nil); err != nil {
 		c.log.Warn("session: cannot carry the establishment request",
 			"cp_seid", cpSEID, "error", err)
+		// merge allocates as it goes (the F-TEID among them) and refuses when a
+		// later PDR names something the table cannot carry, or a value another
+		// session holds: what it got through is this session's and is not going
+		// anywhere.
+		c.mu.Lock()
+		c.releaseSession(s)
+		c.mu.Unlock()
 		return establishResponse(req, local, compileCause(err), nil)
 	}
 
@@ -177,12 +184,16 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
 		c.log.Warn("session: the dataplane refused the session",
 			"cp_seid", cpSEID, "seid", local, "error", err)
-		// All or nothing: nothing of this session reached the dataplane, so
-		// its ids are free again. (A refused *modification* is different -- its
-		// ids belong to a session that is still live; see Modify.)
-		c.mu.Lock()
-		c.releaseSession(s)
-		c.mu.Unlock()
+		// A definite refusal means nothing of this session is in the dataplane,
+		// so its ids are free again. An *unanswered* request is different: the
+		// transaction may have committed, and handing those ids to the next
+		// session would let it overwrite records this request's rules still
+		// select -- so they stay allocated, and the leak is the safe failure.
+		if definiteRefusal(err) {
+			c.mu.Lock()
+			c.releaseSession(s)
+			c.mu.Unlock()
+		}
 		return establishResponse(req, local, causeOf(err), nil)
 	}
 
@@ -409,7 +420,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		if dir.Tunnels != "" && far != nil && far.hasOuter {
 			p.tunnels = []string{tunnelsRes(dir)}
 		}
-		if s.UEIP.IsValid() {
+		if !p.ueIP.IsValid() {
+			// The PDI names no address of its own, so the session's is the one
+			// an SMF means (it may send the address on one direction only). An
+			// uplink rule with the address masked out instead would match every
+			// session's decapsulated packets at that precedence.
 			p.ueIP = s.UEIP
 		}
 	}
@@ -584,7 +599,11 @@ func ones(n int) []byte {
 // another session's packets included.
 func host(a netip.Addr) (match, bool, error) {
 	if !a.IsValid() {
-		return match{}, false, nil
+		// merge fills a PDR's address in from the session's when its own PDI
+		// names none, so this is a session with no UE address anywhere: there
+		// is nothing to key the rule on, and leaving the field open would let
+		// the rule match every session's decapsulated packets.
+		return match{}, false, fmt.Errorf("%w: no UE address for the rule's key", errNotExpressible)
 	}
 	a = a.Unmap()
 	if !a.Is4() {
@@ -875,10 +894,16 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if err != nil {
 				return fmt.Errorf("UE IP address: %w", err)
 			}
-			if v4 := fields.IPv4Address; v4 != nil {
-				if a, ok := netip.AddrFromSlice(v4); ok {
+			switch {
+			case fields.IPv4Address != nil:
+				if a, ok := netip.AddrFromSlice(fields.IPv4Address); ok {
 					p.ueIP, p.hasUEIP = a.Unmap(), true
 				}
+			case fields.IPv6Address != nil:
+				// The tables' address fields are four bytes: an IPv6 UE address
+				// has no form here, and reading the IE as "no address" would
+				// compile a rule that matches every session's packets.
+				return fmt.Errorf("%w: the UE IP address is IPv6", errNotExpressible)
 			}
 		case ie.SDFFilter:
 			fields, err := c.SDFFilter()
@@ -1239,10 +1264,8 @@ func compileCause(err error) uint8 {
 // dataplane is all-or-nothing, so nothing of the session is in place when one
 // of these returns.
 func causeOf(err error) uint8 {
-	var invalid *bess.InvalidRequestError
-	var rejected *bess.RejectedError
 	switch {
-	case errors.As(err, &invalid), errors.As(err, &rejected):
+	case definiteRefusal(err):
 		return ie.CauseRuleCreationModificationFailure
 	default:
 		// A conflict, a busy dataplane, a restarted daemon or an unanswered
@@ -1251,6 +1274,16 @@ func causeOf(err error) uint8 {
 		// is in place).
 		return ie.CauseRequestRejected
 	}
+}
+
+// definiteRefusal reports whether the SDK's error says the daemon refused the
+// transaction outright. The alternative is an outcome that is unknown (no
+// answer, a transport error): the transaction may have committed, so a caller
+// must not treat the session's ids or records as its own to undo.
+func definiteRefusal(err error) bool {
+	var invalid *bess.InvalidRequestError
+	var rejected *bess.RejectedError
+	return errors.As(err, &invalid) || errors.As(err, &rejected)
 }
 
 // createdFTEID is the F-TEID of a Created PDR: our own TEID and the N3

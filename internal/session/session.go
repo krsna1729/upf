@@ -524,7 +524,14 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 func (c *Compiler) releaseSession(s *Session) {
 	for _, p := range pdrsInOrder(s) {
 		if p.teid != 0 {
-			delete(c.byTEID, p.teid)
+			// Only if this session is what the mapping names. Between a
+			// refused merge and this release (a separate lock), the holder can
+			// delete -- freeing the name -- and another session can pin the
+			// same value and take it: erasing that mapping would let a third
+			// session take the TEID and overwrite the new holder's rule.
+			if c.byTEID[p.teid] == s {
+				delete(c.byTEID, p.teid)
+			}
 			c.teids.release(p.teid)
 		}
 		if p.actionID != 0 {

@@ -190,7 +190,7 @@ func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.S
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x02, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),
@@ -764,29 +764,86 @@ func TestAPinnedFTEIDIsReservedAndOneCollisionIsRefused(t *testing.T) {
 	}
 }
 
-// A PDR without a UE IP IE is not a broken session: the address is simply not
-// constrained (the uplink is chosen by its TEID, an uplink PDR by its F-TEID or
-// its SDF filter). The zero netip.Addr is how that reaches the compiler, and
-// reading it as "not IPv4" turned a valid session into cause 73.
-func TestAPDRWithoutAUEAddressIsUnconstrained(t *testing.T) {
+// The session's UE address keys an uplink rule even when the uplink PDI does not
+// name it: an F-TEID-selected uplink PDR is legal, and a rule with the address
+// masked out would match every session's decapsulated packets at that
+// precedence. A session with no UE address anywhere -- or one whose address the
+// four-byte table cannot carry -- is refused with cause 73 rather than widened.
+func TestTheUplinkRuleIsKeyedOnTheSessionsUEAddress(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
+
+	// The UE address arrives on the downlink PDI only.
 	req := message.NewSessionEstablishmentRequest(0, 0, 0x5561, 1, 0,
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(0x5561, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x02, 7, net.ParseIP("192.0.2.1"), nil, 0)),
+				ie.NewFTEID(0x01, 7, net.ParseIP("192.0.2.1"), nil, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
+			ie.NewFARID(2)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess),
+				ie.NewOuterHeaderCreation(0x0100, 0x11223344, "10.20.30.2", "", 0, 0, 0))),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a UE address on the downlink PDI only answered cause %d", got)
+	}
+	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 6})
+	if got := r.mask(fieldSrcIP); !bytes.Equal(got, []byte{0xff, 0xff, 0xff, 0xff}) {
+		t.Errorf("the uplink rule's address mask is %v, want the session's address keyed in", got)
+	}
+
+	// No UE address anywhere: the rule has no key, so the session is refused.
+	bare := message.NewSessionEstablishmentRequest(0, 0, 0x5562, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(0x5562, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 8, net.ParseIP("192.0.2.1"), nil, 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
 			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 	)
-	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
-		t.Fatalf("a PDR with no UE IP IE answered cause %d", got)
+	before := len(rec.txns)
+	if got := cause(t, c.Establish(bare)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a session with no UE address at all answered cause %d, want a rule failure", got)
 	}
-	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{0, 0, 0, 0})
-	if got := r.mask(fieldSrcIP); !bytes.Equal(got, []byte{0, 0, 0, 0}) {
-		t.Errorf("an unconstrained address masks with %v, want it masked out", got)
+	if len(rec.txns) != before {
+		t.Error("a session with no UE address wrote to the dataplane")
+	}
+
+	// A UE IP IE carrying an IPv6 address is not "no address": reading it as
+	// absent would key the uplink rule on the *other* PDI's IPv4 address, a
+	// filter the SMF never asked for. The session is refused instead.
+	v6 := message.NewSessionEstablishmentRequest(0, 0, 0x5563, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(0x5563, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 9, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x01, "", "2001:db8::1", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	before = len(rec.txns)
+	if got := cause(t, c.Establish(v6)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("an IPv6 UE address answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != before {
+		t.Error("a session with an IPv6 UE address wrote to the dataplane")
 	}
 }
 
@@ -808,7 +865,7 @@ func TestARefusedEstablishmentReleasesItsIDs(t *testing.T) {
 		ie.NewFSEID(0x5562, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x02, 0, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewFTEID(0x01, 0, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
 			ie.NewFARID(1)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
@@ -885,8 +942,129 @@ func TestARepeatedReleaseQueuesOneID(t *testing.T) {
 	p := newIDPool(4, 0)
 	p.release(3)
 	p.release(3)
+	p.release(3)
 	if n := len(p.freed); n != 1 {
 		t.Errorf("three releases of one id queued %d entries", n)
+	}
+}
+
+// A refused establishment must not disturb the session that holds the value it
+// pinned: the refused request's PDR keeps the SMF's TEID, and freeing the
+// mapping would let a third session take the value and overwrite the holder's
+// rule.
+func TestARefusedCollisionLeavesTheHoldersFTEIDAlone(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	pinned := uint32(3)
+	resp := c.Establish(establishmentWithFTEID(0x5701, "10.45.0.6", pinned)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the holder's establishment answered cause %d", got)
+	}
+	// A second session pinning the same value: refused, not shared.
+	if got := cause(t, c.Establish(establishmentWithFTEID(0x5702, "10.45.0.7", pinned))); got != ie.CauseNoResourcesAvailable {
+		t.Fatalf("a colliding pin answered cause %d, want no-resources", got)
+	}
+	// The holder still holds it, so a third pin is refused too.
+	third := c.Establish(establishmentWithFTEID(0x5703, "10.45.0.8", pinned)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, third); got != ie.CauseNoResourcesAvailable {
+		t.Errorf("after a refused collision the value went to a third session (cause %d)", got)
+	}
+}
+
+// A establishment that fails after allocating must give the id back: here the
+// first PDR takes the only one (the UPF chooses its F-TEID) and the second pins
+// a value another session holds, so merge refuses after the allocation.
+func TestAMergeRefusalReleasesWhatItAllocated(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxTEIDs = 2 // one usable id
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	holder := c.Establish(establishmentWithFTEID(0x5710, "10.45.0.6", 0x77)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, holder); got != ie.CauseRequestAccepted {
+		t.Fatalf("the holder answered cause %d", got)
+	}
+
+	clash := message.NewSessionEstablishmentRequest(0, 0, 0x5711, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(0x5711, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x04, 0, nil, nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.9", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x77, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.9", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Establish(clash)); got != ie.CauseNoResourcesAvailable {
+		t.Fatalf("the clashing session answered cause %d", got)
+	}
+	// The id the refused session allocated is back: a new session gets it.
+	next := c.Establish(establishment(0x5712, "10.45.0.10")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, next); got != ie.CauseRequestAccepted {
+		t.Errorf("after a refused merge the single id was not given back (cause %d)", got)
+	}
+}
+
+// An Apply whose outcome is unknown may have committed, so the ids stay
+// allocated: that keeps the pool from handing a live record's id to the next
+// session. The leak is deliberate, and this test is where it is written down.
+func TestAnUnknownOutcomeKeepsTheIDs(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxTEIDs = 2 // one usable id
+	rec := &recorder{fail: errors.New("transport")}
+	c := New(cfg, rec, quietLogger())
+
+	first := c.Establish(establishment(0x5720, "10.45.0.6")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, first); got != ie.CauseRequestRejected {
+		t.Fatalf("an unknown outcome answered cause %d", got)
+	}
+	second := c.Establish(establishment(0x5721, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, second); got != ie.CauseNoResourcesAvailable {
+		t.Errorf("the id of an unknown outcome was reused (cause %d): a record may still select it", got)
+	}
+}
+
+// releaseSession frees a session's ids, and the TEID mapping only if it names
+// this session. The reachable case is cross-request: a merge refused because a
+// value is taken, and by the time its release runs the holder may have gone and
+// another session may hold the value. Erasing that mapping would let a third
+// session take the TEID and overwrite the new holder's rule.
+func TestReleasingARefusedSessionLeavesAnotherHoldersTEIDAlone(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+
+	holder := &Session{LocalSEID: 1, CPSEID: 2, PDRs: map[uint16]*pdr{}}
+	holder.PDRs[1] = &pdr{id: 1, srcIfc: ie.SrcInterfaceAccess, teid: 0x77}
+	c.mu.Lock()
+	c.sessions[holder.LocalSEID] = holder
+	c.byTEID[0x77] = holder
+	c.mu.Unlock()
+
+	// A request that pinned the same value and was refused: its PDR still
+	// carries the value, and its release must not disturb the holder.
+	refused := &Session{LocalSEID: 3, CPSEID: 4, PDRs: map[uint16]*pdr{}}
+	refused.PDRs[1] = &pdr{id: 1, srcIfc: ie.SrcInterfaceAccess, teid: 0x77}
+	c.mu.Lock()
+	c.releaseSession(refused)
+	still := c.byTEID[0x77]
+	c.mu.Unlock()
+	if still != holder {
+		t.Errorf("the refused request's release erased the holder's TEID mapping (now %p)", still)
+	}
+
+	// And its own mapping is freed as usual.
+	c.mu.Lock()
+	c.releaseSession(holder)
+	_, held := c.byTEID[0x77]
+	c.mu.Unlock()
+	if held {
+		t.Error("releasing the holder left its TEID mapping behind")
 	}
 }
 
