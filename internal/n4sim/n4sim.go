@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: BSD-3-Clause
+
+// Package n4sim builds the PFCP messages a client of the UPF's N4 node sends:
+// the associate, establish, modify and delete requests an SMF would send, with
+// the element set internal/session's compiler accepts (the same shape the
+// session tests and ci/session-live.sh use, parameterised so every session has
+// its own keys).
+//
+// It is the client-side counterpart of the compiler: a load client
+// (cmd/n4bench) drives this, and the smoke tests can too.
+package n4sim
+
+import (
+	"fmt"
+	"net"
+	"time"
+
+	"github.com/wmnsk/go-pfcp/ie"
+	"github.com/wmnsk/go-pfcp/message"
+)
+
+// now is the clock every timestamp in this package reads: one place, so a test
+// can see where time enters.
+func now() time.Time { return time.Now() }
+
+// Apply action bits as the compiler reads them (internal/session/compile.go).
+const (
+	applyDrop = 0x01
+	applyForw = 0x02
+)
+
+// Session is one session's request parameters. Every field that becomes a key
+// in the dataplane must differ between sessions: the CP SEID, the TEID the
+// downlink uses, the UE address, and the two ports of the SDF filter.
+type Session struct {
+	CPSEID uint64 // this session's CP F-SEID
+	TEID   uint32 // the TEID the gNB expects on the downlink
+	UEIP   string // the UE's address, an uplink PDR's key and a downlink PDR's
+	GnBIP  string // the gNB's N3 address: the outer header's destination
+	N3IP   string // the UPF's N3 address: the F-TEID the UPF answers with
+	SDF    string // the uplink filter; empty: the default permit for port 53
+}
+
+// sdf is the filter to send for a session.
+func (s Session) sdf() string {
+	if s.SDF == "" {
+		return "permit out udp from any to assigned 53"
+	}
+	return s.SDF
+}
+
+// Associate is an Association Setup Request from an SMF named nodeID.
+func Associate(seq uint32, nodeID string) *message.AssociationSetupRequest {
+	return message.NewAssociationSetupRequest(seq,
+		ie.NewNodeID("", "", nodeID),
+		ie.NewRecoveryTimeStamp(now()),
+	)
+}
+
+// Establish is a Session Establishment Request: an uplink PDR (access side,
+// F-TEID, UE address) forwarding to the core, and a downlink PDR (core side,
+// UE address, SDF) whose FAR creates the GTP-U outer header toward the gNB,
+// with one QER for the session. That is what an SMF's first message carries.
+func Establish(seq uint32, s Session) *message.SessionEstablishmentRequest {
+	return message.NewSessionEstablishmentRequest(0, 0, s.CPSEID, seq, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(s.CPSEID, nil, nil),
+		ie.NewCreatePDR(
+			ie.NewPDRID(1),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x02, 0, net.ParseIP(s.N3IP), nil, 0),
+				ie.NewUEIPAddress(0x02, s.UEIP, "", 0, 0),
+			),
+			ie.NewFARID(1),
+			ie.NewQERID(1),
+		),
+		ie.NewCreatePDR(
+			ie.NewPDRID(2),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, s.UEIP, "", 0, 0),
+				ie.NewSDFFilter(s.sdf(), "", "", "", 0),
+			),
+			ie.NewFARID(2),
+		),
+		ie.NewCreateFAR(
+			ie.NewFARID(1),
+			ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
+		),
+		ie.NewCreateFAR(
+			ie.NewFARID(2),
+			ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceAccess),
+				ie.NewOuterHeaderCreation(0x0100, s.TEID, s.GnBIP, "", 0, 0, 0),
+			),
+		),
+		ie.NewCreateQER(
+			ie.NewQERID(1),
+			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			ie.NewMBR(1000, 2000),
+		),
+	)
+}
+
+// Modify rewrites the downlink FAR's outer header: the same session (same
+// keys), a new gNB endpoint, which is what a handover looks like on N4. It is
+// also the cheapest transaction an SMF sends, so it is the one a rate limit is
+// most often expressed in.
+func Modify(seq uint32, seid uint64, farID uint32, teid uint32, gnbIP string) *message.SessionModificationRequest {
+	return message.NewSessionModificationRequest(0, 0, seid, seq, 0,
+		ie.NewUpdateFAR(ie.NewFARID(farID), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceAccess),
+				ie.NewOuterHeaderCreation(0x0100, teid, gnbIP, "", 0, 0, 0),
+			)),
+	)
+}
+
+// Delete removes the session by its UPF-side SEID (the one the establishment
+// response carried).
+func Delete(seq uint32, seid uint64) *message.SessionDeletionRequest {
+	return message.NewSessionDeletionRequest(0, 0, seid, seq, 0)
+}
+
+// HeartbeatResponse answers a Heartbeat Request the UPF initiated, so a long
+// run does not lose the association to a timeout.
+func HeartbeatResponse(seq uint32) *message.HeartbeatResponse {
+	return message.NewHeartbeatResponse(seq, ie.NewRecoveryTimeStamp(now()))
+}
+
+// Cause is the Cause value of any session-level or association-level response.
+func Cause(m message.Message) (uint8, error) {
+	var i *ie.IE
+	switch v := m.(type) {
+	case *message.AssociationSetupResponse:
+		i = v.Cause
+	case *message.SessionEstablishmentResponse:
+		i = v.Cause
+	case *message.SessionModificationResponse:
+		i = v.Cause
+	case *message.SessionDeletionResponse:
+		i = v.Cause
+	default:
+		return 0, fmt.Errorf("%s carries no cause", m.MessageTypeName())
+	}
+	if i == nil {
+		return 0, fmt.Errorf("%s carries no cause", m.MessageTypeName())
+	}
+	return i.Cause()
+}
