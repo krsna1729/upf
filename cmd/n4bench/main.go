@@ -221,10 +221,6 @@ func (c *client) send(m message.Message, kind opKind, timeout time.Duration) (me
 		c.stats[kind].add(0, err)
 		return nil, 0, err
 	}
-	// One timer per request, not time.After's: a phase runs millions of
-	// requests, and each time.After leaves a timer for the GC to find.
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	select {
 	case resp := <-ch:
 		d := time.Since(start)
@@ -240,7 +236,7 @@ func (c *client) send(m message.Message, kind opKind, timeout time.Duration) (me
 		}
 		c.stats[kind].add(d, nil)
 		return resp, d, nil
-	case <-timer.C:
+	case <-time.After(timeout):
 		err := errors.New("no answer within " + timeout.String())
 		c.stats[kind].add(0, err)
 		return nil, 0, err
