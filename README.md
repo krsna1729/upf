@@ -95,13 +95,27 @@ build/stage/bin/bessctl apply deploy/upf.yaml
 - The datapath plugin is in and proven: `datapath/` (GTP-U decapsulation and
   encapsulation) builds against the installed `bess-dev` stage, and
   `ci/smoke-gtpu.sh` loads it into `bessd`, applies `deploy/smoke-gtpu.yaml`,
-  and checks a decapsulated and an encapsulated packet byte for byte. The first
-  run found a real bug (an uninitialized UDP source port), which is the point of
-  the check.
+  and checks six things: the decapsulated frame, the `upf_teid` attribute, that
+  a G-PDU whose TEID no session names is dropped (`decap0/sessions`), the outer
+  header, the UDP/GTP-U header with the session's TEID, and the inner packet.
+  Its first run found a real bug (an uninitialized UDP source port), which is the
+  point of the check.
+- The deployment graph is in: `deploy/upf.yaml` (N3 and N6 on `PMDPort`s, the
+  TEID table, the two PDR tables with their action resources, both chains, the
+  N6 route) validates against a daemon with the plugin loaded.
+  `deploy/session-live.yaml` is the same composition without ports, for a host
+  with no bound NIC.
 - The N4 node is in (`internal/n4`, `cmd/upfd`): an SMF can associate, heartbeat,
-  and be seen restarting. Session requests are answered with Cause "Request
-  rejected" until the session layer exists — nothing is silently dropped.
-- Next, in this order: the datapath graph (`deploy/upf.yaml`, plus the classifier
-  → ActionId composition the smoke graph does not yet exercise), the session
-  transaction (`internal/session` plus `internal/bess`), routing, then usage
-  reporting. `docs/design.md` holds the milestones and what each one must prove.
+  and be seen restarting; association, heartbeat, restart handling and the
+  refusal Causes are covered by tests over a real UDP socket.
+- The session layer is in and live: `internal/session` compiles a PFCP session
+  into resources and one transaction per change, and `ci/session-live.sh`
+  programs a whole session into a running bessd through the Go SDK — establish
+  (two PDRs, eight changes, one transaction), a repeated establishment (a
+  no-op), a modify, and a delete — with every message built from the daemon's
+  own schema.
+- Next, in this order: a real SMF (open5gs or free5GC) against `upfd` for
+  interop and Causes, packets over the bound N3/N6 ports, route domains in
+  `internal/routing` for N9, the classifier's explicit tuple budget
+  (`max_tuples`), then usage reporting. `docs/design.md` holds the milestones
+  and what each one must prove.
