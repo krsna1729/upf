@@ -1,9 +1,9 @@
 # upf — a 5G UPF on BESS
 
-One controller process, one `bessd` process, with the UPF datapath compiled into
-`bessd`. The controller speaks PFCP (N4) to the SMF and drives BESS through
-control_v2 with the Go SDK — desired state plus one transaction per session
-change. It holds no dataplane state of its own.
+One controller process, one `bessd` process, with the UPF datapath loaded into
+`bessd` as a plugin. The controller speaks PFCP (N4) to the SMF and drives BESS
+through control_v2 with the Go SDK — desired state plus one transaction per
+session change. It holds no dataplane state of its own.
 
 ```
                  PFCP/N4 (UDP 8805)
@@ -34,10 +34,14 @@ change. It holds no dataplane state of its own.
 - `internal/session` — the session state machine: one PFCP session is one
   BESS transaction.
 - `internal/routing` — route domains (N3/N6/N9) and next-hop programming.
-- `datapath/` — the C++ UPF datapath (modules on BESS's public/experimental
-  API). Built into `bessd`, not loaded from a `.so`: `ci/build-bess.sh`
-  compiles these sources into the daemon, so one process runs the graph and
-  one controller programs it.
+- `datapath/` — the UPF datapath as a Bess **plugin** (D-008: UPF-specific
+  code stays in a plugin) — GTP-U decapsulation and encapsulation, on the
+  installed header-only codec (`core/tunnel/tunnel.h`, experimental). It is
+  built against the installed `bess-dev` stage and loaded by `bessd`
+  (`--modules=`), because Bess offers no supported way to compile extra sources
+  into the daemon (no meson hook) and a plugin must not link Bess's static
+  archives. The rest of the graph — classification, `ActionTable`, `Meter`,
+  `Router` — is Bess's own modules, composed by `deploy/upf.yaml`.
 
 ## Why it is shaped this way
 
@@ -52,13 +56,26 @@ that makes them unnecessary.
 
 ```sh
 go build ./cmd/upfd        # the controller
+
+# the datapath plugin, against an installed bess-dev stage
+cd datapath
+PKG_CONFIG_PATH=<stage>/lib/pkgconfig meson setup build && ninja -C build
+
+# the proof it works: bessd loads the plugin, applies the smoke graph, and the
+# script checks one decapsulated and one encapsulated packet byte for byte
+STAGE=<stage> ../ci/smoke-gtpu.sh
 ```
 
-The BESS side arrives with the datapath: `BESS_SRC=~/Projects/bess
-./ci/build-bess.sh` compiles the UPF datapath into `bessd` and installs a stage
-under `build/stage`. Driving BESS needs the fork's Go SDK, the nested module
-`sdk/go`; until those commits are published, `go.mod` documents the local
-`replace` to use.
+The stage must be a BESS install whose `bess-dev.pc` carries the stage's own
+paths — i.e. BESS configured with `-Dprefix=<stage>`. An install made with
+`meson install --destdir=...` keeps `/usr/local` inside the `.pc`, and a build
+against it fails on headers that are not there; with such a stage, put a copy of
+`bess-dev.pc` whose `prefix` line names the stage in a directory of its own and
+point `PKG_CONFIG_PATH` at that directory instead. The smoke's `STAGE` default
+is the pkg worktree's `stage-fast`, which is such a destdir install.
+
+Driving BESS needs the fork's Go SDK, the nested module `sdk/go`; until those
+commits are published, `go.mod` documents the local `replace` to use.
 
 ## Run
 
@@ -66,17 +83,25 @@ under `build/stage`. Driving BESS needs the fork's Go SDK, the nested module
 # the N4 node, today
 ./upfd -n4 0.0.0.0:8805 -node-id 10.0.0.1
 
-# once the datapath and the session layer are in
-build/stage/bin/bessd -m 4096 -c 0 -- -f deploy/upf.yaml
+# the datapath: bessd with the plugin, then apply the graph (the daemon starts
+# empty; -f is foreground mode, and the manifest is applied over control_v2)
+build/stage/bin/bessd -m 4096 -modules=<plugin dir> -f &
+build/stage/bin/bessctl apply deploy/upf.yaml
 ./upfd -bess localhost:10514 -n4 0.0.0.0:8805 -node-id 10.0.0.1
 ```
 
 ## Status
 
+- The datapath plugin is in and proven: `datapath/` (GTP-U decapsulation and
+  encapsulation) builds against the installed `bess-dev` stage, and
+  `ci/smoke-gtpu.sh` loads it into `bessd`, applies `deploy/smoke-gtpu.yaml`,
+  and checks a decapsulated and an encapsulated packet byte for byte. The first
+  run found a real bug (an uninitialized UDP source port), which is the point of
+  the check.
 - The N4 node is in (`internal/n4`, `cmd/upfd`): an SMF can associate, heartbeat,
   and be seen restarting. Session requests are answered with Cause "Request
   rejected" until the session layer exists — nothing is silently dropped.
-- Next, in this order: the datapath graph (`datapath/`, `deploy/upf.yaml`,
-  `ci/build-bess.sh`), the session transaction (`internal/session` plus
-  `internal/bess`), routing, then usage reporting. `docs/design.md` holds the
-  milestones and what each one must prove.
+- Next, in this order: the datapath graph (`deploy/upf.yaml`, plus the classifier
+  → ActionId composition the smoke graph does not yet exercise), the session
+  transaction (`internal/session` plus `internal/bess`), routing, then usage
+  reporting. `docs/design.md` holds the milestones and what each one must prove.

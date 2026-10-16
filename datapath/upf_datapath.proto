@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: BSD-3-Clause
+//
+// The UPF datapath plugin's wire types (D-008: UPF-specific code lives in a
+// plugin). The Go controller builds these messages when it programs a session;
+// the descriptor set is installed next to the plugin, so a controller can build
+// them without generated code (GetSchema carries the same descriptors).
+//
+// The file name is unique across the process's one protobuf pool: a duplicate
+// .proto file name aborts the daemon's registration.
+
+syntax = "proto3";
+
+package upf.pb;
+
+// GtpuDecapArg configures decapsulation on the N3 side.
+message GtpuDecapArg {
+  // The UDP port a G-PDU must arrive on. 0 means the standard GTP-U port
+  // 2152 (TS 29.281); the codec compares the field exactly.
+  uint32 port = 1;
+}
+
+// GtpuEncapArg configures encapsulation toward the N3 side.
+message GtpuEncapArg {
+  // The outer IPv4 source address, dotted. Required: it is the UPF's N3
+  // address, a property of the graph, not of a session.
+  string src_ip = 1;
+
+  // The outer UDP source port. 0 means a hash of the inner flow (RFC 6864
+  // entropy, as VXLANEncap does).
+  uint32 src_port = 2;
+
+  // The outer UDP destination port. 0 means 2152 (TS 29.281).
+  uint32 dst_port = 3;
+}

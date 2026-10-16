@@ -5,9 +5,13 @@
 - **One `upfd` process.** It terminates PFCP/N4 (UDP 8805 server), owns the
   session store, and is the *only* writer of BESS state. No second controller,
   no per-session workers, no sidecar.
-- **One `bessd` process**, with the UPF datapath compiled in
-  (`ci/build-bess.sh` adds `datapath/` to the daemon's sources). One graph, one
-  set of workers, one packet path.
+- **One `bessd` process**, with the UPF datapath loaded as a plugin
+  (`datapath/`, built against the installed `bess-dev` stage, loaded with
+  `--modules=`). One graph, one set of workers, one packet path. Bess has no
+  supported hook for compiling extra sources into the daemon (no meson option
+  does it; D-008 puts UPF-specific code in a plugin), and a
+  plugin may use only the installed headers, of which the GTP-U codec and the
+  conntrack parse types are experimental.
 - The controller is stateless with respect to the dataplane: it can restart and
   rebuild everything from BESS's own state (pipeline + resources) plus the
   PFCP sessions the SMF replays.

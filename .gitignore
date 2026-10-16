@@ -1,4 +1,5 @@
 /build/
+/datapath/build/
 /upfd
 *.o
 *.so

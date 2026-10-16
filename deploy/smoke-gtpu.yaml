@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Smoke graph for the datapath plugin: the smallest graph that shows both
+# halves of GTP-U working, with the plugin loaded from the installed bess-dev
+# stage (never from BESS's source tree).
+#
+#   bessd -m 512 --no-huge -- -f deploy/smoke-gtpu.yaml --modules=<plugin dir>
+#
+# Uplink: a Source's packets are rewritten into one G-PDU frame (TEID
+# 0x11223344, inner 10.0.0.1 -> 8.8.8.8/UDP), decapsulated by the plugin, and
+# Dump prints the inner packet and the upf_teid the module wrote.
+#
+# Downlink: an inner IP packet gets the session's metadata (setattr) and the
+# plugin writes the outer Eth/IPv4/UDP/GTP-U headers; Dump prints those bytes.
+#
+# Two chains, one worker: the plugin's two modules share one graph here only so
+# that one run shows both.
+
+modules:
+  - name: src_up
+    mclass: Source
+    arg: {pkt_size: 87, burst: 1}
+  - name: rewrite_up
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4BChQeAghoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARILcKAAABCAgICATSADUAEQAAaGVsbG8tdXBm"
+  - name: decap0
+    # mclass is the module's class name (core/module.h:761 registers #_MOD),
+    # not the legacy ADD_MODULE string ("gtpu_decap").
+    mclass: GtpuDecap
+  - name: dump_up
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_up
+    mclass: Sink
+
+  - name: src_down
+    mclass: Source
+    arg: {pkt_size: 37, burst: 1}
+  - name: rewrite_down
+    mclass: Rewrite
+    arg:
+      templates:
+        - "RQAAJQABQABAESC3CgAAAQgICAgE0gA1ABEAAGhlbGxvLXVwZg=="
+  - name: setattr_down
+    mclass: SetMetadata
+    arg:
+      attrs:
+        # 0x11223344: the TEID the uplink frame carries, so one run shows the
+        # same session in both directions.
+        - {name: "upf_teid", size: "4", value_int: "287454020"}
+        # 10.20.30.2, the gNB's outer address.
+        - {name: "upf_gnb_ip", size: "4", value_int: "169090562"}
+        - {name: "ether_src", size: "6", value_bin: "AgAAAAAB"}
+        - {name: "ether_dst", size: "6", value_bin: "AgAAAAAC"}
+  - name: encap0
+    mclass: GtpuEncap
+    arg: {src_ip: "10.20.30.1"}
+  - name: dump_down
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_down
+    mclass: Sink
+
+connections:
+  - {upstream: src_up, downstream: rewrite_up}
+  - {upstream: rewrite_up, downstream: decap0}
+  - {upstream: decap0, downstream: dump_up}
+  - {upstream: dump_up, downstream: sink_up}
+
+  - {upstream: src_down, downstream: rewrite_down}
+  - {upstream: rewrite_down, downstream: setattr_down}
+  - {upstream: setattr_down, downstream: encap0}
+  - {upstream: encap0, downstream: dump_down}
+  - {upstream: dump_down, downstream: sink_down}
+
+workers:
+  - {wid: 0, core: 0}
