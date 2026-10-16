@@ -35,6 +35,10 @@ modules:
       # One table per direction, because a rule names an ActionId and a table
       # declares one actions resource (D-141): every rule's reference is then
       # exact, and the rule's gate picks nothing -- its table has one chain.
+      # Distinct masks in use at once: a session's shapes are its filters' --
+      # exact addresses, prefixes, ports -- and each is one hash lookup per
+      # batch. Declared rather than defaulted: it is a UPF decision.
+      max_tuples: 8
       action_resource: at_ul/actions
   - name: pdr_dl
     mclass: WildcardMatch
@@ -45,6 +49,10 @@ modules:
         - {offset: 23, num_bytes: 1}
         - {offset: 34, num_bytes: 2}
         - {offset: 36, num_bytes: 2}
+      # Distinct masks in use at once: a session's shapes are its filters' --
+      # exact addresses, prefixes, ports -- and each is one hash lookup per
+      # batch. Declared rather than defaulted: it is a UPF decision.
+      max_tuples: 8
       action_resource: at_dl/actions
   - name: at_ul
     mclass: ActionTable
