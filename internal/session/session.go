@@ -14,9 +14,10 @@
 //	F-TEID  -> an entry in the decap's session table, so only TEIDs this UPF
 //	           advertised are accepted
 //
-// State here is a cache of what the SMF asked for, not a source of truth: a
-// restarted controller rebuilds it from the PFCP messages the SMF replays
-// (docs/design.md, "Restart and failure semantics").
+// State here is a cache of what the SMF asked for, not a source of truth --
+// and only for as long as the process lives: a restarted controller has no
+// PFCP state (SEIDs, session identity, URR configuration) to rebuild from
+// yet, which is docs/design.md's restart wall.
 package session
 
 import (

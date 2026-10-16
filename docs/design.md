@@ -203,10 +203,12 @@ them (2-4 cycles) and the metadata write (one store): under 10% of what the pair
 in exchange for a forked classifier that would have to carry every future WildcardMatch
 change. They stay two modules.
 
-**The composition's rate**, for the shape the lab can offer: the whole graph
-(`deploy/session-path.yaml`: both chains, the plugin's decap and encap, one session
-programmed over N4) carries 7.25 Mpps per direction and 14.5 Mpps together on one
-worker core -- three rounds of `ci/bench-graph.sh`, 7.254/7.273/7.254 Mpps. That is
+**The composition's rate**, for the shape the lab can offer -- this is
+`deploy/session-path.yaml`, the bench graph, not a claim about a deployment
+graph (whose module count, ports and NIC decide its own number): the whole
+graph (both chains, the plugin's decap and encap, one session programmed over
+N4) carries 7.25 Mpps per direction and 14.5 Mpps together on one worker core
+-- three rounds of `ci/bench-graph.sh`, 7.254/7.273/7.254 Mpps. That is
 the ceiling of the graph's own generator, whose `Source` bursts at most 32 packets
 (about 227K scheduler iterations a second), so it is a floor for the chains rather
 than their limit; the per-packet numbers above are what bound them. The same run
@@ -219,7 +221,7 @@ that MBR allows for 51-byte packets plus a token bucket's slack.
 | OMEC pattern | Why it is unnecessary here | What this repo does instead |
 |---|---|---|
 | A goroutine and a `ModuleCommand` per PDR/FAR/QER, unordered; `SendMsgToUPFWithCompletion` per session | BESS's transaction engine orders, validates and rolls back server-side; a client that orders internals has to reimplement all of it | one `Transaction` per session change, `WithExpectedGeneration` when the caller has a generation in hand |
-| Cartesian expansion of port ranges into many rules | range keys and masked rules are a classifier concern, and the mask limit is now configurable (`max_tuples`) | one rule per PDR with a range/mask key |
+| Cartesian expansion of port ranges into many rules | not needed, because the compiler refuses a port range in an SDF filter rather than matching more widely than the filter (docs/compliance.md); the classifier itself is not the constraint | one rule per PDR with a masked key, and port ranges wait for their milestone (the classifier's mask limit is configurable, `max_tuples`) |
 | Client-side establishment, then a second pass to modify | desired state is the model: `ApplyPipeline` diffs and plans, and resource contents ride along in the same call | `Pipeline` + `PlanPipeline` before a change, `ApplyPipeline` for topology |
 | Retries, idempotency and "did it apply?" reinvented in the client | the SDK owns it: one request id per logical transaction, `GetTransaction` after an unanswered send, `DaemonRestartedError` when the epoch moved | `internal/bess` wraps exactly that and nothing else |
 | State in the controller that the dataplane also holds (and they drift) | the dataplane is the state of record; sessions are reconstructible | the controller keeps only what PFCP needs (session ids, SEIDs, the last reported counters) |
@@ -254,10 +256,12 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 
 ## Restart and failure semantics
 
-- The compiler's id spaces (actions, meters, TEIDs) are the graph's capacities:
-  `upfd -capacity` and the `capacity` of the Meter, ActionTable and GtpuEncap
-  tables are one number, because a module refuses an id beyond its capacity as
-  invalid -- a mismatch is a session the SMF sees refused, not a slow path.
+- The compiler's id spaces (actions, meters, TEIDs) are bounded by
+  `upfd -capacity`, and the graph's tables must be at least that wide: the
+  ActionTable and the Meter take `capacity`, the GtpuEncap takes `max_tunnels`
+  (and the decap's session table its own default), and a module refuses an id
+  beyond its limit as invalid -- a mismatch is a session the SMF sees refused,
+  not a slow path.
 - A released id is not handed out again until the pool's walk of its space has
   come round (and then only once it has aged): a transaction that removes a
   record leaves its slot retiring for a grace period, and publishing into a
@@ -271,10 +275,15 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   controller re-reads `Capabilities`/`Pipeline`/`Resources`, reapplies the
   graph, and re-programs sessions from its own PFCP state; PFCP peers see
   `Association Release`/`Heartbeat` timeouts meanwhile.
-- `upfd` restarts: it re-reads BESS state and rebuilds sessions from it; a
-  session the SMF still holds is re-established through a PFCP Session Report
-  or a Modification from the SMF, and a session only BESS knows about is
-  erased (it has no CP F-SEID to answer to).
+- `upfd` restarts: its PFCP state (CP F-SEIDs, session identity, URR
+  configuration) is in memory only, and its id pools start empty while BESS
+  still holds the previous incarnation's records -- the pools hand out the
+  same ids, so a rule that outlives its controller can come to name another
+  session's action (on the downlink, another session's tunnel). There is no
+  checkpoint and no replay path yet: a restart is followed by emptying the
+  session tables (or by a `bessd` restart) and by the SMF re-establishing,
+  which its own path management forces once the Recovery Time Stamp changes.
+  Wall 4 below is that work.
 - Either restart must be a *reapply*, never a trust fall: the controller
   verifies by reading back what it wrote (the SDK's readback and
   `ReadBackDiffers`-style comparison exist for this).
@@ -331,7 +340,11 @@ graph's `max_tuples`, so it is a UPF decision, not a default.
 Rates, measured (performance contract rows 66-67): one transaction per session
 sustains 695K sessions/s (519K in the other profile), and with the writer flat
 out at 194K sessions/s four readers still do 44.8 Mpps each, from 49.3 at rest.
-A million sessions is therefore seconds of control traffic, not a migration.
+A million sessions at the N4 rate measured below (2,274.8/s, one client in
+flight) is 440 seconds of control traffic; at the transaction engine's ceiling
+it is 1.4 s. Either way it is a campaign, not a migration -- and which of the
+two you get is decided by how many answers the client keeps in flight, which is
+what "the deployment's own numbers" below is about.
 
 The deployment's own numbers, through the whole N4 path (a PFCP message, the
 session compiler, one transaction, the daemon's answer) with one client in
@@ -359,9 +372,13 @@ The walls, in order:
 3. **The transaction wire.** A typed rule is 131 B and a message is capped at
    64 MiB, about 510K rules, so bulk programming is chunked. This layer already
    programs one session per transaction, below the cap by design.
-4. **Restart.** PFCP has no "give me your sessions": if `upfd` restarts the SMF
-   does not re-establish, so the session store needs a checkpoint and a replay
-   path. BESS holds no session state to recover.
+4. **Restart.** PFCP has no "give me your sessions", and BESS holds the
+   *dataplane's* state (rules, actions, tunnels, counters), not the control
+   plane's: a session's SEIDs, its URR configuration and its identity are
+   `upfd`'s, in memory. So a restart needs a checkpoint and a replay path --
+   and, until then, an operator procedure that empties the session tables
+   first, because the previous incarnation's records are indistinguishable
+   from this one's.
 5. **Id and priority space.** uint32 throughout (PDR priority, ActionId, meter
    id): a million sessions at four PDRs is 4M rules, which fits.
 
