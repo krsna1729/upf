@@ -51,7 +51,7 @@ whose bit is on with nothing behind it is the kind of claim
 | § | capability | state | evidence |
 |---|---|---|---|
 | 7.5.2.2 / 8.2.1-8.2.2 | PDR: PDR ID, precedence, PDI (source interface, F-TEID, UE IP, SDF filter), FAR-ID and QER-ID correlation | in | `internal/session`: TestEstablishCompilesTheSessionIntoOneTransaction |
-| 8.2.2 | SDF filter: source/destination, protocol, single ports | in (the key is canonical, and the mask says which fields the filter constrains) | TestRuleKeysAreCanonical; `ci/session-path.sh` |
+| 8.2.2 | SDF filter: source and destination addresses **and prefixes**, protocol, single ports | in: the key is canonical, the mask says which fields the filter constrains, and a prefix's mask is its length | TestRuleKeysAreCanonical, TestAnSDFPrefixIsAPrefixNotAnAddress (and the live arm with it); `ci/session-path.sh` |
 | — | a port **range** in an SDF filter | refused, deliberately: a rule that cannot express the range must not match more widely than the filter | TestPortRangeIsRefusedNotMatchedTooWidely |
 | 8.2.3 | QFI, Network Instance | not read: one QFI per session, one network instance (N6) | — |
 | 7.5.2.4 / 8.2.4-8.2.6 | FAR: apply action FORW; destination interface | in | the live tests, and `ci/n4-path.sh` for the downlink's |
@@ -60,6 +60,7 @@ whose bit is on with nothing behind it is the kind of claim
 | 7.5.3 / 8.2.10 | PFCPSMReqFlags: SNDEM (end marker), DROBU (drop buffered) | not read | — |
 | 8.2.8-8.2.9 | QER: MBR (UL/DL), gate status, one QER per session | in: the compiler writes a meter per policed direction and the gate's state; a closed gate drops | `internal/session`'s establishment test; `ci/session-path.sh` counts the packets through the meter |
 | 8.2.17 | URR: volume and time, thresholds, quota, reporting triggers | **not implemented** — the design doc's next milestone after the routing domains | — |
+| — | session churn: an id released by a deletion is not reused until the dataplane's retire period has passed, and a restarted controller does not walk its predecessor's order | in | TestTheIDPoolWalksTheSpaceAndWaitsOutTheGrace; both live arms of `ci/session-path.sh` (the second one is what found it) |
 | 8.2.14-8.2.16 | MAR/ATSSS-LL | not implemented (phased, needs a dual-3GPP-access deployment) | — |
 
 ## Datapath

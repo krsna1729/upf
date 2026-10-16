@@ -70,7 +70,7 @@ fi
 # again. Run from the repository root so the module and its workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ -run TestLiveSessionCarriesPackets -count=1 -v
+  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log. The Dump module
 # wraps sixteen bytes to a line, so a field may straddle two of them: join the

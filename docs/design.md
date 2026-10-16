@@ -254,6 +254,19 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 
 ## Restart and failure semantics
 
+- The compiler's id spaces (actions, meters, TEIDs) are the graph's capacities:
+  `upfd -capacity` and the `capacity` of the Meter, ActionTable and GtpuEncap
+  tables are one number, because a module refuses an id beyond its capacity as
+  invalid -- a mismatch is a session the SMF sees refused, not a slow path.
+- A released id is not handed out again until the pool's walk of its space has
+  come round (and then only once it has aged): a transaction that removes a
+  record leaves its slot retiring for a grace period, and publishing into a
+  retiring slot is refused (`slot_table.h`: `CanPublish`). The walk starts at a
+  random point with a random stride, so a controller that restarts and replays
+  what the SMF sends does not walk its predecessor's order -- which is the case
+  that found this: a session established right after a deletion was answered
+  `73` with "the meter is still retiring (removed less than a grace period
+  ago)".
 - `bessd` restarts: every handle goes stale (`StaleResourceError`), the
   controller re-reads `Capabilities`/`Pipeline`/`Resources`, reapplies the
   graph, and re-programs sessions from its own PFCP state; PFCP peers see

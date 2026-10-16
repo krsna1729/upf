@@ -40,6 +40,9 @@ func run() error {
 	n3Addr := flag.String("n3-addr", "", "the UPF's N3 IPv4 address, advertised as the uplink F-TEID; required with -bess")
 	n3MAC := flag.String("n3-mac", "02:00:00:00:00:01", "the N3 port's Ethernet address, for the outer header of a downlink packet")
 	peerMAC := flag.String("peer-mac", "02:00:00:00:00:02", "the N3 peer's Ethernet address (the transport next hop)")
+	capacity := flag.Uint("capacity", 1<<16,
+		"the id spaces the session compiler keeps: the capacity of the graph's "+
+			"Meter, ActionTable and GtpuEncap tables, which refuse an id beyond it")
 	n6NextHop := flag.Uint("n6-next-hop", 1, "the Router next hop an uplink forward leaves by")
 	n3NextHop := flag.Uint("n3-next-hop", 2,
 		"the Router next hop a downlink forward leaves by: the encap's gate "+
@@ -90,6 +93,7 @@ func run() error {
 		defer client.Close()
 		graph, err := graphConfig(graphArgs{
 			n3: *n3Addr, n3MAC: *n3MAC, peerMAC: *peerMAC,
+			capacity:  uint32(*capacity),
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			pdrTableUL: *pdrTableUL, pdrTableDL: *pdrTableDL,
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
@@ -126,6 +130,7 @@ func run() error {
 // graphArgs is the flag set graphConfig turns into a session.Config.
 type graphArgs struct {
 	n3, n3MAC, peerMAC string
+	capacity           uint32
 	n6NextHop          uint32
 	n3NextHop          uint32
 	pdrTableUL         string
@@ -154,6 +159,11 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	graph := session.Config{
 		TEIDTable: a.teidTable,
 		TEIDGate:  a.teidGate,
+		// The graph's tables and these spaces are one number: the modules
+		// refuse an id beyond their capacity.
+		MaxActions: a.capacity,
+		MaxMeters:  a.capacity,
+		MaxTEIDs:   a.capacity,
 		// Two chains, because a module has one output gate per path: the
 		// uplink's meter feeds the router toward N6, the downlink's feeds the
 		// tunnel toward N3. Each chain has its own rule table, so every rule's

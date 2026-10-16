@@ -34,6 +34,13 @@ const (
 // address the graph's frames carry (10.45.0.2, whose packet is
 // 10.45.0.2:5000 -> 8.8.8.8:53).
 func pathEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishmentRequest {
+	return pathEstablishmentWithSDF(cpSEID, ueIP, "permit out udp from any to assigned 53")
+}
+
+// pathEstablishmentWithSDF is pathEstablishment with the downlink PDR's filter
+// spelled out: the frames are fixed, so a test about a filter's shape (a prefix,
+// for instance) must choose one the frames still match.
+func pathEstablishmentWithSDF(cpSEID uint64, ueIP string, sdf string) *message.SessionEstablishmentRequest {
 	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(cpSEID, nil, nil),
@@ -54,7 +61,7 @@ func pathEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishment
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
+				ie.NewSDFFilter(sdf, "", "", "", 0),
 			),
 			ie.NewFARID(2),
 		),
@@ -102,6 +109,26 @@ func pathEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishment
 // runs this test with UPF_BESS_TARGET set, then checks the frames themselves in
 // the daemon's log (the Dumps in the graph).
 func TestLiveSessionCarriesPackets(t *testing.T) {
+	carriesPackets(t, pathEstablishment(0x2222, "10.45.0.2"), true)
+}
+
+// TestLiveSessionCarriesPacketsWithAnSDFPrefix is the same proof with the
+// downlink PDR's filter naming a prefix (10.45.0.0/16) instead of the UE's
+// address: the frames are the same, the rule is a masked one, and the packets
+// must still cross -- which is what says the classifier honours the mask rather
+// than the prefix's network address alone.
+func TestLiveSessionCarriesPacketsWithAnSDFPrefix(t *testing.T) {
+	carriesPackets(t, pathEstablishmentWithSDF(0x3333, "10.45.0.2",
+		"permit out udp from any to 10.45.0.0/16 53"), false)
+}
+
+// carriesPackets establishes one session and waits for both chains to carry
+// packets. controlArm belongs to the daemon's first session: it is the reading
+// that makes the later counts evidence (the sources run from the moment the
+// graph is applied, so a zero is absent state, not absent traffic), and it can
+// only be taken before any session has existed.
+func carriesPackets(t *testing.T, req *message.SessionEstablishmentRequest, controlArm bool) {
+	t.Helper()
 	target := os.Getenv("UPF_BESS_TARGET")
 	if target == "" {
 		t.Skip("set UPF_BESS_TARGET (ci/session-path.sh does) to run against a live bessd")
@@ -120,16 +147,15 @@ func TestLiveSessionCarriesPackets(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := New(liveConfig(), client, log)
 
-	// The control arm, and what makes the counts below evidence: with no
-	// session programmed, the sources are running and nothing leaves either
-	// chain.
-	for _, module := range []string{"rt", "enc"} {
-		if n := gatePackets(t, ctx, client, module); n != 0 {
-			t.Fatalf("%s already emitted %v packets before any session existed", module, n)
+	if controlArm {
+		for _, module := range []string{"rt", "enc"} {
+			if n := gatePackets(t, ctx, client, module); n != 0 {
+				t.Fatalf("%s already emitted %v packets before any session existed", module, n)
+			}
 		}
 	}
 
-	resp := c.Establish(pathEstablishment(0x2222, "10.45.0.2")).(*message.SessionEstablishmentResponse)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the daemon refused the establishment with cause %d", got)
 	}
@@ -144,6 +170,9 @@ func TestLiveSessionCarriesPackets(t *testing.T) {
 	up := waitForPackets(t, ctx, client, "rt", 10*time.Second)
 	down := waitForPackets(t, ctx, client, "enc", 10*time.Second)
 	t.Logf("uplink packets leaving toward N6: %v, downlink packets leaving toward N3: %v", up, down)
+	if up == 0 || down == 0 {
+		t.Errorf("a direction carried nothing: up %v, down %v", up, down)
+	}
 }
 
 // gatePackets is the packets a module's output gate has counted, from the
@@ -178,10 +207,13 @@ func gatePackets(t *testing.T, ctx context.Context, client *bess.Client, module 
 // or a tunnel record that did not reach the packet path.
 func waitForPackets(t *testing.T, ctx context.Context, client *bess.Client, module string, within time.Duration) float64 {
 	t.Helper()
+	// The counters are cumulative: a test that is not the daemon's first (the
+	// prefix arm) judges its session by growth, so the baseline is taken here.
+	before := gatePackets(t, ctx, client, module)
 	deadline := time.Now().Add(within)
 	for {
-		if n := gatePackets(t, ctx, client, module); n > 0 {
-			return n
+		if n := gatePackets(t, ctx, client, module); n > before {
+			return n - before
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("%s emitted no packet within %s: the graph's source runs continuously, "+

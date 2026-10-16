@@ -488,11 +488,9 @@ func (p *pdr) ruleKey(fields []Field) map[string]any {
 		width := f.width()
 		mask := make([]byte, width)
 		value := make([]byte, width)
-		if v, ok := p.matchValue(f); ok {
-			for i := range mask {
-				mask[i] = 0xff
-			}
-			copy(value, v)
+		if m, ok := p.matchValue(f); ok {
+			copy(mask, m.mask)
+			copy(value, m.value)
 		}
 		values = append(values, map[string]any{"value_bin": value})
 		masks = append(masks, map[string]any{"value_bin": mask})
@@ -500,16 +498,56 @@ func (p *pdr) ruleKey(fields []Field) map[string]any {
 	return map[string]any{"values": values, "masks": masks}
 }
 
-// matchValue is the bytes a field must carry for this PDR, and whether the PDI
-// constrains it at all.
-func (p *pdr) matchValue(f Field) ([]byte, bool) {
-	prefix := func(a netip.Addr) ([]byte, bool) {
-		if !a.Is4() {
-			return nil, false
-		}
-		b := a.As4()
-		return b[:], true
+// match is one field's constraint: the bits a PDI fixes, and the mask that says
+// which of them matter. The two differ where the PDI names a prefix -- an SDF
+// filter's "to 10.10.0.0/16" is a rule about a /16, not about the address
+// 10.10.0.0 -- and the mask is what makes it so.
+type match struct {
+	value []byte
+	mask  []byte
+}
+
+// ones is a mask of n bytes, all bits set.
+func ones(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = 0xff
 	}
+	return b
+}
+
+// host is a field constrained to one IPv4 address.
+func host(a netip.Addr) (match, bool) {
+	if !a.Is4() {
+		return match{}, false
+	}
+	b := a.As4()
+	return match{value: b[:], mask: ones(4)}, true
+}
+
+// pref is a field constrained to an IPv4 prefix: the value is its network
+// address (the canonical form the classifier requires, value & ^mask == 0) and
+// the mask its length, bit by bit so a /12 is as expressible as a /16.
+func pref(p netip.Prefix) (match, bool) {
+	a := p.Addr().Unmap()
+	if !a.Is4() {
+		return match{}, false
+	}
+	b := a.As4()
+	bits := p.Bits()
+	if bits < 0 || bits > 32 {
+		return match{}, false
+	}
+	m := make([]byte, 4)
+	for i := 0; i < bits; i++ {
+		m[i/8] |= 0x80 >> (i % 8)
+	}
+	return match{value: b[:], mask: m}, true
+}
+
+// matchValue is the constraint a PDR puts on one field of its table, and
+// whether it constrains it at all.
+func (p *pdr) matchValue(f Field) (match, bool) {
 	switch f {
 	case SrcIP:
 		// The uplink's UE address is the source. A downlink PDR's SDF may name
@@ -519,43 +557,43 @@ func (p *pdr) matchValue(f Field) ([]byte, bool) {
 		// both sides and match no packet at all.
 		if p.srcIfc == ie.SrcInterfaceAccess {
 			if p.sdf != nil && p.sdf.srcOK {
-				return prefix(p.sdf.src.Addr())
+				return pref(p.sdf.src)
 			}
-			return prefix(p.ueIP)
+			return host(p.ueIP)
 		}
 		if p.sdf != nil && p.sdf.srcOK {
-			return prefix(p.sdf.src.Addr())
+			return pref(p.sdf.src)
 		}
-		return nil, false
+		return match{}, false
 	case DstIP:
 		if p.srcIfc == ie.SrcInterfaceAccess {
-			return nil, false // the uplink is chosen by its UE address
+			return match{}, false // the uplink is chosen by its UE address
 		}
 		if p.sdf != nil && p.sdf.dstOK {
-			return prefix(p.sdf.dst.Addr())
+			return pref(p.sdf.dst)
 		}
-		return prefix(p.ueIP)
+		return host(p.ueIP)
 	case Proto:
 		if p.sdf != nil && p.sdf.protoOK {
-			return []byte{p.sdf.proto}, true
+			return match{value: []byte{p.sdf.proto}, mask: ones(1)}, true
 		}
-		return nil, false
+		return match{}, false
 	case SrcPort:
 		if p.sdf != nil && p.sdf.sportOK {
 			b := make([]byte, 2)
 			binary.BigEndian.PutUint16(b, p.sdf.sport)
-			return b, true
+			return match{value: b, mask: ones(2)}, true
 		}
-		return nil, false
+		return match{}, false
 	case DstPort:
 		if p.sdf != nil && p.sdf.dportOK {
 			b := make([]byte, 2)
 			binary.BigEndian.PutUint16(b, p.sdf.dport)
-			return b, true
+			return match{value: b, mask: ones(2)}, true
 		}
-		return nil, false
+		return match{}, false
 	default:
-		return nil, false
+		return match{}, false
 	}
 }
 

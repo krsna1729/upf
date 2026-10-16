@@ -23,8 +23,10 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/krsna1729/upf/internal/bess"
 )
@@ -121,6 +123,15 @@ type Config struct {
 	MaxActions uint32
 	MaxMeters  uint32
 	MaxTEIDs   uint32
+
+	// IDReuseDelay is how long a released id waits before the pool may hand it
+	// out again. A transaction that removes a record leaves its slot retiring
+	// for a grace period (core/dataplane/slot_table.h), and creating a record
+	// at an id that is still retiring is refused -- so a session established
+	// right after another one was deleted must not be given its ids back. The
+	// engine's retirement is asynchronous, so this is a generous margin rather
+	// than a synchronisation; the pool hands out fresh ids while it has them.
+	IDReuseDelay time.Duration
 }
 
 // direction of a PDR: the uplink chain for a packet the UE sends, the downlink
@@ -141,6 +152,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxTEIDs == 0 {
 		c.MaxTEIDs = 1 << 16
+	}
+	if c.IDReuseDelay == 0 {
+		// A second is orders of magnitude more than the cascade of grace
+		// periods a removal needs; it costs nothing while the pool has fresh
+		// ids to hand out.
+		c.IDReuseDelay = time.Second
 	}
 	for _, d := range []*Direction{&c.Up, &c.Down} {
 		if len(d.PDRFields) == 0 {
@@ -179,9 +196,9 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		sessions: map[uint64]*Session{},
 		byTEID:   map[uint32]*Session{},
 		nextSEID: 1,
-		actions:  newIDPool(cfg.MaxActions),
-		meters:   newIDPool(cfg.MaxMeters),
-		teids:    newIDPool(cfg.MaxTEIDs),
+		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		meters:   newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
+		teids:    newIDPool(cfg.MaxTEIDs, 0),
 	}
 }
 
@@ -275,33 +292,97 @@ func (c *Compiler) AssociationEnded(reason string) {
 
 // idPool hands out small ids and takes them back, so a long-lived UPF reuses
 // the space the dataplane's fixed-size tables have.
+//
+// The walk is spread, not in order: the pool starts at a random point and steps
+// by a random stride, so it visits the whole space once. Two reasons, both
+// about the dataplane's slots. A transaction that removes a record leaves its
+// slot retiring for a grace period and refuses a publish into it
+// (core/dataplane/slot_table.h: CanPublish), and the engine's cascade of those
+// periods is asynchronous: a compiler that reissued the ids it had just
+// released got "the meter is still retiring (removed less than a grace period
+// ago)", and the session established right after a deletion was refused. And a
+// *new* compiler -- after a controller restart, replaying what the SMF sends
+// again -- knows nothing of what the daemon still holds retiring, so it must
+// not walk its predecessor's order either. A released id is reused only after
+// the walk has come round (and then only once it has aged), which is far longer
+// than any grace period.
 type idPool struct {
-	limit uint32
-	next  uint32
-	free  []uint32
+	limit  uint32
+	start  uint32 // where the walk began, and so where it is done
+	next   uint32
+	stride uint32
+	walked bool // the walk has visited every id once
+	grace  time.Duration
+	now    func() time.Time
+	freed  []freedID
 }
 
-func newIDPool(limit uint32) *idPool { return &idPool{limit: limit, next: 1} }
+type freedID struct {
+	id uint32
+	at time.Time
+}
+
+// newIDPool returns a pool of ids 1..limit-1 (the dataplane's slots are
+// numbered from 1). The starting point and the stride are random; the stride is
+// coprime with the space, so the walk visits every id.
+func newIDPool(limit uint32, grace time.Duration) *idPool {
+	span := limit - 1
+	if span < 1 {
+		span = 1
+	}
+	p := &idPool{limit: limit, start: 1 + rand.Uint32N(span), grace: grace, now: time.Now}
+	p.next = p.start
+	for {
+		p.stride = 1 + rand.Uint32N(span)
+		if gcd(p.stride, span) == 1 {
+			return p
+		}
+	}
+}
+
+func gcd(a, b uint32) uint32 {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
+
+// advance is one step of the walk: ids stay in 1..limit-1.
+func (p *idPool) advance(id uint32) uint32 {
+	span := p.limit - 1
+	return 1 + (id-1+p.stride)%span
+}
 
 func (p *idPool) alloc() (uint32, error) {
-	if n := len(p.free); n != 0 {
-		id := p.free[n-1]
-		p.free = p.free[:n-1]
+	// One walk of the space: an id released behind the walk waits for the
+	// round trip, which is what keeps it out of circulation past the grace.
+	if !p.walked {
+		id := p.next
+		p.next = p.advance(p.next)
+		if p.next == p.start {
+			p.walked = true
+		}
 		return id, nil
 	}
-	if p.next >= p.limit {
-		return 0, errors.New("id space exhausted")
+	// The walk is done: a released id, if one has aged.
+	if n := len(p.freed); n != 0 {
+		oldest := p.freed[0]
+		if p.now().Sub(oldest.at) >= p.grace {
+			p.freed = p.freed[1:]
+			return oldest.id, nil
+		}
 	}
-	id := p.next
-	p.next++
-	return id, nil
+	return 0, errors.New("id space exhausted")
 }
 
+// release takes an id back. A zero grace means the id may be reused as soon as
+// the walk is over -- for a space whose resource has no retire period (the TEID
+// table's rules are keyed, not slotted).
 func (p *idPool) release(id uint32) {
 	if id == 0 {
 		return
 	}
-	p.free = append(p.free, id)
+	p.freed = append(p.freed, freedID{id: id, at: p.now()})
 }
 
 // resource names, as the deployed graph spells them.

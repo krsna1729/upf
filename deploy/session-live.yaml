@@ -48,19 +48,21 @@ modules:
       action_resource: at_dl/actions
   - name: at_ul
     mclass: ActionTable
-    arg: {meters: mt_ul/meters, next_hops: rt/next_hops}
+    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
   - name: mt_ul
     mclass: Meter
+    arg: {capacity: 65536}
   - name: at_dl
     mclass: ActionTable
-    arg: {meters: mt_dl/meters, next_hops: rt/next_hops}
+    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
   - name: mt_dl
     mclass: Meter
+    arg: {capacity: 65536}
   - name: rt
     mclass: Router
   - name: enc
     mclass: GtpuEncap
-    arg: {src_ip: "192.0.2.1"}
+    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
   - name: sink
     mclass: Sink
 

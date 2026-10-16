@@ -96,22 +96,28 @@ modules:
   # ActionTable fails closed when the id it writes has no reader -- so the
   # downlink does not go straight from the table to the encap. Meters are
   # per-chain for the same reason the tables are.
+  # The capacities are the id spaces the session compiler's config names: the
+  # Meter and ActionTable defaults are 1024 each, and a session whose meter id
+  # is beyond the capacity is refused as an invalid id. A deployment that wants
+  # a different number changes it here and in upfd's -capacity together.
   - name: at_ul
     mclass: ActionTable
-    arg: {meters: mt_ul/meters, next_hops: rt/next_hops}
+    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
   - name: mt_ul
     mclass: Meter
+    arg: {capacity: 65536}
   - name: at_dl
     mclass: ActionTable
-    arg: {meters: mt_dl/meters, next_hops: rt/next_hops}
+    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
   - name: mt_dl
     mclass: Meter
+    arg: {capacity: 65536}
 
   - name: rt
     mclass: Router
   - name: enc
     mclass: GtpuEncap
-    arg: {src_ip: "192.0.2.1"}
+    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
 
   # -- egress ------------------------------------------------------------------
   - name: n6_out

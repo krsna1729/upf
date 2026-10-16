@@ -39,6 +39,10 @@ func liveConfig() Config {
 	cfg.N3Addr = netip.MustParseAddr("192.0.2.1")
 	cfg.N3MAC = [6]byte{2, 0, 0, 0, 0, 1}
 	cfg.PeerMAC = [6]byte{2, 0, 0, 0, 0, 2}
+	// MaxActions, MaxMeters and MaxTEIDs keep their defaults: the lab graphs
+	// declare those capacities (65536) on their Meter, ActionTable and
+	// GtpuEncap modules, and the compiler's id spaces must equal them -- a
+	// session whose meter id is beyond the capacity is refused as invalid.
 	return cfg
 }
 

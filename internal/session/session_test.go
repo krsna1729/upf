@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
@@ -409,14 +410,36 @@ func TestDeleteRemovesWhatTheSessionProgrammed(t *testing.T) {
 			t.Errorf("the deletion wrote a value for %s", ch.Resource)
 		}
 	}
-	if _, ok := find0(rec.last(), testConfig().Up.Actions+"/actions", "id", uint32(1)); !ok {
-		t.Error("the deletion leaves the uplink action behind")
+	// The ids are the compiler's to choose (its pool walks the space), so the
+	// reading is what the establishment wrote: a deletion that leaves any of
+	// them behind is state the dataplane keeps for a session that is gone.
+	est := rec.txns[0]
+	for _, resource := range []string{testConfig().Up.Actions + "/actions",
+		testConfig().Down.Actions + "/actions"} {
+		for _, ch := range est {
+			if ch.Resource != resource {
+				continue
+			}
+			if _, ok := find0(rec.last(), resource, "id", ch.Key["id"]); !ok {
+				t.Errorf("the deletion leaves %s id %v behind", resource, ch.Key["id"])
+			}
+		}
 	}
-	if _, ok := find0(rec.last(), testConfig().Down.Actions+"/actions", "id", uint32(2)); !ok {
-		t.Error("the deletion leaves the downlink action behind")
-	}
-	if _, ok := teidRule(rec.last(), testConfig().TEIDTable+"/rules", 1); !ok {
-		t.Error("the deletion leaves the TEID rule behind")
+	for _, ch := range est {
+		if ch.Resource != testConfig().TEIDTable+"/rules" {
+			continue
+		}
+		masks, _ := ch.Key["masks"].([]map[string]any)
+		mask, _ := masks[0]["value_bin"].([]byte)
+		values, _ := ch.Key["values"].([]map[string]any)
+		value, _ := values[0]["value_bin"].([]byte)
+		if len(mask) != 4 || len(value) != 4 {
+			t.Fatalf("the TEID rule's key is not four bytes: %v / %v", value, mask)
+		}
+		teid := uint32(value[0])<<24 | uint32(value[1])<<16 | uint32(value[2])<<8 | uint32(value[3])
+		if _, ok := teidRule(rec.last(), testConfig().TEIDTable+"/rules", teid); !ok {
+			t.Errorf("the deletion leaves the TEID rule for %#x behind", teid)
+		}
 	}
 	if len(rules(rec.last())) != 2 {
 		t.Error("the deletion does not remove both rules")
@@ -478,6 +501,111 @@ func TestPortRangeIsRefusedNotMatchedTooWidely(t *testing.T) {
 	}
 	if len(rec.txns) != 0 {
 		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+func TestAnSDFPrefixIsAPrefixNotAnAddress(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5556, 1, 0,
+		ie.NewFSEID(0x5556, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("an SDF prefix answered cause %d", got)
+	}
+	// The rule must match the whole prefix: the value is its network address and
+	// the mask its length. With the address alone it would match 10.10.0.0 and
+	// nothing else, which is a session that never carries a packet.
+	rule := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0})
+	if got := rule.value(fieldDstIP); !bytes.Equal(got, []byte{10, 10, 0, 0}) {
+		t.Errorf("the prefix rule's destination value is %v, want the network address", got)
+	}
+	if got := rule.mask(fieldDstIP); !bytes.Equal(got, []byte{0xff, 0xff, 0, 0}) {
+		t.Errorf("the prefix rule's destination mask is %v, want the /16", got)
+	}
+
+	// An address that is not the prefix's network address has no masked rule:
+	// the session is refused rather than matched too narrowly.
+	req = message.NewSessionEstablishmentRequest(0, 0, 0x5557, 1, 0,
+		ie.NewFSEID(0x5557, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 10.10.0.1/16", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a non-network prefix answered cause %d, want a rule failure", got)
+	}
+}
+
+func TestTheIDPoolWalksTheSpaceAndWaitsOutTheGrace(t *testing.T) {
+	// The pool's two jobs: visit every id once before reusing any (so a
+	// released id is out of circulation far longer than the dataplane's retire
+	// period, and a restarted compiler does not walk its predecessor's order),
+	// and then hand a released id back only once it has aged. What this
+	// prevents: a session established right after a deletion was refused with
+	// "the meter is still retiring (removed less than a grace period ago)",
+	// because the pool had given it the deleted session's meter id.
+	const limit = 8
+	p := newIDPool(limit, time.Second)
+	now := time.Unix(0, 0)
+	p.now = func() time.Time { return now }
+
+	first, err := p.alloc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := map[uint32]bool{first: true}
+	for i := 2; i < limit; i++ {
+		id, err := p.alloc()
+		if err != nil {
+			t.Fatalf("allocation %d of a fresh space: %v", i, err)
+		}
+		if held[id] {
+			t.Fatalf("allocation %d handed out %d, which is still held", i, id)
+		}
+		held[id] = true
+	}
+	if len(held) != limit-1 {
+		t.Errorf("a walk of the space handed out %d of %d ids", len(held), limit-1)
+	}
+
+	// The walk is over and `first` was released a moment ago: nothing may come
+	// back yet.
+	p.release(first)
+	if id, err := p.alloc(); err == nil {
+		t.Errorf("an id released a moment ago was handed out again: %d", id)
+	}
+
+	// Once it has aged it comes back, and it is the released one.
+	now = now.Add(time.Second)
+	got, err := p.alloc()
+	if err != nil {
+		t.Fatalf("after the grace the released id must come back: %v", err)
+	}
+	if got != first {
+		t.Errorf("after the grace the pool handed out %d, want the released %d", got, first)
+	}
+
+	// A released id never shares a number with one still held.
+	if !held[first] {
+		t.Fatal("the test lost track of the id it released")
+	}
+	for id := range held {
+		if id == first {
+			continue
+		}
+		if id == got {
+			t.Errorf("the pool reissued %d, which a session still holds", id)
+		}
 	}
 }
 
