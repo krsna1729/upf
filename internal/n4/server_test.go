@@ -347,6 +347,19 @@ func TestSessionRequestsWithoutSessionLayer(t *testing.T) {
 	if cause, err := est.Cause.Cause(); err != nil || cause != ie.CauseRequestRejected {
 		t.Fatalf("cause = %d err=%v, want %d", cause, err, ie.CauseRequestRejected)
 	}
+
+	// An establishment that named a CP F-SEID is refused under that SEID: the
+	// identity is the SMF's own, and it is what it matches the answer to
+	// (TS 29.244 7.2.2.4.2), session layer or not.
+	sendMsg(t, conn, message.NewSessionEstablishmentRequest(0, 0, 0, 3, 0,
+		ie.NewFSEID(0x7001, nil, nil)))
+	named, ok := recvMsg(t, conn, waitFor).(*message.SessionEstablishmentResponse)
+	if !ok {
+		t.Fatalf("no answer to the establishment that named an F-SEID")
+	}
+	if named.Header.SEID != 0x7001 {
+		t.Errorf("the refusal names SEID %#x, want the CP F-SEID 0x7001", named.Header.SEID)
+	}
 }
 
 func TestHeartbeatInitiatorKeepsAssociationAlive(t *testing.T) {

@@ -233,8 +233,8 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 	if err != nil {
 		c.log.Warn("session: the establishment request names no CP F-SEID", "error", err)
 		// The request carries no CP F-SEID at all, so there is none to answer
-		// under either: the header's SEID is left unset (S flag clear) rather
-		// than naming a session that was never identified.
+		// under either: the header's SEID is 0 (a session message always carries
+		// the SEID field, and 0 names no session).
 		return establishResponse(req, 0, 0, ie.CauseMandatoryIEMissing, nil)
 	}
 	pdrs, fars, qers, urrs, err := parseCreate(ies)

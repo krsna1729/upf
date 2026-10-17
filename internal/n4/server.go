@@ -557,6 +557,20 @@ func (s *Server) dispatchSession(msg message.Message) message.Message {
 	return nil
 }
 
+// cpSEIDOf is the CP F-SEID an establishment request names, or 0 when it names
+// none: the header of an answer carries the identity of the peer's session
+// (TS 29.244 7.2.2.4.2), which is the F-SEID the request sent.
+func cpSEIDOf(r *message.SessionEstablishmentRequest) uint64 {
+	if r.CPFSEID == nil {
+		return 0
+	}
+	fields, err := r.CPFSEID.FSEID()
+	if err != nil {
+		return 0
+	}
+	return fields.SEID
+}
+
 // rejectSession answers a session-level request with a Cause, echoing the
 // request's sequence number and, where the request carried one, its SEID.
 func (s *Server) rejectSession(req message.Message, from net.Addr, cause uint8, why string) {
@@ -564,10 +578,12 @@ func (s *Server) rejectSession(req message.Message, from net.Addr, cause uint8, 
 	var resp message.Message
 	switch r := req.(type) {
 	case *message.SessionEstablishmentRequest:
-		// Establishment has no UP F-SEID yet: the UP function would
-		// allocate one.
-		resp = message.NewSessionEstablishmentResponse(0, 0, 0, r.Sequence(), 0, c)
+		// The answer is addressed by the CP F-SEID the request named -- the
+		// SMF's own identity for the session -- and by 0 when it named none.
+		resp = message.NewSessionEstablishmentResponse(0, 0, cpSEIDOf(r), r.Sequence(), 0, c)
 	case *message.SessionModificationRequest:
+		// With no session layer there is no CP F-SEID to read; the SEID the
+		// request carried is the only name left to answer under.
 		resp = message.NewSessionModificationResponse(0, 0, r.SEID(), r.Sequence(), 0, c)
 	case *message.SessionDeletionRequest:
 		resp = message.NewSessionDeletionResponse(0, 0, r.SEID(), r.Sequence(), 0, c)
