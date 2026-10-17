@@ -28,7 +28,6 @@ package session
 
 import (
 	"context"
-	"errors"
 	"slices"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -238,25 +237,24 @@ func removedFlows(s *Session) []uint32 {
 	return out
 }
 
-// releaseFlows tells the store to send what each flow holds, and counts what the
-// datapath did not take. A store that is not there, or a command the daemon
+// releaseFlows tells the store to send what each flow holds, and counts the
+// commands the daemon took. A store that is not there, or a command the daemon
 // refuses, is a warning: the SMF's instruction is in force either way, and the
 // held packets age out of the store by its own timeout if nobody collects them.
-// A flow the store holds nothing for is neither: the ids come from the labels
-// of PDRs that had a BUFF FAR (removedFlows, endedFlows), which is buffering
-// being *in force*, not a downlink packet having arrived -- so on the common
-// idle-to-service-request path there is simply nothing to release.
+// The only refusal left is ENOSPC, the store's request ring being full. The call
+// is accepted, not completed -- the store applies the request on a later task
+// run -- so buffersReleased counts *accepted* release commands; what the
+// packets did is read back from the store (`ps/flows`, the release counters).
+// A flow the store holds nothing for is a no-op, not a refusal: the ids come
+// from the labels of PDRs that had a BUFF FAR (removedFlows, endedFlows), which
+// is buffering being *in force*, not a downlink packet having arrived -- so on
+// the common idle-to-service-request path there is simply nothing to release.
 func (c *Compiler) releaseFlows(ctx context.Context, seid uint64, ids []uint32) {
 	if !c.BufferingConfigured() || c.store == nil || len(ids) == 0 {
 		return
 	}
 	for _, id := range ids {
 		err := c.store.ReleaseFlow(ctx, c.cfg.Buffering.Store, id)
-		if errors.Is(err, bess.ErrFlowNotHeld) {
-			c.log.Debug("session: nothing was buffered for a flow whose buffering ended",
-				"seid", seid, "flow", id)
-			continue
-		}
 		if err != nil {
 			c.stats.bufferFailures.Add(1)
 			c.log.Warn("session: a buffering flow was not released", "seid", seid, "flow", id, "error", err)
@@ -268,19 +266,16 @@ func (c *Compiler) releaseFlows(ctx context.Context, seid uint64, ids []uint32) 
 
 // dropFlows is releaseFlows' other half for a session that is going away
 // (TS 29.244 5.2.4.1: the packets "shall be either dropped or forwarded"):
-// forwarding them would need a path the session no longer has. Nothing held is
-// the same non-event as it is for a release.
+// forwarding them would need a path the session no longer has. It is accepted
+// the same way -- buffersDropped counts accepted drop commands, and the store
+// frees the packets on a later task run -- and a flow the store holds nothing
+// for is the same no-op as it is for a release.
 func (c *Compiler) dropFlows(ctx context.Context, seid uint64, ids []uint32) {
 	if !c.BufferingConfigured() || c.store == nil || len(ids) == 0 {
 		return
 	}
 	for _, id := range ids {
 		err := c.store.DropFlow(ctx, c.cfg.Buffering.Store, id)
-		if errors.Is(err, bess.ErrFlowNotHeld) {
-			c.log.Debug("session: nothing was buffered for a flow of a session that went away",
-				"seid", seid, "flow", id)
-			continue
-		}
 		if err != nil {
 			c.stats.bufferFailures.Add(1)
 			c.log.Warn("session: a buffering flow was not dropped", "seid", seid, "flow", id, "error", err)

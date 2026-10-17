@@ -442,6 +442,25 @@ a map rebuilt per transaction is precisely what it would catch. Per packet the
 cost is one hash probe and one key compare — no masks, no key construction —
 against `WildcardMatch`'s tuple-plus-masks path in the split chain.
 
+**Status: deferred behind the feature list.** The fusion is a performance
+experiment, not a capability — nothing in `docs/compliance.md`'s gaps or the
+roadmap waits on it, and `docs/design.md`'s "measure before any placement change"
+makes the module and its arm the price of an *answer*, not of a feature. The
+design work above is the part that was expensive to derive, and it is recorded
+here so the deferral costs nothing later. The module and the arm pair stay
+unwritten until something needs the number — the single-port N3/N6/N9 placement
+work is the first thing that will.
+
+When it resumes, the first step is not the module but a control that needs no new
+code: stock `ExactMatch` uses the same `ConcurrentExactTable`, so `teid` as an
+`ExactMatch` (`fields: [{offset: 46, num_bytes: 4}]`, `default_gate: 1`) followed
+by `decap0` is *unfused but already exact-table*. Three points then read cleanly
+— split `WildcardMatch` (today), split `ExactMatch`, fused — and the middle one
+separates the two wins: how much is the lookup kind (available with no module at
+all) and how much is the dispatch the fusion removes. If `ExactMatch` closes most
+of the gap, the fusion is not worth losing the tap and the module is never
+written. That arm belongs in the same request as the fused pair.
+
 ## Building and loading it
 
 ```sh

@@ -28,11 +28,13 @@ type counters struct {
 	// marker path -- the graph's unix_port -- is not there.
 	markers        atomic.Uint64
 	markerFailures atomic.Uint64
-	// buffersReleased, buffersDropped and bufferFailures count what the store
-	// did with the packets a buffering flow held when the SMF's instruction
-	// arrived (5.2.4.1): released into the action path, dropped because the
-	// session was going away, or neither -- the last is an operator's signal
-	// that the graph's store would not take the command.
+	// buffersReleased, buffersDropped and bufferFailures count the store
+	// commands a buffering flow's instruction produced (5.2.4.1): the releases
+	// and the drops the daemon accepted, and the ones it refused -- the last is
+	// an operator's signal that the graph's store would not take the command. An
+	// accepted command is not a completed one: the store's own task applies it on
+	// a later run, so these count commands, and what the packets did is the
+	// store's own readback (`ps/flows`, its drop and release counters).
 	buffersReleased atomic.Uint64
 	buffersDropped  atomic.Uint64
 	bufferFailures  atomic.Uint64
@@ -48,8 +50,10 @@ type StatsSnapshot struct {
 	Refused        uint64 // requests answered with a cause other than accepted
 	Markers        uint64 // End Marker packets sent
 	MarkerFailures uint64 // End Marker packets the graph's port refused
-	// The buffering half: flows whose held packets the store released or
-	// dropped on the SMF's instruction, and the commands it refused.
+	// The buffering half: the release and drop commands the SMF's instruction
+	// produced for buffering flows, and the commands the store refused. Counted
+	// when the daemon accepted a command, not when the store applied it (the
+	// store's own task does that on a later run).
 	BuffersReleased uint64
 	BuffersDropped  uint64
 	BufferFailures  uint64

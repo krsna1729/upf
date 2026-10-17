@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"syscall"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -341,77 +340,6 @@ type Change struct {
 	Value    map[string]any
 }
 
-// storeActions is the slice of the SDK that storeCommand uses, so the order of
-// the three calls can be tested without a daemon. *sdk.Client implements it.
-type storeActions interface {
-	InvokeAction(ctx context.Context, module, action string, arg proto.Message) (*anypb.Any, error)
-	PauseWorkers(ctx context.Context) error
-	ResumeWorkers(ctx context.Context) error
-}
-
-// storeCommand runs one of the store's commands. They are declared
-// thread-unsafe (core/modules/packet_store.cc: release, drop and clear are
-// Command::THREAD_UNSAFE), and the daemon does not stop the worker for such a
-// command -- it refuses it (EBUSY, "There is a running worker and command '%s'
-// is not MT safe", core/module.cc:RunCommand) -- so the caller is the one that
-// stops the workers. The same shape holds for a resource whose codec requires
-// paused workers: a write while a worker runs the module is refused with
-// RESOURCE_BUSY, and nothing was tried (the SDK says so at InvokeAction and at
-// Resource).
-//
-// So: try it first, and only if the daemon answers busy stop the workers,
-// invoke, and start them again. Both choices are policy this layer owns: the
-// first try is what lets a startup clearance run against a graph nobody is
-// running the store on without starting it, and the resume happens even when
-// the invocation failed, or one refused command would leave the datapath
-// stopped. The SDK stays explicit (InvokeAction, PauseWorkers, ResumeWorkers);
-// D-146 keeps the three SDKs' surfaces the same, so the loop lives here until a
-// second consumer needs it.
-func (c *Client) storeCommand(ctx context.Context, module, action string, arg proto.Message) error {
-	return storeCommandPaused(ctx, c.sdk, module, action, arg)
-}
-
-func storeCommandPaused(ctx context.Context, s storeActions, module, action string, arg proto.Message) error {
-	_, err := s.InvokeAction(ctx, module, action, arg)
-	var busy *BusyError
-	if err == nil || !errors.As(err, &busy) {
-		return err
-	}
-	if pauseErr := s.PauseWorkers(ctx); pauseErr != nil {
-		return fmt.Errorf("the daemon refused %s %s (%w), and pausing the workers failed: %w",
-			module, action, err, pauseErr)
-	}
-	_, invokeErr := s.InvokeAction(ctx, module, action, arg)
-	resumeErr := s.ResumeWorkers(ctx)
-	if invokeErr != nil {
-		if resumeErr != nil {
-			return fmt.Errorf("%w, and starting the workers again failed: %w", invokeErr, resumeErr)
-		}
-		return invokeErr
-	}
-	return resumeErr
-}
-
-// ErrFlowNotHeld: the store holds nothing for the flow a command named. A
-// release or drop answers ENOENT for a flow with no entry
-// (core/modules/packet_store.cc: `store_.find(arg.id())`), and having buffering
-// in force is not the same as a packet having arrived -- a session that was
-// told to buffer and saw no downlink data before the SMF's next instruction
-// reaches this on the common idle-to-service-request path. It is not a failure
-// of the command, and there is nothing to release or drop.
-var ErrFlowNotHeld = errors.New("bess: the store holds nothing for that flow")
-
-// flowNotHeld maps the daemon's ENOENT for a store command onto ErrFlowNotHeld,
-// by the errno in the refusal's detail (never by its message, which is the
-// daemon's to change).
-func flowNotHeld(err error) error {
-	var refused *InvalidRequestError
-	if errors.As(err, &refused) && refused.Detail.GetErrnoValue() == int32(syscall.ENOENT) {
-		return ErrFlowNotHeld
-	}
-	return err
-}
-
 // ReleaseFlow tells a packet store to send the packets it holds for one flow
 // out of its release gate, and DropFlow tells it to discard them. Both are the
 // CP function's "new instruction" arriving at a flow that was buffering
@@ -420,12 +348,17 @@ func flowNotHeld(err error) error {
 // either dropped or forwarded"), and both are commands rather than resource
 // writes because that is the split the daemon's D-129 makes: a command acts on
 // the state a module holds -- here, the packets -- while a resource write is
-// configuration. A release that finds a worker running the module stops it for
-// as long as the command takes (storeCommand), which is a signalling-rate
-// event: the SMF answered a DDN.
+// configuration.
 //
-// A flow the store holds nothing for is ErrFlowNotHeld, not a failure
-// (flowNotHeld).
+// The call is *accepted*, not completed. release, drop and clear are
+// THREAD_SAFE commands that enqueue a request into the store's own ring
+// (core/modules/packet_store.cc), so a worker running the module is no reason to
+// stop it, and the store's owner task applies the request on a later run: the
+// answer says nothing about the packets. A caller that needs the effect reads it
+// back -- `ps/flows`, the store's drop and release counters, GetDesc.
+//
+// A flow the store holds nothing for is a no-op, and the commands answer
+// success for it. The only refusal left is ENOSPC, the request ring being full.
 //
 // The flow id is the value the store is keyed by: the ActionId the classifier
 // wrote, which is also the PDR's action record and tunnel key. The argument's
@@ -437,22 +370,25 @@ func (c *Client) ReleaseFlow(ctx context.Context, module string, id uint32) erro
 	if err != nil {
 		return err
 	}
-	if err := c.storeCommand(ctx, module, "release", arg); err != nil {
-		return fmt.Errorf("bess: %s release %d: %w", module, id, flowNotHeld(err))
+	if _, err := c.sdk.InvokeAction(ctx, module, "release", arg); err != nil {
+		return fmt.Errorf("bess: %s release %d: %w", module, id, err)
 	}
 	return nil
 }
 
 // DropFlow is ReleaseFlow's other half: the held packets are freed instead of
 // forwarded, which is what a session that is going away wants (and what the
-// DROBU flag asks for while one stays).
+// DROBU flag asks for while one stays). It is accepted the same way -- the store
+// frees on a later task run, and a flow it holds nothing for is the same no-op.
+// Dropping is what frees the packets: erasing the flow's `flows` entry is
+// configuration only.
 func (c *Client) DropFlow(ctx context.Context, module string, id uint32) error {
 	arg, err := c.Message("bess.pb.PacketStoreCommandDropArg", map[string]any{"id": id})
 	if err != nil {
 		return err
 	}
-	if err := c.storeCommand(ctx, module, "drop", arg); err != nil {
-		return fmt.Errorf("bess: %s drop %d: %w", module, id, flowNotHeld(err))
+	if _, err := c.sdk.InvokeAction(ctx, module, "drop", arg); err != nil {
+		return fmt.Errorf("bess: %s drop %d: %w", module, id, err)
 	}
 	return nil
 }
@@ -460,15 +396,14 @@ func (c *Client) DropFlow(ctx context.Context, module string, id uint32) error {
 // ClearStore frees every packet a store holds (the module's own clear, whose
 // argument carries no fields at all). This is the restart wall's call: a
 // previous run's held packets must not outlive the controller that knew which
-// episode they belonged to. At startup the workers are normally not running the
-// store yet, so this takes the no-pause path in storeCommand; against a running
-// graph it stops and restarts them.
+// episode they belonged to. Like the other two it is accepted, not completed:
+// the store's own task frees what it holds on a later run.
 func (c *Client) ClearStore(ctx context.Context, module string) error {
 	arg, err := c.Message("bess.pb.PacketStoreCommandClearArg", map[string]any{})
 	if err != nil {
 		return err
 	}
-	if err := c.storeCommand(ctx, module, "clear", arg); err != nil {
+	if _, err := c.sdk.InvokeAction(ctx, module, "clear", arg); err != nil {
 		return fmt.Errorf("bess: %s clear: %w", module, err)
 	}
 	return nil

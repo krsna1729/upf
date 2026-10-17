@@ -20,7 +20,7 @@ import (
 // liveCompiler dials the daemon ci/session-live.sh started and returns a compiler
 // on the graph it applied, with the client behind it. The environment names the
 // daemon's control endpoint.
-func liveCompiler(tb testing.TB) (*Compiler, *bess.Client) {
+func liveCompiler(tb testing.TB) *Compiler {
 	tb.Helper()
 	target := os.Getenv("UPF_BESS_TARGET")
 	if target == "" {
@@ -36,7 +36,7 @@ func liveCompiler(tb testing.TB) (*Compiler, *bess.Client) {
 		tb.Fatalf("reading the daemon's schema: %v", err)
 	}
 	return New(liveConfig(), client, slog.New(slog.NewTextHandler(os.Stderr,
-		&slog.HandlerOptions{Level: slog.LevelWarn}))), client
+		&slog.HandlerOptions{Level: slog.LevelWarn})))
 }
 
 // recordingApplier keeps the last transaction the compiler handed over, so a
@@ -57,18 +57,24 @@ func (r *recordingApplier) Apply(ctx context.Context, changes ...bess.Change) er
 // per-type BenchmarkLiveMessage, and the number to quote for a session's
 // conversion rather than whichever type a graph happened to declare first.
 func BenchmarkLiveChangesToMessages(b *testing.B) {
-	c, client := liveCompiler(b)
+	c := liveCompiler(b)
+	client, ok := c.ap.(*bess.Client)
+	if !ok {
+		b.Fatalf("the compiler's applier is %T, not the live client", c.ap)
+	}
 	rec := &recordingApplier{inner: c.ap}
 	c.ap = rec
 
 	// One real session, through the real client once: what it produced is what
-	// this benchmark converts.
-	first := c.Establish(establishment(0x7f01, "10.250.0.2"))
+	// this benchmark converts. Numbered from the clock, because a run whose
+	// cleanup failed must not collide with the next one.
+	base := uint64(time.Now().UnixNano()%1_000_000) * 1000
+	first := c.Establish(establishment(base+1, "10.250.0.2"))
 	est, ok := first.(*message.SessionEstablishmentResponse)
 	if !ok {
 		b.Fatalf("no establishment response: %#v", first)
 	}
-	upSEID := est.Header.SEID
+	upSEID := upFSEID(b, est)
 	b.Cleanup(func() {
 		c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID, 3, 0))
 	})
@@ -79,6 +85,8 @@ func BenchmarkLiveChangesToMessages(b *testing.B) {
 	}
 
 	// Resolve each change's resource once; the conversion is what is timed.
+	// Apply converts a singleton's value alone (it has no key), so the loop does
+	// the same: count and convert a key only where one exists.
 	type step struct {
 		keyType, valueType string
 		key, value         map[string]any
@@ -92,18 +100,21 @@ func BenchmarkLiveChangesToMessages(b *testing.B) {
 		}
 		steps = append(steps, step{keyType: r.KeyType, valueType: r.ValueType,
 			key: ch.Key, value: ch.Value})
-		messages++ // the key
+		if ch.Key != nil {
+			messages++
+		}
 		if ch.Value != nil {
 			messages++
 		}
 	}
-	b.ReportMetric(float64(messages), "messages/op")
 
 	b.ReportAllocs()
 	for b.Loop() {
 		for _, s := range steps {
-			if _, err := client.Message(s.keyType, s.key); err != nil {
-				b.Fatal(err)
+			if s.key != nil {
+				if _, err := client.Message(s.keyType, s.key); err != nil {
+					b.Fatal(err)
+				}
 			}
 			if s.value == nil {
 				continue
@@ -113,6 +124,9 @@ func BenchmarkLiveChangesToMessages(b *testing.B) {
 			}
 		}
 	}
+	// After the loop: the first b.Loop resets the timer and clears metrics
+	// reported before it.
+	b.ReportMetric(float64(messages), "messages/op")
 }
 
 // applyTimer wraps the real client to time the transactions it is given, so the
@@ -169,7 +183,7 @@ func logApplyHistogram(b *testing.B, durs []time.Duration) {
 // Sessions are numbered from the clock so that a second run does not re-establish
 // what the first left behind, and they are deleted again afterwards.
 func BenchmarkLiveEstablish(b *testing.B) {
-	c, _ := liveCompiler(b)
+	c := liveCompiler(b)
 	timer := &applyTimer{inner: c.ap}
 	c.ap = timer
 	base := uint64(time.Now().UnixNano()%1_000_000) * 1000
@@ -188,7 +202,7 @@ func BenchmarkLiveEstablish(b *testing.B) {
 		if cause, err := n4sim.Cause(est); err != nil || cause != 1 {
 			b.Fatalf("cause %d (err %v)", cause, err)
 		}
-		ups = append(ups, est.Header.SEID)
+		ups = append(ups, upFSEID(b, est))
 	}
 	b.StopTimer()
 
