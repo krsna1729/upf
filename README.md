@@ -135,6 +135,12 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   reads it back in the Created PDR, and the PDIs of a session that carry one
   CHOOSE ID share it — one TEID rule for the group, and one value in each of
   their Created PDRs.
+- Per-rule usage counters are in: `datapath/urr_count.*` counts the packets and
+  octets of every rule a URR's PDRs name (the entry in `<module>/counters` is
+  what says a rule is measured), and its `get_counts` action is how a controller
+  reads them — `ci/session-path.sh` drives real packets through it and checks
+  the octets are the inner IP packet's, not the frame's. The URR reporting half
+  (triggers, thresholds, quota, Session Report) is not in yet.
 - Next, in this order: a real SMF (open5gs or free5GC) against `upfd` for
   interop and Causes, packets over the bound N3/N6 ports, route domains in
   `internal/routing` for N9 (the downlink's next hop is per-direction today,

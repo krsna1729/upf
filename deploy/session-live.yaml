@@ -66,6 +66,12 @@ modules:
   - name: mt_dl
     mclass: Meter
     arg: {capacity: 65536}
+  - name: cnt_ul
+    mclass: UrrCount
+    arg: {capacity: 65536}
+  - name: cnt_dl
+    mclass: UrrCount
+    arg: {capacity: 65536}
   - name: rt
     mclass: Router
   - name: enc
@@ -79,10 +85,12 @@ connections:
   - {upstream: decap0, downstream: pdr_ul}
   - {upstream: pdr_ul, downstream: at_ul}
   - {upstream: at_ul, downstream: mt_ul}
-  - {upstream: mt_ul, downstream: rt}
+  - {upstream: mt_ul, downstream: cnt_ul}
+  - {upstream: cnt_ul, downstream: rt}
   - {upstream: pdr_dl, downstream: at_dl}
   - {upstream: at_dl, downstream: mt_dl}
-  - {upstream: mt_dl, downstream: rt}
+  - {upstream: mt_dl, downstream: cnt_dl}
+  - {upstream: cnt_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: sink}
 

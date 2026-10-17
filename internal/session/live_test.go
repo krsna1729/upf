@@ -26,6 +26,7 @@ func liveConfig() Config {
 		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
 		Actions:   "at_ul",
 		Meters:    "mt_ul",
+		Counters:  "cnt_ul",
 		NextHop:   1,
 	}
 	cfg.Down = Direction{
@@ -33,6 +34,7 @@ func liveConfig() Config {
 		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
 		Actions:   "at_dl",
 		Meters:    "mt_dl",
+		Counters:  "cnt_dl",
 		NextHop:   2,
 		Tunnels:   "enc",
 	}

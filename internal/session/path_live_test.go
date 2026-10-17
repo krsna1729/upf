@@ -287,6 +287,186 @@ func waitForPackets(t *testing.T, ctx context.Context, client *bess.Client, modu
 	}
 }
 
+// pathUrrEstablishment is pathEstablishment with a URR measuring the uplink
+// PDR, and a QER that polices nothing: the meter would drop all but a trickle
+// of the source's packets, and the counting module sits behind it, so a rate
+// here would make the numbers a function of the meter rather than of the
+// packets the source produced. The URR's threshold is far above what a run
+// carries, so nothing in it fires yet (reporting is not implemented).
+func pathUrrEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishmentRequest {
+	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(cpSEID, nil, nil),
+		ie.NewCreatePDR(
+			ie.NewPDRID(1),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, pathUpTEID, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+			),
+			ie.NewFARID(1),
+			ie.NewURRID(7),
+		),
+		ie.NewCreatePDR(
+			ie.NewPDRID(2),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
+			),
+			ie.NewFARID(2),
+		),
+		ie.NewCreateFAR(
+			ie.NewFARID(1),
+			ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
+		),
+		ie.NewCreateFAR(
+			ie.NewFARID(2),
+			ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceAccess),
+				ie.NewOuterHeaderCreation(0x0100, pathDownTEID, "10.20.30.2", "", 0, 0, 0),
+			),
+		),
+		// A gate and nothing else: no MBR, so no meter stands between the rule
+		// and the counting module.
+		ie.NewCreateQER(
+			ie.NewQERID(1),
+			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+		),
+		ie.NewCreateURR(
+			ie.NewURRID(7),
+			ie.NewMeasurementMethod(0, 1, 0),    // VOLUM
+			ie.NewReportingTriggers(0x02, 0x00), // VOLTH
+			ie.NewVolumeThreshold(0x01, 1<<40, 0, 0),
+		),
+	)
+}
+
+// countersOf is one counting module's reading of every rule it measures, asked
+// through the module's own command -- the call the reporting task makes. The
+// argument and the answer are built from the daemon's schema, so a field the
+// module does not declare fails here rather than reporting zero.
+func countersOf(t *testing.T, ctx context.Context, client *bess.Client, module string) map[uint32][2]uint64 {
+	t.Helper()
+	arg, err := client.Message("upf.pb.UrrCountCommandGetCountsArg", nil)
+	if err != nil {
+		t.Fatalf("building the %s command argument: %v", module, err)
+	}
+	result, err := client.SDK().InvokeAction(ctx, module, "get_counts", arg)
+	if err != nil {
+		t.Fatalf("%s get_counts: %v", module, err)
+	}
+	response, err := client.Message("upf.pb.UrrCountCommandGetCountsResponse", nil)
+	if err != nil {
+		t.Fatalf("building the %s answer: %v", module, err)
+	}
+	if err := result.UnmarshalTo(response); err != nil {
+		t.Fatalf("%s get_counts answered %s: %v", module, result.GetTypeUrl(), err)
+	}
+	out := map[uint32][2]uint64{}
+	fields := response.ProtoReflect().Descriptor().Fields()
+	counts := response.ProtoReflect().Get(fields.ByName("counts")).List()
+	for i := range counts.Len() {
+		count := counts.Get(i).Message()
+		f := count.Descriptor().Fields()
+		out[uint32(count.Get(f.ByName("action_id")).Uint())] = [2]uint64{
+			count.Get(f.ByName("packets")).Uint(),
+			count.Get(f.ByName("octets")).Uint(),
+		}
+	}
+	return out
+}
+
+// TestLiveSessionCountsTheRulesATURReasures is the counting half of usage
+// reporting, on a real daemon: deploy/session-path.yaml's Sources run from the
+// moment the graph is applied, the session's uplink PDR is measured by a URR,
+// and the module's own command reports what crossed the chain.
+//
+// The numbers are exact, not approximate: every frame the source produces is
+// the same 51-byte frame, and what is counted is the IP packet's octets (the
+// inner IPv4 header's Total Length, 37), not the frame's -- so the assertion
+// "octets == 37 x packets" is also the one that says the 14-byte Ethernet
+// header the framing adds is not data volume. The downlink chain measures
+// nothing (no URR names its PDRs), and reports nothing: the entry is what makes
+// a rule counted.
+func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
+	target := os.Getenv("UPF_BESS_TARGET")
+	if target == "" {
+		t.Skip("set UPF_BESS_TARGET (ci/session-path.sh does) to run against a live bessd")
+	}
+
+	ctx := context.Background()
+	client, err := bess.Dial(ctx, target)
+	if err != nil {
+		t.Fatalf("dialing %s: %v", target, err)
+	}
+	defer client.Close()
+	if err := client.Refresh(ctx); err != nil {
+		t.Fatalf("reading the daemon's schema: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := New(liveConfig(), client, log)
+
+	// The control arm: nothing is measured before this session exists, so a
+	// later non-zero reading is the session's doing.
+	if before := countersOf(t, ctx, client, "cnt_ul"); len(before) != 0 {
+		t.Fatalf("cnt_ul already measures %d rules before any session exists: %v", len(before), before)
+	}
+
+	resp := c.Establish(pathUrrEstablishment(0x4444, "10.45.0.2")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the daemon refused the establishment with cause %d", got)
+	}
+	defer func() {
+		del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 9, 0)
+		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
+			t.Errorf("the deletion answered cause %d", got)
+		}
+	}()
+
+	// The source's packets and this reading are not ordered: wait for the
+	// counter to move. A run that never does is the module not counting, which
+	// is what this test exists to notice.
+	var packets, octets uint64
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		counts := countersOf(t, ctx, client, "cnt_ul")
+		if len(counts) > 1 {
+			t.Fatalf("cnt_ul measures %d rules, and the session has one URR on one PDR: %v",
+				len(counts), counts)
+		}
+		for _, count := range counts {
+			packets, octets = count[0], count[1]
+		}
+		if packets != 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the uplink chain carried no packet the URR measures within 10s; "+
+				"output counters: %v", chainCounters(t, ctx, client))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// The inner IPv4 packet's Total Length: the graph's uplink frame holds
+	// 10.45.0.2:5000 -> 8.8.8.8:53 with a 9-byte payload, 20 + 8 + 9.
+	const innerOctets = 37
+	if got := octets / packets; got != innerOctets {
+		t.Errorf("the counter reports %d octets per packet, want the inner IP packet's %d "+
+			"(%d packets, %d octets): the frame's Ethernet header is not data volume",
+			got, innerOctets, packets, octets)
+	}
+	if down := countersOf(t, ctx, client, "cnt_dl"); len(down) != 0 {
+		t.Errorf("the downlink chain, which no URR measures, counts %d rules: %v", len(down), down)
+	}
+	t.Logf("cnt_ul: %d packets, %d octets, %d octets per packet", packets, octets, octets/packets)
+}
+
 // chainCounters is every output-gate packet counter the daemon reports, so a
 // failure says where a packet stopped rather than only that it did.
 func chainCounters(t *testing.T, ctx context.Context, client *bess.Client) []string {

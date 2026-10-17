@@ -635,6 +635,16 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 				return fmt.Errorf("%w: PDR %d names the URR %d, which the session does not have",
 					errNotExpressible, p.id, uid)
 			}
+			if dir.Counters == "" {
+				// The graph has no counting module for this direction (a
+				// deployment that does not charge, or a flag left empty): the
+				// session would compile with a URR that measures nothing, and
+				// every report from it would say zero -- the quietly-wrong
+				// report this refusal exists to avoid.
+				return fmt.Errorf(
+					"%w: PDR %d names the URR %d, and this graph has no usage counters in that direction",
+					errNotExpressible, p.id, uid)
+			}
 		}
 		if !p.ueIP.IsValid() {
 			// The PDI names no address of its own, so the session's is the one
@@ -718,6 +728,17 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
 		}
 	}
+	// The counter entries the session still needs, as the transaction will write
+	// them: one per forwarding PDR a URR measures. A removal or a replaced form
+	// whose entry is in this set is not erased -- the write follows, and the
+	// engine rejects both operations on one key.
+	liveCounters := map[string]bool{}
+	for _, p := range s.PDRs {
+		dir := c.direction(p.srcIfc)
+		if dir.Counters != "" && len(p.urrIDs) > 0 && !p.drop && p.actionID != 0 {
+			liveCounters[countersRes(dir)+"\x00"+strconv.FormatUint(uint64(p.actionID), 10)] = true
+		}
+	}
 	// PDRs a modification removed are erased by the same transaction that
 	// writes the rest of the session: the SMF is told they are gone, so their
 	// rules must stop selecting packets. Three of the records a PDR names can
@@ -740,6 +761,19 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		erased[k] = true
 		changes = append(changes, ch)
 	}
+	// counterErase takes out the counter entry of a PDR that is going away or
+	// that no URR measures any more: the module would go on counting a rule
+	// nobody reports, and the rule's id is about to be free.
+	counterErase := func(p *pdr) {
+		dir := c.direction(p.srcIfc)
+		if dir.Counters == "" || len(p.urrIDs) == 0 || p.actionID == 0 {
+			return
+		}
+		if liveCounters[countersRes(dir)+"\x00"+strconv.FormatUint(uint64(p.actionID), 10)] {
+			return
+		}
+		erase(bess.Change{Resource: countersRes(dir), Key: map[string]any{"action_id": p.actionID}})
+	}
 	for _, p := range s.removed {
 		dir := c.direction(p.srcIfc)
 		key, err := p.ruleKey(dir.PDRFields)
@@ -761,6 +795,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if p.meterID != 0 && !qerHoldsMeter(s, p) {
 			erase(bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
 		}
+		counterErase(p)
 	}
 	// A PDR a modification replaced keeps its action and its tunnel, but its
 	// rule key can change under it (a new filter, a new address): the old key
@@ -780,6 +815,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if old.teid != 0 && !teidNamed(s, old.teid) {
 			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(old.teid)})
 		}
+		counterErase(old)
 	}
 
 	// Meters first: an action references the meter its QER resolved to. One
@@ -845,6 +881,18 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			Key:      map[string]any{"id": p.actionID},
 			Value:    map[string]any{"meter_id": p.meterID, "next_hop_id": dir.NextHop},
 		})
+
+		// A PDR a URR measures carries one counter entry, keyed by the same
+		// ActionId: the module counts what the chain forwards for that rule,
+		// and the reporting side sums the entries of the URR's PDRs. The entry
+		// is what keeps a session without a URR off the counting module's cost.
+		if dir.Counters != "" && len(p.urrIDs) > 0 {
+			changes = append(changes, bess.Change{
+				Resource: countersRes(dir),
+				Key:      map[string]any{"action_id": p.actionID},
+				Value:    map[string]any{},
+			})
+		}
 
 		// A downlink PDR's FAR names the tunnel this session's packets leave
 		// by: the record is keyed by the same action id the rule carries.

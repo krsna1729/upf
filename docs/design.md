@@ -31,7 +31,7 @@ to race.
 | F-TEID the CP function asks the UP function to choose (8.2.3: the CH flag, and CHID for a group the CP function names) | one TEID rule in front of the decap per F-TEID we allocate; the PDIs of a session that carry one CHOOSE ID share the F-TEID the session gave that group, so an SMF's several filters on one tunnel are one rule and one Created PDR value |
 | FAR (Apply Action, Forwarding Parameters: Destination Interface, Network Instance, Outer Header Creation) | a *treatment* resource the action references (forward / drop / buffer / notify) plus the next hop and GTP-U encap parameters |
 | QER (Gate Status, MBR, QFI) | a meter resource per QER, referenced from the action |
-| URR (Measurement Method, Reporting Triggers, thresholds, period) | a counter resource per URR plus a reporting task; reports become PFCP Session Reports |
+| URR (Measurement Method, Reporting Triggers, thresholds, period) | per-rule counters in the `UrrCount` module, one entry per rule a URR's PDRs name, keyed by the rule's ActionId; the reporting task sums the entries of a URR's PDRs (the counters are in; the task is the next slice). The counts are per-worker cells with no atomic in the path, and the read is the module's own `get_counts` action |
 | Session (CP F-SEID, UP F-SEID) | one transaction's worth of resources, all named `<session-id>/…` |
 | Network Instance (N3/N6/N9) | a route domain; overlapping subscriber prefixes never collide because each domain has its own table |
 | Outer Header Creation (TEID, peer address) | the tunnel encap parameters of the treatment |
