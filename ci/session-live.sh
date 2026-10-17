@@ -65,6 +65,25 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
   exit 1
 }
 
+# The client's own tests: the schema is the contract, and they check it against
+# the daemon that is up.
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
+  $GO test ./internal/bess/ -run 'TestLive' -count=1 -v || {
+  echo "session-live: the client's live tests failed; the daemon's log is $LOG" >&2
+  exit 1
+}
+
+# And the live benchmarks, with the daemon that is already up: the compiler with
+# a real transaction behind it, and the schema-driven message building. Their
+# numbers are what the role of each fake-free part is judged by (docs/design.md,
+# "Where that time goes").
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
+  $GO test ./internal/session/ ./internal/bess/ -run '^$' -bench 'BenchmarkLive' \
+  -benchtime "${LIVE_BENCHTIME:-200x}" -benchmem || {
+  echo "session-live: a live benchmark failed; the daemon's log is $LOG" >&2
+  exit 1
+}
+
 # The run's own files, not a result: a failed run keeps them (the message above
 # says where), a green one leaves nothing behind -- the other CI scripts do the
 # same, and this one used to leave a log and a pidfile per run in /tmp.
