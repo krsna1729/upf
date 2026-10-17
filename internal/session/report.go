@@ -20,6 +20,15 @@
 // needs a second base per URR to keep the report's own window apart from the
 // limit's, and this one gives the SMF the same control with the one base the
 // model already has.
+//
+// **Time.** The counting module stamps each rule's first packet since a reading
+// and its last one, and a reading that asks for the next window clears the
+// first. The controller therefore measures a time threshold and a time quota
+// against the time the *window's* traffic ran -- the window's own first packet
+// to the reading's last one -- which is the base the volume limits use, with
+// the idle gaps taken out. A graph whose counters carry no stamp falls back to
+// the window's length, the number the clock gives while the traffic is
+// continuous.
 package session
 
 import (
@@ -334,62 +343,42 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 			u.reported, u.lastUp, u.lastDown = now, up, down
 			continue
 		}
-		if !u.hasSeen && (up.Packets > 0 || down.Packets > 0) {
-			// The measurement starts with the first packet that arrives: the
-			// duration of a URR that measures time is the time its traffic has
-			// been running (5.2.2.2.1). The dataplane's own stamp says when it
-			// arrived; a graph whose counters carry none leaves the reading's
-			// instant as the closest the control plane can get.
-			u.hasSeen = true
-			if first.IsZero() {
-				u.firstSeen = now
-			} else {
-				u.firstSeen = first
-			}
-		}
 		window := now.Sub(u.reported)
 		if window < 0 {
 			window = 0
 		}
 		upWindow, downWindow := up.since(u.lastUp), down.since(u.lastDown)
-		moved := upWindow.Packets > 0 || downWindow.Packets > 0
-		stamped := moved && !first.IsZero() && !last.Before(first)
-		if stamped && u.windowFirst.IsZero() {
-			// The window's own start: this reading's first packet is the first
-			// of the tick it covers, and a window spans however many ticks its
-			// period is.
-			u.windowFirst = first
-		}
-		// The time a window's traffic ran is what a time threshold and a time
-		// quota are measured against -- the threshold within the window, the
-		// quota since it was provisioned, because a report does not reset a
-		// quota (5.2.2.2.1). A reading's stamps cover its own tick and the
-		// reading clears them, so no tick's running time is counted twice; a
-		// graph whose counters carry no stamp falls back to the window's
-		// length, which is what the clock gives while the traffic is
-		// continuous.
-		windowActive := window
-		if stamped {
+		if !first.IsZero() && !last.Before(first) {
+			// This reading counted packets: it is the window's first activity
+			// when the window has none yet, and it is its last one.
 			u.stamped = true
-			windowActive = last.Sub(u.windowFirst)
-			u.active += last.Sub(first)
-		} else if !moved {
-			windowActive = 0
+			if u.windowFirst.IsZero() {
+				u.windowFirst = first
+			}
+			u.windowLast = last
 		}
-		quotaTime := window
+		// The time a window's traffic ran is what a time limit is measured
+		// against -- the window's own first counted packet to its own last one,
+		// the same base the volume limits use, with the idle between them taken
+		// out. A graph whose counters carry no stamp at all falls back to the
+		// window's length, the number the clock gives while the traffic runs.
+		windowActive := window
 		if u.stamped {
-			quotaTime = u.active
+			windowActive = 0
+			if !u.windowFirst.IsZero() {
+				windowActive = u.windowLast.Sub(u.windowFirst)
+			}
 		}
-		first, last = windowTimes(u.windowFirst, last, upWindow, downWindow)
+		first, last = windowTimes(u.windowFirst, u.windowLast, upWindow, downWindow)
 		// A limit that is reached stops the traffic whether or not it is the
 		// reason this report is going: a period that ends in the same window as
 		// a quota must not swallow the enforcement, and the window the report
 		// opens would otherwise put the quota out of reach of the next one.
-		if u.quotaReached(upWindow, downWindow, quotaTime) && !u.enforcing {
+		if u.quotaReached(upWindow, downWindow, windowActive) && !u.enforcing {
 			u.enforcing = true
 			stopped = true
 		}
-		trigger, due := u.due(upWindow, downWindow, window, windowActive, quotaTime)
+		trigger, due := u.due(upWindow, downWindow, window, windowActive)
 		if !due {
 			continue
 		}
@@ -402,9 +391,9 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 		// The report opens the URR's next window, and it is the SMF's message
 		// that carries this usage: the counters are not reset (the dataplane
 		// knows nothing of reports), so the base is what moves -- and with it
-		// the window's own first packet, which the next tick stamps afresh.
+		// the window's own stamps, which the next tick writes afresh.
 		u.reported, u.lastUp, u.lastDown = now, up, down
-		u.windowFirst = time.Time{}
+		u.windowFirst, u.windowLast = time.Time{}, time.Time{}
 		u.seqn++
 	}
 	return reports, stopped
@@ -459,23 +448,21 @@ func (c *Compiler) countsOf(s *Session, uid uint32, counts map[string]map[uint32
 
 // quotaReached reports whether a quota this URR measures is used up: the
 // enforcement is the UPF's own doing (5.2.2.2.1), so the traffic stops whether
-// or not the SMF asked for a report of it. quotaTime is the time the URR's
-// traffic has run since its quota was provisioned.
-func (u *urr) quotaReached(up, down Usage, quotaTime time.Duration) bool {
+// or not the SMF asked for a report of it. windowActive is the time the
+// window's traffic ran (for a time quota) and the counters are the window's.
+func (u *urr) quotaReached(up, down Usage, windowActive time.Duration) bool {
 	if u.onVolQuota && u.volume && u.volQuota.reached(up.Octets, down.Octets) {
 		return true
 	}
-	return u.onTimeQuota && u.duration && u.hasTimeQuota && quotaTime >= u.timeQuota
+	return u.onTimeQuota && u.duration && u.hasTimeQuota && windowActive >= u.timeQuota
 }
 
 // due is the reason this URR owes a report now, if it owes one: its period has
 // passed, or a limit it measures is reached. window is the clock's length since
-// the last report (what a period means), windowActive the time the window's
-// traffic ran (what a time threshold means), and quotaTime the same across
-// every window since the quota was provisioned. The triggers are tried in the
-// URR's own order, so a window that satisfies several reports the first of
-// them.
-func (u *urr) due(up, down Usage, window, windowActive, quotaTime time.Duration) (Trigger, bool) {
+// the last report (what a period means) and windowActive the time the window's
+// traffic ran (what a time limit means). The triggers are tried in the URR's
+// own order, so a window that satisfies several reports the first of them.
+func (u *urr) due(up, down Usage, window, windowActive time.Duration) (Trigger, bool) {
 	if u.periodic && window >= u.period {
 		return TriggerPeriod, true
 	}
@@ -488,7 +475,7 @@ func (u *urr) due(up, down Usage, window, windowActive, quotaTime time.Duration)
 	if u.onVolQuota && u.volume && u.volQuota.reached(up.Octets, down.Octets) {
 		return TriggerVolumeQuota, true
 	}
-	if u.onTimeQuota && u.duration && u.hasTimeQuota && quotaTime >= u.timeQuota {
+	if u.onTimeQuota && u.duration && u.hasTimeQuota && windowActive >= u.timeQuota {
 		return TriggerTimeQuota, true
 	}
 	return 0, false

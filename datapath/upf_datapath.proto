@@ -81,6 +81,12 @@ message CounterEntry {}
 message UrrCountCommandGetCountsArg {
   // The rules to read, by ActionId. Empty reads every rule the table holds.
   repeated uint32 action_ids = 1;
+  // Whether this reading opens the next window: true clears each rule's first
+  // packet stamp, so the stamp the next reading reports is the next window's
+  // own. The reporting side sets it, because a report is what opens a window;
+  // a diagnostic read -- an operator's, a test's -- leaves it false and finds
+  // the window's first packet where the last one left it.
+  bool restart_window = 2;
 }
 
 // UrrCountCommandGetCountsResponse is one reading of the counters: every

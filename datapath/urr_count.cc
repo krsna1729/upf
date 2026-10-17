@@ -81,7 +81,7 @@ CommandResponse UrrCount::Init(const upf::pb::UrrCountArg &arg) {
                              (cells_per_worker_ / kCellsPerLine));
   // One stamp pair per rule: 16 bytes x capacity (1 MiB at the default), and
   // nothing per worker -- the stamps are the rule's own fact.
-  times_ = std::vector<Times>(capacity_);
+  stamps_ = std::vector<Stamps>(capacity_);
 
   entries_ = std::make_unique<dataplane::SlotTable<ActionId, Entry>>(capacity_);
   resource_ = std::make_unique<dataplane::SlotResource<ActionId, Entry>>(
@@ -154,8 +154,10 @@ void UrrCount::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   const size_t base = static_cast<size_t>(ctx->wid.value()) * cells_per_worker_;
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
-  // The batch's own clock, read at most once and only if a packet is counted.
-  uint64_t now_ns = 0;
+  // The rules this batch counted, in arrival order and each once: what the
+  // stamps are written for, after the loop.
+  ActionId counted[bess::PacketBatch::kMaxBurst];
+  size_t counted_n = 0;
 
   for (size_t i = 0; i < cnt; i++) {
     bess::PacketRef pkt = batch->packet(i);
@@ -173,18 +175,33 @@ void UrrCount::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     const size_t cell = base + offset_of(id.value());
     Add(cell + kPackets, 1);
     Add(cell + kBytes, Octets(pkt));
-    // The stamps: the clock is read once per batch that counts anything (an
-    // rdtsc is cheaper than the octets lookup above), and every rule this
-    // batch counted gets it -- the first store of a window is the one a reading
-    // cleared, and the last follows the traffic.
-    if (now_ns == 0) {
-      now_ns = tsc_to_ns(rdtsc());
+    // This batch counted the rule: remember it, once, and stamp it after the
+    // loop. The stamps are shared state, so a batch writes them once per rule
+    // and never once per packet.
+    bool already = false;
+    for (size_t j = 0; j < counted_n; j++) {
+      if (counted[j].value() == id.value()) {
+        already = true;
+        break;
+      }
     }
-    Times &t = times_[id.value() - 1];
-    if (t.first_ns.load(std::memory_order_relaxed) == 0) {
-      t.first_ns.store(now_ns, std::memory_order_relaxed);
+    if (!already) {
+      counted[counted_n++] = id;
     }
-    t.last_ns.store(now_ns, std::memory_order_relaxed);
+  }
+
+  if (counted_n > 0) {
+    // The worker's own loop timestamp (module.h's Context, set from the
+    // scheduler's rdtsc): the same monotonic domain the reading reports, and no
+    // clock read of this module's own on the packet path.
+    const uint64_t now_ns = ctx->current_ns;
+    for (size_t j = 0; j < counted_n; j++) {
+      Stamps &s = stamps_[counted[j].value() - 1];
+      if (s.first_ns.load(std::memory_order_relaxed) == 0) {
+        s.first_ns.store(now_ns, std::memory_order_relaxed);
+      }
+      s.last_ns.store(now_ns, std::memory_order_relaxed);
+    }
   }
 
   EmitBatch(ctx, batch, ogates);
@@ -208,15 +225,17 @@ std::pair<uint64_t, uint64_t> UrrCount::Counts(ActionId id) const noexcept {
   return {packets, octets};
 }
 
-std::pair<uint64_t, uint64_t> UrrCount::ReadTimes(ActionId id) noexcept {
+std::pair<uint64_t, uint64_t> UrrCount::ReadTimes(ActionId id, bool restart) noexcept {
   if (id.value() == 0 || id.value() > capacity_) {
     return {0, 0};
   }
-  Times &t = times_[id.value() - 1];
-  // The first stamp is read and cleared in one step: the next packet of this
-  // rule starts the next window, whatever else the workers are doing.
-  const uint64_t first = t.first_ns.exchange(0, std::memory_order_relaxed);
-  const uint64_t last = t.last_ns.load(std::memory_order_relaxed);
+  Stamps &s = stamps_[id.value() - 1];
+  // The first stamp of the next window starts with the next packet: the
+  // reporting side clears it in one step, and a diagnostic read only looks.
+  const uint64_t first =
+      restart ? s.first_ns.exchange(0, std::memory_order_relaxed)
+              : s.first_ns.load(std::memory_order_relaxed);
+  const uint64_t last = s.last_ns.load(std::memory_order_relaxed);
   return {first, last};
 }
 
@@ -238,7 +257,7 @@ CommandResponse UrrCount::CommandGetCounts(
   // termination report is made of.
   auto report = [&](ActionId id) {
     auto [packets, octets] = Counts(id);
-    auto [first_ns, last_ns] = ReadTimes(id);
+    auto [first_ns, last_ns] = ReadTimes(id, arg.restart_window());
     auto *count = response.add_counts();
     count->set_action_id(id.value());
     count->set_packets(packets);

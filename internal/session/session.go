@@ -429,29 +429,19 @@ type urr struct {
 	// The reporting task's bookkeeping. reported is where the last report of
 	// this URR ended, so a report carries the usage of the interval it covers
 	// and the next periodic one has a period to measure; seqn is the UR-SEQN
-	// of the next report (5.2.2.3: the first report of a URR is 0); firstSeen
-	// is when the counters last went from nothing to something, which is when
-	// the duration measurement started (5.2.2.2.1, no Inactivity Detection Time
-	// provisioned: the time measurement runs continuously).
-	reported  time.Time
-	seqn      uint32
-	firstSeen time.Time
-	hasSeen   bool
+	// of the next report (5.2.2.3: the first report of a URR is 0).
+	reported time.Time
+	seqn     uint32
 
-	// windowFirst is the first packet of the *current* reporting window. The
-	// dataplane stamps a tick's own first packet (a reading clears it), and a
-	// window spans however many ticks its period is, so which packet opened the
-	// window is remembered here; a report opens the next one.
+	// windowFirst and windowLast are the *current* reporting window's own first
+	// and last counted packet. The dataplane stamps a tick's own first packet (a
+	// reading clears it) and a window spans however many ticks its period is, so
+	// which packets opened and closed the window are remembered here; a report
+	// opens the next one. stamped says whether any reading carried a stamp at
+	// all: a graph whose counters carry none falls back to the window's length.
 	windowFirst time.Time
-
-	// active is the time this URR's traffic has run since the quota it carries
-	// was provisioned: a report does not reset a quota (5.2.2.2.1), so each
-	// tick's own running time is added, and a window the traffic left quiet
-	// adds nothing. stamped says whether any reading carried the dataplane's
-	// stamps at all: without them a quota falls back to the window's length,
-	// which is the same number while the traffic is continuous.
-	active  time.Duration
-	stamped bool
+	windowLast  time.Time
+	stamped     bool
 
 	// lastUp and lastDown are the counters these PDRs had counted when the last
 	// report was made, so that report's successor covers the usage after it

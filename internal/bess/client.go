@@ -239,13 +239,16 @@ type RuleCount struct {
 
 // RuleCounts asks a counting module for the counters of the named rules, or of
 // every rule it holds when none are named, through the module's own get_counts
-// action. The message names are the plugin's (datapath/upf_datapath.proto), so
-// a graph without that module -- or one built against another schema -- is an
-// error here and not an empty reading: a reporter that read silence as zero
-// usage would report nothing forever.
+// action, and for the next window: the module clears each rule's first-packet
+// stamp when a reading asks it to, so a diagnostic read of the same command
+// (an operator's, a test's) finds the window's first packet where the last
+// report left it. The message names are the plugin's
+// (datapath/upf_datapath.proto), so a graph without that module -- or one built
+// against another schema -- is an error here and not an empty reading: a
+// reporter that read silence as zero usage would report nothing forever.
 func (c *Client) RuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]RuleCount, error) {
 	arg, err := c.Message("upf.pb.UrrCountCommandGetCountsArg",
-		map[string]any{"action_ids": actionIDs})
+		map[string]any{"action_ids": actionIDs, "restart_window": true})
 	if err != nil {
 		return nil, err
 	}
@@ -264,22 +267,34 @@ func (c *Client) RuleCounts(ctx context.Context, module string, actionIDs ...uin
 	counts := response.ProtoReflect().Get(fields.ByName("counts")).List()
 	// The reading's clock: the per-rule stamps are in the module's monotonic
 	// domain, and the wall clock it read at the same instant is what places them
-	// on the clock a PFCP timestamp carries.
-	mono := response.ProtoReflect().Get(fields.ByName("read_monotonic_ns")).Uint()
-	wall := int64(response.ProtoReflect().Get(fields.ByName("read_wall_unix_ns")).Uint())
+	// on the clock a PFCP timestamp carries. A daemon whose plugin predates the
+	// stamps has no such field at all -- uintField answers 0 and the times are
+	// unknown, rather than the reporting loop panicking on a nil descriptor.
+	mono := uintField(response.ProtoReflect(), "read_monotonic_ns")
+	wall := int64(uintField(response.ProtoReflect(), "read_wall_unix_ns"))
 	out := make([]RuleCount, 0, counts.Len())
 	for i := range counts.Len() {
 		rule := counts.Get(i).Message()
-		rf := rule.Descriptor().Fields()
 		out = append(out, RuleCount{
-			ActionID: uint32(rule.Get(rf.ByName("action_id")).Uint()),
-			Packets:  rule.Get(rf.ByName("packets")).Uint(),
-			Octets:   rule.Get(rf.ByName("octets")).Uint(),
-			First:    packetTime(rule.Get(rf.ByName("first_packet_ns")).Uint(), mono, wall),
-			Last:     packetTime(rule.Get(rf.ByName("last_packet_ns")).Uint(), mono, wall),
+			ActionID: uint32(uintField(rule, "action_id")),
+			Packets:  uintField(rule, "packets"),
+			Octets:   uintField(rule, "octets"),
+			First:    packetTime(uintField(rule, "first_packet_ns"), mono, wall),
+			Last:     packetTime(uintField(rule, "last_packet_ns"), mono, wall),
 		})
 	}
 	return out, nil
+}
+
+// uintField is a uint field of a message the daemon's own schema defines, or 0
+// when that schema has no such field: a plugin built before a field existed
+// must read as "no value", never as a panic.
+func uintField(m protoreflect.Message, name string) uint64 {
+	fd := m.Descriptor().Fields().ByName(protoreflect.Name(name))
+	if fd == nil {
+		return 0
+	}
+	return m.Get(fd).Uint()
 }
 
 // packetTime places a rule's stamp -- nanoseconds of the module's own monotonic

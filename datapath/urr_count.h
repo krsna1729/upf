@@ -79,10 +79,11 @@ class UrrCount final : public Module {
 
   // One rule's timestamps, in the reading's monotonic domain
   // (read_monotonic_ns): the first packet counted since the previous reading
-  // and the last packet counted at all. The first is cleared here, so the next
-  // reading's first stamp is the next window's own; zeros mean no packet was
-  // counted.
-  std::pair<uint64_t, uint64_t> ReadTimes(ActionId id) noexcept;
+  // and the last packet counted at all. restart clears the first, which is what
+  // the reporting side asks for -- a report opens the next window -- while a
+  // diagnostic read leaves the window's first packet where it is. Zeros mean no
+  // packet was counted.
+  std::pair<uint64_t, uint64_t> ReadTimes(ActionId id, bool restart) noexcept;
 
   CommandResponse CommandGetCounts(
       const upf::pb::UrrCountCommandGetCountsArg &arg);
@@ -107,7 +108,7 @@ class UrrCount final : public Module {
 
   // The stamps of one rule's counted traffic: shared, because the fact is the
   // rule's own, and written once per batch that counted a packet of it.
-  struct Times {
+  struct Stamps {
     std::atomic<uint64_t> first_ns{0};
     std::atomic<uint64_t> last_ns{0};
   };
@@ -135,7 +136,7 @@ class UrrCount final : public Module {
   // One stamp pair per rule, indexed by ActionId - 1: module state like the
   // cells, not part of "<name>/counters" (a reading is a question, not a
   // resource write).
-  std::vector<Times> times_;
+  std::vector<Stamps> stamps_;
 
   std::unique_ptr<bess::dataplane::SlotTable<ActionId, Entry>> entries_;
   std::unique_ptr<bess::dataplane::SlotResource<ActionId, Entry>> resource_;
