@@ -448,7 +448,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 				// make a URR out of half a request.
 				return fmt.Errorf("%w: the URR %d is not in the session", errNotExpressible, u.id)
 			}
-			entry = &urr{id: u.id}
+			entry = &urr{id: u.id, reported: time.Now()}
 			s.URRs[u.id] = entry
 		}
 		// An Update URR carries what changed (7.5.4.4); the fields it names
@@ -592,9 +592,23 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		}
 		s.PDRs[p.id] = pdr
 	}
-	// Resolve what each PDR's FAR and QERs mean for the dataplane: a forward or
-	// a drop, the meter of the QER this direction is policed by, and (downlink)
-	// the tunnel record the FAR's outer header creation names.
+	// What the request's objects mean for each PDR (resolve): a modification
+	// that leaves the model unfaithful to itself is refused before the compile
+	// that would write it.
+	if err := c.resolve(s); err != nil {
+		return err
+	}
+	return nil
+}
+
+// resolve derives what each PDR's FAR and QERs mean for the dataplane: a
+// forward or a drop, the meter of the QER this direction is policed by, and
+// (downlink) the tunnel record the FAR's outer header creation names. compile
+// calls it too, and that is not redundancy: a URR's enforcement changes the
+// model with no message from the SMF (report.go), so what a transaction writes
+// must follow the model as it is now rather than as the last message left it.
+// The caller holds the lock.
+func (c *Compiler) resolve(s *Session) error {
 	for _, p := range pdrsInOrder(s) {
 		far := s.FARs[p.farID]
 		dir := c.direction(p.srcIfc)
@@ -644,6 +658,14 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 				return fmt.Errorf(
 					"%w: PDR %d names the URR %d, and this graph has no usage counters in that direction",
 					errNotExpressible, p.id, uid)
+			}
+			if s.URRs[uid].enforcing {
+				// The URR's quota is used up (5.2.2.2.1): the traffic of every
+				// PDR that names it stops, by compiling to the drop gate. A
+				// modification that provisions a new quota or threshold clears
+				// the flag, which is how the SMF re-opens the traffic, and the
+				// next transaction then writes the rule again with its action.
+				p.drop = true
 			}
 		}
 		if !p.ueIP.IsValid() {
@@ -702,6 +724,12 @@ func qerHoldsMeter(s *Session, removed *pdr) bool {
 func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// What this transaction writes follows the model as it is now: a URR's
+	// enforcement changes it without a message from the SMF (report.go).
+	if err := c.resolve(s); err != nil {
+		return nil, nil, err
+	}
 
 	changes := make([]bess.Change, 0, 4*len(s.PDRs)+len(s.QERs))
 	created := make([]*ie.IE, 0, len(s.PDRs))

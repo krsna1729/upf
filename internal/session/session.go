@@ -40,6 +40,16 @@ type Applier interface {
 	Apply(ctx context.Context, changes ...bess.Change) error
 }
 
+// CounterReader is the half of a dataplane a URR's measurement needs: the
+// counting module's own reading of the rules named, by ActionId (report.go).
+// It is a capability of its own rather than another method of Applier because a
+// dataplane without counters (a graph that charges nothing, or a stand-in in a
+// test) is a plain fact about that graph, and only a session that has a URR
+// ever asks.
+type CounterReader interface {
+	RuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error)
+}
+
 // Field is one entry of the PDR table's key, in the order the deployed graph
 // declared it. The compiler sets a mask per field: a rule matches what its PDI
 // names and masks the rest out, so one table holds every PDR shape.
@@ -199,7 +209,12 @@ func (c Config) withDefaults() Config {
 type Compiler struct {
 	cfg Config
 	ap  Applier
-	log *slog.Logger
+	// counters is the same dataplane as a counter reader, when it has that
+	// capability: the Applier interface stays what every applier must answer,
+	// and a graph without counting modules is a graph a URR cannot report from
+	// (Evaluate says so rather than reporting zero forever).
+	counters CounterReader
+	log      *slog.Logger
 
 	mu       sync.Mutex
 	sessions map[uint64]*Session // by local SEID
@@ -216,7 +231,7 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		log = slog.Default()
 	}
 	cfg = cfg.withDefaults()
-	return &Compiler{
+	c := &Compiler{
 		cfg:      cfg,
 		ap:       ap,
 		log:      log,
@@ -227,6 +242,10 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		meters:   newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
 		teids:    newIDPool(cfg.MaxTEIDs, 0),
 	}
+	if reader, ok := ap.(CounterReader); ok {
+		c.counters = reader
+	}
+	return c
 }
 
 // findByCP is the session the SMF's F-SEID names; the caller holds the lock.
@@ -411,6 +430,11 @@ type urr struct {
 	seqn      uint32
 	firstSeen time.Time
 	hasSeen   bool
+
+	// lastUp and lastDown are the counters these PDRs had counted when the last
+	// report was made, so that report's successor covers the usage after it
+	// rather than the session's lifetime (report.go, "the window").
+	lastUp, lastDown Usage
 }
 
 // AssociationEnded implements n4.SessionHandler: no session of the association

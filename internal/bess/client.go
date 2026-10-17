@@ -168,6 +168,54 @@ func (c *Client) Message(typ string, fields map[string]any) (proto.Message, erro
 	return m, nil
 }
 
+// RuleCount is what one rule's traffic measured: the ActionId its counter is
+// keyed by, and the packets and the IP octets of them that crossed the rule,
+// with every worker's plane summed (a reading is exact for each cell -- a
+// worker writes only its own -- not one global instant).
+type RuleCount struct {
+	ActionID uint32
+	Packets  uint64
+	Octets   uint64
+}
+
+// RuleCounts asks a counting module for the counters of the named rules, or of
+// every rule it holds when none are named, through the module's own get_counts
+// action. The message names are the plugin's (datapath/upf_datapath.proto), so
+// a graph without that module -- or one built against another schema -- is an
+// error here and not an empty reading: a reporter that read silence as zero
+// usage would report nothing forever.
+func (c *Client) RuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]RuleCount, error) {
+	arg, err := c.Message("upf.pb.UrrCountCommandGetCountsArg",
+		map[string]any{"action_ids": actionIDs})
+	if err != nil {
+		return nil, err
+	}
+	result, err := c.sdk.InvokeAction(ctx, module, "get_counts", arg)
+	if err != nil {
+		return nil, fmt.Errorf("bess: %s get_counts: %w", module, err)
+	}
+	response, err := c.Message("upf.pb.UrrCountCommandGetCountsResponse", nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.UnmarshalTo(response); err != nil {
+		return nil, fmt.Errorf("bess: %s get_counts answered %s: %w", module, result.GetTypeUrl(), err)
+	}
+	fields := response.ProtoReflect().Descriptor().Fields()
+	counts := response.ProtoReflect().Get(fields.ByName("counts")).List()
+	out := make([]RuleCount, 0, counts.Len())
+	for i := range counts.Len() {
+		rule := counts.Get(i).Message()
+		rf := rule.Descriptor().Fields()
+		out = append(out, RuleCount{
+			ActionID: uint32(rule.Get(rf.ByName("action_id")).Uint()),
+			Packets:  rule.Get(rf.ByName("packets")).Uint(),
+			Octets:   rule.Get(rf.ByName("octets")).Uint(),
+		})
+	}
+	return out, nil
+}
+
 // Change is one resource edit of a session's transaction: a map resource's key
 // and value, or a singleton's value alone. A nil Value erases the key.
 type Change struct {
