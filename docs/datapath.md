@@ -415,29 +415,32 @@ the class of mistake the smoke test exists to catch.
 
 **The fused module's table, decided before it is written.** `teid` ⊕
 `gtpu_decap` needs a table keyed by TEID, and the primitive decides the cost the
-fusion exists to win. Our other resources are dense and id-indexed:
-`SlotTable<ActionId, …>` behind `SlotResource` (the tunnels, the counters), built
-on the immutable `ObjectTable` (`core/dataplane/object_table.h`: "extract the id,
-bounds check, validity check, address calculation. No hashing, no search") whose
-generations are published through `RcuPtr` and the runtime's `RcuDomain`. That
-shape does not fit a TEID: ids there are one-based and dense, while a TEID is a
-sparse `uint32` the *SMF* usually chooses (it sends the F-TEID; we only allocate
-when it asks with CHOOSE/CHID, FTUP). A dense encoding — pool index plus a
-generation prefix — would be the cheapest possible lookup, and it is rejected for
-the reason it is tempting: it works only for TEIDs we allocate, and the SMF's own
-TEIDs must be served the same way.
+fusion exists to win. It is not the one our other resources use: the tunnels and
+the counters are `SlotTable<ActionId, …>` behind `SlotResource`, and that header
+describes itself as "ObjectTable (K2) **without the rebuild**" — a change is one
+pointer store and the object it replaced is retired through RCU. That fits dense
+ids, and a TEID is a sparse `uint32` the *SMF* usually chooses (it sends the
+F-TEID; we allocate only when it asks with CHOOSE/CHID, FTUP). So the dense
+encoding — pool index plus a generation prefix — would serve only the TEIDs we
+allocate and die on the case that matters, and a translation table for the SMF's
+own TEIDs is a second lookup, i.e. no win.
 
-So the table is sparse: `bess::utils::CuckooMap<uint32_t, …>`
-(`core/utils/cuckoo_map.h`), whose header states the split we need — "lookup is
-thread-safe, but update is not" — published the way every other resource here is:
-a session transaction builds a new generation and hands it to the runtime's
-`RcuDomain`, so a reader keeps the old one until it is done and a control thread
-destroys it. Lookup is then one hash probe on four bytes with no mask machinery
-and no key construction, against `WildcardMatch`'s tuple-plus-masks path in the
-split chain; updates are a rebuild, which is a per-session event and not a
-per-packet cost. If the measurement ever shows the probe dominating, the dense
-encoding comes back as an option — but only alongside a translation table for
-SMF-chosen TEIDs, which is a second lookup, i.e. no win at all.
+The table is the daemon's own concurrent exact table, the one its match modules
+use: `bess::classifier::ConcurrentExactTable`
+(`core/classifier/concurrent_exact.h`), keyed on the four bytes of the TEID and
+held behind `bess::rcu::RcuPtr<Generation>`, published through the runtime's
+`RcuDomain` exactly as `ExactMatch` holds its table
+(`core/modules/exact_match.h:259-269`: one acquire load per batch on the data
+path, serialized rebuilds off it, the retired generation destroyed by a control
+thread). It is rte_hash underneath — CRC32C over the key, a fixed capacity
+(`CapacityFor(rules)`: three quarters of a power of two), per-key upsert and
+remove with headroom for the deletes still waiting out a grace period, and a
+deliberate rebuild only when it runs out of room. A session change is therefore
+one upsert, not a rebuild of the whole table: O(1) per establish is what
+`docs/design.md`'s `update_scale_bench` exists to hold at 10^5–10^6 sessions, and
+a map rebuilt per transaction is precisely what it would catch. Per packet the
+cost is one hash probe and one key compare — no masks, no key construction —
+against `WildcardMatch`'s tuple-plus-masks path in the split chain.
 
 ## Building and loading it
 
