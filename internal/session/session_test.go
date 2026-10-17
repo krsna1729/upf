@@ -97,6 +97,42 @@ func (r rule) actionID() uint32 { v, _ := r.change.Value["action_id"].(uint32); 
 // gate is the gate the rule delivers.
 func (r rule) gate() uint64 { v, _ := r.change.Value["gate"].(uint64); return v }
 
+// actionsErased is the action records a transaction takes out: a change with no
+// value, which is what an erase is.
+func actionsErased(changes []bess.Change) []bess.Change {
+	var out []bess.Change
+	for _, ch := range changes {
+		if ch.Value == nil && strings.HasSuffix(ch.Resource, "/actions") {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// metersErased is actionsErased for meters.
+func metersErased(changes []bess.Change) []bess.Change {
+	var out []bess.Change
+	for _, ch := range changes {
+		if ch.Value == nil && strings.HasSuffix(ch.Resource, "/meters") {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// onlyErases is the changes that take records out: a change carries no value
+// when it erases, and a transaction that removes an object while rewriting
+// others holds both kinds.
+func onlyErases(changes []bess.Change) []bess.Change {
+	var out []bess.Change
+	for _, ch := range changes {
+		if ch.Value == nil {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
 // teidRule is the change carrying a session's TEID rule, or false: the rule's
 // key holds the TEID in one field, values and masks in two lists.
 func teidRule(changes []bess.Change, resource string, teid uint32) (bess.Change, bool) {
@@ -241,26 +277,7 @@ func TestADeletionErasesEachSharedRecordOnce(t *testing.T) {
 	// better than the SMF's filters do.)
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
-	req := message.NewSessionEstablishmentRequest(0, 0, 0x6660, 1, 0,
-		ie.NewFSEID(0x6660, nil, nil),
-		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
-			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, 0x00000011, net.ParseIP("192.0.2.1"), nil, 0),
-				ie.NewUEIPAddress(0x02, "10.45.0.5", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any 1000 to any", "", "", "", 0)),
-			ie.NewFARID(1), ie.NewQERID(1)),
-		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
-			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, 0x00000011, net.ParseIP("192.0.2.1"), nil, 0),
-				ie.NewUEIPAddress(0x02, "10.45.0.5", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any 2000 to any", "", "", "", 0)),
-			ie.NewFARID(1), ie.NewQERID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
-			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
-		ie.NewCreateQER(ie.NewQERID(1),
-			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
-			ie.NewMBR(1000, 2000)),
-	)
+	req := sharedFTEIDEstablishment(0x6660, "10.45.0.5", 0x00000011)
 	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
@@ -286,9 +303,110 @@ func TestADeletionErasesEachSharedRecordOnce(t *testing.T) {
 	}
 }
 
+// sharedFTEIDEstablishment is a session whose two uplink PDRs share one F-TEID
+// and one QER: what a real session looks like when an SMF programs several
+// uplink filters onto one tunnel. The two PDRs differ only in the source port
+// their SDF names, so their rule keys differ while the records they name do not.
+func sharedFTEIDEstablishment(cpSEID uint64, ueIP string, fteid uint32) *message.SessionEstablishmentRequest {
+	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+		ie.NewFSEID(cpSEID, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any 1000 to any", "", "", "", 0)),
+			ie.NewFARID(1), ie.NewQERID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any 2000 to any", "", "", "", 0)),
+			ie.NewFARID(1), ie.NewQERID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		ie.NewCreateQER(ie.NewQERID(1),
+			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			ie.NewMBR(1000, 2000)),
+	)
+}
+
 // A closed gate is not a slow path: the compiler writes the rule's own gate as
 // the drop gate and gives it no action, so the packet is dropped where the
 // session's state says it must be, without a lookup into the action table.
+func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
+	// A Modify that removes a PDR must erase what that PDR programmed, in the
+	// same transaction as the rest of the change: a rule that keeps selecting
+	// packets after the SMF has been told the PDR is gone forwards them under
+	// an action the session no longer has a PDR for, and the answer the SMF got
+	// gives it no way to learn that.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(establishmentWithFTEID(0x7770, "10.45.0.7", 0x22222222)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+
+	// PDR 1 is the session's only uplink PDR, so its rule, its action, the
+	// session's TEID rule and the uplink meter it is policed by are all its.
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewRemovePDR(ie.NewPDRID(1)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	erases := rec.last()
+	r := ruleCarrying(t, erases, fieldSrcIP, []byte{10, 45, 0, 7})
+	if r.change.Value != nil {
+		t.Error("the removed PDR's rule was rewritten rather than erased")
+	}
+	if _, ok := teidRule(onlyErases(erases), testConfig().TEIDTable+"/rules", 0x22222222); !ok {
+		t.Error("the removed PDR's TEID rule is still programmed")
+	}
+	if n := len(actionsErased(erases)); n != 1 {
+		t.Errorf("%d action records erased, want the removed PDR's one", n)
+	}
+	if n := len(metersErased(erases)); n != 1 {
+		t.Errorf("%d meter records erased, want the uplink QER's one", n)
+	}
+	// The downlink PDR stays, so its rule is rewritten in the same transaction.
+	written := 0
+	for _, ch := range rules(erases) {
+		if ch.change.Value != nil {
+			written++
+		}
+	}
+	if written != 1 {
+		t.Errorf("%d rules written, want the surviving PDR's one", written)
+	}
+
+	// Now the shared case: two uplink PDRs on one F-TEID and one QER, one of
+	// them removed. Its own records go; the TEID rule and the meter belong to
+	// the PDR that stays, and erasing them would leave that PDR unpoliced and
+	// its packets dropped at the decap's default gate.
+	rec = &recorder{}
+	c = New(testConfig(), rec, quietLogger())
+	resp = c.Establish(sharedFTEIDEstablishment(0x7771, "10.45.0.7", 0x33333333)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewRemovePDR(ie.NewPDRID(2)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	erases = rec.last()
+	if _, ok := teidRule(onlyErases(erases), testConfig().TEIDTable+"/rules", 0x33333333); ok {
+		t.Error("the removal erased a TEID rule the surviving PDR still needs")
+	}
+	if n := len(metersErased(erases)); n != 0 {
+		t.Errorf("%d meter records erased, want none: the surviving PDR uses the meter", n)
+	}
+	if n := len(actionsErased(erases)); n != 1 {
+		t.Errorf("%d action records erased, want the removed PDR's one", n)
+	}
+}
+
 func TestAClosedGateDropsWithoutAnAction(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
@@ -685,6 +803,38 @@ func TestAUEIPAllocationRequestIsRefused(t *testing.T) {
 	}
 	if len(rec.txns) != 0 {
 		t.Error("a refused session wrote to the dataplane")
+	}
+
+	// A dual-stack session, where the SMF gives the IPv4 address and asks the
+	// UP to choose the IPv6 one: the flags are V4|V6|CHV6, so an IPv4 address
+	// field is present and the CHV6 bit is the only sign that the SMF expects
+	// an IPv6 address back. Reading the IE by its address alone accepts the
+	// session and the SMF never learns what it was told to choose.
+	req = message.NewSessionEstablishmentRequest(0, 0, 0x555b, 1, 0,
+		ie.NewFSEID(0x555b, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x23, "10.45.0.8", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a V4 address with CHV6 answered cause %d, want a rule failure", got)
+	}
+
+	// The V4 flag with no address at all is a malformed IE rather than a
+	// request: it parses as 0.0.0.0, and a rule keyed on that matches no
+	// packet, so the session would stand while carrying nothing.
+	req = message.NewSessionEstablishmentRequest(0, 0, 0x555c, 1, 0,
+		ie.NewFSEID(0x555c, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("an empty V4 address answered cause %d, want a rule failure", got)
 	}
 }
 

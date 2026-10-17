@@ -255,6 +255,7 @@ func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Messa
 		c.log.Warn("session: the dataplane refused the modification", "seid", seid, "error", err)
 		return modifyResponse(req, seid, causeOf(err), nil)
 	}
+	c.settle(s)
 
 	c.mu.Lock()
 	for _, p := range pdrsInOrder(s) {
@@ -337,6 +338,12 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		}
 	}
 	for _, id := range removePDRs {
+		if old := s.PDRs[id]; old != nil {
+			// The records stay in the dataplane until the next compile erases
+			// them: it is the transaction that carries the removal out, so a
+			// refused modification leaves both the PDR and its records.
+			s.removed = append(s.removed, old)
+		}
 		delete(s.PDRs, id)
 	}
 	for _, id := range removeFARs {
@@ -344,6 +351,9 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 	}
 	for _, p := range pdrs {
 		old := s.PDRs[p.id]
+		// A request may remove a PDR and create it again; the removal folded in
+		// above then says nothing about the PDR that is live now.
+		s.forgetRemoval(p.id)
 		pdr := &pdr{
 			id: p.id, precedence: p.precedence, srcIfc: p.srcIfc,
 			ueIP: p.ueIP, sdf: p.sdf, farID: p.farID,
@@ -443,6 +453,29 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 	return nil
 }
 
+// teidInUse reports whether a PDR the session still has names this F-TEID. The
+// TEID rule is the session's, not the PDR's: several uplink PDRs may share one
+// F-TEID, so removing one of them does not remove the rule.
+func teidInUse(s *Session, removed *pdr) bool {
+	for _, p := range s.PDRs {
+		if p.teid == removed.teid {
+			return true
+		}
+	}
+	return false
+}
+
+// meterInUse is teidInUse for the meter a QER's rate resolved to in one
+// direction: several PDRs are policed by it, so it outlives any one of them.
+func meterInUse(s *Session, meterID uint32) bool {
+	for _, p := range s.PDRs {
+		if p.meterID == meterID {
+			return true
+		}
+	}
+	return false
+}
+
 // compile turns a session's model into the resource changes that program it,
 // and the Created PDRs the answer carries. Every action and meter id the
 // session needs is allocated here, once.
@@ -452,6 +485,46 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 
 	changes := make([]bess.Change, 0, 4*len(s.PDRs)+len(s.QERs))
 	created := make([]*ie.IE, 0, len(s.PDRs))
+
+	// PDRs a modification removed are erased by the same transaction that
+	// writes the rest of the session: the SMF is told they are gone, so their
+	// rules must stop selecting packets. Two of the records a PDR names can
+	// belong to the PDRs that stay -- a rule key when two PDRs compile to the
+	// same one, a QER's meter when several are policed by it, and the TEID rule
+	// when a session's uplink PDRs share an F-TEID -- and those are erased only
+	// if the removed PDR was their last user.
+	live := map[string]bool{}
+	for _, p := range s.PDRs {
+		dir := c.direction(p.srcIfc)
+		if key, err := p.ruleKey(dir.PDRFields); err == nil {
+			live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
+		}
+	}
+	for _, p := range s.removed {
+		dir := c.direction(p.srcIfc)
+		key, err := p.ruleKey(dir.PDRFields)
+		if err != nil {
+			return nil, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
+		}
+		if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
+			changes = append(changes, bess.Change{Resource: rulesRes(dir), Key: key})
+		}
+		if p.actionID != 0 {
+			changes = append(changes, bess.Change{
+				Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
+		}
+		for _, t := range p.tunnels {
+			changes = append(changes, bess.Change{
+				Resource: t, Key: map[string]any{"action_id": p.actionID}})
+		}
+		if p.teid != 0 && !teidInUse(s, p) {
+			changes = append(changes, bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
+		}
+		if p.meterID != 0 && !meterInUse(s, p.meterID) {
+			changes = append(changes, bess.Change{
+				Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
+		}
+	}
 
 	// Meters first: an action references the meter its QER resolved to. One
 	// record per policed direction, each a two-rate three-colour meter with the
@@ -911,12 +984,26 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if err != nil {
 				return fmt.Errorf("UE IP address: %w", err)
 			}
+			if c.HasCHV4() || c.HasCHV6() {
+				// CHV4/CHV6 (TS 29.244 8.2.62): the SMF asks the UP function to
+				// choose an address of that family -- the UEIP feature, which
+				// this UP neither implements nor advertises. The other family's
+				// address may well be present, as it is in a dual-stack session
+				// where the SMF gives V4 and asks for V6, so these bits are what
+				// says a request was made at all: reading the IE by its
+				// addresses accepts the session and answers a success the SMF
+				// reads as "the UP chose one", an address it would never learn.
+				return fmt.Errorf("%w: the UE IP address IE asks the UP function to allocate an address", errNotExpressible)
+			}
 			switch {
 			case len(fields.IPv4Address) == 4:
-				// go-pfcp hands back a zero-length (not nil) field when the IE
-				// carries no address, which is the alloc-request form above --
-				// length, not nilness, is what says whether one is present.
 				if a, ok := netip.AddrFromSlice(fields.IPv4Address); ok {
+					if a.IsUnspecified() {
+						// The V4 flag with no address bytes parses as 0.0.0.0:
+						// a rule keyed on that matches no packet, so the session
+						// would stand while carrying nothing at all.
+						return fmt.Errorf("%w: the UE IP address is 0.0.0.0", errNotExpressible)
+					}
 					p.ueIP = a.Unmap()
 				}
 			case len(fields.IPv4Address) != 0:

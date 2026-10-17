@@ -244,6 +244,25 @@ type Session struct {
 	FARs map[uint32]*far
 	QERs map[uint32]*qer
 	URRs map[uint32]*urr
+
+	// removed holds the PDRs a modification took out of the model: their
+	// records are still in the dataplane, and the next transaction that
+	// compiles the session erases them (compile), so the SMF is never told a
+	// PDR is gone while its rule still selects packets. settle clears the list
+	// once that transaction is applied, which leaves the retry after a refusal
+	// erasing the same records.
+	removed []*pdr
+}
+
+// forgetRemoval marks a PDR id as live again: a request may remove a PDR and
+// create it in the same message, and the removal is folded in first.
+func (s *Session) forgetRemoval(id uint16) {
+	for i, p := range s.removed {
+		if p.id == id {
+			s.removed = append(s.removed[:i], s.removed[i+1:]...)
+			return
+		}
+	}
 }
 
 // pdr is one compiled PDR: its rule in the PDR table and what it resolved to.
@@ -423,12 +442,12 @@ func (p *idPool) alloc() (uint32, error) {
 }
 
 // reserve keeps an id the pool did not hand out out of the walk: an F-TEID an
-// SMF pinned. That a pin is foreign to the pool is what makes the *pin* the
-// pool's problem rather than its business -- a foreign value handed out would
-// go to a session that did not ask for it (0x11223344 is a legal pin and an
-// illegal allocation) -- but the pin is still released when its session goes
-// (releaseSession), and the walk may then hand it out like any freed id. That
-// is what lets an SMF re-pin a value it has finished with.
+// SMF pinned. The pin is released when its session goes (releaseSession), which
+// ends the reservation but never queues the value for allocation: a foreign
+// value offered to the free list is a value no session asked for. It comes back
+// only if the walk visits it, so a pin inside the pool's space is handed out
+// again on the next time round and a pin outside it (0x11223344 is a legal pin
+// and an illegal allocation) never is.
 func (p *idPool) reserve(id uint32) {
 	if id == 0 {
 		return
@@ -535,11 +554,21 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	return nil
 }
 
+// settle forgets the removals a transaction carried out, once the dataplane has
+// taken it. Until then they stay listed, so a refused modification's retry
+// erases the same records rather than leaving them behind.
+func (c *Compiler) settle(s *Session) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s.removed = nil
+}
+
 // releaseSession frees the ids a session's records hold, each exactly once: one
 // F-TEID, and one QER's meter, usually appear in several of a session's PDRs,
 // and freeing an id twice would queue it in the free list twice and hand it to
 // two sessions. The caller holds the lock. A reserved id (an F-TEID the SMF
-// pinned) is not freed: the pool never handed it out.
+// pinned) is not queued for allocation -- the pool never handed it out -- so
+// only its reservation ends.
 func (c *Compiler) releaseSession(s *Session) {
 	// Each id once per pool: a session says its ids once per PDR, and two
 	// uplink PDRs sharing a pinned F-TEID would otherwise release it twice --
