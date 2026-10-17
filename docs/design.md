@@ -130,20 +130,24 @@ costs the arms below are expected to confirm:
 | BAR | a slot write, only on a buffered packet | 0 |
 | ULCL / branching | one route-domain select from the record | 0 |
 
-**State policy (the path to 400G).** No shared mutable state in the packet path:
-classifiers and records are per-worker copies published by RCU; URR counters are
-worker-local and summed by the reporting task (no atomics in the path). Policing is the
-one state that cannot be summed after the fact: a counter's read is order-free and can
-be taken later, but a rate's decision -- the colour *this* packet gets -- has to be
-taken at the packet, so the bucket is shared at the point of decision. MBR policing
-goes through the `Meter` module, which creates every controller-written meter as
-`kShared` (`core/modules/meter.cc:158`; `Reconfigure` keeps the mode, so it is
-`kShared` for the meter's life): one token bucket, each check under the meter's own
-spinlock. The rate is therefore enforced *once* regardless of how many workers a
-session's flow reaches; the cost is serialization on one cache line, not N times the
-rate. `kWorkerExclusive` would remove the lock but requires the flow to be pinned to one
-worker, and no control-plane path selects it today (`datapath/` and `internal/` name no
-sharing mode, and the graph's `Meter` takes none).
+**State policy (the path to 400G).** What the *controller* writes is shared and read,
+never written, by the packet path: one classifier table and one `ActionTable` per
+direction (`classifier::ConcurrentMaskedTable`, `dataplane::SlotTable` -- a rule or a
+record exists once for every worker, and a configuration change is published as a new
+generation), so a session's rules cost memory once rather than once per worker. What
+the *packet path* writes is per-worker: URR counters are worker-local and summed by the
+reporting task (no atomics in the path). Policing is the one state that has to be shared
+at the point of decision, because it cannot be summed after the fact: a counter's read
+is order-free and can be taken later, but a rate's decision -- the colour *this* packet
+gets -- is this packet's. MBR policing goes through the `Meter` module, which creates
+every controller-written meter as `kShared` (`core/modules/meter.cc:158`;
+`Reconfigure` keeps the mode, so it is `kShared` for the meter's life): one token
+bucket, each check under the meter's own spinlock. The rate is therefore enforced
+*once* regardless of how many workers a session's flow reaches; the cost is
+serialization on one cache line, not N times the rate. `kWorkerExclusive` would remove
+the lock but requires the flow to be pinned to one worker, and no control-plane path
+selects it today (`datapath/` and `internal/` name no sharing mode, and the graph's
+`Meter` takes none).
 
 The counterpoint is NAT, where a shared table is the multi-worker mode by *decision*
 rather than by default: a binding cannot be partitioned at all -- the rewrite changes
@@ -213,8 +217,11 @@ publishable module cost looks like.
 **The counting arms, and the owed re-run (2026-10-17).** The three `M.urr_count`
 arms were taken by `ci/bench-modules.sh` inside the host's perf slot --
 `WRAP="taskset -c 2,4" ROUNDS=4 slot perf ci/bench-modules.sh`, so no build ran
-while the window was open -- pinned to CPUs 2,4, plugin 519584 bytes of
-2026-10-17 (the DSCP copy is in), the daemon and the tool from `build/fast`:
+while the window was open -- pinned to CPUs 2,4, the governor as found (`powersave`
+on the measured CPU, `no_turbo=0`, i.e. turbo on: `slot perf` changes neither, and
+`perf stat` needs `perf_event_paranoid <= 0`, which this host sets to 2), plugin
+519584 bytes of 2026-10-17 (the DSCP copy is in), the daemon and the tool from
+`build/fast`:
 
 | arm | ns/pkt (above `M.base`) | over its control |
 |---|---|---|
@@ -223,28 +230,28 @@ while the window was open -- pinned to CPUs 2,4, plugin 519584 bytes of
 | `M.urr_count.empty` | 2.55 | **+1.34 ns with no entry** |
 
 The four rounds' paired deltas: a counted rule 3.69-4.46 ns, no entry 1.09-1.64 ns.
-From the same run, the module arms: decap +12.45 ns (12.20-15.09 per round; round 3
-sampled 39.7 ns against its 24.7 ns control) and encap +17.77 ns (17.49-18.03) --
-the encap's cost *with* the DSCP copy, which is the re-run the paragraph below owes.
-An earlier run of the same arms with `taskset` alone gave +3.88 and +1.56 ns, within
-0.3 ns of these: the shape was right, and these are the figures. There is no
-instruction column: `live_perf` reports `perf stat failed; no counters (needs perf
-and kernel.perf_event_paranoid <= 0)` and this host's setting is 2, so the 2026-10-16
-run's instructions/pkt remain the only ones on record.
+From the same run, the module arms: decap +12.45 ns (paired rounds 12.20, 12.35,
+15.09, 12.30 -- round 3 sampled 39.7 ns against its own 24.7 ns control) and encap
++17.77 ns (17.49-18.03 paired) -- the encap's cost *with* the DSCP copy, which is the
+re-run the section owed. An earlier run of the same arms with `taskset` alone gave
++3.88 and +1.56 ns, within 0.3 ns of these: the shape was right, and these are the
+figures. There is no instruction column, so the 2026-10-16 run's instructions/pkt
+remain the only ones on record, and the two runs' conditions differ (that one on an
+isolated CPU at the performance governor).
 
 **After that measurement** the encap learned to copy the inner packet's TOS to the
 outer header (the DSCP copy; `ci/session-path.sh` checks the outer header carries the
-inner class). The re-run is owed: the wrapper's child writes nothing and exits 1 —
+inner class). Its re-run is the 2026-10-17 run above (+17.77 ns over its control; an
+unisolated cross-check had put it at +16.88 ns against the +18.1 here, which is the
+between-run spread an unpaired run can see). What the re-run had to work around is the
+wrapper's child: it writes nothing and exits 1 —
 measured today, and it is **`--cpu` rather than `--isolate`**: `omarchy-benchmark
 --cpu 4 -- /bin/echo` exits 1 without running the command (its launcher's status is
 1, and it restores the machine on the way out), `--cpu 4 --isolate` the same, while
 the same command with no CPU selection runs — so `ci/bench-modules.sh` now fails
 loudly when its report is empty instead of `sed`-ing nothing and exiting 0. It is
 not a privilege problem: `sudo -n true` succeeds on this host, and the wrapper
-does restore the CPU, turbo and governor state it touched. There is
-no isolated number for the changed encap yet. An unisolated cross-check put
-the encap at +16.88 ns over its control against the +18.1 above: inside the
-between-run spread, which is as much as an unpaired run can say.
+does restore the CPU, turbo and governor state it touched.
 
 **Fusion decision from these numbers.** The decap is 44 cycles, the encap 63, and the
 classifier in front of the decap is ~49 (its control above `M.base`, including its rule,
@@ -336,7 +343,11 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   claim dropped while a transaction is in the air would let another session
   write a rule this one's retry then erases. A compile that fails gives up only
   the keys it was the first to claim; the keys the session already held stay,
-  their rules being in the dataplane. What makes the key's contents a statement
+  their rules being in the dataplane, and an Apply whose answer never came keeps
+  them too (its transaction may have committed). The keys are listed on the
+  session itself, so a release frees its own rules rather than walking every live
+  key under the lock -- at the million-session target that walk is the difference
+  between a release and a stall. What makes the key's contents a statement
   is the same fact from the other side: the tunnel on the uplink (`upf_teid`)
   and the route domain where a graph writes one are why two instances serving
   one subscriber prefix are two rules rather than a collision.
@@ -578,7 +589,7 @@ structure this design uses, so the arithmetic below is that table at this shape
 
 | per session | state in BESS | measured bytes | at 10^6 sessions |
 |---|---|---|---|
-| 4 PDR | WildcardMatch rule (masked table, per worker) | not measured: 16-byte key, mask, value, priority, result, cuckoo body | about 360 MB partitioned, about 2.9 GB if every worker holds every rule |
+| 4 PDR | WildcardMatch rule (one masked table, shared by the workers) | not measured: 16-byte key, mask, value, priority, result, cuckoo body | about 360 MB (2.9 GB only if the table were copied per worker, which it is not) |
 | 4 FAR | ActionTable record (`ObjectTable`) | 64 B/object | 256 MB |
 | 2 QER | `MeterSet` | 64 B state + 8 B pointer | 144 MB (1,048,576 meters measure 64 MiB) |
 | 2 URR | `CounterSet` block | 4 KiB for three counters (each slot per worker: 64 slots) | the wall: 8 GB if each URR owns a full per-worker block |
@@ -679,15 +690,17 @@ Go's own `-cpuprofile` is killed here, and that does not say anything about
 
 The walls, in order:
 
-1. **Per-worker tables.** Classifier rules and action records are per-worker
-   (D-097). Sharding by flow owner -- the worker whose queue sees the session
-   -- measures 3.4x better than one shared table at 3% new flows
-   (`update_scale_bench` E2), so sessions are sharded, not shared. That holds
-   only while one worker sees the whole session: with asymmetric RSS, or the N6
-   side of a rewritten flow, the two directions land on different workers and
-   the sharded form cannot hold a session's state. Which shape this deployment
-   gets is a property of its ports, not of the module (see "Where a table
-   lives"), and that case is not measured yet.
+1. **Per-worker tables.** The tables a controller *writes* are not the subject of
+   this wall: they are shared -- one copy, read by every worker, published as a
+   generation -- so the state at issue is what the *packet path* writes (a usage
+   count, a learned binding). Sharding that by flow owner -- the worker whose
+   queue sees the session -- measures 3.4x better than one shared table at 3% new
+   flows (`update_scale_bench` E2), so packet-path state is sharded by flow owner
+   rather than shared. That holds only while one worker sees the whole session:
+   with asymmetric RSS, or the N6 side of a rewritten flow, the two directions
+   land on different workers and the sharded form cannot hold a session's state.
+   Which shape this deployment gets is a property of its ports, not of the module
+   (see "Where a table lives"), and that case is not measured yet.
 2. **URR counters.** A counter block is priced per worker slot (`CounterSet`:
    4 KiB for three counters): right for a hot counter, wrong for a million
    mostly-idle sessions. A URR must allocate its block on the worker where the
@@ -750,8 +763,8 @@ The cost is about 80 us of datapath time per transaction. That is BESS's to
 carry, it is written down in its performance contract's live-API section, and it
 is the number a session has to be programmed against a million times over.
 Finding which part of a change's publication to the workers costs those 80 us --
-the generation handoff, the per-worker table swap, or the reader's
-next-iteration check -- is the next experiment.
+the generation handoff, or the reader's next-iteration check -- is the next
+experiment.
 
 Two operational findings from the same runs. `upfd` must bound how many
 transactions it has in flight: 256 concurrent applies made the node answer eight

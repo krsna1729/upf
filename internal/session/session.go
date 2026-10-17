@@ -339,6 +339,36 @@ type Session struct {
 	// old key unless the same transaction writes it, which is what keeps one
 	// key from being written and erased at once (the engine rejects that).
 	stale []*pdr
+
+	// ruleKeys are the rule keys this session holds in the compiler's table of
+	// owners, kept here so a release touches only them: a deletion at the
+	// million-session target would otherwise walk every live key under the
+	// lock. compile adds a key when it is the first to claim it, settle removes
+	// the ones a transaction gave up, and releaseSession frees what is left.
+	ruleKeys []string
+}
+
+// holdsRuleKey reports whether the session already lists a rule key. The list
+// is a session's own -- a handful of rules -- so the scan is the point: it
+// costs nothing next to a map, and it keeps the entry from being added twice
+// when a key is claimed, given up and claimed again. The caller holds the lock.
+func (s *Session) holdsRuleKey(key string) bool {
+	for _, k := range s.ruleKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// forgetRuleKey drops a key from the session's list. The caller holds the lock.
+func (s *Session) forgetRuleKey(key string) {
+	for i, k := range s.ruleKeys {
+		if k == key {
+			s.ruleKeys = append(s.ruleKeys[:i], s.ruleKeys[i+1:]...)
+			return
+		}
+	}
 }
 
 // forgetRemoval marks a PDR id as live again: a request may remove a PDR and
@@ -830,6 +860,7 @@ func (c *Compiler) settle(s *Session) {
 		rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
 		if !live[rkey] && c.rules[rkey] == s.LocalSEID {
 			delete(c.rules, rkey)
+			s.forgetRuleKey(rkey)
 		}
 	}
 	s.removed, s.stale = nil, nil
@@ -844,12 +875,15 @@ func (c *Compiler) settle(s *Session) {
 func (c *Compiler) releaseSession(s *Session) {
 	// The rule keys this session holds go with it: the deletion that called
 	// this erased them, and a claim kept past that would refuse another session
-	// the key for good.
-	for key, owner := range c.rules {
-		if owner == s.LocalSEID {
+	// the key for good. The keys are the session's own list, so a release costs
+	// the session's own rules rather than a walk of every live key under the
+	// lock -- which is what a million sessions make unaffordable.
+	for _, key := range s.ruleKeys {
+		if c.rules[key] == s.LocalSEID {
 			delete(c.rules, key)
 		}
 	}
+	s.ruleKeys = nil
 	// Each id once per pool: a session says its ids once per PDR, and two
 	// uplink PDRs sharing a pinned F-TEID would otherwise release it twice --
 	// the second release finds the reservation gone and queues an SMF's value
