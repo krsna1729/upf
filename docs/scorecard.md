@@ -39,8 +39,8 @@ and introduces no claims of its own.
 | 1 | association, heartbeat, restart detection (3) | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
 | 2 | session establishment, modification, deletion (3) | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
 | 3 | Session Report Request: USAR, DLDR (2) | **50** | 50 | 100 | 50 | 100 | 50 | 0 |
-| 4 | PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5) | **60** | — | — | — | — | — | — |
-| 5 | QER: gate, MBR, per-flow or GBR (3) | **67** | 67 | 67 | 33 | 0 | 67 | 67 |
+| 4 | PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5) | **80** | — | — | — | — | — | — |
+| 5 | QER: gate, MBR, per-flow or GBR (3) | **100** | 67 | 67 | 33 | 0 | 67 | 67 |
 | 6 | URR: volume, time, thresholds, quota + enforcement, linked (5) | **80** | 60 | 60 | 60 | 100 | 0 | 0 |
 | 7 | BAR + DDN: buffering, DDN, duration, drop-buffered (4) | **0** | 75 | 75 | 25 | 0 | 0 | 25 |
 | 8 | GTP-U: decap, encap, echo, end marker, DSCP copy (5) | **100** | 40 | 80 | 40 | 40 | 40 | 80 |
@@ -48,7 +48,7 @@ and introduces no claims of its own.
 | 10 | MAR / ATSSS-LL (2) | **0** | 50 | 0 | 0 | 50 | 0 | 0 |
 | 11 | ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 |
 | 12 | real-SMF interop (1) | **0** | 0 | **100** | 0 | 0 | 0 | 0 |
-| | **mean of the eleven blocks every project scores (1-3, 5-12)** | **50** | **54** | **62** | **42** | **43** | **28** | **38** |
+| | **mean of the eleven blocks every project scores (1-3, 5-12)** | **53** | **54** | **62** | **42** | **43** | **28** | **38** |
 
 ## What each number is made of
 
@@ -76,8 +76,8 @@ are the survey's (file and symbol, in
 | 1 | association setup/update/release; heartbeat; restart detection by Recovery Time Stamp | `internal/n4`: `TestAssociationAndHeartbeat`, `TestCPRestartVoidsAssociation`, `TestSecondCPFunctionIsRejected` | every project must interoperate with an SMF to be used at all; the survey found no absence |
 | 2 | establishment; modification; deletion | `ci/session-live.sh`; `TestEstablishCompilesTheSessionIntoOneTransaction` | in every project |
 | 3 | USAR (a report sent when a URR says so); DLDR (one sent when downlink data arrives with no tunnel) | `TestAReportIsAUsageReportTheSMFCanRead`, `TestTheDownlinkReportIsOwedOncePerBufferingEpisode`; live: `internal/n4/live_report_test.go` (USAR, run by `ci/session-report.sh`); the DLDR live arm (`internal/n4/live_ddn_test.go`, `ci/buffer-path.sh`) is written and needs a daemon carrying BESS's `packet_store` key_attrs (128fd237), so the DLDR half is **in, unverified live** and is not scored until that arm passes | OAI (`xdp_urr_apply_kern.c` and its DLDR path), open5gs (`upf_sess_urr_acc_add`, DDN), free5GC (`report.go` types) send both; UPG-VPP sends usage reports, DLDR not evidenced; eUPF's URR is unwired, OMEC has none, so neither can report |
-| 4 | precedence; F-TEID with CH/CHID (FTUP); UE IP; SDF filter incl. port ranges; Network Instance and QFI | `TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID`, `TestPortRangeIsRefusedNotMatchedTooWidely`, `TestANonIPv4PDIIsRefusedNotWidened` | not examined per project: the survey scores rule types (PDR/FAR/QER/URR/BAR), not PDI sub-features. Only OAI's `ftup=1` is on record, and it is not enough to score the block |
-| 5 | QER gate; MBR; per-flow or GBR semantics | `TestAClosedGateDropsWithoutAnAction`; `ci/session-path.sh` | OAI TC-BPF, open5gs `appQER`/`sessionQER`, eUPF one QER per PDR, OMEC app + session QER; free5GC has no QER semantics in userspace (33); UPG-VPP's README says QER is "not yet working" (0) |
+| 4 | precedence; F-TEID with CH/CHID (FTUP); UE IP; SDF filter incl. port ranges; Network Instance and QFI | `TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID`, `TestThePrecedenceIsInvertedIntoTheClassifiersPriority`, `TestAPDINamingAQFIKeysTheRuleOnIt`, `TestAQERsQFIReachesTheTunnelRecord`, `TestPortRangeIsRefusedNotMatchedTooWidely`, `TestANonIPv4PDIIsRefusedNotWidened`, `ci/smoke-gtpu.sh` (a G-PDU carrying a PDU Session Container, decap reading QFI 5 into metadata) | not examined per project: the survey scores rule types (PDR/FAR/QER/URR/BAR), not PDI sub-features. Only OAI's `ftup=1` is on record, and it is not enough to score the block |
+| 5 | QER gate; MBR; per-flow or GBR semantics | `TestAClosedGateDropsWithoutAnAction`; `TestAQERsQFIReachesTheTunnelRecord` (a QER's QFI reaching the flow's tunnel record, so a session's flows can be policed apart); `ci/smoke-gtpu.sh` (the encap writing the container from the record's QFI); `ci/session-path.sh` | OAI TC-BPF, open5gs `appQER`/`sessionQER`, eUPF one QER per PDR, OMEC app + session QER; free5GC has no QER semantics in userspace (33); UPG-VPP's README says QER is "not yet working" (0) |
 | 6 | volume; time; thresholds; quota and its enforcement; linked UR-SEQN | `TestEvaluateReportsAUsedUpQuotaAndStopsTheTraffic`, `TestEvaluateReportsTheWindowItMeasured` | UPG-VPP `upf_session.c:640-680` (100); OAI, open5gs and free5GC measure volume and time with thresholds but the survey shows no quota-enforcement or linked half; eUPF unwired; OMEC none |
 | 7 | downlink buffering; DDN; buffering duration; drop-buffered | buffering and DDN: `TestABuffFARIsGatedToTheStoreAndCounted`, `TestTheDownlinkReportIsOwedOncePerBufferingEpisode`, `TestAModificationThatStopsBufferingReleasesTheFlow`, with the live arm `ci/buffer-path.sh` (written; needs the same daemon rebuild, so buffering and DDN are **in, unverified live** and are not scored until that arm passes); a graph with no store still drops (`TestABuffOnlyFARIsADrop`) | OAI and open5gs buffer; free5GC validates BAR and does not buffer (25); OMEC notifies and does not buffer (25); UPG-VPP's README says BAR is "not yet working" |
 | 8 | GTP-U decap; encap; echo request/reply; end marker; inner-to-outer DSCP copy | `ci/smoke-gtpu.sh` (decap, encap, DSCP, and the echo reply byte for byte: `gtpu_echo`, TS 29.281 7.2.2); `ci/session-path.sh` (the End Marker a handover sends, byte for byte: `internal/session/endmarker.go`, TS 29.244 5.3.2) | open5gs and OMEC have both markers (80); everyone decapsulates and encapsulates; echo is not examined per project by the survey |
@@ -90,22 +90,25 @@ are the survey's (file and symbol, in
 
 ## What moves our number
 
-Each row is one close, on its own, against the mean of 50:
+Each row is one close, on its own, against the mean of 53 — the QFI row has closed (`e3822d8`, per-flow QER and the PDI's QFI with tests and a wire smoke) and is counted in it:
 
 | close | block | block from → to | mean | cost |
 |---|---|---|---|---|
-| BAR + DDN (gap 4) | 7 | 0 → 75 | 50 → 57 | the largest item: a buffer, a DDN report, and the duration semantics; the code is in (`a10e9e5`) and its live arm waits on a daemon carrying BESS's `packet_store` key_attrs |
-| the DLDR half of the report path | 3 | 50 → 100 | 50 → 55 | the code is in the same commit, waiting on the same arm |
-| linked UR-SEQN | 6 | 80 → 100 | 50 → 52 | one field read and one counter link |
-| QFI and per-flow QER | 5 | 67 → 100 | 50 → 53 | the classifier's second key form and one more match field |
-| the vif that writes the route domain (gap 5's tail) | 11 | 50 → 100 | 50 → 55 | the port work in `design.md`; needs the placement measurement first |
-| IPv6 | 9 | 0 → 100 | 50 → 59 | the dataplane's tables and the F-TEID key: a second form, not a patch |
-| a real SMF (open5gs or free5GC) at the door | 12 | 0 → 100 | 50 → 59 | no code: an afternoon with a NIC and someone else's SMF |
+| BAR + DDN (gap 4) | 7 | 0 → 75 | 53 → 60 | the largest item: a buffer, a DDN report, and the duration semantics; the code is in (`a10e9e5`) and its live arm waits on a daemon carrying BESS's `packet_store` key_attrs |
+| the DLDR half of the report path | 3 | 50 → 100 | 53 → 58 | the code is in the same commit, waiting on the same arm |
+| linked UR-SEQN | 6 | 80 → 100 | 53 → 55 | one field read and one counter link |
+| the vif that writes the route domain (gap 5's tail) | 11 | 50 → 100 | 53 → 58 | the port work in `design.md`; needs the placement measurement first |
+| IPv6 | 9 | 0 → 100 | 53 → 62 | the dataplane's tables and the F-TEID key: a second form, not a patch |
+| a real SMF (open5gs or free5GC) at the door | 12 | 0 → 100 | 53 → 62 | no code: an afternoon with a NIC and someone else's SMF |
 
 Taken together, the closes left on that list — BAR + DDN and the DLDR half (both
-written, both waiting on the live arm), linked UR-SEQN, the QER's GBR half, the
-vif that puts a downlink rule's domain in its key, IPv6 and a real SMF — are the
-ones that put the mean past open5gs's 62, and none of them is a rewrite.
+written, both waiting on the live arm), linked UR-SEQN, the vif that puts a
+downlink rule's domain in its key, IPv6 and a real SMF — are the ones that put
+the mean past open5gs's 62, and none of them is a rewrite. (GBR *as such* is not
+on the list because block 5's sub-feature is "per-flow **or** GBR", and the
+per-flow half is what the QFI work earns; a guaranteed bit rate with its own
+rate pair remains absent and would be its own close if the survey ever scored
+the two halves apart.)
 
 ## Three readings
 
