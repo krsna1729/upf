@@ -66,7 +66,6 @@ downstream is keyed by.
                                         |                     | rt  Router          |
                                         |                     +----------+----------+
                                         |                                | ogate 0
-                                        |                                v
                                         v                                v
                               +-------------------+          +---------------------+
                               | n3_out  PortOut   |---> N3   | n6_out  PortOut     |---> N6
@@ -246,7 +245,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | `PMDPort` | `n3`, `n6` | `num_rx_queues: 1` each in the deployment's graph; RSS and one worker per queue are the scale path, and the one-port split (per-pattern RSS, `L3_SRC_ONLY` uplink / `L3_DST_ONLY` downlink) is designed in `docs/design.md`, "N3, N6, N9" — no graph wires it yet |
 | `UnixSocketPort` | `cp_marker` | `SOCK_SEQPACKET`: one write from `upfd` is one End Marker frame |
 | `PortInc`/`PortOut`, `Sink`, `Source`, `Rewrite`, `Dump`, `MetadataTest` | graphs | plumbing and lab only; a `Sink` has no output gate, so it appears in no metric — the counters that prove behaviour sit on modules' *output* gates |
-| `PacketStore` | the buffering branch (`buffer-path.yaml`) | `key_attrs: ["action_id"]`, `max_packets`, `max_packets_per_flow`, `timeout_ms`; single worker; `release`/`drop`/`clear` are commands, and writing its `flows` resource pauses the workers (BESS's note: `packet_store: the flow key is a configured attribute, not a fixed pair`, 96d22a8f) |
+| `PacketStore` | the buffering branch (`buffer-path.yaml`) | `key_attrs: ["action_id"]`, `max_packets`, `max_packets_per_flow`, `timeout_ms`; single worker; `release`/`drop`/`clear` are commands, and both they and (when it lands) a write to its `flows` resource are **refused** while a worker runs the module, so the caller stops the workers around them (BESS's note: `packet_store: the flow key is a configured attribute, not a fixed pair`, 96d22a8f) |
 | `Vif` | not wired yet | the module that would write a packet's `vif_id`/`route_domain` from the PDI's Network Instance (`docs/design.md`, "N3, N6, N9") |
 
 ## Framework and library surface we use
@@ -277,25 +276,47 @@ Used as they are; the configuration is ours and is what the compiler assumes.
   worker, so two workers never touch a line, and its two resources behave like
   the daemon's own concurrent ones.
 * **Which part of this graph needs paused workers: none of it today, and one
-  resource of it later.** A resource pauses the workers only if its codec says
-  so, and a transaction pauses exactly when it carries ops for such a resource
-  (`core/control/control_plane.cc`: `pause = pause ||
-  (converged->requires_paused_workers && !converged->ops.empty())`). The modules
-  that declare it are `arp_responder` (`entries`), `bridge` (`statics`),
-  `flowgen` and `vif` (`interfaces`) — none of them in any graph here. Every
-  resource the session path writes is a concurrent slot-table resource applied
-  live: `WildcardMatch`'s rules, `ActionTable`'s actions, `Meter`'s meters,
-  `Router`'s next hops, `enc/tunnels`, `cnt_*/counters`. The exception, when it
-  lands, is the store's `flows` resource on the buffering branch, whose write
-  pauses the workers for that one transaction (BESS's decision: a limits map
-  changed live from the control thread would race the packet path). The list RPC
-  advertises the flag, so a controller can see it before it writes.
-  The store's commands are a separate case with the same shape: `release`,
-  `drop` and `clear` are thread-unsafe, so an invocation while a worker is
-  running the module answers `EBUSY` and the caller pauses with `PauseWorkers`
-  first (the SDK says so at `InvokeAction`). Either way the stop is bounded by
-  one operation and belongs to a *session* event — a BAR arriving, a DDN answer
-  releasing packets — not to the packet path.
+  resource of it later — and the *caller* is the one that stops.** Two facts
+  decide it, and neither is a quiesce: a resource whose codec declares
+  `requires_paused_workers` is **refused** with `RESOURCE_BUSY` while a worker
+  runs its module ("nothing was tried", the SDK's `Resource` comment), and a
+  command declared `THREAD_UNSAFE` — the store's `release`, `drop`, `clear` —
+  is **refused** with `EBUSY` ("There is a running worker and command '%s' is
+  not MT safe", `core/module.cc`). In both cases the daemon leaves the stopping
+  to whoever is writing. The modules that declare the flag are `arp_responder`
+  (`entries`), `bridge` (`statics`), `flowgen` and `vif` (`interfaces`) — none of
+  them in any graph here; every resource the session path writes is a concurrent
+  slot-table resource applied live (`WildcardMatch`'s rules, `ActionTable`'s
+  actions, `Meter`'s meters, `Router`'s next hops, `enc/tunnels`,
+  `cnt_*/counters`). The store's `flows`, when BESS adds it, will be the first
+  paused-worker resource any graph here has.
+
+  ```
+  what stops, and who stops it
+
+  (A) session state -- rules, actions, meters, next hops, tunnels, counters
+      upfd --commit--> daemon --publish--> concurrent resource
+      workers ............................ running throughout: nothing stops
+
+  (B) a thread-unsafe command, or a resource that requires paused workers
+      upfd --invoke/commit--> daemon: is a worker running the module?
+                                 |
+                                 +-- no  --> runs; no pause at all
+                                 |
+                                 +-- yes --> EBUSY / RESOURCE_BUSY, nothing tried
+                                                |
+      upfd --PauseWorkers--> invoke/commit --> ResumeWorkers
+              the only stop in this tree, and it is the caller's to make
+  ```
+
+  Both stops are bounded by one command or one commit and happen at signalling
+  rate — a BAR arriving, a DDN answer releasing packets — never per packet.
+  **Known blocker for the live arm:** `internal/bess` calls `release`/`drop`/
+  `clear` bare, and the Go SDK has no pause-aware call, so the first release in
+  `ci/buffer-path.sh` would be refused; upf does not implement that loop itself
+  (the SDK owns the daemon's contract), and the helper is with Main. The
+  in-process tests still cover the refusal path's consequences
+  (`TestAReleaseTheStoreRefusesIsCountedNotFatal` and the sweep's tests).
 * **Where state lives.** Per-worker: the counters' planes. Shared, atomic,
   written once per batch: the counters' stamps. Per-rule, indexed by the
   ActionId the classifier wrote: the tunnel records and the counter entries.
