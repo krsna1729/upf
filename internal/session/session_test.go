@@ -2043,6 +2043,45 @@ func TestModifyRewritesTheWholeSession(t *testing.T) {
 // a report is what the SMF bills from, so a URR field that cannot be honoured
 // is a rule failure, never something quietly not measured.
 
+func TestClosingAGateDropsThePacketsOfALivePDR(t *testing.T) {
+	// A QER's gate is the rule's gate: a modification that closes it must take
+	// the action away in the same transaction. The establishment path already
+	// writes the drop gate (TestAClosedGateDropsWithoutAnAction); the update
+	// path is the one that matters to a live session -- a handover's QER change
+	// and a URR's exhausted quota both arrive as an update to a PDR that has an
+	// action id already, and a PDR that keeps its action goes on forwarding.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x6010, "10.45.0.6")
+	req.CreateQER = []*ie.IE{ie.NewCreateQER(
+		ie.NewQERID(1),
+		ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+	)}
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	if got := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 6}).actionID(); got == 0 {
+		t.Fatal("the uplink PDR has no action id to keep")
+	}
+
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewUpdateQER(ie.NewQERID(1),
+			ie.NewGateStatus(ie.GateStatusClosed, ie.GateStatusOpen)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 6})
+	if got := r.gate(); got != dropGate {
+		t.Errorf("a closed gate's rule gates %d, want the drop gate %d", got, dropGate)
+	}
+	if got, ok := r.change.Value["action_id"].(uint32); !ok || got != 0 {
+		t.Errorf("a closed gate's rule names action %v (%T), want none",
+			r.change.Value["action_id"], r.change.Value["action_id"])
+	}
+}
+
 func TestUnknownSessionIsNotFound(t *testing.T) {
 	c := New(testConfig(), &recorder{}, quietLogger())
 	resp := c.Modify(message.NewSessionModificationRequest(0, 0, 999, 1, 0)).(*message.SessionModificationResponse)

@@ -813,9 +813,14 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return nil, nil, fmt.Errorf("%w: two PDRs compile to one rule key", errNotExpressible)
 		}
 		writtenRules[rkey] = true
-		if p.drop && p.actionID == 0 {
+		if p.drop {
 			// A drop needs no action record: the rule's gate is the whole
-			// result, and the packet path pays for nothing else.
+			// result, and the packet path pays for nothing else. The PDR may
+			// hold an action id from the form being replaced (a modification
+			// that closed a gate or stopped forwarding); the rule written here
+			// names none, so that record is what the PDR no longer uses -- kept
+			// in the model, and erased when the PDR is (a PDR that stops
+			// forwarding and starts again keeps its identity, docs/design.md).
 			changes = append(changes, bess.Change{
 				Resource: rulesRes(dir),
 				Key:      key,
