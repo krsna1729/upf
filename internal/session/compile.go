@@ -120,6 +120,14 @@ type farReq struct {
 	peer     netip.Addr
 	hasOuter bool
 
+	// hasApply and hasFwd say the message carried the Apply Action and the
+	// forwarding parameters. An Update FAR carries what changes (7.5.4.3), so
+	// a field it leaves out keeps the value the session has: treating its zero
+	// as the new value would stop a forward (no Apply Action) or send an uplink
+	// forward back out of N3 (destination interface 0 is the access side).
+	hasApply bool
+	hasFwd   bool
+
 	// instance is the Network Instance inside the Forwarding Parameters
 	// (8.2.4): the interface this forward leaves by, empty when the SMF named
 	// none. It is not the PDI's instance -- that one says which flow the rule
@@ -492,15 +500,21 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 	for _, f := range fars {
 		entry := s.FARs[f.id]
 		if entry == nil {
-			entry = &far{id: f.id}
+			// A Create FAR: every field the message carries is the record's.
+			entry = &far{id: f.id, apply: f.apply, destIfc: f.destIfc, instance: f.instance}
 			s.FARs[f.id] = entry
-		}
-		entry.apply, entry.destIfc = f.apply, f.destIfc
-		if f.instance != "" {
-			// An update that names no instance keeps the one it had, like the
-			// outer header creation above: the fields this message carries are
-			// what changes (7.5.4.3).
-			entry.instance = f.instance
+		} else {
+			// An Update FAR carries what changes (7.5.4.3): a field the message
+			// leaves out keeps the value the session has. The zero values are
+			// not neutral here -- no Apply Action stops the forward, and
+			// destination interface 0 is the access side, which would send an
+			// uplink forward back out of N3.
+			if f.hasApply {
+				entry.apply = f.apply
+			}
+			if f.hasFwd {
+				entry.destIfc, entry.instance = f.destIfc, f.instance
+			}
 		}
 		if f.hasOuter {
 			entry.teid, entry.peer, entry.hasOuter = f.teid, f.peer, true
@@ -851,6 +865,16 @@ func writeCounter(p *pdr, dir Direction) []bess.Change {
 	}}
 }
 
+// dropRuleClaim gives up a rule key this session held: the transaction being
+// built erases that rule, so another session may claim the key. Only this
+// session's claim goes -- a key another session wrote is not this one's to
+// release. The caller holds the lock.
+func (c *Compiler) dropRuleClaim(s *Session, key string) {
+	if c.rules[key] == s.LocalSEID {
+		delete(c.rules, key)
+	}
+}
+
 // qerHoldsMeter reports whether the meter a removed PDR was policed by still
 // belongs to a QER the session holds. compile writes a meter for every QER with
 // a rate whether or not a PDR names it, so erasing one of those in the same
@@ -870,6 +894,25 @@ func qerHoldsMeter(s *Session, removed *pdr) bool {
 func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// The rule keys this compile claims, and whether it got as far as writing
+	// them: a compile that returns an error wrote nothing (its transaction never
+	// reached the dataplane), so the claims it made on the way are given back
+	// here rather than left refusing keys no session holds. A transaction the
+	// dataplane *refuses* is the caller's business, exactly as an allocated id
+	// is: what may have committed stays claimed.
+	claimed := make([]string, 0, len(s.PDRs))
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		for _, key := range claimed {
+			if c.rules[key] == s.LocalSEID {
+				delete(c.rules, key)
+			}
+		}
+	}()
 
 	// What this transaction writes follows the model as it is now: a URR's
 	// enforcement changes it without a message from the SMF (report.go).
@@ -963,6 +1006,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
 			erase(bess.Change{Resource: rulesRes(dir), Key: key})
+			c.dropRuleClaim(s, rulesRes(dir)+"\x00"+fmt.Sprint(key))
 		}
 		if p.actionID != 0 {
 			erase(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
@@ -992,6 +1036,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
 			erase(bess.Change{Resource: rulesRes(dir), Key: key})
+			c.dropRuleClaim(s, rulesRes(dir)+"\x00"+fmt.Sprint(key))
 		}
 		if old.teid != 0 && !teidNamed(s, old.teid) {
 			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(old.teid)})
@@ -1030,6 +1075,18 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return nil, nil, fmt.Errorf("%w: two PDRs compile to one rule key", errNotExpressible)
 		}
 		writtenRules[rkey] = true
+		if owner, taken := c.rules[rkey]; taken && owner != s.LocalSEID {
+			// Another session holds this rule. Writing it would take that
+			// session's packets -- and, when this one went, erase the rule the
+			// other still holds -- so the SMF is told the rule failed rather
+			// than served a session that quietly shares another's. A graph
+			// whose key carries the tunnel or the domain does not collide here
+			// for sessions that share a UE address; one that classifies by the
+			// tuple alone does, and this is where it says so.
+			return nil, nil, fmt.Errorf("%w: the rule is session %d's", errNotExpressible, owner)
+		}
+		c.rules[rkey] = s.LocalSEID
+		claimed = append(claimed, rkey)
 		if p.drop {
 			// A drop needs no action record: the rule's gate is the whole
 			// result, and the packet path pays for nothing else. The PDR may
@@ -1123,6 +1180,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				createdFTEID(p.teid, c.cfg.N3Addr)))
 		}
 	}
+	committed = true
 	return changes, created, nil
 }
 
@@ -1529,9 +1587,7 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			// does not configure is refused there rather than served by the
 			// wrong interface -- with one instance configured, a rule naming
 			// another used to be indistinguishable from one naming ours.
-			if v, err := c.NetworkInstance(); err == nil {
-				p.instance = v
-			}
+			p.instance = networkInstanceName(c.Payload)
 		case ie.FTEID:
 			fields, err := c.FTEID()
 			if err != nil {
@@ -1625,6 +1681,47 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 	return nil
 }
 
+// networkInstanceName is the Network Instance IE's value (TS 29.244 8.2.4).
+// The IE carries an OctetString, and an SMF may write the name in either of
+// the clause's forms: its own bytes, or the DNS-label form where every label is
+// a length octet followed by its bytes (open5gs writes its DNN APN-style, so
+// "internet" arrives as 0x08 followed by the letters). Reading only the raw
+// bytes would turn every session from such an SMF into a refusal naming an
+// instance nobody configured, and the library's own heuristic would cut a plain
+// name at whatever its first byte happens to be, so the label form is used only
+// when its labels are exactly the payload: a name whose first byte cannot be a
+// label length (> 63, which every text byte is) is read whole.
+func networkInstanceName(payload []byte) string {
+	// A trailing zero octet is the root label, and some stacks write it.
+	trimmed := payload
+	if n := len(trimmed); n > 0 && trimmed[n-1] == 0 {
+		trimmed = trimmed[:n-1]
+	}
+	if name, ok := decodeDNSLabels(trimmed); ok {
+		return name
+	}
+	return string(payload)
+}
+
+// decodeDNSLabels reads the length-prefixed labels of a DNS name and reports
+// whether they are the given bytes exactly: a partial read is not a name, and
+// this is what keeps the label form from being guessed at.
+func decodeDNSLabels(b []byte) (string, bool) {
+	var labels []string
+	for i := 0; i < len(b); {
+		n := int(b[i])
+		if n == 0 || n > 63 || i+1+n > len(b) {
+			return "", false
+		}
+		labels = append(labels, string(b[i+1:i+1+n]))
+		i += 1 + n
+	}
+	if len(labels) == 0 {
+		return "", false
+	}
+	return strings.Join(labels, "."), true
+}
+
 func parseFAR(i *ie.IE) (farReq, error) {
 	children, err := i.CreateFAR()
 	what := "Create FAR"
@@ -1647,6 +1744,7 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			if err != nil {
 				return farReq{}, fmt.Errorf("Apply Action: %w", err)
 			}
+			f.hasApply = true
 			if len(flags) > 0 {
 				f.apply = flags[0]
 			}
@@ -1655,37 +1753,23 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			if err != nil {
 				return farReq{}, fmt.Errorf("Forwarding Parameters: %w", err)
 			}
-			for _, fp := range fwd {
-				switch fp.Type {
-				case ie.DestinationInterface:
-					if v, err := fp.DestinationInterface(); err == nil {
-						f.destIfc = v
-					}
-				case ie.NetworkInstance:
-					// The forward's own Network Instance (TS 29.244 8.2.4 inside
-					// the Forwarding Parameters): the instance the traffic
-					// leaves by, which is what N9's peer UPF is named with. A
-					// PDI's instance says where the flow came from; this one
-					// says where it goes, and an SMF may name either or both.
-					if v, err := fp.NetworkInstance(); err == nil {
-						f.instance = v
-					}
-				case ie.OuterHeaderCreation:
-					fields, err := fp.OuterHeaderCreation()
-					if err != nil {
-						return farReq{}, fmt.Errorf("Outer Header Creation: %w", err)
-					}
-					if fields.TEID == 0 {
-						return farReq{}, errors.New(
-							"Outer Header Creation without a TEID")
-					}
-					peer, ok := netip.AddrFromSlice(fields.IPv4Address)
-					if !ok {
-						return farReq{}, errors.New(
-							"Outer Header Creation without an IPv4 address")
-					}
-					f.hasOuter, f.teid, f.peer = true, fields.TEID, peer.Unmap()
-				}
+			f.hasFwd = true
+			if err := parseForwardingParameters(&f, fwd); err != nil {
+				return farReq{}, err
+			}
+		case ie.UpdateForwardingParameters:
+			// An Update FAR carries the same fields in the update form (7.5.4.3
+			// and 7.5.4.4): without this case the message's destination
+			// interface and network instance would be read as absent, and a
+			// merge that overwrote them with the zero values would move the
+			// forward -- 0 is the access side.
+			fwd, err := c.UpdateForwardingParameters()
+			if err != nil {
+				return farReq{}, fmt.Errorf("Update Forwarding Parameters: %w", err)
+			}
+			f.hasFwd = true
+			if err := parseForwardingParameters(&f, fwd); err != nil {
+				return farReq{}, err
 			}
 		}
 	}
@@ -1693,6 +1777,41 @@ func parseFAR(i *ie.IE) (farReq, error) {
 		return farReq{}, errors.New("FAR without a FAR ID")
 	}
 	return f, nil
+}
+
+// parseForwardingParameters reads the forwarding parameters of a Create FAR or
+// an Update FAR: where the forward goes, the instance it goes by, and the outer
+// header creation of the tunnel it leaves through.
+func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
+	for _, fp := range fwd {
+		switch fp.Type {
+		case ie.DestinationInterface:
+			if v, err := fp.DestinationInterface(); err == nil {
+				f.destIfc = v
+			}
+		case ie.NetworkInstance:
+			// The forward's own Network Instance (TS 29.244 8.2.4 inside the
+			// Forwarding Parameters): the instance the traffic leaves by, which
+			// is what N9's peer UPF is named with. A PDI's instance says where
+			// the flow came from; this one says where it goes, and an SMF may
+			// name either or both.
+			f.instance = networkInstanceName(fp.Payload)
+		case ie.OuterHeaderCreation:
+			fields, err := fp.OuterHeaderCreation()
+			if err != nil {
+				return fmt.Errorf("Outer Header Creation: %w", err)
+			}
+			if fields.TEID == 0 {
+				return errors.New("Outer Header Creation without a TEID")
+			}
+			peer, ok := netip.AddrFromSlice(fields.IPv4Address)
+			if !ok {
+				return errors.New("Outer Header Creation without an IPv4 address")
+			}
+			f.hasOuter, f.teid, f.peer = true, fields.TEID, peer.Unmap()
+		}
+	}
+	return nil
 }
 
 // parseURR reads a Create URR or an Update URR (TS 29.244 7.5.2.4): what the

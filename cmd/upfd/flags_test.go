@@ -37,13 +37,14 @@ func TestParseInstancesReadsTheDeployment(t *testing.T) {
 	if !ok || ims.Domain != 1 || ims.NextHop != 3 {
 		t.Errorf("ims is %+v (found %v), want domain 1 and next hop 3", ims, ok)
 	}
-	// No pool is an interface that serves nothing but still resolves.
+	// No pool is an interface that serves every address until the deployment
+	// says otherwise: the flag's omission is not an outage.
 	bare, err := parseInstances("name=n9,domain=3", 4)
 	if err != nil {
 		t.Fatalf("an interface with no pool was refused: %v", err)
 	}
-	if ifc, ok := bare.Lookup("n9"); !ok || ifc.NextHop != 0 || ifc.Serves(netip.MustParseAddr("10.45.0.2")) {
-		t.Errorf("n9 is %+v, want a nameless hop and an empty pool", ifc)
+	if ifc, ok := bare.Lookup("n9"); !ok || ifc.NextHop != 0 || !ifc.Serves(netip.MustParseAddr("10.45.0.2")) {
+		t.Errorf("n9 is %+v, want a nameless hop and an unconstrained pool", ifc)
 	}
 }
 

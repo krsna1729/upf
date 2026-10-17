@@ -40,7 +40,14 @@ func TestTwoInstancesMayServeTheSamePool(t *testing.T) {
 		t.Error("internet serves 10.46.0.2, which only ims declares")
 	}
 	if internet.Serves(netip.MustParseAddr("192.0.2.1")) {
-		t.Error("an address outside every pool is served")
+		t.Error("an address outside every declared pool is served")
+	}
+	unconstrained, err := New([]Interface{{Instance: "n9", Domain: 0}}, 1)
+	if err != nil {
+		t.Fatalf("an interface with no pool was refused: %v", err)
+	}
+	if ifc, _ := unconstrained.Lookup("n9"); !ifc.Serves(netip.MustParseAddr("192.0.2.1")) {
+		t.Error("an interface the deployment declares no pool for serves nothing: a flag left out would refuse every session")
 	}
 	if got := d.Default().Instance; got != "internet" {
 		t.Errorf("the default interface is %q, want the first configured (internet)", got)

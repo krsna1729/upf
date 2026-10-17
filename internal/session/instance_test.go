@@ -296,6 +296,113 @@ func TestTheForwardsNetworkInstanceChoosesTheEgress(t *testing.T) {
 	}
 }
 
+// TestTheInstanceIsReadInBothTheFormsAnSMFSends: the IEs' Network Instance is
+// an OctetString (8.2.4), and the name arrives either as its own bytes or in
+// the DNS-label form an SMF that encodes its DNN APN-style writes (open5gs
+// sends "internet" as 0x08 followed by the letters). Both must resolve to the
+// deployment's interface, and a plain name must not be cut short at a first
+// byte that happens to be small enough to look like a label length.
+func TestTheInstanceIsReadInBothTheFormsAnSMFSends(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		iface    string // the deployment's instance name
+		encoded  *ie.IE // the IE an SMF sends for it
+		accepted bool
+	}{
+		{"the bytes", "internet", ie.NewNetworkInstance("internet"), true},
+		{"DNS labels", "internet", ie.NewNetworkInstanceFQDN("internet"), true},
+		{"a dotted name's bytes", "my.dnn", ie.NewNetworkInstance("my.dnn"), true},
+		{"a dotted name in labels", "my.dnn", ie.NewNetworkInstanceFQDN("my.dnn"), true},
+		{"a name that is not served", "ims", ie.NewNetworkInstance("internet"), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := instancedConfig(t)
+			domains, err := routing.New([]routing.Interface{
+				{Instance: c.iface, Domain: 0, NextHop: 1,
+					Pool: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")}},
+			}, 2)
+			if err != nil {
+				t.Fatalf("the one-interface deployment was refused: %v", err)
+			}
+			cfg.Instances = domains
+
+			est := instancedEstablishment(1, "10.45.0.2", 0x11223344, "")
+			est.CreatePDR = []*ie.IE{
+				ie.NewCreatePDR(
+					ie.NewPDRID(1),
+					ie.NewPrecedence(100),
+					ie.NewPDI(
+						ie.NewSourceInterface(ie.SrcInterfaceAccess),
+						c.encoded,
+						ie.NewFTEID(0x01, 0x11223344, net.ParseIP("192.0.2.1"), nil, 0),
+						ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0),
+					),
+					ie.NewFARID(1),
+				),
+			}
+			rec := &recorder{}
+			compiler := New(cfg, rec, quietLogger())
+			resp := compiler.Establish(est)
+			got := cause(t, resp)
+			if c.accepted && got != ie.CauseRequestAccepted {
+				t.Errorf("the instance %q written as %s answered cause %d, want accepted",
+					c.iface, c.name, got)
+			}
+			if !c.accepted && got == ie.CauseRequestAccepted {
+				t.Errorf("the instance %q written as %s was accepted, and no interface serves it",
+					c.iface, c.name)
+			}
+		})
+	}
+}
+
+// TestAnUpdateFARKeepsWhatItDoesNotCarry: an Update FAR carries what changes
+// (7.5.4.3), and the fields it leaves out keep the values the session has --
+// their zero values are not neutral. No Apply Action means no forward, and
+// destination interface 0 is the access side, which would send an uplink
+// forward back out of N3; a session whose forward moved because the SMF updated
+// something else is a rule that stops carrying its traffic.
+func TestAnUpdateFARKeepsWhatItDoesNotCarry(t *testing.T) {
+	rec := &recorder{}
+	c := New(instancedConfig(t), rec, quietLogger())
+	if got := cause(t, c.Establish(withForwardInstance(
+		instancedEstablishment(1, "10.45.0.2", 0x11223344, "internet"), "ims"))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+
+	// Only the Apply Action: the destination interface and the instance stay,
+	// so the forward still leaves by the FAR's instance (next hop 3).
+	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, 1, 2, 0,
+		ie.NewFSEID(1, nil, nil),
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw))))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the Apply-Action-only update answered cause %d", got)
+	}
+	changes := rec.last()
+	ul := ruleIn(t, changes, "pdr_ul")
+	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 3 {
+		t.Errorf("after an Apply-Action-only update the forward takes next hop %d, want the instance's 3 still", got)
+	}
+
+	// And the update form of the forwarding parameters is read at all: naming
+	// the instance there moves the forward (the update form is a different IE
+	// from the create form, and reading only the create form would leave the
+	// destination interface at its zero, the access side).
+	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, 1, 3, 0,
+		ie.NewFSEID(1, nil, nil),
+		ie.NewUpdateFAR(ie.NewFARID(1),
+			ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceCore),
+				ie.NewNetworkInstance("internet")))))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the update answered cause %d", got)
+	}
+	changes = rec.last()
+	ul = ruleIn(t, changes, "pdr_ul")
+	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 1 {
+		t.Errorf("after naming internet in the update the forward takes next hop %d, want that instance's 1", got)
+	}
+}
+
 // TestAOneInstanceDeploymentIsUnchanged: with no -instances the compiler reads
 // no Network Instance, every rule is domain 0, and each direction keeps the
 // next hop the deployment's flags gave it -- the tables that existed before the

@@ -198,20 +198,20 @@ func run() error {
 	// The management endpoint: this node's own numbers, so an operator reads
 	// them from the same place a scraper does. It is off unless asked for.
 	if *metricsAddr != "" {
-		mux, err := metricsServer(*metricsAddr, metricsHandler(compiler, srv, reports))
+		mux, ln, err := metricsServer(*metricsAddr, metricsHandler(compiler, srv, reports))
 		if err != nil {
 			return err
 		}
 		go func() {
-			if err := mux.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Error("the metrics endpoint stopped", "addr", *metricsAddr, "error", err)
+			if err := mux.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("the metrics endpoint stopped", "addr", ln.Addr().String(), "error", err)
 			}
 		}()
 		go func() {
 			<-ctx.Done()
 			_ = mux.Close()
 		}()
-		log.Info("metrics listening", "addr", *metricsAddr)
+		log.Info("metrics listening", "addr", ln.Addr().String())
 	}
 	return srv.Serve()
 }

@@ -51,10 +51,15 @@ type Interface struct {
 }
 
 // Serves reports whether an address belongs to this interface's pool. An
-// interface with no pool serves nothing: the deployment says what it serves,
-// and a session somewhere else is one the SMF has to place on another
-// interface.
+// interface the deployment declares no pool for serves every address: the flag
+// has not said what it serves, and refusing every session because a line was
+// left out would take the node down over an operator's omission. An address
+// outside a pool that *is* declared is refused, because that is the deployment
+// saying what it serves.
 func (i Interface) Serves(a netip.Addr) bool {
+	if len(i.Pool) == 0 {
+		return true
+	}
 	a = a.Unmap()
 	for _, p := range i.Pool {
 		if p.Contains(a) {

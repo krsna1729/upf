@@ -257,6 +257,13 @@ type Compiler struct {
 	meters   *idPool
 	teids    *idPool
 
+	// rules is the owner of every rule key a live session holds, by the key the
+	// engine sees (resource, then the WildcardMatch key). The PDR tables are
+	// shared by every session and one key is one rule: a second session writing
+	// a key the first holds would take its packets and, when it went, erase the
+	// rule it left behind (compile claims a key, settle and remove give it up).
+	rules map[string]uint64
+
 	// stats counts what this compiler's three entry points answered: what a
 	// management endpoint reports (Stats).
 	stats counters
@@ -274,6 +281,7 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		log:      log,
 		sessions: map[uint64]*Session{},
 		byTEID:   map[uint32]*Session{},
+		rules:    map[string]uint64{},
 		nextSEID: 1,
 		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		meters:   newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
@@ -808,6 +816,14 @@ func (c *Compiler) settle(s *Session) {
 // pinned) is not queued for allocation -- the pool never handed it out -- so
 // only its reservation ends.
 func (c *Compiler) releaseSession(s *Session) {
+	// The rule keys this session holds go with it: the deletion that called
+	// this erased them, and a claim kept past that would refuse another session
+	// the key for good.
+	for key, owner := range c.rules {
+		if owner == s.LocalSEID {
+			delete(c.rules, key)
+		}
+	}
 	// Each id once per pool: a session says its ids once per PDR, and two
 	// uplink PDRs sharing a pinned F-TEID would otherwise release it twice --
 	// the second release finds the reservation gone and queues an SMF's value
