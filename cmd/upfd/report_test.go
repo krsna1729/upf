@@ -165,11 +165,12 @@ type sentReport struct {
 }
 
 // queueSender is a reportSender that answers as the test tells it and records
-// what it was asked to send: the loop's queue is judged from the reports it
-// sees, and a report is identified by its URR and UR-SEQN.
+// what it was asked to send, and when: the loop's queue and its backoff are
+// judged from the reports it sees, identified by their URR and UR-SEQN.
 type queueSender struct {
 	mu         sync.Mutex
 	sent       []sentReport
+	at         []time.Time
 	unanswered int   // this many calls are left without an answer
 	refusal    uint8 // a Cause to answer with instead of accepted
 }
@@ -182,6 +183,7 @@ func (s *queueSender) Report(_ context.Context, _ uint64, ies ...*ie.IE) (uint8,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sent = append(s.sent, sentReport{urrID: urr, seqn: seqn})
+	s.at = append(s.at, time.Now())
 	if s.unanswered > 0 {
 		s.unanswered--
 		return 0, errors.New("no answer from the SMF")
@@ -196,6 +198,13 @@ func (s *queueSender) snapshot() []sentReport {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]sentReport(nil), s.sent...)
+}
+
+// times is when each send happened, and how many there were.
+func (s *queueSender) times() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Time(nil), s.at...)
 }
 
 // reportIdentity is the URR and the UR-SEQN a report's IEs carry.
@@ -225,22 +234,48 @@ func reportIdentity(ies []*ie.IE) (uint32, uint32, error) {
 	return 0, 0, errors.New("no usage report among the IEs")
 }
 
-// loopSession is the session the queue's tests drive: one establishment over the
-// fake dataplane, with the loop's own graph shape. It checks the session owes a
-// report a period later, so a test that then sees no sends is failing on the
-// loop rather than on its own setup.
-func loopSession(t *testing.T, est *message.SessionEstablishmentRequest) *session.Compiler {
+// withUE gives an establishment another UE address and F-TEID: its two PDRs
+// carry them, and building the whole session again to change two values would
+// duplicate the shape reportLoopEstablishment owns. The typed fields hold the
+// PDRs (go-pfcp's constructor sorts them there).
+func withUE(est *message.SessionEstablishmentRequest, ue string, teid uint32) *message.SessionEstablishmentRequest {
+	for i, p := range est.CreatePDR {
+		if len(p.ChildIEs) == 0 || p.ChildIEs[0].Type != ie.PDRID {
+			continue
+		}
+		id, err := p.ChildIEs[0].PDRID()
+		if err != nil {
+			continue
+		}
+		switch id {
+		case 1:
+			est.CreatePDR[i] = ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(100),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+					ie.NewFTEID(0x01, teid, net.ParseIP("192.0.2.1"), nil, 0),
+					ie.NewUEIPAddress(0x02, ue, "", 0, 0)),
+				ie.NewFARID(1), ie.NewURRID(7))
+		case 2:
+			est.CreatePDR[i] = ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x02, ue, "", 0, 0),
+					ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
+				ie.NewFARID(2))
+		}
+	}
+	return est
+}
+
+// loopSession is the compiler the queue's tests drive: every establishment
+// given, over the fake dataplane, with the loop's own graph shape.
+func loopSession(t *testing.T, ests ...*message.SessionEstablishmentRequest) *session.Compiler {
 	t.Helper()
 	compiler := session.New(reportConfig(), &fakeDataplane{},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
-	resp := compiler.Establish(est).(*message.SessionEstablishmentResponse)
-	if cause, err := resp.Cause.Cause(); err != nil || cause != ie.CauseRequestAccepted {
-		t.Fatalf("the establishment answered cause %d (%v), want accepted", cause, err)
-	}
-	ctx := context.Background()
-	compiler.EvaluateAll(ctx, time.Now()) // the first reading is the window's base
-	if got := compiler.EvaluateAll(ctx, time.Now().Add(2*time.Second)); len(got) != 1 {
-		t.Fatalf("the session owes %d reports a period later, want the periodic one", len(got))
+	for _, est := range ests {
+		resp := compiler.Establish(est).(*message.SessionEstablishmentResponse)
+		if cause, err := resp.Cause.Cause(); err != nil || cause != ie.CauseRequestAccepted {
+			t.Fatalf("the establishment answered cause %d (%v), want accepted", cause, err)
+		}
 	}
 	return compiler
 }
@@ -270,7 +305,7 @@ func TestAnUnansweredReportIsSentAgainBeforeTheNextOne(t *testing.T) {
 		s := sender.snapshot()
 		return len(s) >= 3 && s[2].seqn > s[0].seqn
 	}, "a newer window's report followed the answered one", logs.log)
-	waitFor(t, 2*time.Second, func() bool { return logs.contains("held for the next tick") },
+	waitFor(t, 2*time.Second, func() bool { return logs.contains("held and backed off") },
 		"the loop logged the report as held", logs.log)
 	if logs.contains("usage report dropped") {
 		t.Errorf("a report was dropped with the queue far from full: %s", logs.log())
@@ -313,6 +348,74 @@ func TestARefusedReportIsNotRetried(t *testing.T) {
 // TestTheReportQueueIsBoundedPerSession: a CP function that never answers must
 // not grow this node's memory without bound, and what does not fit is handed
 // back so the loop can log it with its usage rather than lose it quietly.
+// TestAHeldReportIsRetriedWithBackoff: a CP function that has stopped answering
+// must not be sent to at the tick's rate -- every attempt costs the n4 layer's
+// retry budget, and the tick also carries the evaluation that enforces every
+// session's quota. So the repeats double apart, and the log follows the
+// doublings rather than the ticks.
+func TestAHeldReportIsRetriedWithBackoff(t *testing.T) {
+	sender := &queueSender{unanswered: 1 << 30}
+	compiler := loopSession(t, periodicEstablishment(1, 0x9001, time.Second))
+	logs := &logCapture{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reportLoop(ctx, compiler, sender, 5*time.Millisecond,
+		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	// The first report is due a period in (1s), so this window holds ~1s of
+	// retries: without a backoff that is ~200 sends at a 5ms tick to a peer that
+	// has gone silent.
+	time.Sleep(2 * time.Second)
+	at := sender.times()
+	if len(at) < 3 {
+		t.Fatalf("the loop made %d attempts in 2s, want the report retried", len(at))
+	}
+	if len(at) > 16 {
+		t.Errorf("a silent SMF was sent to %d times in 2s of 5ms ticks, want the backoff to keep it to the doublings", len(at))
+	}
+	var gaps []time.Duration
+	for i := 1; i < len(at); i++ {
+		gaps = append(gaps, at[i].Sub(at[i-1]))
+	}
+	if last := gaps[len(gaps)-1]; last <= gaps[0] {
+		t.Errorf("the retry gaps are %v: they double, so the last must exceed the first", gaps)
+	}
+	if n := strings.Count(logs.log(), "held and backed off"); n > 8 {
+		t.Errorf("%d log lines for one held report, want the first failure and the doublings", n)
+	}
+}
+
+// TestATickStopsDrainingAfterATransportFailure: the first failed send of a tick
+// ends that tick's drain, so the evaluation behind it (every session's windows
+// and quotas) runs on time however many sessions are stuck behind a silent peer.
+func TestATickStopsDrainingAfterATransportFailure(t *testing.T) {
+	sender := &queueSender{unanswered: 1 << 30}
+	compiler := loopSession(t,
+		periodicEstablishment(1, 0x9001, time.Second),
+		// A second session is its own UE address and F-TEID: two sessions for
+		// one UE are refused (their PDRs would be ambiguous) and two sessions on
+		// one TEID rule are one session's.
+		withUE(periodicEstablishment(2, 0x9002, time.Second), "10.45.0.9", 0x0a0a0a0a))
+	logs := &logCapture{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reportLoop(ctx, compiler, sender, 20*time.Millisecond,
+		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	// The reports are due a period in (1s), so this holds about a second of a
+	// silent peer with two sessions stuck behind it.
+	time.Sleep(2 * time.Second)
+	at := sender.times()
+	if len(at) < 2 {
+		t.Fatalf("two sessions had a report held and the loop made %d attempts in 2s, want more", len(at))
+	}
+	for i := 1; i < len(at); i++ {
+		if gap := at[i].Sub(at[i-1]); gap < 10*time.Millisecond {
+			t.Errorf("two sends %v apart: a tick must make one attempt once the peer has gone silent", gap)
+		}
+	}
+}
+
 func TestTheReportQueueIsBoundedPerSession(t *testing.T) {
 	q := newReportQueue()
 	var dropped []uint32
@@ -335,8 +438,9 @@ func TestTheReportQueueIsBoundedPerSession(t *testing.T) {
 	if head, _ := q.head(1); head.report.Seqn != 3 {
 		t.Errorf("after the acknowledgement the oldest is UR-SEQN %d, want 3", head.report.Seqn)
 	}
-	// An unanswered send is recorded without moving the report.
-	q.sent(1)
+	// An unanswered send is recorded without moving the report, and the next
+	// attempt is what the backoff schedules.
+	q.sent(1, time.Now(), time.Second)
 	if head, _ := q.head(1); head.attempts != 1 {
 		t.Errorf("the oldest report has %d attempts after one unanswered send, want 1", head.attempts)
 	}
