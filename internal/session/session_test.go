@@ -1615,6 +1615,63 @@ func TestTwoQFIKeyedPDRsGetTheirOwnMeters(t *testing.T) {
 	}
 }
 
+// assertActionRecords holds the daemon's own invariant: a rule's action_id is a
+// *reference* (D-021; transaction_engine.cc checks it on the transaction's end
+// state), so every rule naming an id must be joined by an upsert of that id in
+// the same transaction. The buffering path broke it -- it allocated the flow's
+// store key as an ActionId and wrote no record -- and only the live arm showed
+// it, because nothing in the unit tests walked the transaction looking for the
+// reference.
+func assertActionRecords(t *testing.T, cfg Config, changes []bess.Change) {
+	t.Helper()
+	for _, dir := range []struct{ rules, actions string }{
+		{rulesRes(cfg.Up), actionsRes(cfg.Up)},
+		{rulesRes(cfg.Down), actionsRes(cfg.Down)},
+	} {
+		written := map[uint32]bool{}
+		for _, ch := range changes {
+			if ch.Resource == dir.actions {
+				if id, ok := ch.Key["id"].(uint32); ok {
+					written[id] = true
+				}
+			}
+		}
+		for _, ch := range changes {
+			if ch.Resource != dir.rules {
+				continue
+			}
+			id, _ := ch.Value["action_id"].(uint32)
+			if id != 0 && !written[id] {
+				t.Errorf("a rule in %s names action %d, and no upsert in %s writes it: the daemon refuses the transaction",
+					dir.rules, id, dir.actions)
+			}
+		}
+	}
+}
+
+// TestEveryRulesActionIdHasAnActionRecord runs the invariant over a fresh
+// establishment of each kind -- forwarding and buffering -- because that is the
+// shape the live arm failed on.
+func TestEveryRulesActionIdHasAnActionRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		req  *message.SessionEstablishmentRequest
+	}{
+		{"a forwarding session", testConfig(), establishment(0x9201, "10.45.0.9")},
+		{"a buffering session", bufferingConfig(), buffEstablishment(0x9202, "10.45.0.9")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			c := New(tc.cfg, rec, quietLogger())
+			if got := cause(t, c.Establish(tc.req)); got != ie.CauseRequestAccepted {
+				t.Fatalf("the establishment answered cause %d", got)
+			}
+			assertActionRecords(t, tc.cfg, rec.last())
+		})
+	}
+}
+
 // TestThePrecedenceIsInvertedIntoTheClassifiersPriority: PFCP orders PDRs one
 // way and the classifier the other. 8.2.11: "the lower precedence values
 // indicate higher precedence of the PDR, and the higher precedence values
