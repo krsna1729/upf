@@ -1,0 +1,123 @@
+# Scorecard: our compliance blocks against the field
+
+Status: 2026-10-17. Purpose: one number per compliance block, for us and for the
+open-source UPFs this project measures itself against, so the roadmap's order can
+be argued from a score rather than from impressions.
+
+**Evidence.** [`compliance-landscape.md`](compliance-landscape.md) is the survey:
+per project, the features its code sets and the code path that implements each.
+[`compliance.md`](compliance.md) is our own row-by-row state, each row carrying
+its TS 29.244 clause and the test that exercises it. This file scores those two
+and introduces no claims of its own.
+
+---
+
+## How to read the numbers
+
+| rule | why |
+|---|---|
+| A block's percentage is the sub-features of that block a project shows, over the sub-features the block scores. They are listed under [The blocks, audited](#the-blocks-audited). | a percentage is only worth reading if you can see what it counts |
+| **We are credited only where a test exists** — not where a clause is read, not where the code "supports" it. | this repository's own rule: a feature without a bar is a claim |
+| **Competitors are credited only where the survey found code**, so every competitor number is a **lower bound**. Silence counts as absent for scoring. | an unexamined feature is not a missing feature; the audit table says where this bites |
+| No sub-feature is counted in two blocks, and **nothing a project only documents is scored at all** (see [Not scored](#not-scored)). | a score that rewards writing things down measures the writing |
+| `—` in a cell: the survey did not examine that block per project; the block is left out of the means. | no number is better than a wrong one |
+
+## Not scored
+
+| left out | why |
+|---|---|
+| one atomic transaction per change, idempotent retries, refusal with a Cause | ours, and tested, but the survey does not examine any other project's atomicity: scoring it would score the survey's silence, not the field |
+| a clause number and a test per feature; published per-packet numbers | this repository's documentation habit. It is why the numbers in this file can be checked; it is not a capability |
+| declared UP Function Features (association response bits) | a declaration is a claim until a code path implements it, which is the survey's own starting rule |
+
+---
+
+## The score
+
+| # | block (sub-features scored) | us | OAI-CN5G | open5gs | free5GC | UPG-VPP | eUPF | OMEC |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | association, heartbeat, restart detection (3) | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
+| 2 | session establishment, modification, deletion (3) | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
+| 3 | UP-initiated reports: USAR, DLDR (2) | **50** | 100 | 100 | 100 | 50 | 0 | 0 |
+| 4 | PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5) | **60** | — | — | — | — | — | — |
+| 5 | QER: gate, MBR, per-flow or GBR (3) | **67** | 67 | 67 | 33 | 0 | 67 | 67 |
+| 6 | URR: volume, time, thresholds, quota + enforcement, linked (5) | **80** | 60 | 60 | 60 | 100 | 0 | 0 |
+| 7 | BAR + DDN: buffering, DDN, duration, drop-buffered (4) | **0** | 75 | 75 | 25 | 0 | 0 | 25 |
+| 8 | GTP-U: decap, encap, echo, end marker, DSCP copy (5) | **60** | 40 | 80 | 40 | 40 | 40 | 80 |
+| 9 | IPv6: PFCP UE IP, inner + outer, N9 (3) | **0** | 0 | 0 | 0 | 33 | 0 | 0 |
+| 10 | MAR / ATSSS-LL (2) | **0** | 50 | 0 | 0 | 50 | 0 | 0 |
+| 11 | ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 |
+| 12 | real-SMF interop (1) | **0** | 0 | **100** | 0 | 0 | 0 | 0 |
+| | **mean of the eleven blocks every project scores (1-3, 5-12)** | **46** | **54** | **62** | **42** | **43** | **28** | **38** |
+
+## What each number is made of
+
+| project | its mean rests on | weakest blocks |
+|---|---|---|
+| **us** | URR wired end to end and the PDI sub-features no one else is scored on; nothing in the box an idle UE sits in | 7, 9, 10, 12 (0) |
+| **open5gs** | the roundest project in the field: reports, buffering, markers, and production interop — four blocks at 75-100 | 9, 10, 11 (0) |
+| **OAI-CN5G** | feature breadth in one XDP pipeline: BAR 75, MAR 50, URR 60 | 9, 11, 12 (0) |
+| **free5GC** | delegating to the `gtp5g` kernel module: fast, but semantics it does not own | 7 (25), 5 (33), 9/10/11/12 (0) |
+| **UPG-VPP** | the deepest URR in the field (100) and nothing in the box below it: no working QER or BAR | 5, 7, 10, 11, 12 (0) |
+| **eUPF** | speed; its URR is in the datapath but not wired to the session handler | 3, 6, 7, 9, 10, 11, 12 (0) |
+| **OMEC** | the UPF this project replaces: QER, DDN notification, ULCL/N9, DSCP copy — and no URR at all | 3, 6, 9, 10, 12 (0) |
+
+---
+
+## The blocks, audited
+
+Each block's sub-features and where the credit comes from. Competitor citations
+are the survey's (file and symbol, in
+[`compliance-landscape.md`](compliance-landscape.md)); ours are test names in
+[`compliance.md`](compliance.md).
+
+| # | sub-features | us | field |
+|---|---|---|---|
+| 1 | association setup/update/release; heartbeat; restart detection by Recovery Time Stamp | `internal/n4`: `TestAssociationAndHeartbeat`, `TestCPRestartVoidsAssociation`, `TestSecondCPFunctionIsRejected` | every project must interoperate with an SMF to be used at all; the survey found no absence |
+| 2 | establishment; modification; deletion | `ci/session-live.sh`; `TestEstablishCompilesTheSessionIntoOneTransaction` | in every project |
+| 3 | USAR (a report sent when a URR says so); DLDR (one sent when downlink data arrives with no tunnel) | `TestAReportIsAUsageReportTheSMFCanRead`; `internal/n4/live_report_test.go` | OAI (`xdp_urr_apply_kern.c` and its DLDR path), open5gs (`upf_sess_urr_acc_add`, DDN), free5GC (`report.go` types) send both; UPG-VPP sends usage reports, DLDR not evidenced; eUPF's URR is unwired, OMEC has none, so neither can report |
+| 4 | precedence; F-TEID with CH/CHID (FTUP); UE IP; SDF filter incl. port ranges; Network Instance and QFI | `TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID`, `TestPortRangeIsRefusedNotMatchedTooWidely`, `TestANonIPv4PDIIsRefusedNotWidened` | not examined per project: the survey scores rule types (PDR/FAR/QER/URR/BAR), not PDI sub-features. Only OAI's `ftup=1` is on record, and it is not enough to score the block |
+| 5 | QER gate; MBR; per-flow or GBR semantics | `TestAClosedGateDropsWithoutAnAction`; `ci/session-path.sh` | OAI TC-BPF, open5gs `appQER`/`sessionQER`, eUPF one QER per PDR, OMEC app + session QER; free5GC has no QER semantics in userspace (33); UPG-VPP's README says QER is "not yet working" (0) |
+| 6 | volume; time; thresholds; quota and its enforcement; linked UR-SEQN | `TestEvaluateReportsAUsedUpQuotaAndStopsTheTraffic`, `TestEvaluateReportsTheWindowItMeasured` | UPG-VPP `upf_session.c:640-680` (100); OAI, open5gs and free5GC measure volume and time with thresholds but the survey shows no quota-enforcement or linked half; eUPF unwired; OMEC none |
+| 7 | downlink buffering; DDN; buffering duration; drop-buffered | `TestABuffOnlyFARIsADrop` (what we do instead: drop) | OAI and open5gs buffer; free5GC validates BAR and does not buffer (25); OMEC notifies and does not buffer (25); UPG-VPP's README says BAR is "not yet working" |
+| 8 | GTP-U decap; encap; echo request/reply; end marker; inner-to-outer DSCP copy | `ci/smoke-gtpu.sh` (decap, encap, DSCP); echo and end marker absent | open5gs and OMEC have both markers (80); everyone decapsulates and encapsulates; echo is not examined per project by the survey |
+| 9 | PFCP UE IP and prefixes; IPv6 inner and outer; IPv6 on N9 | refusal with cause 73: `TestANonIPv4PDIIsRefusedNotWidened`, `TestACHOOSEForIPv6IsRefused` | UPG-VPP states IPv4/IPv6 inner + outer (33, one sub-feature of three); no other project claims any |
+| 10 | MAR; ATSSS-LL | nothing; phased in `compliance.md` | OAI (MAR) and UPG-VPP (MAR message support) at 50; ATSSS-LL nowhere |
+| 11 | Network Instance to route domain; branching on N9 | `internal/routing`; `TestParseInstancesReadsTheDeployment` | OMEC has ULCL/N9 (50); nothing else claims it |
+| 12 | a real SMF driving this UPF end to end | none yet: `ci/n4-path.sh` drives our own stand-in | open5gs is the field's proven one (production labs) and scores 100 |
+
+---
+
+## What moves our number
+
+Each row is one close, on its own, against the mean of 46:
+
+| close | block | block from → to | mean | cost |
+|---|---|---|---|---|
+| GTP-U echo + end marker (gap 2) | 8 | 60 → 100 | 46 → 50 | one small module: echo replies in the datapath, an end marker on SNDEM |
+| BAR + DDN (gap 4) | 7 | 0 → 75 | 46 → 53 | the largest item: a buffer, a DDN report, and the duration semantics |
+| the DLDR half of the report path | 3 | 50 → 100 | 46 → 51 | needs gap 4 to have a trigger |
+| linked UR-SEQN | 6 | 80 → 100 | 46 → 48 | one field read and one counter link |
+| QFI and per-flow QER | 5 | 67 → 100 | 46 → 49 | the classifier's second key form and one more match field |
+| the vif that writes the route domain (gap 5's tail) | 11 | 50 → 100 | 46 → 51 | the port work in `design.md`; needs the placement measurement first |
+| IPv6 | 9 | 0 → 100 | 46 → 55 | the dataplane's tables and the F-TEID key: a second form, not a patch |
+| a real SMF (open5gs or free5GC) at the door | 12 | 0 → 100 | 46 → 55 | no code: an afternoon with a NIC and someone else's SMF |
+
+Taken together, the four cheapest closes — echo + end marker, DLDR, a real SMF,
+and whichever of BAR or IPv6 a deployment asks for first — are the ones that put
+the mean above the field's best today, and none of them is a rewrite.
+
+## Three readings
+
+1. **We are behind, and by a specific list.** open5gs 62 and OAI 54 against our
+   46 is not noise: it is BAR + DDN (0 against 75), the tunnel markers (60
+   against 80), and interop (0 against 100). What we lead is URR (80 against 60
+   for three of them) and the PDI sub-features the survey does not score for
+   anyone else — and neither of those is what a handover or a stalled UE notices.
+2. **The mean is not a verdict on the dataplane.** No row here is a throughput
+   claim: the same-harness measurement that would settle that (verification plan
+   section 2) has not been run. The floors that do exist are per packet and
+   per module, in `design.md`'s arms.
+3. **No project has everything, and the two leaders trade places per block.**
+   UPG-VPP owns URR and nothing in the box under it; eUPF is fast and unwired;
+   OMEC is what this project replaces — it has the box and no measurement.
