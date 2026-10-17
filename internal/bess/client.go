@@ -380,6 +380,22 @@ func (c *Client) DropFlow(ctx context.Context, module string, id uint32) error {
 	return nil
 }
 
+// ClearStore frees every packet a store holds. Its command takes a flow id and
+// ignores it when the store is emptied wholesale (the module's clear); the id is
+// there for the release and drop commands, which act on one flow. This is the
+// restart wall's call: a previous run's held packets must not outlive the
+// controller that knew which episode they belonged to.
+func (c *Client) ClearStore(ctx context.Context, module string, id uint32) error {
+	arg, err := c.Message("bess.pb.PacketStoreCommandClearArg", map[string]any{})
+	if err != nil {
+		return err
+	}
+	if _, err := c.sdk.InvokeAction(ctx, module, "clear", arg); err != nil {
+		return fmt.Errorf("bess: %s clear: %w", module, err)
+	}
+	return nil
+}
+
 // Apply writes every change in one transaction. The daemon validates all of
 // them, applies all or nothing, and a change whose own resource is missing is
 // refused rather than half-applied (control_v2's D-129 semantics). The error is
