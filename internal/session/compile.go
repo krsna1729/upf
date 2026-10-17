@@ -362,6 +362,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 				// of the allocator's way: another session handed the same
 				// value would share the TEID rule, and its uplink packets
 				// would land in whichever session wrote the rule last.
+				//
 				if other := c.byTEID[p.teid]; other != nil && other != s {
 					return fmt.Errorf(
 						"%w: the pinned F-TEID %#x is session %d's",
@@ -369,6 +370,16 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 				}
 				pdr.teid = p.teid
 				c.teids.reserve(p.teid)
+				// The mapping goes in here, under merge's lock, not after the
+				// Apply: that is what makes the check above atomic. Two
+				// concurrent establishments that pin one value would otherwise
+				// both pass (the mapping is written later), and the second
+				// Apply would overwrite the first's TEID rule. It also means a
+				// session's *own* two uplink PDRs that share a pinned value
+				// see their own mapping and are accepted. releaseSession rolls
+				// it back when the session is refused, and Establish's write
+				// after the Apply is the no-op it always was.
+				c.byTEID[p.teid] = s
 			} else if pdr.teid == 0 {
 				// The SMF left the F-TEID to us (TEID 0): allocate one and
 				// report it in the Created PDR. Failing to is not something to
@@ -589,14 +600,13 @@ func ones(n int) []byte {
 }
 
 // host is a field constrained to one IPv4 address: the UE's, where a PDI names
-// it. No address at all is *unconstrained*, not inexpressible -- the zero
-// netip.Addr is how "the PDI says nothing about this field" arrives here (a PDR
-// with no UE IP IE, an SMF that sent the address on the other direction's PDI
-// only), and refusing those would turn a valid session into cause 73. An
-// address the table's four bytes cannot carry is inexpressible, never
-// "unconstrained": a PDI naming an IPv6 UE is a session whose rules must not be
-// written at all, because a masked-out address matches every address --
-// another session's packets included.
+// it. Both ways of not having one are inexpressible. An address the table's
+// four bytes cannot carry would otherwise be *unconstrained*, and a masked-out
+// address matches every address -- another session's packets included. An
+// invalid one means the session has no UE address anywhere: merge fills a PDI's
+// address in from the session's when the PDI names none, so nothing is left to
+// key the rule on, and an unconstrained uplink rule would match every session's
+// decapsulated packets at its precedence.
 func host(a netip.Addr) (match, bool, error) {
 	if !a.IsValid() {
 		// merge fills a PDR's address in from the session's when its own PDI

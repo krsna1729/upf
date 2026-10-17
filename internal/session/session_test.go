@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -887,42 +888,6 @@ func TestARefusedEstablishmentReleasesItsIDs(t *testing.T) {
 	}
 }
 
-// An F-TEID the SMF pinned belongs to the SMF: when its session goes, the pool
-// must not queue the value, or a later session is handed an id another SMF is
-// about to pin. The walk is consulted before the free list, so the difference
-// only shows once the space is exhausted.
-func TestAPinnedFTEIDIsNotFreedWithItsSession(t *testing.T) {
-	cfg := testConfig()
-	cfg.MaxTEIDs = 4 // ids 1..3
-	rec := &recorder{}
-	c := New(cfg, rec, quietLogger())
-
-	pinned := uint32(2)
-	resp := c.Establish(establishmentWithFTEID(0x5570, "10.45.0.6", pinned)).(*message.SessionEstablishmentResponse)
-	if got := cause(t, resp); got != ie.CauseRequestAccepted {
-		t.Fatalf("the pinned establishment answered cause %d", got)
-	}
-	del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0)
-	if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
-		t.Fatalf("the deletion answered cause %d", got)
-	}
-
-	// The walk has two ids left (1 and 3) and never the pinned one.
-	for i := 0; i < 2; i++ {
-		r := c.Establish(establishment(0x5580+uint64(i), "10.45.0.20")).(*message.SessionEstablishmentResponse)
-		if got := cause(t, r); got != ie.CauseRequestAccepted {
-			t.Fatalf("establishment %d answered cause %d", i, got)
-		}
-		if got := reportedTEID(t, r); got == pinned {
-			t.Fatalf("the allocator handed out the pinned F-TEID %#x", pinned)
-		}
-	}
-	third := c.Establish(establishment(0x5590, "10.45.0.21")).(*message.SessionEstablishmentResponse)
-	if got := cause(t, third); got != ie.CauseNoResourcesAvailable {
-		t.Errorf("after the pinned value's session went, the space answered cause %d: the pinned F-TEID was freed", got)
-	}
-}
-
 // A capacity of zero or one leaves no id at all: alloc answers no-resources,
 // rather than handing out id 1 (which the modules would refuse) or panicking in
 // the walk's arithmetic.
@@ -1031,10 +996,10 @@ func TestAnUnknownOutcomeKeepsTheIDs(t *testing.T) {
 }
 
 // releaseSession frees a session's ids, and the TEID mapping only if it names
-// this session. The reachable case is cross-request: a merge refused because a
-// value is taken, and by the time its release runs the holder may have gone and
-// another session may hold the value. Erasing that mapping would let a third
-// session take the TEID and overwrite the new holder's rule.
+// this session -- the property a refused session's rollback rests on. The
+// mapping is written in merge, under merge's lock, so the state below cannot be
+// reached today; it is built here directly to pin the contract, because the
+// release is what a refusal and a deletion share.
 func TestReleasingARefusedSessionLeavesAnotherHoldersTEIDAlone(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
@@ -1065,6 +1030,115 @@ func TestReleasingARefusedSessionLeavesAnotherHoldersTEIDAlone(t *testing.T) {
 	c.mu.Unlock()
 	if held {
 		t.Error("releasing the holder left its TEID mapping behind")
+	}
+}
+
+// Two uplink PDRs that pin one F-TEID are ordinary SMF practice: the session is
+// accepted, and when it goes the pinned value is free again -- but only once.
+// Releasing it per PDR (instead of per id) deletes the reservation on the first
+// call and queues the value on the second, so the pool hands the same id out
+// twice.
+func TestTwoPDRsMayShareOnePinnedFTEID(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxTEIDs = 0x100 // so 0x77 is inside the pool's range
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	const pinned = 0x77
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5730, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(0x5730, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, pinned, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, pinned, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 8.8.8.8 53", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("two PDRs sharing the pinned F-TEID %#x answered cause %d", pinned, got)
+	}
+	if err := c.remove(context.Background(), c.sessions[resp.Header.SEID]); err != nil {
+		t.Fatalf("the deletion failed: %v", err)
+	}
+
+	// Every id the space can yield, each exactly once.
+	seen := map[uint32]bool{}
+	n := 0
+	for {
+		id, err := c.teids.alloc()
+		if err != nil {
+			break
+		}
+		if seen[id] {
+			t.Fatalf("after the pin was released, alloc handed out %#x twice", id)
+		}
+		seen[id] = true
+		n++
+	}
+	if want := int(cfg.MaxTEIDs) - 1; n != want {
+		t.Errorf("the space yielded %d ids, want %d: a shared pin was queued for allocation", n, want)
+	}
+}
+
+// gatedApply parks the first Apply until the test lets it go, so a second
+// establishment can run its merge while the first is in flight.
+type gatedApply struct {
+	inner   Applier
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *gatedApply) Apply(ctx context.Context, changes ...bess.Change) error {
+	first := false
+	g.once.Do(func() { first = true; close(g.entered) })
+	if first {
+		<-g.release
+	}
+	return g.inner.Apply(ctx, changes...)
+}
+
+// The collision check is only as good as when the mapping is written. byTEID is
+// filled after a session's Apply, so if the mapping went in there, two
+// establishments that pin one value -- the second while the first is in flight
+// -- would both pass, and the second Apply would overwrite the first's TEID
+// rule. The mapping goes in during merge, under merge's lock; this test holds
+// the first Apply open and requires the second establishment to be refused.
+func TestAPinArrivingDuringAnApplyIsRefused(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxTEIDs = 0x100
+	rec := &recorder{}
+	gate := &gatedApply{inner: rec, entered: make(chan struct{}), release: make(chan struct{})}
+	c := New(cfg, gate, quietLogger())
+
+	const pinned = 0x55
+	type result struct {
+		resp message.Message
+	}
+	done := make(chan result, 1)
+	go func() {
+		done <- result{c.Establish(establishmentWithFTEID(0x5740, "10.45.0.6", pinned))}
+	}()
+	<-gate.entered // the first session is inside Apply: its rule, no mapping yet
+
+	second := c.Establish(establishmentWithFTEID(0x5741, "10.45.0.7", pinned)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, second); got != ie.CauseNoResourcesAvailable {
+		t.Errorf("a pin of a value whose holder is mid-Apply answered cause %d, want no-resources", got)
+	}
+
+	close(gate.release)
+	first := (<-done).resp.(*message.SessionEstablishmentResponse)
+	if got := cause(t, first); got != ie.CauseRequestAccepted {
+		t.Errorf("the holder's establishment answered cause %d", got)
 	}
 }
 

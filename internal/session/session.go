@@ -433,16 +433,22 @@ func (p *idPool) reserve(id uint32) {
 	p.taken[id] = true
 }
 
-// release takes back an id the pool handed out. A reserved one is ignored --
-// delete on a session whose SMF pinned the F-TEID must not feed that value into
-// the free list -- and so is one already waiting in the free list: a session
-// says its ids once per PDR, so the same meter arrives several times when its
-// QER is shared, and two entries would later be handed to two sessions. A zero
-// grace means the id may be reused as soon as the walk is over (for a space
-// whose resource has no retire period: the TEID table's rules are keyed, not
-// slotted).
+// release takes back an id the pool handed out. A reserved one (an F-TEID an
+// SMF pinned) ends its reservation here -- the value is free again for the SMF
+// that pinned it -- but is never queued for allocation: the pool did not hand it
+// out, and queueing a foreign value like 0x11223344 would offer it to a session
+// that never asked for it. A zero grace means an id the pool *did* hand out may
+// be reused as soon as the walk is over (for a space whose resource has no
+// retire period: the TEID table's rules are keyed, not slotted).
 func (p *idPool) release(id uint32) {
-	if id == 0 || p.taken[id] || p.released[id] {
+	if id == 0 {
+		return
+	}
+	if p.taken[id] {
+		delete(p.taken, id)
+		return
+	}
+	if p.released[id] {
 		return
 	}
 	p.released[id] = true
@@ -522,22 +528,33 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 // two sessions. The caller holds the lock. A reserved id (an F-TEID the SMF
 // pinned) is not freed: the pool never handed it out.
 func (c *Compiler) releaseSession(s *Session) {
+	// Each id once per pool: a session says its ids once per PDR, and two
+	// uplink PDRs sharing a pinned F-TEID would otherwise release it twice --
+	// the second release finds the reservation gone and queues an SMF's value
+	// for allocation.
+	teids := map[uint32]bool{}
+	actions := map[uint32]bool{}
+	meters := map[uint32]bool{}
 	for _, p := range pdrsInOrder(s) {
-		if p.teid != 0 {
-			// Only if this session is what the mapping names. Between a
-			// refused merge and this release (a separate lock), the holder can
-			// delete -- freeing the name -- and another session can pin the
-			// same value and take it: erasing that mapping would let a third
-			// session take the TEID and overwrite the new holder's rule.
+		if p.teid != 0 && !teids[p.teid] {
+			teids[p.teid] = true
+			// Only if this session is what the mapping names. The mapping goes
+			// in during merge, under merge's lock, so nothing else can hold
+			// this value while this session has it: the guard is what the
+			// rollback property rests on (a refused session clears its own
+			// mapping and nobody else's), and it is defensive, not reachable
+			// today.
 			if c.byTEID[p.teid] == s {
 				delete(c.byTEID, p.teid)
 			}
 			c.teids.release(p.teid)
 		}
-		if p.actionID != 0 {
+		if p.actionID != 0 && !actions[p.actionID] {
+			actions[p.actionID] = true
 			c.actions.release(p.actionID)
 		}
-		if p.meterID != 0 {
+		if p.meterID != 0 && !meters[p.meterID] {
+			meters[p.meterID] = true
 			c.meters.release(p.meterID)
 		}
 	}
