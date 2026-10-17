@@ -42,7 +42,7 @@ type peerState interface {
 //	upf_sessions_{established,modified,deleted}_total
 //	upf_sessions_refused_total         requests answered with a cause but accepted
 //	upf_end_markers_total{outcome}     End Markers sent, or failed (the graph's port took none)
-//	upf_buffer_flows_total{outcome}    buffering flows released, dropped, or failed
+//	upf_buffer_flows_total{outcome}    release/drop commands accepted, or refused (accepted, not completed)
 //	upf_usage_reports_total{outcome}   sent, refused, held (no answer yet), dropped
 //	upf_pfcp_associated                a CP function is associated (1) or not (0)
 //	upf_pfcp_peer_info{node_id,address}  the associated CP function, if any
@@ -74,7 +74,7 @@ func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportS
 		fmt.Fprintf(&b, "# TYPE upf_end_markers_total counter\n")
 		fmt.Fprintf(&b, "upf_end_markers_total{outcome=\"sent\"} %d\n", stats.Markers)
 		fmt.Fprintf(&b, "upf_end_markers_total{outcome=\"failed\"} %d\n", stats.MarkerFailures)
-		fmt.Fprintf(&b, "# HELP upf_buffer_flows_total Buffering flows whose held packets the store released or dropped on the SMF's instruction, and the commands it refused.\n")
+		fmt.Fprintf(&b, "# HELP upf_buffer_flows_total Release and drop commands for buffering flows: accepted releases, accepted drops, and refusals. A command is counted when the daemon accepted it, not when the store applied it.\n")
 		fmt.Fprintf(&b, "# TYPE upf_buffer_flows_total counter\n")
 		fmt.Fprintf(&b, "upf_buffer_flows_total{outcome=\"released\"} %d\n", stats.BuffersReleased)
 		fmt.Fprintf(&b, "upf_buffer_flows_total{outcome=\"dropped\"} %d\n", stats.BuffersDropped)
