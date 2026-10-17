@@ -351,10 +351,33 @@ counted rule and +1.34 ns for a miss.
 | `mt_ul` ⊕ `cnt_ul` | one lookup and one dispatch | one module holding both the policer's bucket and the counter cells; both primitives are available to us (BESS's meter, our counters), and the cells' per-worker planes are the thing that must survive |
 | `rt` ⊕ `enc` | the router's lookup on the downlink | the encap gains the route table; on a single-port N3/N6/N9 deployment (docs/design.md's port section) the next hop is a queue rather than a port, which is exactly the case where this fusion starts to look right |
 
-None of these is done. The rule is `docs/design.md`'s "measure before any placement
-change" and its "per feature, per packet" obligation: an arm in
-`ci/bench-modules.sh` that measures the fused module against the same work split,
-on the frames `smoke-gtpu.sh` uses, is the evidence, not the argument.
+None of these is done. Two things decide it, and neither is taste.
+
+**The measurement.** `docs/design.md`'s "measure before any placement change" and
+its "per feature, per packet" obligation mean an arm in `ci/bench-modules.sh` that
+measures the fused module against the same work split, on the frames
+`smoke-gtpu.sh` uses. The first such obligation is already owed by a feature in
+this tree: the decap now parses the 0x85 PDU Session Container and writes `qfi`
+unconditionally, and `pdr_ul`'s key grows by a field with its own mask, so the
+decap arm must be re-taken against the 2026-10-16 baseline (+13.4 ns/pkt, 612
+instructions over its control) on **both** frame kinds -- a G-PDU with a container
+and one without -- and the rule table's tuple budget reported with it. That same
+pair of numbers is what decides `teid` ⊕ `gtpu_decap`: a fusion has to beat the
+lookup and dispatch it removes, and the decap's own arm is the upper bound on what
+there is to win.
+
+**The taps.** A split is also the place where the transformation is *observed*:
+`smoke-gtpu.yaml` dumps the frame after the decap and after the encap, and
+`ci/smoke-gtpu.sh` byte-checks both against the log, which is how a wrong header
+length or a dropped option is caught at the stage that wrote it. Fusing two
+modules removes that boundary: a tcpdump between them is no longer possible, and
+"did the decap strip it or did the encap write it wrong" stops being answerable
+from the wire. So a fusion is acceptable only if the fused stage is still
+observable -- BESS's per-gate taps, or a `Dump` at the fused module's own output
+-- and the tap has to be removable from the measured graph, since a copy per
+packet is not something the base path pays for. That is the ergonomic half of the
+evidence, and it is a criterion, not a preference: what we would lose is exactly
+the class of mistake the smoke test exists to catch.
 
 ## Building and loading it
 
