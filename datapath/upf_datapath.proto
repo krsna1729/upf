@@ -60,11 +60,16 @@ message GtpuEncapArg {
 
 // -- resources ---------------------------------------------------------------
 //
-// Both modules register one transactional resource (control_v2, D-129): the
-// controller writes it as part of the session's single transaction, in the
-// order docs/design.md gives (resources, then the action record, then the rule
-// that names it). Neither resource references another, so a session change is
-// one flat transaction.
+// Two of the modules register one transactional resource each (control_v2,
+// D-129): GtpuEncap's "tunnels" and UrrCount's "counters" (one UrrCount
+// instance per direction, plus one on the buffering branch). The controller
+// writes them as part of the session's single transaction, in the order
+// docs/design.md gives (resources, then the action record, then the rule that
+// names it). Neither resource references another, so a session change is one
+// flat transaction. GtpuDecap and GtpuEcho own no resource: a session's TEID is
+// a rule of the classifier in front of the decap, and an echo belongs to the
+// path. The packet store's per-flow resource is BESS's own module, not this
+// plugin's, and is documented there.
 
 // UrrCountArg configures the per-rule usage counters (TS 29.244 7.5.2.4: the
 // data half of a URR's measurement).
