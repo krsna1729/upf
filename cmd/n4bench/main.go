@@ -332,8 +332,10 @@ func run() error {
 					}
 					resp, _, err := c.send(m, kind, *timeout)
 					if err == nil && kind == opEstablish && resp != nil {
-						// The response header carries our own SEID; the UPF's
-						// is the F-SEID IE, and every later request must use it.
+						// The answer's header carries *our* SEID (the CP F-SEID,
+						// the identity the UPF addresses its answers to); the
+						// UPF's own is the F-SEID IE, and every later request
+						// must use it (TS 29.244 7.2.2.4.2).
 						if r, ok := resp.(*message.SessionEstablishmentResponse); ok && r.UPFSEID != nil {
 							if f, err := r.UPFSEID.FSEID(); err == nil {
 								seids[i] = f.SEID

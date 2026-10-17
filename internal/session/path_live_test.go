@@ -159,9 +159,9 @@ func carriesPackets(t *testing.T, req *message.SessionEstablishmentRequest, cont
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the daemon refused the establishment with cause %d", got)
 	}
-	t.Logf("established SEID %d, uplink TEID %#x, downlink TEID %#x", resp.Header.SEID, pathUpTEID, pathDownTEID)
+	t.Logf("established SEID %d, uplink TEID %#x, downlink TEID %#x", upSEID(t, resp), pathUpTEID, pathDownTEID)
 	defer func() {
-		del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 9, 0)
+		del := message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 9, 0)
 		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
 			t.Errorf("the deletion answered cause %d", got)
 		}
@@ -209,19 +209,19 @@ func TestLiveSessionSharedRecords(t *testing.T) {
 		t.Fatalf("the daemon refused the establishment with cause %d", got)
 	}
 	defer func() {
-		del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 9, 0)
+		del := message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 9, 0)
 		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
 			t.Errorf("the deletion answered cause %d", got)
 		}
 	}()
-	t.Logf("established SEID %d with two uplink PDRs on one F-TEID", resp.Header.SEID)
+	t.Logf("established SEID %d with two uplink PDRs on one F-TEID", upSEID(t, resp))
 
 	// PDR 1 is the one the shared TEID rule was written from (the first PDR, in
 	// precedence order), and PDR 2 survives to rewrite it: that is the case
 	// where a removal's erase list and a write can name one key in one
 	// transaction. Then PDR 2 goes too, which is the case where the session has
 	// no user of the TEID left and the rule is erased.
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewRemovePDR(ie.NewPDRID(1)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
@@ -229,7 +229,7 @@ func TestLiveSessionSharedRecords(t *testing.T) {
 	}
 	t.Logf("removed PDR 1; PDR 2 rewrote the shared TEID rule in the same transaction")
 
-	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
+	mod = message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 3, 0,
 		ie.NewRemovePDR(ie.NewPDRID(2)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
@@ -380,7 +380,7 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 		t.Fatalf("the daemon refused the establishment with cause %d", got)
 	}
 	defer func() {
-		del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 9, 0)
+		del := message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 9, 0)
 		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
 			t.Errorf("the deletion answered cause %d", got)
 		}
@@ -390,7 +390,7 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 	// quota is spent by the traffic after it.
 	var counted uint64
 	baseline := time.Now()
-	if reports := evaluateAt(t, c, resp.Header.SEID, baseline); len(reports) != 0 {
+	if reports := evaluateAt(t, c, upSEID(t, resp), baseline); len(reports) != 0 {
 		t.Fatalf("the baseline reading returned %+v, want none", reports)
 	}
 	// Wait for the counter to grow past the quota: the reading the baseline
@@ -407,7 +407,7 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 	}
 	counted = octetsOf(t, ctx, client, "cnt_ul")
 
-	reports, err := c.Evaluate(ctx, resp.Header.SEID, time.Now())
+	reports, err := c.Evaluate(ctx, upSEID(t, resp), time.Now())
 	if err != nil {
 		t.Fatalf("evaluating the session's usage: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 		t.Fatalf("the daemon refused the establishment with cause %d", got)
 	}
 	defer func() {
-		del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 9, 0)
+		del := message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 9, 0)
 		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
 			t.Errorf("the deletion answered cause %d", got)
 		}

@@ -370,7 +370,7 @@ func TestADeletionErasesEachSharedRecordOnce(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	del := c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 2, 0)).(*message.SessionDeletionResponse)
+	del := c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 2, 0)).(*message.SessionDeletionResponse)
 	if got := cause(t, del); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
@@ -436,7 +436,7 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 
 	// PDR 1 is the session's only uplink PDR, so its rule, its action, the
 	// session's TEID rule and the uplink meter it is policed by are all its.
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewRemovePDR(ie.NewPDRID(1)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
@@ -464,7 +464,7 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	// And the records it left behind go when the session does: the removed PDR
 	// is out of the model, so a deletion that walked only the model would leave
 	// its meter, and any TEID rule no one else used, programmed for good.
-	del := c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0)).(*message.SessionDeletionResponse)
+	del := c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 3, 0)).(*message.SessionDeletionResponse)
 	if got := cause(t, del); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
@@ -493,7 +493,7 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod = message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewRemovePDR(ie.NewPDRID(2)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
@@ -610,7 +610,7 @@ func TestAnUpdateThatChangesTheKeyErasesTheOldRule(t *testing.T) {
 		t.Fatalf("the establishment gave the PDR no action (%v)", actionID)
 	}
 
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
@@ -658,7 +658,7 @@ func TestADeletionErasesTheOldKeyOfARefusedUpdate(t *testing.T) {
 	}
 
 	rec.fail = &bess.RejectedError{}
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
@@ -670,7 +670,7 @@ func TestADeletionErasesTheOldKeyOfARefusedUpdate(t *testing.T) {
 	}
 	rec.fail = nil
 
-	del := c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0)).(*message.SessionDeletionResponse)
+	del := c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 3, 0)).(*message.SessionDeletionResponse)
 	if got := cause(t, del); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
@@ -704,7 +704,7 @@ func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
 	}
 	actionID := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0}).change.Value["action_id"]
 
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
@@ -847,7 +847,7 @@ func TestARefusedModificationKeepsTheCHIDItAllocated(t *testing.T) {
 	}
 	// A third uplink PDI on a CHOOSE ID the session does not have yet.
 	addPDR := func() *message.SessionModificationRequest {
-		return message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		return message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 			ie.NewCreatePDR(ie.NewPDRID(3), ie.NewPrecedence(30),
 				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 					ie.NewFTEID(0x0d, 0, nil, nil, 9),
@@ -862,7 +862,7 @@ func TestARefusedModificationKeepsTheCHIDItAllocated(t *testing.T) {
 		t.Fatalf("the dataplane refused the modification and the SMF was told cause %d", got)
 	}
 	c.mu.Lock()
-	held, has := c.sessions[resp.Header.SEID].chids[9]
+	held, has := c.sessions[upSEID(t, resp)].chids[9]
 	queued := len(c.teids.freed)
 	c.mu.Unlock()
 	if !has {
@@ -885,7 +885,7 @@ func TestARefusedModificationKeepsTheCHIDItAllocated(t *testing.T) {
 	}
 
 	// And the reservation ends with the session, not with the process.
-	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0))); got != ie.CauseRequestAccepted {
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 3, 0))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
 	c.mu.Lock()
@@ -982,7 +982,7 @@ func TestACHOOSEIDIsTheSessionsFTEIDForThatGroup(t *testing.T) {
 	}
 	want := createdTEID(t, resp.CreatedPDR, 1)
 
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewCreatePDR(ie.NewPDRID(3), ie.NewPrecedence(30),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewFTEID(0x0d, 0, nil, nil, 7),
@@ -1015,13 +1015,13 @@ func TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI(t *testing.T) {
 	}
 	gone := createdTEID(t, resp.CreatedPDR, 1)
 
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewRemovePDR(ie.NewPDRID(1)), ie.NewRemovePDR(ie.NewPDRID(2)))
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the removal answered cause %d", got)
 	}
 
-	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
+	mod = message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 3, 0,
 		ie.NewCreatePDR(ie.NewPDRID(3), ie.NewPrecedence(30),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewFTEID(0x0d, 0, nil, nil, 9),
@@ -1186,7 +1186,7 @@ func TestAQuotaExhaustedURRDropsItsPDRs(t *testing.T) {
 
 	// An update that changes nothing about the PDR: whatever the SMF sends, the
 	// session is recompiled, and the rule must come out as a drop.
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
 			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 	)
@@ -1204,7 +1204,7 @@ func TestAQuotaExhaustedURRDropsItsPDRs(t *testing.T) {
 	// A new quota is the SMF's own lever for re-opening the traffic
 	// (5.2.2.2.1): provisioning one clears the flag, and the next transaction
 	// writes the rule with its action again.
-	reopen := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
+	reopen := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 3, 0,
 		ie.NewUpdateURR(ie.NewURRID(7), ie.NewVolumeQuota(0x01, 1<<40, 0, 0)),
 	)
 	if got := cause(t, c.Modify(reopen)); got != ie.CauseRequestAccepted {
@@ -1385,9 +1385,9 @@ func TestRepeatedEstablishmentAnswersWithTheSameSession(t *testing.T) {
 	if got := cause(t, again); got != ie.CauseRequestAccepted {
 		t.Errorf("a retransmitted establishment answered cause %d", got)
 	}
-	if first.Header.SEID != again.Header.SEID {
+	if upSEID(t, first) != upSEID(t, again) {
 		t.Errorf("the retransmission got SEID %d, the first answered %d",
-			again.Header.SEID, first.Header.SEID)
+			upSEID(t, again), upSEID(t, first))
 	}
 	if len(rec.txns) != 1 {
 		t.Errorf("%d transactions for one session, want 1", len(rec.txns))
@@ -1399,7 +1399,7 @@ func TestDeleteRemovesWhatTheSessionProgrammed(t *testing.T) {
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(establishment(0x3333, "10.45.0.4")).(*message.SessionEstablishmentResponse)
 
-	del := c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 2, 0)).(*message.SessionDeletionResponse)
+	del := c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 2, 0)).(*message.SessionDeletionResponse)
 	if got := cause(t, del); got != ie.CauseRequestAccepted {
 		t.Fatalf("deletion refused with cause %d", got)
 	}
@@ -1447,7 +1447,7 @@ func TestDeleteRemovesWhatTheSessionProgrammed(t *testing.T) {
 	}
 
 	// A retransmitted deletion is not an error and writes nothing.
-	again := c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0)).(*message.SessionDeletionResponse)
+	again := c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 3, 0)).(*message.SessionDeletionResponse)
 	if got := cause(t, again); got != ie.CauseSessionContextNotFound {
 		t.Errorf("a repeated deletion answered cause %d", got)
 	}
@@ -2120,7 +2120,7 @@ func TestTwoPDRsMayShareOnePinnedFTEID(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("two PDRs sharing the pinned F-TEID %#x answered cause %d", pinned, got)
 	}
-	if err := c.remove(context.Background(), c.sessions[resp.Header.SEID]); err != nil {
+	if err := c.remove(context.Background(), c.sessions[upSEID(t, resp)]); err != nil {
 		t.Fatalf("the deletion failed: %v", err)
 	}
 
@@ -2214,7 +2214,7 @@ func TestModifyRewritesTheWholeSession(t *testing.T) {
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(establishment(0x8888, "10.45.0.9")).(*message.SessionEstablishmentResponse)
 
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
 			ie.NewForwardingParameters(
 				ie.NewDestinationInterface(ie.DstInterfaceAccess),
@@ -2269,7 +2269,7 @@ func TestClosingAGateDropsThePacketsOfALivePDR(t *testing.T) {
 		t.Fatal("the uplink PDR has no action id to keep")
 	}
 
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdateQER(ie.NewQERID(1),
 			ie.NewGateStatus(ie.GateStatusClosed, ie.GateStatusOpen)),
 	)
@@ -2359,7 +2359,7 @@ func TestAnUpdateThatKeepsTheURRMovesTheCounterOnce(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
 			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 	)
@@ -2408,14 +2408,14 @@ func TestEvaluateReportsAUsedUpQuotaAndStopsTheTraffic(t *testing.T) {
 	// the 1000 the SMF provisioned.
 	// The dataplane's first reading is the window's base and reports nothing;
 	// the traffic after it is what spends the quota.
-	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+	if reports := evaluate(t, c, upSEID(t, resp)); len(reports) != 0 {
 		t.Fatalf("the baseline reading reported %+v, want none", reports)
 	}
 	rec.counts = map[string][]bess.RuleCount{
 		testConfig().Up.Counters: {{ActionID: rule.actionID(), Packets: 10, Octets: 1500}},
 	}
 
-	reports := evaluate(t, c, resp.Header.SEID)
+	reports := evaluate(t, c, upSEID(t, resp))
 	if len(reports) != 1 {
 		t.Fatalf("evaluation returned %d reports, want one for the used-up quota", len(reports))
 	}
@@ -2432,9 +2432,9 @@ func TestEvaluateReportsAUsedUpQuotaAndStopsTheTraffic(t *testing.T) {
 	if !r.Enforcing {
 		t.Error("a report for a used-up quota is not marked as stopping the traffic")
 	}
-	if r.SEID != resp.Header.SEID || r.CPSEID != 0x3030 || r.URRID != 7 {
+	if r.SEID != upSEID(t, resp) || r.CPSEID != 0x3030 || r.URRID != 7 {
 		t.Errorf("the report names SEID %d, CP SEID %d, URR %d; want %d, %#x, 7",
-			r.SEID, r.CPSEID, r.URRID, resp.Header.SEID, 0x3030)
+			r.SEID, r.CPSEID, r.URRID, upSEID(t, resp), 0x3030)
 	}
 
 	// The enforcement reached the dataplane: the PDR's rule is a drop, so the
@@ -2446,7 +2446,7 @@ func TestEvaluateReportsAUsedUpQuotaAndStopsTheTraffic(t *testing.T) {
 
 	// A second evaluation has nothing to say: the report is made, and the rule
 	// it stopped is not counted any more.
-	again, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now())
+	again, err := c.Evaluate(context.Background(), upSEID(t, resp), time.Now())
 	if err != nil {
 		t.Fatalf("evaluating again: %v", err)
 	}
@@ -2469,7 +2469,7 @@ func TestEvaluateReportsTheWindowItMeasured(t *testing.T) {
 	// period, the URR owes nothing. This first reading is also the window's
 	// baseline, so the 400 octets in it are not usage.
 	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 4, Octets: 400}}}
-	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+	if reports := evaluate(t, c, upSEID(t, resp)); len(reports) != 0 {
 		t.Fatalf("the baseline reading returned %v, want none", reports)
 	}
 
@@ -2478,7 +2478,7 @@ func TestEvaluateReportsTheWindowItMeasured(t *testing.T) {
 	// cumulative, so what arrives after it is what the following report covers.
 	const threshold = 1 << 20
 	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 9, Octets: threshold + 1000}}}
-	reports := evaluate(t, c, resp.Header.SEID)
+	reports := evaluate(t, c, upSEID(t, resp))
 	if len(reports) != 1 || reports[0].Trigger != TriggerVolumeThreshold {
 		t.Fatalf("evaluation returned %+v, want one volume-threshold report", reports)
 	}
@@ -2489,12 +2489,12 @@ func TestEvaluateReportsTheWindowItMeasured(t *testing.T) {
 	// Another window: only what arrives after the first report counts, so the
 	// threshold needs another 1MiB -- the 900 octets short of it earn nothing.
 	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 10, Octets: threshold + 1900}}}
-	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+	if reports := evaluate(t, c, upSEID(t, resp)); len(reports) != 0 {
 		t.Fatalf("a window under the threshold returned %v, want none", reports)
 	}
 
 	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 11, Octets: 2*threshold + 2900}}}
-	reports = evaluate(t, c, resp.Header.SEID)
+	reports = evaluate(t, c, upSEID(t, resp))
 	if len(reports) != 1 {
 		t.Fatalf("evaluation returned %d reports, want the one the new window earned", len(reports))
 	}
@@ -2524,12 +2524,12 @@ func TestEvaluateReportsThePeriodEvenWithNoTraffic(t *testing.T) {
 	}
 	// The first reading is the window's base (and no report), so the period
 	// below is measured from it: the same instant, a moment later.
-	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+	if reports := evaluate(t, c, upSEID(t, resp)); len(reports) != 0 {
 		t.Fatalf("the baseline reading returned %v, want none", reports)
 	}
 	// The URR's window starts when it is first read, so a moment later the
 	// period has passed with nothing counted.
-	reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now().Add(2*time.Second))
+	reports, err := c.Evaluate(context.Background(), upSEID(t, resp), time.Now().Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("evaluating: %v", err)
 	}
@@ -2558,7 +2558,7 @@ func TestEvaluateWithoutCountersInTheDataplaneSaysSo(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	c.counters = nil
-	if _, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now()); err == nil {
+	if _, err := c.Evaluate(context.Background(), upSEID(t, resp), time.Now()); err == nil {
 		t.Error("evaluating against a dataplane with no counters returned no error")
 	}
 }
@@ -2601,7 +2601,7 @@ func TestAMeasuredPDRThatDropsKeepsItsCounterEntry(t *testing.T) {
 	// The SMF closes the gate: the PDR's rule becomes a drop, and the entry it
 	// still needs must not be erased (nothing would put it back, and the
 	// deletion would then fail -- below).
-	closeGr := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	closeGr := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdateQER(ie.NewQERID(1), ie.NewGateStatus(ie.GateStatusClosed, ie.GateStatusClosed)),
 	)
 	if got := cause(t, c.Modify(closeGr)); got != ie.CauseRequestAccepted {
@@ -2622,7 +2622,7 @@ func TestAMeasuredPDRThatDropsKeepsItsCounterEntry(t *testing.T) {
 	// second erases a key that is already gone, which the engine refuses (this
 	// fake does too, through errEraseMissing).
 	updatePDR := func(seq uint32) *message.SessionModificationRequest {
-		return message.NewSessionModificationRequest(0, 0, resp.Header.SEID, seq, 0,
+		return message.NewSessionModificationRequest(0, 0, upSEID(t, resp), seq, 0,
 			ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 					ie.NewFTEID(0x01, 0x2000, net.ParseIP("192.0.2.1"), nil, 0),
@@ -2638,7 +2638,7 @@ func TestAMeasuredPDRThatDropsKeepsItsCounterEntry(t *testing.T) {
 	if got := cause(t, c.Modify(updatePDR(4))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the second update of the dropped PDR answered cause %d", got)
 	}
-	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 5, 0))); got != ie.CauseRequestAccepted {
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 5, 0))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
 	if n := len(rec.entries); n != 0 {
@@ -2664,7 +2664,7 @@ func TestEvaluateTakesTheFirstReadingAsItsBaseline(t *testing.T) {
 	const inherited = 1 << 20
 	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 27100, Octets: inherited}}}
 
-	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+	if reports := evaluate(t, c, upSEID(t, resp)); len(reports) != 0 {
 		t.Fatalf("the first reading reported %+v: the inherited totals are not this URR's usage", reports)
 	}
 	c.mu.Lock()
@@ -2680,7 +2680,7 @@ func TestEvaluateTakesTheFirstReadingAsItsBaseline(t *testing.T) {
 	// What arrives after the baseline is this URR's usage, and the quota is
 	// spent by that alone -- the inherited million is not in the window.
 	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 27110, Octets: inherited + 1000}}}
-	reports := evaluate(t, c, resp.Header.SEID)
+	reports := evaluate(t, c, upSEID(t, resp))
 	if len(reports) != 1 || reports[0].Trigger != TriggerVolumeQuota {
 		t.Fatalf("evaluation returned %+v, want one volume-quota report for the 1000 octets measured", reports)
 	}
@@ -2803,16 +2803,32 @@ func TestEvaluateAllWalksEverySession(t *testing.T) {
 	if len(reports) != 1 {
 		t.Fatalf("the second tick returned %d reports, want the measured session's one", len(reports))
 	}
-	if reports[0].SEID != withURR.Header.SEID || reports[0].URRID != 7 {
+	if reports[0].SEID != upSEID(t, withURR) || reports[0].URRID != 7 {
 		t.Errorf("the tick reported SEID %d URR %d, want the measured session's %d/7",
-			reports[0].SEID, reports[0].URRID, withURR.Header.SEID)
+			reports[0].SEID, reports[0].URRID, upSEID(t, withURR))
 	}
 	if reports[0].Trigger != TriggerVolumeQuota || !reports[0].Enforcing {
 		t.Errorf("the tick's report is %v (enforcing %v), want the spent volume quota", reports[0].Trigger, reports[0].Enforcing)
 	}
-	if reports[0].SEID == plain.Header.SEID {
+	if reports[0].SEID == upSEID(t, plain) {
 		t.Error("the session with no URR was reported")
 	}
+}
+
+// upSEID is the UP F-SEID an establishment answer carries: the value the SMF
+// addresses the session with afterwards. The answer's *header* carries the CP
+// F-SEID instead (the identity the SMF knows the session by), so a test that
+// wants to modify or delete the session reads this IE, not the header.
+func upSEID(t testing.TB, resp *message.SessionEstablishmentResponse) uint64 {
+	t.Helper()
+	if resp.UPFSEID == nil {
+		t.Fatal("the establishment answer carries no F-SEID IE")
+	}
+	fields, err := resp.UPFSEID.FSEID()
+	if err != nil {
+		t.Fatalf("the establishment answer's F-SEID: %v", err)
+	}
+	return fields.SEID
 }
 
 func TestUnknownSessionIsNotFound(t *testing.T) {
@@ -2877,7 +2893,7 @@ func TestAURRIsReadIntoTheSession(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	u := sessionOf(t, c, resp.Header.SEID).URRs[7]
+	u := sessionOf(t, c, upSEID(t, resp)).URRs[7]
 	if u == nil {
 		t.Fatal("the session holds no URR 7")
 	}
@@ -2920,7 +2936,7 @@ func TestAOneOctetReportingTriggersIsRead(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("a one-octet Reporting Triggers answered cause %d", got)
 	}
-	u := sessionOf(t, c, resp.Header.SEID).URRs[7]
+	u := sessionOf(t, c, upSEID(t, resp)).URRs[7]
 	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
 		t.Errorf("the triggers read as %+v, want PERIO alone", u)
 	}
@@ -2998,10 +3014,10 @@ func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	s := sessionOf(t, c, resp.Header.SEID)
+	s := sessionOf(t, c, upSEID(t, resp))
 	s.URRs[7].enforcing = true // as the reporter leaves it after a quota exhaustion
 
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdateURR(
 			ie.NewURRID(7),
 			ie.NewReportingTriggers(0x01),        // PERIO alone
@@ -3011,7 +3027,7 @@ func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
 	}
-	u := sessionOf(t, c, resp.Header.SEID).URRs[7]
+	u := sessionOf(t, c, upSEID(t, resp)).URRs[7]
 	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
 		t.Errorf("the triggers read as %+v, want PERIO alone", u)
 	}
@@ -3044,18 +3060,18 @@ func TestRemoveURRNeedsThePDRsToGoFirst(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewRemoveURR(ie.NewURRID(7)))
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("removing a URR a PDR still names answered cause %d, want a rule failure", got)
 	}
-	if s := sessionOf(t, c, resp.Header.SEID); s.URRs[7] == nil {
+	if s := sessionOf(t, c, upSEID(t, resp)); s.URRs[7] == nil {
 		t.Fatal("the refused removal took the URR out of the model")
 	}
 
 	// The Update PDR is the PDR's whole new form: without the URR ID the PDR no
 	// longer measures anything.
-	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
+	mod = message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 3, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewFTEID(0x01, 0x1000, net.ParseIP("192.0.2.1"), nil, 0),
@@ -3065,12 +3081,12 @@ func TestRemoveURRNeedsThePDRsToGoFirst(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the PDR update answered cause %d", got)
 	}
-	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 4, 0,
+	mod = message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 4, 0,
 		ie.NewRemoveURR(ie.NewURRID(7)))
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the removal answered cause %d", got)
 	}
-	if s := sessionOf(t, c, resp.Header.SEID); s.URRs[7] != nil {
+	if s := sessionOf(t, c, upSEID(t, resp)); s.URRs[7] != nil {
 		t.Error("the session still holds the removed URR")
 	}
 }
@@ -3079,7 +3095,7 @@ func TestAnUpdateURRForAMissingURRIsRefused(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(establishment(0x3006, "10.45.0.2")).(*message.SessionEstablishmentResponse)
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdateURR(ie.NewURRID(4), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02)))
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("an Update URR for a URR the session does not hold answered cause %d, want a rule failure", got)

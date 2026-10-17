@@ -102,8 +102,8 @@ func BenchmarkDelete(b *testing.B) {
 		if resp == nil {
 			b.Fatal("Establish answered nothing")
 		}
-		upSEID := resp.(*message.SessionEstablishmentResponse).Header.SEID
-		dels = append(dels, message.NewSessionDeletionRequest(0, 0, upSEID, 2, 0))
+		upSeid := upSEID(b, resp.(*message.SessionEstablishmentResponse))
+		dels = append(dels, message.NewSessionDeletionRequest(0, 0, upSeid, 2, 0))
 	}
 	b.ReportAllocs()
 	b.ResetTimer()

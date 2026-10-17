@@ -298,11 +298,12 @@ func TestReportLoopSendsAReportTheSMFAcknowledges(t *testing.T) {
 	if report.SEID() != 0x9001 {
 		t.Errorf("the report names SEID %#x, want the CP F-SEID 0x9001", report.SEID())
 	}
-	// The establishment response's header is a separate matter: it carries our
-	// F-SEID today, where a conformant UP function puts the CP F-SEID there too
-	// (docs/compliance.md, the 7.2.2.4 row). What this test needs is only that
-	// the session's CP SEID reached the loop, which the assertion above shows.
-	t.Logf("the establishment response's header carried SEID %#x", established.SEID())
+	// And the establishment answer's own header carries the same CP F-SEID: the
+	// receiving node's identity for the session is what a response is addressed
+	// under (TS 29.244 7.2.2.4.2), which is why the loop has a CP SEID to use.
+	if established.SEID() != 0x9001 {
+		t.Errorf("the establishment answer names SEID %#x, want the CP F-SEID 0x9001", established.SEID())
+	}
 	// And the enforcement the report carries reached the dataplane: the uplink
 	// PDR's rule comes out as a drop, which is a transaction the fake counted
 	// (growth, because the establishment wrote one of its own).

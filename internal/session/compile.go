@@ -232,12 +232,15 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 	cpSEID, err := cpFSEID(ies)
 	if err != nil {
 		c.log.Warn("session: the establishment request names no CP F-SEID", "error", err)
-		return establishResponse(req, 0, ie.CauseMandatoryIEMissing, nil)
+		// The request carries no CP F-SEID at all, so there is none to answer
+		// under either: the header's SEID is left unset (S flag clear) rather
+		// than naming a session that was never identified.
+		return establishResponse(req, 0, 0, ie.CauseMandatoryIEMissing, nil)
 	}
 	pdrs, fars, qers, urrs, err := parseCreate(ies)
 	if err != nil {
 		c.log.Warn("session: cannot read the establishment request", "error", err)
-		return establishResponse(req, 0, parseCause(err), nil)
+		return establishResponse(req, cpSEID, 0, parseCause(err), nil)
 	}
 
 	c.mu.Lock()
@@ -247,7 +250,7 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 		created := s.createdPDRs(c.cfg)
 		c.mu.Unlock()
 		c.log.Info("session: establishment repeated", "cp_seid", cpSEID, "seid", s.LocalSEID)
-		return establishResponse(req, s.LocalSEID, ie.CauseRequestAccepted, created)
+		return establishResponse(req, s.CPSEID, s.LocalSEID, ie.CauseRequestAccepted, created)
 	}
 	local := c.nextSEID
 	c.nextSEID++
@@ -272,7 +275,7 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 		c.mu.Lock()
 		c.releaseSession(s)
 		c.mu.Unlock()
-		return establishResponse(req, local, compileCause(err), nil)
+		return establishResponse(req, cpSEID, local, compileCause(err), nil)
 	}
 
 	changes, created, err := c.compile(s)
@@ -285,7 +288,7 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 		c.mu.Lock()
 		c.releaseSession(s)
 		c.mu.Unlock()
-		return establishResponse(req, local, compileCause(err), nil)
+		return establishResponse(req, cpSEID, local, compileCause(err), nil)
 	}
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
 		c.log.Warn("session: the dataplane refused the session",
@@ -300,7 +303,7 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 			c.releaseSession(s)
 			c.mu.Unlock()
 		}
-		return establishResponse(req, local, causeOf(err), nil)
+		return establishResponse(req, cpSEID, local, causeOf(err), nil)
 	}
 
 	c.mu.Lock()
@@ -314,7 +317,7 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 
 	c.log.Info("session: established", "cp_seid", cpSEID, "seid", local,
 		"ue_ip", s.UEIP.String(), "pdrs", len(s.PDRs), "changes", len(changes))
-	return establishResponse(req, local, ie.CauseRequestAccepted, created)
+	return establishResponse(req, cpSEID, local, ie.CauseRequestAccepted, created)
 }
 
 // Modify implements n4.SessionHandler: the request's lists are merged into the
@@ -328,22 +331,28 @@ func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Messa
 	c.mu.Lock()
 	s := c.sessions[seid]
 	c.mu.Unlock()
+	// The header of the answer carries the SEID the SMF knows the session by,
+	// and with no session in hand the only value left is the one it sent.
+	hdr := seid
+	if s != nil {
+		hdr = s.CPSEID
+	}
 	if s == nil {
-		return modifyResponse(req, seid, ie.CauseSessionContextNotFound, nil)
+		return modifyResponse(req, hdr, ie.CauseSessionContextNotFound, nil)
 	}
 
 	ies := modificationIEs(req)
 	pdrs, fars, qers, urrs, err := parseCreate(ies)
 	if err != nil {
 		c.log.Warn("session: cannot read the modification request", "seid", seid, "error", err)
-		return modifyResponse(req, seid, parseCause(err), nil)
+		return modifyResponse(req, hdr, parseCause(err), nil)
 	}
 	removePDRs, removeFARs, removeURRs := parseRemovals(ies)
 
 	// merge takes the lock itself.
 	if err := c.merge(s, pdrs, fars, qers, urrs, removePDRs, removeFARs, removeURRs); err != nil {
 		c.log.Warn("session: cannot carry the modification request", "seid", seid, "error", err)
-		return modifyResponse(req, seid, compileCause(err), nil)
+		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
 
 	changes, created, err := c.compile(s)
@@ -356,11 +365,11 @@ func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Messa
 		// not implemented: those objects' records stay in the dataplane too,
 		// and a naive release would free ids that a live record still names. A
 		// provenance-tracked release is the fix (docs/design.md).
-		return modifyResponse(req, seid, compileCause(err), nil)
+		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
 		c.log.Warn("session: the dataplane refused the modification", "seid", seid, "error", err)
-		return modifyResponse(req, seid, causeOf(err), nil)
+		return modifyResponse(req, hdr, causeOf(err), nil)
 	}
 	c.settle(s)
 
@@ -373,7 +382,7 @@ func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Messa
 	c.mu.Unlock()
 
 	c.log.Info("session: modified", "seid", seid, "pdrs", len(s.PDRs), "changes", len(changes))
-	return modifyResponse(req, seid, ie.CauseRequestAccepted, created)
+	return modifyResponse(req, hdr, ie.CauseRequestAccepted, created)
 }
 
 // Delete implements n4.SessionHandler.
@@ -382,17 +391,21 @@ func (c *Compiler) Delete(req *message.SessionDeletionRequest) message.Message {
 	c.mu.Lock()
 	s := c.sessions[seid]
 	c.mu.Unlock()
+	hdr := seid
+	if s != nil {
+		hdr = s.CPSEID
+	}
 	if s == nil {
 		// Already gone: the SMF gets the answer it wanted (a retransmitted
 		// deletion must not be an error).
-		return deleteResponse(req, seid, ie.CauseSessionContextNotFound)
+		return deleteResponse(req, hdr, ie.CauseSessionContextNotFound)
 	}
 	if err := c.remove(context.Background(), s); err != nil {
 		c.log.Warn("session: the dataplane refused the deletion", "seid", seid, "error", err)
-		return deleteResponse(req, seid, causeOf(err))
+		return deleteResponse(req, hdr, causeOf(err))
 	}
 	c.log.Info("session: deleted", "seid", seid)
-	return deleteResponse(req, seid, ie.CauseRequestAccepted)
+	return deleteResponse(req, hdr, ie.CauseRequestAccepted)
 }
 
 // merge folds a request's objects into the session's model.
@@ -1905,27 +1918,37 @@ func parseFilterPort(word string) (uint16, error) {
 
 // -- answers ------------------------------------------------------------------
 
-func establishResponse(req *message.SessionEstablishmentRequest, seid uint64,
+// The three answers below carry the SEID the *SMF* knows the session by in the
+// message header, and ours only in the F-SEID IE the establishment answer
+// returns (TS 29.244 7.2.2.4.2: the header's SEID is the one the receiving node
+// allocated -- for a message to the CP function that is its own F-SEID, which
+// it sent in the request's F-SEID IE). An SMF looks a session up by that value,
+// so answering under our own F-SEID is an answer to a session it does not have.
+func establishResponse(req *message.SessionEstablishmentRequest, cpSEID, local uint64,
 	cause uint8, created []*ie.IE) message.Message {
 	ies := []*ie.IE{ie.NewCause(cause)}
 	if cause == ie.CauseRequestAccepted {
-		ies = append(ies, ie.NewFSEID(seid, nil, nil))
+		ies = append(ies, ie.NewFSEID(local, nil, nil))
 		ies = append(ies, created...)
 	}
-	return message.NewSessionEstablishmentResponse(0, 0, seid, req.Sequence(), 0, ies...)
+	return message.NewSessionEstablishmentResponse(0, 0, cpSEID, req.Sequence(), 0, ies...)
 }
 
-func modifyResponse(req *message.SessionModificationRequest, seid uint64,
+// modifyResponse answers a modification; cpSEID is the session's CP F-SEID, or
+// the SEID the request itself carried when there is no session any more (a
+// Session Context Not Found has nowhere else to read it from).
+func modifyResponse(req *message.SessionModificationRequest, cpSEID uint64,
 	cause uint8, created []*ie.IE) message.Message {
 	ies := []*ie.IE{ie.NewCause(cause)}
 	if cause == ie.CauseRequestAccepted {
 		ies = append(ies, created...)
 	}
-	return message.NewSessionModificationResponse(0, 0, seid, req.Sequence(), 0, ies...)
+	return message.NewSessionModificationResponse(0, 0, cpSEID, req.Sequence(), 0, ies...)
 }
 
-func deleteResponse(req *message.SessionDeletionRequest, seid uint64, cause uint8) message.Message {
-	return message.NewSessionDeletionResponse(0, 0, seid, req.Sequence(), 0,
+// deleteResponse answers a deletion, with the same rule for its SEID.
+func deleteResponse(req *message.SessionDeletionRequest, cpSEID uint64, cause uint8) message.Message {
+	return message.NewSessionDeletionResponse(0, 0, cpSEID, req.Sequence(), 0,
 		ie.NewCause(cause))
 }
 
