@@ -44,6 +44,10 @@ const (
 	// one per PDI, and one for all the PDIs of a PFCP session that carry the
 	// same CHOOSE ID (8.2.3; internal/session).
 	FTUP = 0x10
+	// EMPU is End Marker packet construction in the UP function (TS 29.244
+	// 5.3.2 and 8.2.25: octet 6, bit 1 of the UP Function Features), set only
+	// where the graph carries one out (upfd -end-marker).
+	EMPU = 0x01
 )
 
 // Liveness parameters, as in common PFCP practice: ask after 10 s of silence,

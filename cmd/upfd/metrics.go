@@ -37,6 +37,7 @@ type peerState interface {
 //	upf_sessions                       the sessions the session layer holds now
 //	upf_sessions_{established,modified,deleted}_total
 //	upf_sessions_refused_total         requests answered with a cause but accepted
+//	upf_end_markers_total{outcome}     End Markers sent, or failed (the graph's port took none)
 //	upf_usage_reports_total{outcome}   sent, refused, held (no answer yet), dropped
 //	upf_pfcp_associated                a CP function is associated (1) or not (0)
 //	upf_pfcp_peer_info{node_id,address}  the associated CP function, if any
@@ -64,6 +65,10 @@ func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportS
 		fmt.Fprintf(&b, "# HELP upf_sessions_refused_total Session requests answered with a cause other than accepted.\n")
 		fmt.Fprintf(&b, "# TYPE upf_sessions_refused_total counter\n")
 		fmt.Fprintf(&b, "upf_sessions_refused_total %d\n", stats.Refused)
+		fmt.Fprintf(&b, "# HELP upf_end_markers_total End Marker packets by outcome: sent, or refused by the graph's port.\n")
+		fmt.Fprintf(&b, "# TYPE upf_end_markers_total counter\n")
+		fmt.Fprintf(&b, "upf_end_markers_total{outcome=\"sent\"} %d\n", stats.Markers)
+		fmt.Fprintf(&b, "upf_end_markers_total{outcome=\"failed\"} %d\n", stats.MarkerFailures)
 
 		fmt.Fprintf(&b, "# HELP upf_usage_reports_total PFCP Session Report Requests by outcome.\n")
 		fmt.Fprintf(&b, "# TYPE upf_usage_reports_total counter\n")

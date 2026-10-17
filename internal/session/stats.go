@@ -22,16 +22,24 @@ type counters struct {
 	// A retransmitted establishment or deletion is not one of them: the answer
 	// repeats what the SMF already had.
 	refused atomic.Uint64
+	// markers counts the End Marker packets this UPF constructed and sent
+	// (TS 29.244 5.3.2, on the SNDEM flag); markerFailures counts the ones the
+	// graph's port would not take, which is an operator's signal that the
+	// marker path -- the graph's unix_port -- is not there.
+	markers        atomic.Uint64
+	markerFailures atomic.Uint64
 }
 
 // StatsSnapshot is the counters at one instant, copied out so a reader is
 // served without holding the compiler's lock.
 type StatsSnapshot struct {
-	Sessions    int    // the sessions this compiler holds now
-	Established uint64 // establishments that became a session
-	Modified    uint64 // modifications applied
-	Deleted     uint64 // deletions applied
-	Refused     uint64 // requests answered with a cause other than accepted
+	Sessions       int    // the sessions this compiler holds now
+	Established    uint64 // establishments that became a session
+	Modified       uint64 // modifications applied
+	Deleted        uint64 // deletions applied
+	Refused        uint64 // requests answered with a cause other than accepted
+	Markers        uint64 // End Marker packets sent
+	MarkerFailures uint64 // End Marker packets the graph's port refused
 }
 
 // Stats is what the session layer has done, and what it holds now. A node with
@@ -44,11 +52,13 @@ func (c *Compiler) Stats() StatsSnapshot {
 	sessions := len(c.sessions)
 	c.mu.Unlock()
 	return StatsSnapshot{
-		Sessions:    sessions,
-		Established: c.stats.established.Load(),
-		Modified:    c.stats.modified.Load(),
-		Deleted:     c.stats.deleted.Load(),
-		Refused:     c.stats.refused.Load(),
+		Sessions:       sessions,
+		Established:    c.stats.established.Load(),
+		Modified:       c.stats.modified.Load(),
+		Deleted:        c.stats.deleted.Load(),
+		Refused:        c.stats.refused.Load(),
+		Markers:        c.stats.markers.Load(),
+		MarkerFailures: c.stats.markerFailures.Load(),
 	}
 }
 

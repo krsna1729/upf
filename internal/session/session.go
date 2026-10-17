@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/netip"
 	"strconv"
 	"sync"
@@ -187,6 +188,12 @@ type Config struct {
 	// The Ethernet addresses of the N3 hop (the graph's port and its peer).
 	N3MAC, PeerMAC [6]byte
 
+	// EndMarker is the graph's unix_port socket path: where an End Marker
+	// packet is written when a modification's SNDEM flag moves a tunnel out
+	// from under a session (TS 29.244 5.3.2). Empty means this UPF constructs
+	// none, and the association response advertises no EMPU for it.
+	EndMarker string
+
 	// MaxActions, MaxMeters and MaxTEIDs bound the id spaces: the dataplane's
 	// tables are sized at construction.
 	MaxActions uint32
@@ -251,6 +258,12 @@ type Compiler struct {
 	// (Evaluate says so rather than reporting zero forever).
 	counters CounterReader
 	log      *slog.Logger
+
+	// endMarkerConn is this run's connection to the graph's end-marker port,
+	// opened on the first marker and dropped when a write fails (the daemon
+	// behind it restarted, or the graph has no such port). Guarded by mu.
+	endMarkerConn *net.UnixConn
+
 	// journal is the checkpoint this run writes (journal.go), when there is
 	// one. It is set once, before the PFCP socket opens, and never changes: no
 	// session message can be in flight while the caller is still setting it.
