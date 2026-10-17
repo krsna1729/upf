@@ -288,11 +288,11 @@ func TestADeletionErasesEachSharedRecordOnce(t *testing.T) {
 	// named each of them once per PDR, so one record appeared several times in
 	// a single transaction -- and a second erase of a record a later change in
 	// the same transaction had rewritten is not a no-op a reader can reason
-	// about. (The establishment is the other way round on purpose and this
-	// session exercises it: the shared TEID rule is written once per PDR, and
-	// the transaction's last write is the one that stands. Two PDRs whose rule
-	// keys collide land the same way, because the rule table knows PDR ids no
-	// better than the SMF's filters do.)
+	// about.
+	//
+	// Meters go through the QER list, where compile writes them, so a direction
+	// no PDR of this session uses is erased too -- and two PDRs sharing a QER do
+	// not name its meter twice.
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	req := sharedFTEIDEstablishment(0x6660, "10.45.0.5", 0x00000011)
