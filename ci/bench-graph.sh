@@ -113,6 +113,9 @@ echo "         PDR); metered_ul = rt gate 0 (what reached N6 through the SMF's Q
 echo "         the session's MBR shapes it); dl_to_N3 = dump_d's output (the downlink"
 echo "         through the PDR, action, meter and encap, unmetered in this session);"
 echo "         input_Mpps = both chains' input per second, Mpps."
-# The run's own files, not a result: a failed run keeps them (the line above
-# says where), a green one leaves nothing behind.
-rm -rf "$WORK"
+echo "== logs: $WORK (the daemon's log and graph dumps; kept only when this run"
+echo "   failed -- the numbers are above)"
+
+# The run's own files, not a result: a failed run keeps everything (the line
+# above says where), a green one drops the logs and keeps the directory.
+rm -f "$WORK"/*.log

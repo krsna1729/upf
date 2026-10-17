@@ -139,9 +139,10 @@ if [ -x "$LIVE_BENCH" ]; then
     echo "(live_transaction_bench needs a bessd of its own; run it separately)"
 fi
 
-echo "== logs: $WORK (bessd.log, upfd.log, n4bench-*.json; kept only when this"
-echo "   run failed -- the numbers are above and in the JSON it printed)"
+echo "== logs: $WORK (bessd.log, upfd.log; kept only when this run failed -- the"
+echo "   numbers are above and in the n4bench-*.json samples, which are kept)"
 
-# The run's own files, not a result: a failed run keeps them (the line above
-# says where), a green one leaves nothing behind.
-rm -rf "$WORK"
+# The run's own files, not a result: the samples are what this run produced and
+# stay where they are printed from, the logs and the extracted binaries go.
+rm -f "$WORK"/bessd.log "$WORK"/upfd.log "$WORK"/n4bench "$WORK"/upfd
+echo "== samples kept: $WORK/n4bench-$MODES.json"
