@@ -142,6 +142,212 @@ func reportLoopEstablishment(seq uint32, cpSEID uint64) *message.SessionEstablis
 	)
 }
 
+// periodicEstablishment is reportLoopEstablishment's session with a URR that
+// reports on its period instead of a quota: a report is then due on every
+// period, which is what the queue's tests need. The URR ID stays the one the PDR
+// names, and the period is a whole second because the IE carries seconds
+// (go-pfcp's MeasurementPeriod truncates to uint32 seconds).
+func periodicEstablishment(seq uint32, cpSEID uint64, period time.Duration) *message.SessionEstablishmentRequest {
+	est := reportLoopEstablishment(seq, cpSEID)
+	// The typed field, not IEs: go-pfcp's constructor sorts each IE into its own
+	// field, and the compiler reads those (message/session-establishment-request.go).
+	est.CreateURR = []*ie.IE{ie.NewCreateURR(ie.NewURRID(7),
+		ie.NewMeasurementMethod(0, 1, 0),    // VOLUM
+		ie.NewReportingTriggers(0x01, 0x00), // PERIO
+		ie.NewMeasurementPeriod(period))}
+	return est
+}
+
+// sentReport is one report the loop asked to send, as the SMF would read it.
+type sentReport struct {
+	urrID uint32
+	seqn  uint32
+}
+
+// queueSender is a reportSender that answers as the test tells it and records
+// what it was asked to send: the loop's queue is judged from the reports it
+// sees, and a report is identified by its URR and UR-SEQN.
+type queueSender struct {
+	mu         sync.Mutex
+	sent       []sentReport
+	unanswered int   // this many calls are left without an answer
+	refusal    uint8 // a Cause to answer with instead of accepted
+}
+
+func (s *queueSender) Report(_ context.Context, _ uint64, ies ...*ie.IE) (uint8, error) {
+	urr, seqn, err := reportIdentity(ies)
+	if err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sent = append(s.sent, sentReport{urrID: urr, seqn: seqn})
+	if s.unanswered > 0 {
+		s.unanswered--
+		return 0, errors.New("no answer from the SMF")
+	}
+	if s.refusal != 0 {
+		return s.refusal, nil
+	}
+	return ie.CauseRequestAccepted, nil
+}
+
+func (s *queueSender) snapshot() []sentReport {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]sentReport(nil), s.sent...)
+}
+
+// reportIdentity is the URR and the UR-SEQN a report's IEs carry.
+func reportIdentity(ies []*ie.IE) (uint32, uint32, error) {
+	for _, i := range ies {
+		if i.Type != ie.UsageReportWithinSessionReportRequest {
+			continue
+		}
+		children, err := i.UsageReport()
+		if err != nil {
+			return 0, 0, err
+		}
+		var urrID, seqn uint32
+		for _, c := range children {
+			switch c.Type {
+			case ie.URRID:
+				urrID, err = c.URRID()
+			case ie.URSEQN:
+				seqn, err = c.URSEQN()
+			}
+			if err != nil {
+				return 0, 0, err
+			}
+		}
+		return urrID, seqn, nil
+	}
+	return 0, 0, errors.New("no usage report among the IEs")
+}
+
+// loopSession is the session the queue's tests drive: one establishment over the
+// fake dataplane, with the loop's own graph shape. It checks the session owes a
+// report a period later, so a test that then sees no sends is failing on the
+// loop rather than on its own setup.
+func loopSession(t *testing.T, est *message.SessionEstablishmentRequest) *session.Compiler {
+	t.Helper()
+	compiler := session.New(reportConfig(), &fakeDataplane{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	resp := compiler.Establish(est).(*message.SessionEstablishmentResponse)
+	if cause, err := resp.Cause.Cause(); err != nil || cause != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d (%v), want accepted", cause, err)
+	}
+	ctx := context.Background()
+	compiler.EvaluateAll(ctx, time.Now()) // the first reading is the window's base
+	if got := compiler.EvaluateAll(ctx, time.Now().Add(2*time.Second)); len(got) != 1 {
+		t.Fatalf("the session owes %d reports a period later, want the periodic one", len(got))
+	}
+	return compiler
+}
+
+// TestAnUnansweredReportIsSentAgainBeforeTheNextOne is the queue's reason to
+// exist: a report the SMF did not answer is not lost, it is sent again before
+// that session's newer one, and the UR-SEQNs the SMF reads stay in order.
+func TestAnUnansweredReportIsSentAgainBeforeTheNextOne(t *testing.T) {
+	sender := &queueSender{unanswered: 1}
+	compiler := loopSession(t, periodicEstablishment(1, 0x9001, time.Second))
+	logs := &logCapture{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reportLoop(ctx, compiler, sender, 20*time.Millisecond,
+		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	waitFor(t, 5*time.Second, func() bool { return len(sender.snapshot()) >= 2 },
+		"the loop sent its first two reports", logs.log)
+	sent := sender.snapshot()
+	if sent[0].seqn != sent[1].seqn {
+		t.Errorf("the first two sends were UR-SEQN %d then %d, want the same unanswered report twice",
+			sent[0].seqn, sent[1].seqn)
+	}
+	// Once the SMF answers, the queue drains and the next window's report
+	// follows: the UR-SEQNs only ever move forward.
+	waitFor(t, 5*time.Second, func() bool {
+		s := sender.snapshot()
+		return len(s) >= 3 && s[2].seqn > s[0].seqn
+	}, "a newer window's report followed the answered one", logs.log)
+	waitFor(t, 2*time.Second, func() bool { return logs.contains("held for the next tick") },
+		"the loop logged the report as held", logs.log)
+	if logs.contains("usage report dropped") {
+		t.Errorf("a report was dropped with the queue far from full: %s", logs.log())
+	}
+}
+
+// TestARefusedReportIsNotRetried: a refusal is the SMF's answer -- it reached
+// the SMF and was rejected -- so the report goes, unlike one left unanswered.
+func TestARefusedReportIsNotRetried(t *testing.T) {
+	sender := &queueSender{refusal: ie.CauseSessionContextNotFound}
+	compiler := loopSession(t, periodicEstablishment(1, 0x9001, time.Second))
+	logs := &logCapture{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reportLoop(ctx, compiler, sender, 20*time.Millisecond,
+		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	waitFor(t, 5*time.Second, func() bool { return logs.contains("usage report refused") },
+		"the loop logged the refusal", logs.log)
+	// A refusal is the SMF's answer, so the next window's report follows it:
+	// every report is sent exactly once, however many the session owes.
+	waitFor(t, 10*time.Second, func() bool {
+		seen := map[uint32]bool{}
+		for _, s := range sender.snapshot() {
+			seen[s.seqn] = true
+		}
+		return len(seen) >= 2
+	}, "the loop sent the session's next window after the refusal", logs.log)
+	seen := map[uint32]int{}
+	for _, s := range sender.snapshot() {
+		seen[s.seqn]++
+	}
+	for seqn, n := range seen {
+		if n != 1 {
+			t.Errorf("UR-SEQN %d was sent %d times, want once: a refusal is an answer", seqn, n)
+		}
+	}
+}
+
+// TestTheReportQueueIsBoundedPerSession: a CP function that never answers must
+// not grow this node's memory without bound, and what does not fit is handed
+// back so the loop can log it with its usage rather than lose it quietly.
+func TestTheReportQueueIsBoundedPerSession(t *testing.T) {
+	q := newReportQueue()
+	var dropped []uint32
+	for seqn := uint32(0); seqn < reportQueueDepth+2; seqn++ {
+		if d := q.add(session.Report{SEID: 1, URRID: 7, Seqn: seqn}); d != nil {
+			dropped = append(dropped, d.Seqn)
+		}
+	}
+	if len(dropped) != 2 || dropped[0] != 0 || dropped[1] != 1 {
+		t.Errorf("the queue dropped UR-SEQNs %v, want the two oldest (0, 1)", dropped)
+	}
+	if held := len(q.held[1]); held != reportQueueDepth {
+		t.Errorf("the session holds %d reports, want the depth %d", held, reportQueueDepth)
+	}
+	// The eldest held report is what the SMF is owed first.
+	if head, ok := q.head(1); !ok || head.report.Seqn != 2 {
+		t.Errorf("the oldest held report is UR-SEQN %d (held %v), want 2", head.report.Seqn, ok)
+	}
+	q.done(1)
+	if head, _ := q.head(1); head.report.Seqn != 3 {
+		t.Errorf("after the acknowledgement the oldest is UR-SEQN %d, want 3", head.report.Seqn)
+	}
+	// An unanswered send is recorded without moving the report.
+	q.sent(1)
+	if head, _ := q.head(1); head.attempts != 1 {
+		t.Errorf("the oldest report has %d attempts after one unanswered send, want 1", head.attempts)
+	}
+	// The sessions with reports waiting are visited in SEID order, so a session
+	// that keeps failing delays only itself.
+	q.add(session.Report{SEID: 2, URRID: 7})
+	if got := q.seids(); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("the queue's sessions are %v, want [1 2]", got)
+	}
+}
+
 func marshal(t *testing.T, m message.Message) []byte {
 	t.Helper()
 	b := make([]byte, m.MarshalLen())
