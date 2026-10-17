@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/anypb"
+
+	pb "github.com/krsna1729/bess/sdk/go/controlv2"
 )
 
 // TestUintFieldOnASchemaWithoutIt is the fallback a daemon running an older
@@ -77,6 +80,34 @@ func TestPacketTimePlacesAStampOnTheWallClock(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := packetTime(c.stamp, mono, wall.UnixNano()); !got.Equal(c.want) {
 				t.Errorf("packetTime(%d) = %v, want %v", c.stamp, got, c.want)
+			}
+		})
+	}
+}
+
+// TestFlowNotHeldReadsTheErrno covers the store's "I hold nothing for that
+// flow": release and drop answer ENOENT for a flow with no entry, and the
+// caller must see that as nothing-to-do rather than as a broken command. The
+// mapping is by errno in the refusal's detail, so a daemon rewording its
+// message cannot change the behaviour, and any other errno stays an error.
+func TestFlowNotHeldReadsTheErrno(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"ENOENT is nothing held",
+			&InvalidRequestError{Message: "flow id 3 not found in packet store",
+				Detail: &pb.ErrorDetail{ErrnoValue: int32(syscall.ENOENT)}}, true},
+		{"a different errno is a real failure",
+			&InvalidRequestError{Detail: &pb.ErrorDetail{ErrnoValue: int32(syscall.EBUSY)}}, false},
+		{"no detail at all", &InvalidRequestError{Message: "refused"}, false},
+		{"an error from elsewhere", errors.New("the socket closed"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := errors.Is(flowNotHeld(c.err), ErrFlowNotHeld); got != c.want {
+				t.Errorf("flowNotHeld(%v) recognized as nothing-held = %v, want %v", c.err, got, c.want)
 			}
 		})
 	}

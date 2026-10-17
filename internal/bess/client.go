@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"syscall"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -391,6 +392,26 @@ func storeCommandPaused(ctx context.Context, s storeActions, module, action stri
 	return resumeErr
 }
 
+// ErrFlowNotHeld: the store holds nothing for the flow a command named. A
+// release or drop answers ENOENT for a flow with no entry
+// (core/modules/packet_store.cc: `store_.find(arg.id())`), and having buffering
+// in force is not the same as a packet having arrived -- a session that was
+// told to buffer and saw no downlink data before the SMF's next instruction
+// reaches this on the common idle-to-service-request path. It is not a failure
+// of the command, and there is nothing to release or drop.
+var ErrFlowNotHeld = errors.New("bess: the store holds nothing for that flow")
+
+// flowNotHeld maps the daemon's ENOENT for a store command onto ErrFlowNotHeld,
+// by the errno in the refusal's detail (never by its message, which is the
+// daemon's to change).
+func flowNotHeld(err error) error {
+	var refused *InvalidRequestError
+	if errors.As(err, &refused) && refused.Detail.GetErrnoValue() == int32(syscall.ENOENT) {
+		return ErrFlowNotHeld
+	}
+	return err
+}
+
 // ReleaseFlow tells a packet store to send the packets it holds for one flow
 // out of its release gate, and DropFlow tells it to discard them. Both are the
 // CP function's "new instruction" arriving at a flow that was buffering
@@ -403,6 +424,9 @@ func storeCommandPaused(ctx context.Context, s storeActions, module, action stri
 // as long as the command takes (storeCommand), which is a signalling-rate
 // event: the SMF answered a DDN.
 //
+// A flow the store holds nothing for is ErrFlowNotHeld, not a failure
+// (flowNotHeld).
+//
 // The flow id is the value the store is keyed by: the ActionId the classifier
 // wrote, which is also the PDR's action record and tunnel key. The argument's
 // type and fields come from the daemon's own schema, as every message this
@@ -414,7 +438,7 @@ func (c *Client) ReleaseFlow(ctx context.Context, module string, id uint32) erro
 		return err
 	}
 	if err := c.storeCommand(ctx, module, "release", arg); err != nil {
-		return fmt.Errorf("bess: %s release %d: %w", module, id, err)
+		return fmt.Errorf("bess: %s release %d: %w", module, id, flowNotHeld(err))
 	}
 	return nil
 }
@@ -428,7 +452,7 @@ func (c *Client) DropFlow(ctx context.Context, module string, id uint32) error {
 		return err
 	}
 	if err := c.storeCommand(ctx, module, "drop", arg); err != nil {
-		return fmt.Errorf("bess: %s drop %d: %w", module, id, err)
+		return fmt.Errorf("bess: %s drop %d: %w", module, id, flowNotHeld(err))
 	}
 	return nil
 }

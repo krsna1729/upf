@@ -274,6 +274,41 @@ func TestAReleaseTheStoreRefusesIsCountedNotFatal(t *testing.T) {
 	}
 }
 
+// TestAModificationBeforeAnyPacketHoldsNothingToRelease is the other side of
+// the same coin: a BUFF FAR being in force is not a downlink packet having
+// arrived, so a session modified before any data reached the store has nothing
+// for the release to collect and the store answers ENOENT. That is the common
+// idle-to-service-request path, not a failure: the counter that exists to show
+// broken releases must stay at zero, and nothing was released either.
+func TestAModificationBeforeAnyPacketHoldsNothingToRelease(t *testing.T) {
+	rec := &recorder{storeFail: bess.ErrFlowNotHeld}
+	c := New(bufferingConfig(), rec, quietLogger())
+
+	resp := c.Establish(buffEstablishment(0x7108, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 8, 0,
+		ie.NewUpdateFAR(
+			ie.NewFARID(2),
+			ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceAccess),
+				ie.NewOuterHeaderCreation(0x0100, 0x55667788, "10.20.30.2", "", 0, 0, 0),
+			),
+		))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a store that held nothing failed the modification with cause %d", got)
+	}
+	stats := c.Stats()
+	if stats.BufferFailures != 0 {
+		t.Errorf("a release that found nothing to release is counted as a failure %d times, want 0", stats.BufferFailures)
+	}
+	if stats.BuffersReleased != 0 {
+		t.Errorf("a release that found nothing to release is counted as a release %d times, want 0", stats.BuffersReleased)
+	}
+}
+
 // TestTheDownlinkReportIsOwedOncePerBufferingEpisode is the DDN decision: the
 // SMF is told about the first buffered packet of each PDR (5.2.4.1), once, and
 // the reading is the branch's counters -- windowed, so the stamp means "a packet
