@@ -38,7 +38,7 @@ func instancedConfig(t *testing.T) Config {
 	t.Helper()
 	cfg := testConfig()
 	cfg.Instances = twoInstances(t)
-	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID}
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI}
 	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain}
 	return cfg
 }
@@ -58,7 +58,7 @@ func threeInstanceConfig(t *testing.T) Config {
 		t.Fatalf("the three-instance deployment was refused: %v", err)
 	}
 	cfg.Instances = d
-	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID}
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI}
 	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain}
 	return cfg
 }
@@ -461,8 +461,11 @@ func TestAOneInstanceDeploymentIsUnchanged(t *testing.T) {
 	changes := rec.last()
 	ul := ruleIn(t, changes, "pdr_ul")
 	dl := ruleIn(t, changes, "pdr_dl")
-	if len(ul.values) != 5 || len(dl.values) != 5 {
-		t.Errorf("the rules carry %d and %d fields, want the table's own five", len(ul.values), len(dl.values))
+	// The uplink table carries the QFI field and the downlink's does not: the
+	// rules take exactly the fields each graph declares.
+	if len(ul.values) != 6 || len(dl.values) != 5 {
+		t.Errorf("the rules carry %d and %d fields, want the tables' own six and five",
+			len(ul.values), len(dl.values))
 	}
 	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 1 {
 		t.Errorf("the uplink forward takes next hop %d, want -n6-next-hop's 1", got)

@@ -95,7 +95,7 @@ func reportConfig() session.Config {
 		Up: session.Direction{
 			PDRTable: "pdr_ul", Actions: "at_ul", Meters: "mt_ul", Counters: "cnt_ul",
 			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto,
-				session.SrcPort, session.DstPort},
+				session.SrcPort, session.DstPort, session.QFI},
 			NextHop: 1,
 		},
 		Down: session.Direction{

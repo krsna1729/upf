@@ -23,7 +23,7 @@ func liveConfig() Config {
 	cfg.TEIDGate = 0
 	cfg.Up = Direction{
 		PDRTable:  "pdr_ul",
-		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
+		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, QFI},
 		Actions:   "at_ul",
 		Meters:    "mt_ul",
 		Counters:  "cnt_ul",

@@ -62,9 +62,10 @@ func run() error {
 	maxDomains := flag.Uint("max-domains", 1,
 		"the graph's Router max_domains: every -instances domain must be below it, "+
 			"and a packet classified in one the router does not have resolves to no table")
-	pdrFieldsUL := flag.String("pdr-fields-ul", "src,dst,proto,sport,dport",
+	pdrFieldsUL := flag.String("pdr-fields-ul", "src,dst,proto,sport,dport,qfi",
 		"the uplink PDR table's fields, in the graph's order: src, dst, proto, sport, "+
-			"dport, domain (the vif's route_domain), teid (the decap's upf_teid)")
+			"dport, qfi (the decap's per-packet QoS flow), domain (the vif's route_domain), "+
+			"teid (the decap's upf_teid)")
 	pdrFieldsDL := flag.String("pdr-fields-dl", "src,dst,proto,sport,dport",
 		"the downlink PDR table's fields, in the graph's order")
 	pdrTableUL := flag.String("pdr-table-ul", "pdr_ul",

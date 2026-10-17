@@ -18,7 +18,7 @@ func validArgs() graphArgs {
 		n6NextHop:  1,
 		n3NextHop:  2,
 		pdrTableUL: "pdr_ul", pdrTableDL: "pdr_dl",
-		pdrFieldsUL: "src,dst,proto,sport,dport", pdrFieldsDL: "src,dst,proto,sport,dport",
+		pdrFieldsUL: "src,dst,proto,sport,dport,qfi", pdrFieldsDL: "src,dst,proto,sport,dport",
 		teidTable: "teid", teidGate: 0,
 		actionsUL: "at_ul", metersUL: "mt_ul",
 		actionsDL: "at_dl", metersDL: "mt_dl",
@@ -71,8 +71,8 @@ func TestGraphConfigMapsTheFlags(t *testing.T) {
 	if cfg.PeerMAC != [6]byte{0x02, 0, 0, 0, 0, 0x02} {
 		t.Errorf("peer mac %x", cfg.PeerMAC)
 	}
-	if len(cfg.Up.PDRFields) != 5 || cfg.Up.PDRFields[0] != session.SrcIP ||
-		cfg.Down.PDRFields[0] != session.SrcIP {
+	if len(cfg.Up.PDRFields) != 6 || cfg.Up.PDRFields[0] != session.SrcIP ||
+		cfg.Up.PDRFields[5] != session.QFI || cfg.Down.PDRFields[0] != session.SrcIP {
 		t.Errorf("both chains match the inner packet: up %v, down %v",
 			cfg.Up.PDRFields, cfg.Down.PDRFields)
 	}

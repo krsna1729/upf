@@ -101,6 +101,13 @@ type pdrReq struct {
 	// interface this rule belongs to, empty when the SMF named none.
 	instance string
 
+	// hasQFI and qfi are the PDI's QFI (TS 29.244 8.2.89): the QoS flow this
+	// rule selects, one of 1..63. A PDI that names none is the session's
+	// general rule for the flow, and the uplink table's qfi field is masked out
+	// of its key -- so it keeps matching where a QFI-specific rule does not.
+	hasQFI bool
+	qfi    uint8
+
 	// An uplink PDR's PDI names an F-TEID: the TEID the SMF expects us to
 	// use (0: ours to choose) and, for the address, usually 0.
 	hasFTEID bool
@@ -175,6 +182,12 @@ type qerReq struct {
 	mbUL    uint64
 	mbDL    uint64
 	hasRate bool
+
+	// hasQFI and qfi are the QER's QFI (TS 29.244 8.2.89): the QoS flow this
+	// QER polices. It is optional -- Gate Status is the QER's one mandatory IE
+	// -- so an Update QER that leaves it out keeps the flow the session holds.
+	hasQFI bool
+	qfi    uint8
 }
 
 type urrReq struct {
@@ -590,6 +603,13 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		// An Update QER carries what changed; every field it names replaces
 		// the one before it.
 		entry.gateUL, entry.gateDL = q.gateUL, q.gateDL
+		if q.hasQFI {
+			// The QFI is optional in a QER (Gate Status is its one mandatory
+			// IE), so an Update that leaves it out keeps the flow the session
+			// holds: a QER that stopped naming its flow would quietly stop
+			// marking the packets of it.
+			entry.hasQFI, entry.qfi = true, q.qfi
+		}
 		if q.hasRate {
 			entry.mbUL, entry.mbDL, entry.hasRate = q.mbUL, q.mbDL, true
 			if entry.meterUL == 0 {
@@ -756,7 +776,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			id: p.id, precedence: p.precedence, srcIfc: p.srcIfc,
 			ueIP: p.ueIP, sdf: p.sdf, farID: p.farID,
 			qerIDs: p.qerIDs, urrIDs: p.urrIDs,
-			instance: p.instance,
+			instance: p.instance, hasQFI: p.hasQFI, qfi: p.qfi,
 		}
 		if old != nil {
 			// An update keeps the dataplane identity: the rule that already
@@ -924,6 +944,7 @@ func (c *Compiler) resolve(s *Session) error {
 		}
 		p.meterID = 0
 		p.tunnels = nil
+		p.encapQFI = 0
 		for _, qid := range p.qerIDs {
 			entry := s.QERs[qid]
 			if entry == nil {
@@ -944,6 +965,15 @@ func (c *Compiler) resolve(s *Session) error {
 				}
 				if entry.hasRate {
 					p.meterID = entry.meterDL
+				}
+				if entry.hasQFI {
+					// The QER's QFI (8.2.89) is the flow the gNB reads out of
+					// the PDU Session Container of a downlink packet: it goes
+					// into the tunnel record the FAR's outer header creation
+					// writes, so the encap marks every packet of this flow
+					// with the id the SMF programmed (the last QER that names
+					// one, as the meter is the last that polices).
+					p.encapQFI = entry.qfi
 				}
 			}
 		}
@@ -1148,10 +1178,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// cannot tell apart -- precedence is part of the rule's value, not its key,
 	// so differing precedence does not separate them. Writing both would be
 	// rejected by the engine, and writing either would silently drop the other's
-	// action. The case that reaches this is an SMF that programs several uplink
-	// PDRs onto one F-TEID with no SDF, distinguishing them only by QFI: this UP
-	// does not read QFI (docs/compliance.md), so they are one key, and the
-	// session is refused with a rule failure rather than half-programmed.
+	// action. An SMF that programs several uplink PDRs onto one F-TEID with no
+	// SDF tells them apart by their QFIs, and the uplink table carries the QFI
+	// in its key: those are two rules, and the SMF's own precedences decide
+	// which serves a packet both match (the priority written below is the
+	// PDR's precedence, doctored by nothing). What reaches this is the rest of
+	// that case -- two PDRs with the same filter *and* the same QFI, or a
+	// deployment whose uplink table declares no qfi field, the PDI's QFI then
+	// being no part of the key -- and the session is refused with a rule
+	// failure rather than half-programmed.
 	writtenRules := map[string]bool{}
 	// The rule keys the session still holds, as the transaction will write them.
 	live := map[string]bool{}
@@ -1333,8 +1368,13 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// The rule table knows PDR ids no better than the SMF's filters do:
 			// one key is one rule, and the engine would reject the second
 			// write. Saying so is better than handing the SMF a session whose
-			// second PDR silently has no rule of its own.
-			return nil, nil, fmt.Errorf("%w: two PDRs compile to one rule key", errNotExpressible)
+			// second PDR silently has no rule of its own -- and the message
+			// names the two shapes that reach it, because the fix differs: an
+			// SMF that sent two identical PDRs, or a deployment whose uplink
+			// table carries no qfi field (see the note above).
+			return nil, nil, fmt.Errorf(
+				"%w: two PDRs compile to one rule key (the same filter and the same QFI, or a graph whose uplink table declares no qfi field)",
+				errNotExpressible)
 		}
 		writtenRules[rkey] = true
 		if owner, taken := c.rules[rkey]; taken && owner != s.LocalSEID {
@@ -1388,7 +1428,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				Resource: rulesRes(dir),
 				Key:      key,
 				Value: map[string]any{
-					"priority":  p.precedence,
+					"priority":  rulePriority(p.precedence),
 					"gate":      gate,
 					"action_id": action,
 				},
@@ -1428,15 +1468,24 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// by: the record is keyed by the same action id the rule carries.
 		for _, resource := range p.tunnels {
 			far := s.FARs[p.farID]
+			value := map[string]any{
+				"teid":      far.teid,
+				"gnb_ip":    far.peer.String(),
+				"ether_src": c.cfg.N3MAC[:],
+				"ether_dst": c.cfg.PeerMAC[:],
+			}
+			if p.encapQFI != 0 {
+				// The QER's QFI (8.2.89): the QoS flow the encap writes into
+				// the PDU Session Container of every packet it tunnels, which
+				// is the flow the gNB schedules the packet on. Written only
+				// where the SMF's QER named one -- 0 is not a QFI, so a record
+				// without the field says the session has no flow of its own.
+				value["qfi"] = uint32(p.encapQFI)
+			}
 			changes = append(changes, bess.Change{
 				Resource: resource,
 				Key:      map[string]any{"action_id": p.actionID},
-				Value: map[string]any{
-					"teid":      far.teid,
-					"gnb_ip":    far.peer.String(),
-					"ether_src": c.cfg.N3MAC[:],
-					"ether_dst": c.cfg.PeerMAC[:],
-				},
+				Value:    value,
 			})
 		}
 
@@ -1445,7 +1494,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			Key:      key,
 			Value: map[string]any{
 				// The table's own output gate: one chain per direction.
-				"priority":  p.precedence,
+				//
+				// The priority is the PDR's Precedence (8.2.11) inverted into
+				// the classifier's own ordering (rulePriority), QFI or not: a
+				// session's general rule (the QFI field masked out) and its
+				// flow's rule (the field required) both match a packet of that
+				// flow, and which PDR serves it stays the SMF's decision --
+				// the more specific rule is not raised above the one the SMF
+				// gave the higher Precedence.
+				"priority":  rulePriority(p.precedence),
 				"gate":      uint64(0),
 				"action_id": p.actionID,
 			},
@@ -1462,7 +1519,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 					Resource: c.teidRes(),
 					Key:      teidRuleKey(p.teid),
 					Value: map[string]any{
-						"priority": p.precedence,
+						"priority": rulePriority(p.precedence),
 						"gate":     uint64(c.cfg.TEIDGate),
 					},
 				})
@@ -1474,6 +1531,23 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	}
 	committed = true
 	return changes, created, nil
+}
+
+// rulePriority is the classifier's priority for a PDR's Precedence (TS 29.244
+// 8.2.11): the two orderings are opposite. The spec has the *lower* Precedence
+// value win -- "the lower precedence values indicate higher precedence of the
+// PDR, and the higher precedence values indicate lower precedence of the PDR
+// when matching a packet" -- while WildcardMatch applies the rule with the
+// *higher* priority ("If a packet matches multiple rules, the rule with higher
+// priority will be applied", module_msg.proto:347). The Precedence is therefore
+// inverted into the classifier's space, and it is inverted here, in one place,
+// because every rule the deployment programs carries the value: a session's PDR
+// rules and the TEID rule in front of the decap alike. Precedence 0, the
+// highest there is, takes the classifier's largest priority, and distinct
+// Precedences stay distinct priorities -- in the opposite direction, which is
+// the SMF's.
+func rulePriority(precedence uint32) int64 {
+	return math.MaxUint32 - int64(precedence)
 }
 
 // ruleKey is the WildcardMatch rule key for a PDR: for every field of the
@@ -1634,6 +1708,17 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 			b := make([]byte, 2)
 			binary.BigEndian.PutUint16(b, p.sdf.dport)
 			return match{value: b, mask: ones(2)}, true, nil
+		}
+		return match{}, false, nil
+	case QFI:
+		// The PDI's QFI (8.2.89), as the decap wrote it into the packet's
+		// `qfi` attribute. A PDI that names none leaves the field open: the
+		// rule selects the flow by its address and filter alone, and keeps
+		// matching where a later PDR of the session names a QFI -- which is
+		// what the masked-out byte says (its value is 0, the canonical form
+		// under a zero mask).
+		if p.hasQFI {
+			return match{value: []byte{p.qfi}, mask: ones(1)}, true, nil
 		}
 		return match{}, false, nil
 	case RouteDomain:
@@ -1900,6 +1985,24 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 	return p, nil
 }
 
+// qfiIE reads a QFI IE (TS 29.244 8.2.89): the six-bit QoS Flow Identifier a
+// PDI or a QER names, one of 1..63. 0 is not a QFI, and the IE's spare bits
+// make any byte above 63 a flow no packet carries -- a rule keyed on one would
+// match nothing at all, and the session would stand while its uplink
+// blackholed -- so both are refused with the cause the SMF can fix rather than
+// carried into a key.
+func qfiIE(c *ie.IE, what string) (uint8, error) {
+	v, err := c.QFI()
+	if err != nil {
+		return 0, fmt.Errorf("QFI: %w", err)
+	}
+	if v == 0 || v > 63 {
+		return 0, fmt.Errorf("%w: %s QFI is %d, and a QFI is one of 1..63 (8.2.89)",
+			errNotExpressible, what, v)
+	}
+	return v, nil
+}
+
 func parsePDI(p *pdrReq, children []*ie.IE) error {
 	for _, c := range children {
 		switch c.Type {
@@ -1915,6 +2018,16 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			// wrong interface -- with one instance configured, a rule naming
 			// another used to be indistinguishable from one naming ours.
 			p.instance = networkInstanceName(c.Payload)
+		case ie.QFI:
+			// The PDI's QFI (TS 29.244 8.2.89): the QoS flow this rule
+			// selects. It goes into the uplink table's key (matchValue), so
+			// the SMF's several uplink PDRs for one F-TEID -- the session's
+			// general rule and one per QoS flow -- are several rules.
+			qfi, err := qfiIE(c, "the PDI's")
+			if err != nil {
+				return err
+			}
+			p.hasQFI, p.qfi = true, qfi
 		case ie.FTEID:
 			fields, err := c.FTEID()
 			if err != nil {
@@ -2371,6 +2484,16 @@ func parseQER(i *ie.IE) (qerReq, error) {
 			if dl, err := c.GateStatusDL(); err == nil {
 				q.gateDL = dl
 			}
+		case ie.QFI:
+			// The QER's QFI (TS 29.244 8.2.89): the QoS flow this QER
+			// polices, and the one a downlink packet's PDU Session Container
+			// must name. resolve carries it into the tunnel record the PDR's
+			// FAR writes.
+			qfi, err := qfiIE(c, "the QER's")
+			if err != nil {
+				return qerReq{}, err
+			}
+			q.hasQFI, q.qfi = true, qfi
 		case ie.MBR:
 			payload, err := c.MBR()
 			if err != nil || len(payload) < 10 {
