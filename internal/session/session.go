@@ -782,11 +782,12 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 }
 
 // settle forgets the removals a transaction carried out, once the dataplane has
-// taken it. Until then they stay listed, so a refused modification's retry
-// erases the same records rather than leaving them behind. A TEID that no PDR of
-// the session names any more also loses its mapping and its reservation here:
-// nothing else would clear them before the session ends, and every later pin of
-// that value would be refused as this session's.
+// taken it, and gives up the rule keys that transaction erased. Until then they
+// stay listed and claimed, so a refused modification's retry erases the same
+// records rather than leaving them behind. A TEID that no PDR of the session
+// names any more also loses its mapping and its reservation here: nothing else
+// would clear them before the session ends, and every later pin of that value
+// would be refused as this session's.
 func (c *Compiler) settle(s *Session) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -804,6 +805,31 @@ func (c *Compiler) settle(s *Session) {
 	for chid, teid := range s.chids {
 		if !teidNamed(s, teid) {
 			delete(s.chids, chid)
+		}
+	}
+	// The rule keys this transaction erased are given up now that it has landed.
+	// Until then they stay the session's: a refused transaction leaves the rule
+	// programmed (and the retry erases it again), so a claim dropped while the
+	// transaction is in the air would let another session write over that rule
+	// -- and be erased by this session's retry. A key a PDR of the session
+	// still names is one the transaction *wrote* rather than erased (compile
+	// skips the erase for those), and it stays claimed.
+	live := map[string]bool{}
+	for _, p := range s.PDRs {
+		dir := c.direction(p.srcIfc)
+		if key, err := p.ruleKey(dir.PDRFields); err == nil {
+			live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
+		}
+	}
+	for _, p := range gones {
+		dir := c.direction(p.srcIfc)
+		key, err := p.ruleKey(dir.PDRFields)
+		if err != nil {
+			continue
+		}
+		rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
+		if !live[rkey] && c.rules[rkey] == s.LocalSEID {
+			delete(c.rules, rkey)
 		}
 	}
 	s.removed, s.stale = nil, nil
