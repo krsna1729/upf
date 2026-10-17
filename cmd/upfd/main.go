@@ -90,6 +90,11 @@ func run() error {
 	urrInterval := flag.Duration("urr-interval", 0,
 		"how often to read every session's usage counters and report what each URR owes "+
 			"over N4 (0: never, so URRs measure and report nothing)")
+	checkpointPath := flag.String("checkpoint", "",
+		"the session checkpoint file (docs/design.md's restart wall): every applied "+
+			"session message is journalled to it before the SMF is answered, and a restart "+
+			"replays it before the PFCP socket opens, keeping the sessions and the "+
+			"Recovery Time Stamp the SMF knows; empty: every start is a clean slate")
 	flag.Parse()
 
 	var lvl slog.Level
@@ -115,6 +120,25 @@ func run() error {
 	defer stop()
 
 	cfg := n4.Config{NodeID: id, Listen: *n4Addr, Logger: log}
+	// The checkpoint (docs/design.md's restart wall). It is opened first: the
+	// Recovery Time Stamp it carries decides what the association answer tells
+	// the SMF, and that answer is built before the socket opens.
+	var (
+		checkpoint *session.Journal
+		// restored is whether this run put the journal's sessions back: it
+		// decides the Recovery Time Stamp the association answer carries, and
+		// the journal's own record is not a second source for it -- a run whose
+		// restore failed clears the file and writes the stamp it advertises.
+		restored bool
+	)
+	if *checkpointPath != "" {
+		j, err := session.OpenJournal(*checkpointPath)
+		if err != nil {
+			return err
+		}
+		defer j.Close()
+		checkpoint = j
+	}
 	// The session layer, when there is one: the metrics endpoint reports what
 	// it holds whatever the run, and the reporting loop needs it to exist.
 	var compiler *session.Compiler
@@ -151,6 +175,34 @@ func run() error {
 		if err := cfg.Sessions.(*session.Compiler).Sweep(ctx); err != nil {
 			log.Warn("could not take an earlier run's sessions out of the dataplane", "error", err)
 		}
+		// And the checkpoint goes back in, after the sweep: the replay writes
+		// the sessions the journal describes, so the dataplane holds those and
+		// nothing else. A journal this layer cannot read is not a checkpoint --
+		// the sessions replayed from it so far are dropped and the run
+		// advertises a new Recovery Time Stamp, so the SMF re-establishes
+		// everything rather than the half that fitted.
+		if checkpoint != nil {
+			// The journal is attached whether or not this run can restore from
+			// it: this is the run whose messages have to be recorded, and a
+			// first start -- an empty file, nothing to restore -- is exactly the
+			// case with everything to write.
+			compiler.Checkpoint(checkpoint)
+			if _, ok := checkpoint.Recovery(); !ok {
+				log.Info("session checkpoint carries no Recovery Time Stamp: "+
+					"this run advertises a new one and the SMF re-establishes",
+					"path", *checkpointPath)
+			} else if err := compiler.Restore(checkpoint); err != nil {
+				// A journal this layer cannot read is not a checkpoint: the
+				// sessions replayed from it so far are dropped and the run
+				// advertises a new Recovery Time Stamp, so the SMF re-establishes
+				// everything rather than the half that fitted.
+				log.Warn("the checkpoint could not be replayed; starting clean",
+					"path", *checkpointPath, "error", err)
+				compiler.AssociationEnded("the checkpoint could not be replayed")
+			} else {
+				restored = true
+			}
+		}
 		// The F-TEID allocation lives in the session layer, so the feature is
 		// advertised only in the run that has it: without -bess this node has no
 		// session layer at all and refuses every session request, and an
@@ -165,6 +217,26 @@ func run() error {
 		log.Info("session layer ready", ready...)
 	} else {
 		log.Warn("no -bess address: session messages are refused (no session layer)")
+	}
+
+	// The stamp the association answer will carry. With no restored checkpoint
+	// it is now: the sessions this node holds are none, and an SMF that kept
+	// believing in its own would be right to -- which is exactly why the stamp
+	// has to move. With a restored one it is the stamp those sessions were
+	// created under, and nothing was lost for the SMF to hear about.
+	if checkpoint != nil {
+		stamp := time.Now()
+		if restored {
+			// Recovery was ok or Restore would not have run; the value is the
+			// one the journal's first record carries.
+			stamp, _ = checkpoint.Recovery()
+		}
+		if err := checkpoint.Start(stamp, restored); err != nil {
+			return err
+		}
+		cfg.RecoveryTimeStamp = stamp
+		log.Info("session checkpoint", "path", *checkpointPath, "sessions_restored", restored,
+			"recovery_time_stamp", stamp.UTC().Format(time.RFC3339))
 	}
 
 	srv, err := n4.New(cfg)

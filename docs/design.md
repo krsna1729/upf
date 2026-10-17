@@ -729,24 +729,45 @@ The walls, in order:
    startup (`session.Compiler.Sweep`, one transaction, before the PFCP socket
    opens), because the previous incarnation's records are indistinguishable
    from this one's.
-   What is still missing is the replay path that would keep the sessions across
-   a restart instead of emptying them, and its form is chosen here rather than
-   left to the implementation: an append-only journal of the *applied* PFCP
-   session messages (`upfd -checkpoint <path>`), **not yet built** -- the
-   compliance rows say what is -- and not a serialisation of the model, because
+   The replay path is `upfd -checkpoint <path>`: an append-only journal of the
+   *applied* PFCP session messages, not a serialisation of the model, because
    the messages are already the complete description of what a session is, any
    second format would be a second thing to keep in step with the first, and
-   replaying messages is what an SMF does. A restart sweeps first -- the
-   dataplane's records are the graph's, and dropping them wholesale is what
-   makes the replay an installation rather than a trust fall -- and then replays
-   the journal in order, pinning each session's local SEID to the value the
-   journal recorded, so a retransmission of an establishment the previous
-   incarnation accepted is answered with the same SEID and the SMF's path
-   management finds either that session or a clean slate, never half of one. The
-   file is appended to and never rewritten, so a change costs its own record;
-   folding a long session's chain into one record is compaction, and it is not a
-   prerequisite for the replay being correct, because a replay reads the records
-   in the order they were written.
+   replaying messages is what an SMF does. A record is written before the SMF is
+   answered, so a change it was told about is in the file and a torn last line
+   belongs to a message nobody was answered for -- which its own retransmission
+   puts back. A restart sweeps first -- the dataplane's records are the graph's,
+   and dropping them wholesale is what makes the replay an installation rather
+   than a trust fall -- and then replays the journal in order, pinning each
+   session's local SEID to the value the journal recorded, so a retransmission
+   of an establishment the previous incarnation accepted is answered with the
+   same SEID.
+   The stamp is what makes the replay coherent with the SMF rather than a trap:
+   a restart that restored the journal re-advertises the *recorded* Recovery
+   Time Stamp, so the SMF does not consider its sessions lost and does not
+   re-establish them -- it would be re-establishing into rules the restored
+   sessions still hold, and `compile` would refuse every one of them for the
+   key. A restart with no usable journal mints a new stamp (and clears the file
+   to begin with it), so the SMF's re-establishment is exactly what the sweep
+   made room for. That is also why the association's end clears the journal: the
+   CP function restarted, so the sessions it describes are void (7.4.1) and a
+   later restart of ours must not hand them back.
+   *Proof:* `internal/session`'s TestTheCheckpointReplaysSessions (a second
+   compiler holds the same session under the SEID the SMF addresses -- a
+   modification at that SEID is accepted -- with the deleted session still gone
+   and the journal unchanged by the replay),
+   TestTheCheckpointIgnoresATornRecord, TestTheCheckpointRefusesCorruption,
+   TestTheCheckpointStampSurvivesARestart,
+   TestTheAssociationEndingClearsTheCheckpoint, and
+   TestTheAssociationAnswerCarriesTheConfiguredRecoveryTimeStamp in
+   `internal/n4`; `ci/n4-path.sh`'s checkpoint phase does it live: a session
+   established into a checkpointed `upfd`, the process killed, its successor
+   logging `checkpoint replayed ... sessions=1` with the same Recovery Time
+   Stamp, and the replayed rules selecting packets with no SMF message since the
+   restart. The file is appended to and never rewritten by a replay, so folding
+   a long session's chain into one record is compaction, and it is not a
+   prerequisite for the replay being correct: a replay reads the records in the
+   order they were written.
 5. **Id and priority space.** uint32 throughout (PDR priority, ActionId, meter
    id): a million sessions at four PDRs is 4M rules, which fits.
 
