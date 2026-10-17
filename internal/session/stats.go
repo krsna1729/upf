@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: BSD-3-Clause
+
+package session
+
+import (
+	"sync/atomic"
+
+	"github.com/wmnsk/go-pfcp/ie"
+	"github.com/wmnsk/go-pfcp/message"
+)
+
+// counters is what the compiler counts about its own work: the numbers a
+// management endpoint reports. They are the SMF's view of this node -- what it
+// asked for and what it was told -- and each is one of the facts this layer
+// owns; the dataplane's own counters are the graph's (upfd reports the usage
+// ones to the SMF as PFCP Session Reports).
+type counters struct {
+	established atomic.Uint64
+	modified    atomic.Uint64
+	deleted     atomic.Uint64
+	// refused counts the requests answered with a cause other than accepted.
+	// A retransmitted establishment or deletion is not one of them: the answer
+	// repeats what the SMF already had.
+	refused atomic.Uint64
+}
+
+// StatsSnapshot is the counters at one instant, copied out so a reader is
+// served without holding the compiler's lock.
+type StatsSnapshot struct {
+	Sessions    int    // the sessions this compiler holds now
+	Established uint64 // establishments that became a session
+	Modified    uint64 // modifications applied
+	Deleted     uint64 // deletions applied
+	Refused     uint64 // requests answered with a cause other than accepted
+}
+
+// Stats is what the session layer has done, and what it holds now. A node with
+// no session layer at all (no -bess) reports zeros rather than panicking.
+func (c *Compiler) Stats() StatsSnapshot {
+	if c == nil {
+		return StatsSnapshot{}
+	}
+	c.mu.Lock()
+	sessions := len(c.sessions)
+	c.mu.Unlock()
+	return StatsSnapshot{
+		Sessions:    sessions,
+		Established: c.stats.established.Load(),
+		Modified:    c.stats.modified.Load(),
+		Deleted:     c.stats.deleted.Load(),
+		Refused:     c.stats.refused.Load(),
+	}
+}
+
+// answerCause is the Cause a session-level response carries, or 0 for a
+// response that carries none: a malformed answer is not a refusal, and saying
+// it was one would put a number on the endpoint that nothing measured.
+func answerCause(resp message.Message) uint8 {
+	var i *ie.IE
+	switch v := resp.(type) {
+	case *message.SessionEstablishmentResponse:
+		i = v.Cause
+	case *message.SessionModificationResponse:
+		i = v.Cause
+	case *message.SessionDeletionResponse:
+		i = v.Cause
+	default:
+		return 0
+	}
+	if i == nil {
+		return 0
+	}
+	cause, err := i.Cause()
+	if err != nil {
+		return 0
+	}
+	return cause
+}

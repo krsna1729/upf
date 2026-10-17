@@ -289,7 +289,7 @@ func TestAnUnansweredReportIsSentAgainBeforeTheNextOne(t *testing.T) {
 	logs := &logCapture{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go reportLoop(ctx, compiler, sender, 20*time.Millisecond,
+	go reportLoop(ctx, compiler, sender, 20*time.Millisecond, &reportStats{},
 		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	waitFor(t, 5*time.Second, func() bool { return len(sender.snapshot()) >= 2 },
@@ -320,7 +320,7 @@ func TestARefusedReportIsNotRetried(t *testing.T) {
 	logs := &logCapture{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go reportLoop(ctx, compiler, sender, 20*time.Millisecond,
+	go reportLoop(ctx, compiler, sender, 20*time.Millisecond, &reportStats{},
 		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	waitFor(t, 5*time.Second, func() bool { return logs.contains("usage report refused") },
@@ -359,7 +359,7 @@ func TestAHeldReportIsRetriedWithBackoff(t *testing.T) {
 	logs := &logCapture{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go reportLoop(ctx, compiler, sender, 5*time.Millisecond,
+	go reportLoop(ctx, compiler, sender, 5*time.Millisecond, &reportStats{},
 		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	// The first report is due a period in (1s), so this window holds ~1s of
@@ -399,7 +399,7 @@ func TestATickStopsDrainingAfterATransportFailure(t *testing.T) {
 	logs := &logCapture{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go reportLoop(ctx, compiler, sender, 20*time.Millisecond,
+	go reportLoop(ctx, compiler, sender, 20*time.Millisecond, &reportStats{},
 		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	// The reports are due a period in (1s), so this holds about a second of a
@@ -562,7 +562,7 @@ func TestReportLoopSendsAReportTheSMFAcknowledges(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go reportLoop(ctx, compiler, srv, 20*time.Millisecond, log)
+	go reportLoop(ctx, compiler, srv, 20*time.Millisecond, &reportStats{}, log)
 
 	// The first tick is the window's baseline and reports nothing: a datagram
 	// arriving now would be a report for traffic that has not happened.

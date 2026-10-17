@@ -239,6 +239,15 @@ var urrUnsupported = map[uint16]string{
 
 // Establish implements n4.SessionHandler.
 func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.Message {
+	resp := c.establish(req)
+	if answerCause(resp) != ie.CauseRequestAccepted {
+		c.stats.refused.Add(1)
+	}
+	return resp
+}
+
+// establish is the establishment itself; Establish counts what it answered.
+func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.Message {
 	ies := establishmentIEs(req)
 	cpSEID, err := cpFSEID(ies)
 	if err != nil {
@@ -325,6 +334,7 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 		}
 	}
 	c.mu.Unlock()
+	c.stats.established.Add(1)
 
 	c.log.Info("session: established", "cp_seid", cpSEID, "seid", local,
 		"ue_ip", s.UEIP.String(), "pdrs", len(s.PDRs), "changes", len(changes))
@@ -337,7 +347,19 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 // commands), and it keeps one code path for every modification shape; the
 // per-record optimizations of docs/design.md ("Modification semantics") can
 // narrow it later without changing what the dataplane holds.
+// Modify implements n4.SessionHandler.
 func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Message {
+	resp := c.modify(req)
+	if answerCause(resp) == ie.CauseRequestAccepted {
+		c.stats.modified.Add(1)
+	} else {
+		c.stats.refused.Add(1)
+	}
+	return resp
+}
+
+// modify is the modification itself; Modify counts what it answered.
+func (c *Compiler) modify(req *message.SessionModificationRequest) message.Message {
 	seid := req.SEID()
 	c.mu.Lock()
 	s := c.sessions[seid]
@@ -398,6 +420,21 @@ func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Messa
 
 // Delete implements n4.SessionHandler.
 func (c *Compiler) Delete(req *message.SessionDeletionRequest) message.Message {
+	resp := c.delete(req)
+	switch answerCause(resp) {
+	case ie.CauseRequestAccepted:
+		c.stats.deleted.Add(1)
+	case ie.CauseSessionContextNotFound:
+		// A retransmitted deletion: the session is already gone, which is what
+		// the SMF asked for, so it is neither a deletion nor a refusal.
+	default:
+		c.stats.refused.Add(1)
+	}
+	return resp
+}
+
+// delete is the deletion itself; Delete counts what it answered.
+func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	seid := req.SEID()
 	c.mu.Lock()
 	s := c.sessions[seid]
