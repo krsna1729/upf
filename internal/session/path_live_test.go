@@ -216,16 +216,26 @@ func TestLiveSessionSharedRecords(t *testing.T) {
 	}()
 	t.Logf("established SEID %d with two uplink PDRs on one F-TEID", resp.Header.SEID)
 
-	// Removing one of the two: its own records go, the shared TEID rule and the
-	// QER's meters stay (the surviving PDR needs the first, and the second is
-	// written by the same transaction).
+	// PDR 1 is the one the shared TEID rule was written from (the first PDR, in
+	// precedence order), and PDR 2 survives to rewrite it: that is the case
+	// where a removal's erase list and a write can name one key in one
+	// transaction. Then PDR 2 goes too, which is the case where the session has
+	// no user of the TEID left and the rule is erased.
 	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewRemovePDR(ie.NewPDRID(1)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the daemon refused the removal of the TEID's PDR with cause %d", got)
+	}
+	t.Logf("removed PDR 1; PDR 2 rewrote the shared TEID rule in the same transaction")
+
+	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
 		ie.NewRemovePDR(ie.NewPDRID(2)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
-		t.Fatalf("the daemon refused the removal with cause %d", got)
+		t.Fatalf("the daemon refused the second removal with cause %d", got)
 	}
-	t.Logf("removed PDR 2; the daemon took the transaction")
+	t.Logf("removed PDR 2; the session holds no user of the TEID rule now")
 }
 
 // gatePackets is the packets a module's output gate has counted, from the

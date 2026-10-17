@@ -252,6 +252,13 @@ type Session struct {
 	// once that transaction is applied, which leaves the retry after a refusal
 	// erasing the same records.
 	removed []*pdr
+
+	// stale holds the PDRs a modification replaced: an update keeps a PDR's
+	// action and its tunnel, but a new filter or a new UE address is a new rule
+	// key, and the old one would go on selecting that action. compile erases an
+	// old key unless the same transaction writes it, which is what keeps one
+	// key from being written and erased at once (the engine rejects that).
+	stale []*pdr
 }
 
 // forgetRemoval marks a PDR id as live again: a request may remove a PDR and
@@ -582,14 +589,15 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 func (c *Compiler) settle(s *Session) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, p := range s.removed {
-		if p.teid == 0 || c.byTEID[p.teid] != s || teidInUse(s, p) {
+	gones := append(append([]*pdr(nil), s.removed...), s.stale...)
+	for _, p := range gones {
+		if p.teid == 0 || c.byTEID[p.teid] != s || teidNamed(s, p.teid) {
 			continue
 		}
 		delete(c.byTEID, p.teid)
 		c.teids.release(p.teid)
 	}
-	s.removed = nil
+	s.removed, s.stale = nil, nil
 }
 
 // releaseSession frees the ids a session's records hold, each exactly once: one

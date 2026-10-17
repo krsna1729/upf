@@ -407,6 +407,12 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		if p.ueIP.IsValid() {
 			s.UEIP = p.ueIP
 		}
+		if old != nil {
+			// The form being replaced: its rule key, and the TEID it held, are
+			// erased unless the transaction that carries this update writes them
+			// (compile).
+			s.stale = append(s.stale, old)
+		}
 		s.PDRs[p.id] = pdr
 	}
 	// Resolve what each PDR's FAR and QERs mean for the dataplane: a forward or
@@ -453,12 +459,12 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 	return nil
 }
 
-// teidInUse reports whether a PDR the session still has names this F-TEID. The
+// teidNamed reports whether a PDR the session still has names this F-TEID. The
 // TEID rule is the session's, not the PDR's: several uplink PDRs may share one
-// F-TEID, so removing one of them does not remove the rule.
-func teidInUse(s *Session, removed *pdr) bool {
+// F-TEID, so removing or replacing one of them does not remove the rule.
+func teidNamed(s *Session, teid uint32) bool {
 	for _, p := range s.PDRs {
-		if p.teid == removed.teid {
+		if p.teid == teid {
 			return true
 		}
 	}
@@ -493,9 +499,13 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// (resource, key) in a transaction. It is written once, with the first PDR's
 	// precedence (pdrsInOrder is an order, so that is the lowest).
 	writtenTEIDs := map[uint32]bool{}
-	// Two PDRs whose filters and precedence compile to one rule key are one rule
-	// the dataplane cannot tell apart: writing both would be rejected by the
-	// engine, and writing either would silently drop the other's action.
+	// Two PDRs whose filters compile to one rule key are one rule the dataplane
+	// cannot tell apart -- precedence is part of the rule's value, not its key,
+	// so differing precedence does not separate them. Writing both would be
+	// rejected by the engine, and writing either would silently drop the other's
+	// action. An SMF that programs two filters for one direction will not hit
+	// this; one that sends the same filter twice is told so rather than having
+	// one of its PDRs quietly do nothing.
 	writtenRules := map[string]bool{}
 	// The rule keys the session still holds, as the transaction will write them.
 	live := map[string]bool{}
@@ -542,11 +552,30 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		for _, t := range p.tunnels {
 			erase(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
 		}
-		if p.teid != 0 && !teidInUse(s, p) {
+		if p.teid != 0 && !teidNamed(s, p.teid) {
 			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
 		}
 		if p.meterID != 0 && !qerHoldsMeter(s, p) {
 			erase(bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
+		}
+	}
+	// A PDR a modification replaced keeps its action and its tunnel, but its
+	// rule key can change under it (a new filter, a new address): the old key
+	// would go on selecting that action for packets the PDR no longer describes.
+	// It is erased unless the same transaction writes it, which is the update
+	// that changed nothing about the key -- and the reason this cannot collide
+	// with a write (the engine rejects two operations on one key).
+	for _, old := range s.stale {
+		dir := c.direction(old.srcIfc)
+		key, err := old.ruleKey(dir.PDRFields)
+		if err != nil {
+			return nil, nil, fmt.Errorf("PDR %d: %w", old.id, err)
+		}
+		if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
+			erase(bess.Change{Resource: rulesRes(dir), Key: key})
+		}
+		if old.teid != 0 && !teidNamed(s, old.teid) {
+			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(old.teid)})
 		}
 	}
 

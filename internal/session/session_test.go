@@ -483,6 +483,87 @@ func TestAReleasedPinInsideTheRangeComesBack(t *testing.T) {
 	}
 }
 
+func TestAQueuedPinIsNotHandedOutByTheWalk(t *testing.T) {
+	// A pin released before the walk reaches it is queued, and the value is
+	// still ahead of the walk -- so both paths can offer it. The walk must skip
+	// an id that is queued, or one id is handed to two sessions: once here, once
+	// from the free list.
+	p := newIDPool(64, 0)
+	p.reserve(5)
+	p.release(5)
+	seen := map[uint32]int{}
+	for {
+		id, err := p.alloc()
+		if err != nil {
+			break
+		}
+		seen[id]++
+	}
+	if seen[5] != 1 {
+		t.Errorf("the released pin was handed out %d times, want once", seen[5])
+	}
+	if len(seen) != 63 {
+		t.Errorf("the pool yielded %d ids, want the whole space (63)", len(seen))
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("id %d was handed out %d times", id, n)
+		}
+	}
+}
+
+func TestAnUpdateThatChangesTheKeyErasesTheOldRule(t *testing.T) {
+	// An update keeps a PDR's action -- the rule that already selected it keeps
+	// its action id, so a worker switching between old and new state never sees
+	// a dangling reference -- but the rule is keyed on the filter, and a new
+	// filter is a new key. The old rule would go on selecting that action for
+	// packets the PDR no longer describes, and the answer the SMF gets would
+	// not say so.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x8880, 1, 0,
+		ie.NewFSEID(0x8880, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	old := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0})
+	actionID := old.change.Value["action_id"]
+	if actionID == nil || actionID == uint32(0) {
+		t.Fatalf("the establishment gave the PDR no action (%v)", actionID)
+	}
+
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 10.20.0.0/16 1000", "", "", "", 0)),
+			ie.NewFARID(1)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	txn := rec.last()
+	if erased := ruleCarrying(t, txn, fieldDstIP, []byte{10, 10, 0, 0}); erased.change.Value != nil {
+		t.Error("the old key was rewritten rather than erased")
+	}
+	written := ruleCarrying(t, txn, fieldDstIP, []byte{10, 20, 0, 0})
+	if written.change.Value == nil {
+		t.Fatal("the new key was not written")
+	}
+	if got := written.change.Value["action_id"]; got != actionID {
+		t.Errorf("the update gave the PDR action %v, want the one it had (%v)", got, actionID)
+	}
+	assertNoRepeat(t, txn)
+}
+
 func TestAClosedGateDropsWithoutAnAction(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
