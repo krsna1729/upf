@@ -6,6 +6,8 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // The client needs a daemon and nothing else: everything this package does --
@@ -81,10 +83,45 @@ func TestLiveSchemaAndMessage(t *testing.T) {
 	}
 }
 
+// scalarFields is the field map a change carries, for the fields of one type: the
+// numbers get 1, the strings and bytes their field's own name. It is built from
+// the descriptor the daemon reports, and it is what Client.Apply hands to
+// Message for every key and every value of a transaction. Nested messages are
+// left empty -- the cost this measures is the schema-driven conversion, not the
+// semantics of one plugin's table.
+func scalarFields(m protoreflect.Message) map[string]any {
+	fields := map[string]any{}
+	md := m.Descriptor()
+	for i := 0; i < md.Fields().Len(); i++ {
+		fd := md.Fields().Get(i)
+		name := fd.JSONName()
+		switch fd.Kind() {
+		case protoreflect.StringKind:
+			fields[name] = string(fd.Name())
+		case protoreflect.BytesKind:
+			fields[name] = []byte(fd.Name())
+		case protoreflect.BoolKind:
+			fields[name] = true
+		case protoreflect.EnumKind:
+			fields[name] = float64(1)
+		case protoreflect.FloatKind, protoreflect.DoubleKind:
+			fields[name] = float64(1)
+		case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind,
+			protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind,
+			protoreflect.Uint32Kind, protoreflect.Fixed32Kind,
+			protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
+			fields[name] = float64(1)
+		}
+	}
+	return fields
+}
+
 // BenchmarkLiveMessage is the schema-driven message building against the real
-// descriptors. It is small -- 258 ns and 3 allocations a message, so the eleven
-// a session builds are a few microseconds of its compile -- which is worth
-// knowing before anyone blames the dynamic messages for the compiler's cost.
+// descriptors, with a real field map: this is the conversion Client.Apply does
+// for every key and every value of a session's transaction, so it is the part of
+// Apply that is ours rather than the daemon's. An empty message is not a useful
+// measurement -- it proves nothing about the conversion -- so the fields are
+// filled from the descriptor.
 func BenchmarkLiveMessage(b *testing.B) {
 	c := liveClient(b)
 
@@ -102,10 +139,19 @@ func BenchmarkLiveMessage(b *testing.B) {
 	if typ == "" {
 		b.Fatal("no resource with a value type")
 	}
+	empty, err := c.Message(typ, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	fields := scalarFields(empty.ProtoReflect())
+	if len(fields) == 0 {
+		b.Fatalf("%s has no scalar fields to set", typ)
+	}
+	b.Logf("%s: %d scalar fields", typ, len(fields))
 
 	b.ReportAllocs()
 	for b.Loop() {
-		m, err := c.Message(typ, nil)
+		m, err := c.Message(typ, fields)
 		if err != nil {
 			b.Fatal(err)
 		}

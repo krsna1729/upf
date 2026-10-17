@@ -499,28 +499,34 @@ message, the same run answers all 256: 8 workers, 256 sessions, establish
 same machine -- the aggregate is flat, and the latency is the queue, which is
 what one serialized control path should look like.
 
-Where that time goes, measured in the compiler's own package (`go test -bench`
-over 2000 iterations each, `internal/session/bench_test.go`): parsing an
-establishment request with the PFCP library costs 5.9 µs and marshalling the
-response 1.5 µs -- the wire is not what costs -- while the compiler's own work,
-reading the IEs and building every rule's key, match and message, costs 121 µs
-(39 µs for a deletion). The rest of the figures above is the transaction's round
-trip, the daemon, and the machine's state: one transaction measures ~175 µs from
-the C++ client, and the whole N4 path 440 µs p50 on a quiet machine. So the
-compiler's share is about a quarter of the quiet figure, and it is
-allocation-heavy (792 allocations per establishment). The wire is not where those
-come from: building and marshalling a session establishment costs 13.1 µs on the
-client side, the server's whole way through one datagram -- parse, dispatch,
-handler, reply, send -- 10.6 µs (44 allocations), and building one schema-driven
-message 258 ns (3 allocations), so the compiler's allocations sit in its own rule
-and key construction, not in the messages. Against a running daemon
-(`ci/session-live.sh` runs these too) the whole path measures 2.18 ms per
-establishment over 200 iterations (1938 allocations), the same path the bench
-script reports as 1.685 ms p50, and both are today's machine. The profile that
-would name what is left cannot be taken in this environment (`-cpuprofile` runs
-are killed here, even on a trivial benchmark, leaving an empty profile), so the
-parts are measured one by one, and there is no reason to dig further before the
-UPF's own features are done.
+Where that time goes, measured by part (`go test -bench`, 2000-3000 iterations
+each; `ci/session-live.sh` runs the live ones against the daemon it starts):
+
+- The PFCP library is not what costs: parsing an establishment request is 5.9 µs
+  and marshalling the response 1.5 µs, with the client's own building and
+  marshalling 13.1 µs (`internal/n4sim/bench_test.go`) and the server's whole way
+  through one datagram -- parse, association check, handler, reply, send --
+  10.6 µs (`internal/n4/bench_test.go`).
+- The compiler is 121 µs (792 allocations) per establishment and 39 µs per
+  deletion (`internal/session/bench_test.go`).
+- The transaction is the rest, and it is nearly all of it. Against a running
+  daemon an establishment measures 2.20 ms, of which `Client.Apply` -- converting
+  every key and value to a schema-driven message, then one `Commit` -- is
+  2.10 ms, 95%, leaving the compile about 103 µs; the bench script reports the
+  same path as 1.685 ms p50, and both are today's machine. The conversion itself
+  is small: 5.2 µs and 20 allocations for one message whose type has two scalar
+  fields (`internal/bess`, `BenchmarkLiveMessage` -- a lower bound, since a rule's
+  type is bigger), so a session's twenty-odd messages are about 0.1 ms and the
+  RPC and the daemon are about 2 ms.
+
+So the lever is the transaction path, and it is ours rather than go-pfcp's. The
+same daemon answers the C++ client at about 175 µs per transaction (the recorded
+5,732 tx/s of `live_transaction_bench`), an order of magnitude under what this Go
+client sees for one. Closing that gap is the next measurement: the SDK's `Commit`
+timed against the engine's own counters, and the C++ bench re-run on this machine
+for a same-day reference. The profile that would name it cannot be taken here
+(`-cpuprofile` runs are killed in this environment, even on a trivial benchmark,
+leaving an empty profile), so the parts are measured one by one.
 
 The walls, in order:
 
