@@ -311,11 +311,17 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 
   Both stops are bounded by one command or one commit and happen at signalling
   rate — a BAR arriving, a DDN answer releasing packets — never per packet.
-  **Known blocker for the live arm:** `internal/bess` calls `release`/`drop`/
-  `clear` bare, and the Go SDK has no pause-aware call, so the first release in
-  `ci/buffer-path.sh` would be refused; upf does not implement that loop itself
-  (the SDK owns the daemon's contract), and the helper is with Main. The
-  in-process tests still cover the refusal path's consequences
+  `internal/bess` wraps the three commands in exactly that loop
+  (`storeCommand`), and its five orderings are pinned by
+  `TestStoreCommandStopsTheWorkersOnlyWhenTheDaemonRefuses`: try, and on a
+  refusal stop the workers, retry, start them again -- tried first so a startup
+  clearance cannot start a graph it found stopped, and resumed even when the
+  retry failed so one refusal cannot leave the datapath stopped. The SDK stays
+  explicit (`InvokeAction`, `PauseWorkers`, `ResumeWorkers`) and D-146 keeps the
+  three SDKs' surfaces alike, which makes this shape this layer's policy rather
+  than the SDK's method. The store's `flows` write will need the same wrapper
+  around the one commit that carries it, since the engine does not pause for it.
+  The in-process tests cover the refusal's consequences as well
   (`TestAReleaseTheStoreRefusesIsCountedNotFatal` and the sweep's tests).
 * **Where state lives.** Per-worker: the counters' planes. Shared, atomic,
   written once per batch: the counters' stamps. Per-rule, indexed by the
