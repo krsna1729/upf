@@ -1017,6 +1017,17 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		if dir.Counters != "" && len(p.urrIDs) > 0 && p.actionID != 0 {
 			add(bess.Change{Resource: countersRes(dir), Key: map[string]any{"action_id": p.actionID}})
 		}
+		// A PDR that buffers is counted by a *second* module, in front of the
+		// store, and compile writes its entry too (writeBufferCounter). The
+		// deletion erased only the direction's counter, so the buffering
+		// module's entry outlived the session: it is what says "arrivals are
+		// news" for the DDN path, and nothing else would ever take it out. The
+		// next session to use the daemon then read a table that was not empty
+		// (ci/buffer-path.sh's second test, "cnt_buf already measures 1 rules
+		// before any session exists").
+		if p.buffer && p.actionID != 0 && c.cfg.Buffering != nil && c.cfg.Buffering.Counter != "" {
+			add(bess.Change{Resource: bufferCountersRes(c.cfg.Buffering), Key: map[string]any{"action_id": p.actionID}})
+		}
 	}
 	// Meters belong to QERs, not to PDRs: compile writes one per policed
 	// direction whether or not a PDR names it, so a deletion erases them from

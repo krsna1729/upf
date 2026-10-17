@@ -92,6 +92,43 @@ func TestABuffFARIsGatedToTheStoreAndCounted(t *testing.T) {
 	}
 }
 
+// TestDeletingABufferingSessionErasesItsBufferCounter pins the other half of
+// the entry's life: it is written so that "a later erase has something to
+// erase", and a deletion is that later erase. It is what the live arm needs to
+// hold -- the n4 package's DDN test establishes a buffering session, gets its
+// report and deletes it, and if the counter entry outlives the deletion the
+// next test in the same daemon reads a table that is not empty, which is
+// exactly how ci/buffer-path.sh failed.
+func TestDeletingABufferingSessionErasesItsBufferCounter(t *testing.T) {
+	cfg := bufferingConfig()
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	resp := c.Establish(buffEstablishment(0x7101, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	flow := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 45, 0, 7}).actionID()
+	if flow == 0 {
+		t.Fatal("a BUFF FAR's rule carries no ActionId")
+	}
+	find(t, rec.last(), bufferCountersRes(cfg.Buffering), "action_id", flow)
+
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upFSEID(t, resp), 9, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	for _, ch := range rec.last() {
+		if ch.Resource != bufferCountersRes(cfg.Buffering) || ch.Value != nil {
+			continue
+		}
+		if id, ok := ch.Key["action_id"].(uint32); ok && id == flow {
+			return
+		}
+	}
+	t.Errorf("the deletion wrote no erase for %s's entry for action %d: the entry outlives the session and the next test in the daemon sees a table that is not empty",
+		bufferCountersRes(cfg.Buffering), flow)
+}
+
 // TestABARTheSessionDoesNotHoldIsRefused pins the reference rule: a FAR that
 // names a BAR the session does not have asks for buffering under numbers nobody
 // sent, which 5.2.4.1 makes the CP function's instruction. The establishment is
