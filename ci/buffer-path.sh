@@ -141,28 +141,38 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_N4_TARGET=127.0.0.1:$N4_PORT \
 }
 
 # The datapath's half, against the same daemon: held, reported once, released.
+# Its output is kept because the release is this test's own evidence: it builds
+# its own controller (New(cfg, client, log)), so upfd is not the one releasing.
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=127.0.0.1:$BESS_PORT \
-  $GO test "$ROOT/internal/session/" -run 'TestLiveSessionBuffersAndReleasesTheHeldPackets' -count=1 -v || {
-  echo "buffer-path: the buffering test failed; upfd's log follows" >&2
+  $GO test "$ROOT/internal/session/" -run 'TestLiveSessionBuffersAndReleasesTheHeldPackets' -count=1 -v \
+  >"$WORK/session-test.log" 2>&1 || {
+  echo "buffer-path: the buffering test failed; its output follows, then upfd's log" >&2
+  cat "$WORK/session-test.log" >&2
   cat "$UPFD_LOG" >&2
   exit 1
 }
 
 FAIL=0
-check() { # check <description> <the line the log must carry>
+check() { # check <description> <the line the file must carry> <file>
   # The description is the test; the line is a fixed string, matched as one
   # (-F --): an unquoted bracket in it is a bracket expression to grep, so
   # "pdrs=[2]" would match the "pdrs=2" of every establishment.
-  if grep -q -F -- "$2" "$UPFD_LOG"; then
+  if grep -q -F -- "$2" "$3"; then
     echo "ok: $1"
   else
-    echo "FAIL: $1 (no '$2' in the controller's log)" >&2
+    echo "FAIL: $1 (no '$2' in $3)" >&2
     FAIL=1
   fi
 }
-check "the controller reported the buffered downlink" "downlink data reported"
-check "the report named the buffering PDR" "pdrs=[2]"
-check "the store released the flow on the SMF's instruction" "buffer_flows_total{outcome=\"released\"} 1"
+check "the controller reported the buffered downlink" "downlink data reported" "$UPFD_LOG"
+check "the report named the buffering PDR" "pdrs=[2]" "$UPFD_LOG"
+# Not upfd's counter: upf_buffer_flows_total is served over HTTP and never
+# logged, and this arm's upfd never drives a release -- the n4 test above
+# deletes its session without one. The evidence is the session test's own line:
+# the branch's counter held the packets, and the encap's moved only after the
+# SMF's instruction. Where upfd itself releases a flow, its counter is what to
+# scrape; that belongs to an arm that drives the release through PFCP.
+check "the store released the flow on the SMF's instruction" "forwarded after the instruction:" "$WORK/session-test.log"
 
 if [ "$FAIL" = 0 ]; then
   echo "buffer-path: ok (a BUFF FAR's packets were held, reported to the SMF over N4, and released when the SMF moved the path)"
