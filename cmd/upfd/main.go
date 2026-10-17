@@ -172,17 +172,22 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, srv *n4.Server,
 		case <-ticker.C:
 		}
 		for _, report := range sessions.EvaluateAll(ctx, time.Now()) {
-			cause, err := srv.Report(ctx, report.SEID, report.IEs()...)
+			// The report is addressed to the CP function, and the header's SEID
+			// is the identity the *receiver* looks the session up with: the CP
+			// F-SEID, not ours (TS 29.244 7.2.2.4.2; an SMF looks a report up
+			// by the F-SEID it allocated).
+			cause, err := srv.Report(ctx, report.CPSEID, report.IEs()...)
 			switch {
 			case err != nil:
-				log.Warn("usage report not delivered", "seid", report.SEID, "urr", report.URRID,
-					"trigger", report.Trigger.String(), "octets", report.Up.Octets, "error", err)
+				log.Warn("usage report not delivered", "seid", report.SEID, "cp_seid", report.CPSEID,
+					"urr", report.URRID, "trigger", report.Trigger.String(),
+					"octets", report.Up.Octets, "error", err)
 			case cause != ie.CauseRequestAccepted:
-				log.Warn("usage report refused", "seid", report.SEID, "urr", report.URRID,
-					"trigger", report.Trigger.String(), "cause", cause)
+				log.Warn("usage report refused", "seid", report.SEID, "cp_seid", report.CPSEID,
+					"urr", report.URRID, "trigger", report.Trigger.String(), "cause", cause)
 			default:
-				log.Info("usage report acknowledged", "seid", report.SEID, "urr", report.URRID,
-					"seqn", report.Seqn, "trigger", report.Trigger.String(),
+				log.Info("usage report acknowledged", "seid", report.SEID, "cp_seid", report.CPSEID,
+					"urr", report.URRID, "seqn", report.Seqn, "trigger", report.Trigger.String(),
 					"packets", report.Up.Packets, "octets", report.Up.Octets,
 					"down_packets", report.Down.Packets, "down_octets", report.Down.Octets)
 			}

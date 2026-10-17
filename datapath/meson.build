@@ -5,15 +5,15 @@
 # types -- are installed, experimental, and header-only). Built and loaded
 # against the installed `bess-dev` stage, never against BESS's source tree:
 #
-#   PKG_CONFIG_PATH=<stage>/lib/pkgconfig meson setup build \
-#     -Dcpp_args="-I<stage>/include/bess -I<stage>/include/bess/core"
+#   PKG_CONFIG="pkg-config --define-prefix" \
+#     PKG_CONFIG_PATH=<stage>/lib/pkgconfig meson setup build
 #   ninja -C build && meson install -C build --destdir=<stage-destdir>
 #   bessd -modules=<plugin dir> ...
 #
-# The two include directories are what `pkg-config --define-prefix` computes for
-# a stage installed with --destdir (the .pc keeps the configured prefix, which
-# is /usr/local unless BESS was configured with -Dprefix=<stage>); meson has no
-# way to pass --define-prefix through.
+# --define-prefix is what derives the stage's own include paths from where
+# bess-dev.pc lives: a stage installed with --destdir keeps the configured
+# prefix (/usr/local unless BESS was configured with -Dprefix=<stage>), and
+# putting the command in PKG_CONFIG is how meson is told to use it.
 
 project('upf_datapath', 'cpp',
   version: '0.1.0',

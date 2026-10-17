@@ -356,6 +356,11 @@ func sequenceNumber(b []byte) uint32 {
 // unanswered request is sent again ReportRetries times -- the usage it carries
 // is what the SMF bills, so silence is not an outcome to forget quietly.
 //
+// seid is the F-SEID the CP function knows this session by (the CP F-SEID it
+// put in the F-SEID IE): a report is addressed *to* the SMF, and the header's
+// SEID is the identity the receiving node looks the session up with, so our own
+// F-SEID would be a session the SMF cannot find.
+//
 // The Cause and the error are different things: a report the SMF *refused* is an
 // answer (it arrived, and the caller decides what to do with the cause), while
 // an error means no answer came at all. Only one report is in flight at a time.

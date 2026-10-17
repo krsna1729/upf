@@ -59,27 +59,24 @@ go build ./cmd/upfd        # the controller
 
 # the datapath plugin, against an installed bess-dev stage
 cd datapath
-# a stage installed with --destdir keeps /usr/local in bess-dev.pc, so its
-# include prefix is expanded relative to the stage by hand: meson has no
-# --define-prefix of its own.
-P=<stage>
-PKG_CONFIG_PATH=$P/lib/pkgconfig meson setup build \
-  -Dcpp_args="-I$P/include/bess -I$P/include/bess/core" && ninja -C build
+# a stage installed with --destdir keeps /usr/local as the prefix inside
+# bess-dev.pc (pkg-config's ordinary, correct behaviour -- the file is not
+# relocatable), so --define-prefix is what derives the stage's own include
+# paths from where the .pc file lives. PKG_CONFIG passes that through to meson.
+PKG_CONFIG="pkg-config --define-prefix" PKG_CONFIG_PATH=<stage>/lib/pkgconfig \
+  meson setup build && ninja -C build
 
 # the proof it works: bessd loads the plugin, applies the smoke graph, and the
 # script checks one decapsulated and one encapsulated packet byte for byte
-STAGE=$P ../ci/smoke-gtpu.sh
+STAGE=<stage> ../ci/smoke-gtpu.sh
 ```
 
 The stage must be a BESS install whose `bess-dev.pc` carries the stage's own
 paths — i.e. BESS configured with `-Dprefix=<stage>`. An install made with
-`meson install --destdir=...` keeps `/usr/local` inside the `.pc`: `pkg-config`
-expands it to `/usr/local/include` (the ordinary, correct behaviour — the file is
-not relocatable), and `pkg-config --define-prefix` is what computes the stage's
-own paths for direct use. Meson does not pass that flag through, which is why
-the plugin's build sets the two include directories itself, exactly as
-`--define-prefix` computes them. The smoke's `STAGE` default is the main
-checkout's `build/stage-fast`, which is such a destdir install.
+`meson install --destdir=...` keeps `/usr/local` inside the `.pc`, which is why
+the build above puts `pkg-config --define-prefix` in `PKG_CONFIG`; a stage
+configured with `-Dprefix=<stage>` needs neither. The smoke's `STAGE` default is
+the main checkout's `build/stage-fast`, which is such a destdir install.
 
 Driving BESS needs the fork's Go SDK, the nested module `sdk/go`; until those
 commits are published, `go.mod` documents the local `replace` to use.
