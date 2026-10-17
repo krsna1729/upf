@@ -78,7 +78,7 @@ type StoreCommands interface {
 	// controller that comes up knows neither the flows nor the episode they
 	// belonged to -- leaving them to age out would hand a later session the
 	// previous one's packets.
-	ClearStore(ctx context.Context, module string, id uint32) error
+	ClearStore(ctx context.Context, module string) error
 }
 
 // Field is one entry of the PDR table's key, in the order the deployed graph

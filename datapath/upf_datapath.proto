@@ -130,24 +130,6 @@ message UrrCountCommandGetCountsResponse {
   uint64 read_wall_unix_ns = 3;
 }
 
-// TeidKey is the key of the decap module's "<module>/sessions" table: the TEID
-// of an uplink G-PDU (TS 29.281). The controller writes one entry per session,
-// and the decap accepts only TEIDs the table holds -- a G-PDU for a session
-// this UPF does not have is dropped, never forwarded into another session's
-// rules.
-message TeidKey {
-  // 0 is invalid: no tunnel carries it, and an unknown TEID is not a session.
-  uint32 teid = 1;
-}
-
-// SessionEntry is what the control plane and an operator can see about a
-// session the decap accepts. The packet path reads no field of it: the
-// entry's existence is the whole test.
-message SessionEntry {
-  // The UE's IPv4 address, dotted: what this session's PDR rules match.
-  string ue_ip = 1;
-}
-
 // TunnelKey is the key of the encap module's "<module>/tunnels" table: the
 // ActionId the PDR rule named, which the classifier wrote into the packet's
 // "action_id" metadata (BESS D-141). Keying the tunnel by the same id is what

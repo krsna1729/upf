@@ -45,7 +45,9 @@ session change. It holds no dataplane state of its own.
 
 ## Why it is shaped this way
 
-BESS is the dataplane; the UPF owns its own semantics. `docs/design.md`
+BESS is the dataplane; the UPF owns its own semantics. `docs/datapath.md`
+is the datapath's engineering reference (modules, resources, placement) and
+`docs/design.md`
 records the boundary and, in particular, the controller patterns that are
 deliberately *not* copied from OMEC's `pfcpiface` (a goroutine and a
 `ModuleCommand` per PDR/FAR/QER, Cartesian port-range expansion, client-side

@@ -29,7 +29,7 @@ func (f *sweepFake) Apply(_ context.Context, changes ...bess.Change) error {
 
 // ClearStore, ReleaseFlow and DropFlow are StoreCommands: the sweep clears the
 // store (a previous run's held packets), and the fake records that it asked.
-func (f *sweepFake) ClearStore(_ context.Context, module string, _ uint32) error {
+func (f *sweepFake) ClearStore(_ context.Context, module string) error {
 	if f.err != nil {
 		return f.err
 	}

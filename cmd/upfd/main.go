@@ -163,6 +163,13 @@ func run() error {
 			return err
 		}
 		defer client.Close()
+		// A buffering deployment must say how often its counters are read, and it
+		// is refused before anything is swept, replayed or listened on: the
+		// guard is a fact about the flags, so it belongs before the first effect.
+		if *bufferStore != "" && *urrInterval <= 0 {
+			return fmt.Errorf("-buffer-store %q needs a positive -urr-interval: the Downlink Data Report is what that loop's reading of the buffering counters owes the SMF",
+				*bufferStore)
+		}
 		graph, err := graphConfig(graphArgs{
 			n3: *n3Addr, n3MAC: *n3MAC, peerMAC: *peerMAC,
 			capacity:  uint32(*capacity),
@@ -288,15 +295,6 @@ func run() error {
 			return fmt.Errorf("-urr-interval %v needs -bess: without a session layer there is nothing to evaluate", *urrInterval)
 		}
 		go reportLoop(ctx, compiler, srv, *urrInterval, reports, log)
-	}
-	if *bufferStore != "" && *urrInterval <= 0 {
-		// The DDN trigger is that loop's reading of the branch's counters
-		// (docs/design.md): without it a BUFF FAR's packets are held, nobody is
-		// told, and the store times them out silently -- which is worse than the
-		// drop a graph with no store gives. A deployment that means to buffer
-		// must say how often to look.
-		return fmt.Errorf("-buffer-store %q needs a positive -urr-interval: the Downlink Data Report is what that loop's reading of the buffering counters owes the SMF",
-			*bufferStore)
 	}
 
 	// The management endpoint: this node's own numbers, so an operator reads
