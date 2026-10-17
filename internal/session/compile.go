@@ -909,6 +909,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		for _, key := range claimed {
 			delete(c.rules, key)
+			s.forgetRuleKey(key)
 		}
 	}()
 
@@ -1090,6 +1091,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// the session already holds stays this session's even if a later
 			// step of this compile fails: its rule is in the dataplane.
 			claimed = append(claimed, rkey)
+			if !s.holdsRuleKey(rkey) {
+				s.ruleKeys = append(s.ruleKeys, rkey)
+			}
 		}
 		c.rules[rkey] = s.LocalSEID
 		if p.drop {
@@ -1695,9 +1699,10 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 // instance nobody configured, and the library's own heuristic would cut a plain
 // name at whatever its first byte happens to be, so the label form is used only
 // when its labels are exactly the payload: a plain name is read whole unless
-// its bytes happen to parse as labels ("5gc" is a name; 0x35 is not a label
-// length). A trailing zero octet is the root label, which some stacks write,
-// and it is not part of the name.
+// its bytes happen to parse as labels ("5gc" is a name -- its first byte would
+// announce a 53-byte label and only two bytes follow -- so the parse fails and
+// the bytes are taken as they are). A trailing zero octet is the root label,
+// which some stacks write, and it is not part of the name.
 func networkInstanceName(payload []byte) string {
 	b := payload
 	if n := len(b); n > 0 && b[n-1] == 0 {

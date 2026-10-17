@@ -1226,6 +1226,52 @@ func TestARefusedMoveKeepsTheKeysRule(t *testing.T) {
 	}
 }
 
+func TestADeletionFreesOnlyItsOwnRuleKeys(t *testing.T) {
+	// A release walks the deleted session's own key list rather than the
+	// compiler's whole table of owners. A key another session holds is not the
+	// deleted session's to free, and the list is what keeps a release from
+	// costing every live key.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	first := c.Establish(establishment(0x9b01, "10.45.0.2")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, first); got != ie.CauseRequestAccepted {
+		t.Fatalf("the first establishment answered cause %d", got)
+	}
+	second := c.Establish(establishment(0x9b02, "10.45.0.3")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, second); got != ie.CauseRequestAccepted {
+		t.Fatalf("the second establishment answered cause %d", got)
+	}
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upFSEID(t, first), 3, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	// The second session's rules are still its own.
+	if got := cause(t, c.Establish(establishment(0x9b03, "10.45.0.3"))); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a session for the live session's address answered cause %d, want a rule failure", got)
+	}
+	// And the deleted session's keys are free.
+	if got := cause(t, c.Establish(establishment(0x9b04, "10.45.0.2"))); got != ie.CauseRequestAccepted {
+		t.Errorf("after the deletion the address answered cause %d, want accepted", got)
+	}
+}
+
+func TestAnUnansweredApplyKeepsTheSessionsKeys(t *testing.T) {
+	// An Apply whose answer never came may have committed, so what it wrote may
+	// be in the dataplane: the rule keys stay the session's, exactly as its
+	// allocated ids do, and the SMF's retry is what reconciles the two. The
+	// alternative -- freeing them -- would hand the next session a rule that
+	// this request's packets may still be matching.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	rec.fail = errors.New("the daemon did not answer")
+	if got := cause(t, c.Establish(establishment(0x9801, "10.45.0.2"))); got == ie.CauseRequestAccepted {
+		t.Fatal("an unanswered establishment was answered as accepted")
+	}
+	rec.fail = nil
+	if got := cause(t, c.Establish(establishment(0x9802, "10.45.0.2"))); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a session for a rule a possibly-committed transaction wrote answered cause %d, want a rule failure", got)
+	}
+}
+
 func TestTwoUplinkPDRsWithOneFilterAreRefused(t *testing.T) {
 	// An SMF with several QoS flows programs several uplink PDRs onto one F-TEID
 	// and tells them apart only by QFI. This UP does not read QFI
