@@ -192,6 +192,25 @@ Reproduced the same night by a second `ci/bench-modules.sh` run: delta +13.54 ns
 (+46.1 and +64.4 cycles). The instruction counts reproduce to 0.2, which is what a
 publishable module cost looks like.
 
+**The counting arms, and the owed re-run (2026-10-17).** The three `M.urr_count`
+arms were taken with `ci/bench-modules.sh` as `WRAP="taskset -c 2,4" ROUNDS=4`
+-- pinned to CPUs 2,4, every governor `powersave`, `no_turbo=0`, **not**
+`--isolate`d (the isolating wrapper swallows the command; see below). Pairs 0/4,
+plugin 519584 bytes of 2026-10-17, so the DSCP copy is in:
+
+| arm | ns/pkt (above `M.base`) | over its control |
+|---|---|---|
+| `M.urr_count.base` | 1.04 | -- |
+| `M.urr_count` | 4.92 | **+3.88 ns for a counted rule** |
+| `M.urr_count.empty` | 2.60 | **+1.56 ns with no entry** |
+
+From the same run, the two module arms against their controls: decap +12.42 ns
+(26.68 - 14.26) and encap +17.44 ns (18.52 - 1.08) -- the encap's cost *with* the
+DSCP copy, which is the re-run the paragraph above owes. These are indicative
+rather than published: an isolated re-take on a quiet machine is what the table
+above is held to, and the pinned figures are the shape of the cost, not the
+figure for the envelope.
+
 **After that measurement** the encap learned to copy the inner packet's TOS to the
 outer header (the DSCP copy; `ci/session-path.sh` checks the outer header carries the
 inner class). The re-run is owed: the wrapper's child writes nothing and exits 1 —
