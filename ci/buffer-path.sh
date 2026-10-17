@@ -67,7 +67,10 @@ stop_bessd() {
     "$BESSCTL" -s "127.0.0.1:$BESS_PORT" shutdown >/dev/null 2>&1 || true
   fi
   if [ -f "$WORK/bessd.pid" ]; then
-    kill -9 "$(cat "$WORK/bessd.pid")" 2>/dev/null || true
+    # The pid file carries a trailing NUL, so it is stripped rather than read
+    # raw: $(cat …) warned "ignored null byte in input" and handed kill a
+    # string with the NUL dropped only by luck.
+    kill -9 "$(tr -d '\000' <"$WORK/bessd.pid")" 2>/dev/null || true
   fi
 }
 
