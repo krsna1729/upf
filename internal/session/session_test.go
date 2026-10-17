@@ -1546,6 +1546,75 @@ func TestTwoUplinkPDRsToldApartByQFIAreTwoRules(t *testing.T) {
 	}
 }
 
+// flowPDR is uplinkPDR with the QER the flow names: the per-flow case, where
+// two PDRs of one session differ only by QFI and by their own QER.
+func flowPDR(id uint16, precedence uint32, ueIP string, fteid uint32, qfi uint8, qerID uint32) *ie.IE {
+	pdi := []*ie.IE{
+		ie.NewSourceInterface(ie.SrcInterfaceAccess),
+		ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+		ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+	}
+	if qfi != 0 {
+		pdi = append(pdi, ie.NewQFI(qfi))
+	}
+	return ie.NewCreatePDR(
+		ie.NewPDRID(id),
+		ie.NewPrecedence(precedence),
+		ie.NewPDI(pdi...),
+		ie.NewFARID(1),
+		ie.NewQERID(qerID),
+	)
+}
+
+// TestTwoQFIKeyedPDRsGetTheirOwnMeters is the per-flow QER claim with its
+// evidence: two PDRs of one session that differ only by QFI -- a PDU session's
+// two QoS flows -- and that name their own QERs must compile to two rules, two
+// actions and two meter ids. Without this, a QER reaches the session rather
+// than the flow: the flows would be policed together by whichever meter the
+// session's single QER named, and the "per-flow" half of the QER block's
+// sub-feature would rest on the tunnel record alone.
+func TestTwoQFIKeyedPDRsGetTheirOwnMeters(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x9103, "10.45.0.3")
+	req.CreatePDR = []*ie.IE{
+		flowPDR(1, 200, "10.45.0.3", 0x11223344, 0, 1),
+		flowPDR(3, 100, "10.45.0.3", 0x11223344, 5, 2),
+	}
+	req.CreateQER = []*ie.IE{
+		ie.NewCreateQER(ie.NewQERID(1), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			ie.NewMBR(1000, 2000)),
+		ie.NewCreateQER(ie.NewQERID(2), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			ie.NewMBR(3000, 4000)),
+	}
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("two flows naming their own QERs answered cause %d, want accepted", got)
+	}
+	i := qfiField(t)
+	specific, ok := ruleWithQFI(rec.last(), i, []byte{5}, []byte{0xff})
+	if !ok {
+		t.Fatal("no rule keyed on QFI 5: the flow's rule is missing")
+	}
+	general, ok := ruleWithQFI(rec.last(), i, []byte{0}, []byte{0})
+	if !ok {
+		t.Fatal("no rule for the flow that names no QFI")
+	}
+	if specific.actionID() == general.actionID() {
+		t.Fatal("the two flows share one action, so one QER would serve both")
+	}
+	up := testConfig().Up.Actions + "/actions"
+	meter := func(r rule) any {
+		return find(t, rec.last(), up, "id", r.actionID()).Value["meter_id"]
+	}
+	first, second := meter(specific), meter(general)
+	if first == uint32(0) || second == uint32(0) {
+		t.Fatalf("a flow's QER named no meter: %v and %v", first, second)
+	}
+	if first == second {
+		t.Errorf("the two flows share meter %v: their own QERs police them together", first)
+	}
+}
+
 // TestThePrecedenceIsInvertedIntoTheClassifiersPriority: PFCP orders PDRs one
 // way and the classifier the other. 8.2.11: "the lower precedence values
 // indicate higher precedence of the PDR, and the higher precedence values
