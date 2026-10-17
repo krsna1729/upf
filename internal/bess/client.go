@@ -16,6 +16,7 @@
 package bess
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/dynamicpb"
+	"google.golang.org/protobuf/types/known/anypb"
 
 	sdk "github.com/krsna1729/bess/sdk/go/bess"
 	pb "github.com/krsna1729/bess/sdk/go/controlv2"
@@ -168,6 +170,53 @@ func (c *Client) Message(typ string, fields map[string]any) (proto.Message, erro
 	return m, nil
 }
 
+// messageFrom unpacks an Any the daemon sent. The type comes from the daemon's
+// own schema: the process's global registry knows none of the daemon's
+// messages, so anypb.UnmarshalNew would answer "proto: not found" for every
+// entry of every resource.
+func (c *Client) messageFrom(a *anypb.Any) (proto.Message, error) {
+	name := a.MessageName()
+	if name == "" {
+		return nil, fmt.Errorf("an entry with no type name (%q)", a.GetTypeUrl())
+	}
+	c.mu.Lock()
+	files := c.files
+	c.mu.Unlock()
+	if files == nil {
+		return nil, errors.New("bess: no schema: call Refresh")
+	}
+	d, err := files.FindDescriptorByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("bess: no type %s in the schema", name)
+	}
+	md, ok := d.(protoreflect.MessageDescriptor)
+	if !ok {
+		return nil, fmt.Errorf("bess: %s is not a message", name)
+	}
+	m := dynamicpb.NewMessage(md)
+	if err := a.UnmarshalTo(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// messageMap is the inverse of Message: a message's fields as the JSON form
+// names them, ready to hand back to Message. Numbers stay json.Number, because
+// a key carrying a 64-bit id must not pass through a float.
+func messageMap(m proto.Message) (map[string]any, error) {
+	raw, err := protojson.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	fields := map[string]any{}
+	if err := dec.Decode(&fields); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
 // RuleCount is what one rule's traffic measured: the ActionId its counter is
 // keyed by, and the packets and the IP octets of them that crossed the rule,
 // with every worker's plane summed (a reading is exact for each cell -- a
@@ -285,6 +334,63 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 		return err
 	}
 	return nil
+}
+
+// Entry is one entry of a resource as the daemon holds it: the key and value
+// it was written with, still packed. A value is nil for a resource whose value
+// the daemon keeps to itself.
+type Entry struct {
+	Key   map[string]any
+	Value map[string]any
+}
+
+// Contents reads the current entries of the named resources in one round trip
+// (Pipeline with include_resources), which is what a restarted controller
+// needs before it can take an earlier run's sessions out. The response carries
+// every named resource's entries, so a resource the daemon does not have -- a
+// module the graph does not load -- comes back with none.
+func (c *Client) Contents(ctx context.Context, names ...string) (map[string][]Entry, error) {
+	snap, err := c.sdk.Pipeline(ctx, sdk.WithResources(names...))
+	if err != nil {
+		return nil, fmt.Errorf("bess: pipeline: %w", err)
+	}
+	got, unique := map[string][]Entry{}, map[string]bool{}
+	for _, rc := range snap.Pipeline.GetResources() {
+		if unique[rc.GetName()] {
+			continue
+		}
+		unique[rc.GetName()] = true
+		entries := got[rc.GetName()]
+		for _, e := range rc.GetEntries() {
+			var key, value map[string]any
+			if e.Key != nil {
+				msg, err := c.messageFrom(e.Key)
+				if err != nil {
+					return nil, fmt.Errorf("bess: %s entry key: %w", rc.GetName(), err)
+				}
+				key, err = messageMap(msg)
+				if err != nil {
+					return nil, fmt.Errorf("bess: %s entry key: %w", rc.GetName(), err)
+				}
+			}
+			if e.Value != nil {
+				msg, err := c.messageFrom(e.Value)
+				if err != nil {
+					return nil, fmt.Errorf("bess: %s entry value: %w", rc.GetName(), err)
+				}
+				value, err = messageMap(msg)
+				if err != nil {
+					return nil, fmt.Errorf("bess: %s entry value: %w", rc.GetName(), err)
+				}
+			}
+			entries = append(entries, Entry{Key: key, Value: value})
+		}
+		got[rc.GetName()] = entries
+	}
+	if len(got) == 0 {
+		return nil, fmt.Errorf("bess: the daemon listed no contents for %v: it predates include_resources, or its graph has none of them", names)
+	}
+	return got, nil
 }
 
 // -- typed errors --------------------------------------------------------------
