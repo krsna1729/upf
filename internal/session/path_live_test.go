@@ -699,11 +699,12 @@ func instancedUplinkEstablishment(cpSEID uint64, ueIP string, upTEID uint32, ins
 
 // TestLiveTwoInstancesRouteIndependently is docs/design.md's milestone 4 on a
 // real daemon: two sessions for the *same* subscriber address, one per network
-// instance, each carrying its own tunnel on N3. The graph's two uplink streams
-// carry one session each (TEIDs 0x11223344 and 0x11223345, bursts 32 and 4), so
-// the router's two output gates say which stream left by which exit: the
-// internet session's packets by gate 0, the ims session's by gate 2, which is
-// that instance's next hop.
+// instance, each carrying its own tunnel on N3. The graph
+// (deploy/session-instances.yaml, which ci/session-instances.sh deploys) has two
+// uplink streams, one per session (TEIDs 0x11223344 and 0x11223345, bursts 32
+// and 4), so the router's two output gates say which stream left by which exit:
+// the internet session's packets by gate 0, the ims session's by gate 2, which
+// is that instance's next hop.
 //
 // The instance is what a deployment classifies each packet's flow by, and on
 // the uplink the packet's own tag is the tunnel it arrived on: one UE address
@@ -734,6 +735,11 @@ func TestLiveTwoInstancesRouteIndependently(t *testing.T) {
 	}
 	cfg := liveConfig()
 	cfg.Instances = instances
+	// deploy/session-instances.yaml's uplink table classifies by the tunnel the
+	// packet arrived on (`upf_teid`, the decap's own metadata attribute): that
+	// is what tells two instances' sessions with one UE address apart, and the
+	// field list here mirrors the manifest's the way every other list does.
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := New(cfg, client, log)

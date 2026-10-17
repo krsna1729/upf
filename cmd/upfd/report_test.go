@@ -345,9 +345,6 @@ func TestARefusedReportIsNotRetried(t *testing.T) {
 	}
 }
 
-// TestTheReportQueueIsBoundedPerSession: a CP function that never answers must
-// not grow this node's memory without bound, and what does not fit is handed
-// back so the loop can log it with its usage rather than lose it quietly.
 // TestAHeldReportIsRetriedWithBackoff: a CP function that has stopped answering
 // must not be sent to at the tick's rate -- every attempt costs the n4 layer's
 // retry budget, and the tick also carries the evaluation that enforces every
@@ -416,6 +413,9 @@ func TestATickStopsDrainingAfterATransportFailure(t *testing.T) {
 	}
 }
 
+// TestTheReportQueueIsBoundedPerSession: a CP function that never answers must
+// not grow this node's memory without bound, and what does not fit is handed
+// back so the loop can log it with its usage rather than lose it quietly.
 func TestTheReportQueueIsBoundedPerSession(t *testing.T) {
 	q := newReportQueue()
 	var dropped []uint32

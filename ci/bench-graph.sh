@@ -82,7 +82,7 @@ for _ in $(seq 1 60); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 
 "$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
 
 "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-  -n3-addr "$N3" -pdr-fields-ul src,dst,proto,sport,dport,teid -log-level warn >"$WORK/upfd.log" 2>&1 &
+  -n3-addr "$N3" -log-level warn >"$WORK/upfd.log" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && sleep 0.25 && break
