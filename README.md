@@ -96,14 +96,16 @@ build/stage/bin/bessctl apply deploy/upf.yaml
 
 ## Status
 
-- The datapath plugin is in and proven: `datapath/` (GTP-U decapsulation and
-  encapsulation) builds against the installed `bess-dev` stage, and
-  `ci/smoke-gtpu.sh` loads it into `bessd`, applies `deploy/smoke-gtpu.yaml`,
-  and checks six things: the decapsulated frame, the `upf_teid` attribute, that
-  a G-PDU whose TEID no session names is dropped (`decap0/sessions`), the outer
-  header, the UDP/GTP-U header with the session's TEID, and the inner packet.
-  Its first run found a real bug (an uninitialized UDP source port), which is the
-  point of the check.
+- The datapath plugin is in and proven: `datapath/` (GTP-U decapsulation,
+  encapsulation and the echo responder) builds against the installed `bess-dev`
+  stage, and `ci/smoke-gtpu.sh` loads it into `bessd`, applies
+  `deploy/smoke-gtpu.yaml`, and checks ten things: the decapsulated frame, the
+  `upf_teid` attribute, that a G-PDU whose TEID no session names is dropped,
+  the outer header, the UDP/GTP-U header with the session's TEID, the inner
+  packet, and the four fields of an Echo Response (`gtpu_echo`: the swapped
+  addresses, the lengths and checksum, the sequence number and the Recovery
+  IE). Its first run found a real bug (an uninitialized UDP source port), which
+  is the point of the check.
 - The deployment graph is in: `deploy/upf.yaml` (N3 and N6 on `PMDPort`s, the
   TEID table, the two PDR tables with their action resources, both chains, and
   the next hop each direction's action names) validates against a daemon with

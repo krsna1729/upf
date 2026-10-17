@@ -25,6 +25,21 @@ message GtpuDecapArg {
   uint32 port = 1;
 }
 
+// GtpuEchoArg configures the GTP-U echo responder (TS 29.281 7.2). The reply
+// is the request with its addresses and ports swapped and its payload dropped,
+// so the module needs no other argument.
+message GtpuEchoArg {
+  // The UDP port an Echo Request must arrive on. 0 means the standard GTP-U
+  // port 2152; the codec compares the field exactly.
+  uint32 port = 1;
+
+  // The Recovery Time Stamp the Echo Response carries (TS 29.281 8.7): the
+  // seconds from 00:00:00 on 1 January 1900 to when this GTP-U entity
+  // started. 0 means the time the module started, which is the entity's own
+  // start in a graph that is applied when the daemon starts.
+  uint64 recovery_time_stamp = 2;
+}
+
 // GtpuEncapArg configures encapsulation toward the N3 side.
 message GtpuEncapArg {
   // The outer IPv4 source address, dotted. Required: it is the UPF's N3
