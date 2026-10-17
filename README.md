@@ -59,20 +59,27 @@ go build ./cmd/upfd        # the controller
 
 # the datapath plugin, against an installed bess-dev stage
 cd datapath
-PKG_CONFIG_PATH=<stage>/lib/pkgconfig meson setup build && ninja -C build
+# a stage installed with --destdir keeps /usr/local in bess-dev.pc, so its
+# include prefix is expanded relative to the stage by hand: meson has no
+# --define-prefix of its own.
+P=<stage>
+PKG_CONFIG_PATH=$P/lib/pkgconfig meson setup build \
+  -Dcpp_args="-I$P/include/bess -I$P/include/bess/core" && ninja -C build
 
 # the proof it works: bessd loads the plugin, applies the smoke graph, and the
 # script checks one decapsulated and one encapsulated packet byte for byte
-STAGE=<stage> ../ci/smoke-gtpu.sh
+STAGE=$P ../ci/smoke-gtpu.sh
 ```
 
 The stage must be a BESS install whose `bess-dev.pc` carries the stage's own
 paths — i.e. BESS configured with `-Dprefix=<stage>`. An install made with
-`meson install --destdir=...` keeps `/usr/local` inside the `.pc`, and a build
-against it fails on headers that are not there; with such a stage, put a copy of
-`bess-dev.pc` whose `prefix` line names the stage in a directory of its own and
-point `PKG_CONFIG_PATH` at that directory instead. The smoke's `STAGE` default
-is the pkg worktree's `stage-fast`, which is such a destdir install.
+`meson install --destdir=...` keeps `/usr/local` inside the `.pc`: `pkg-config`
+expands it to `/usr/local/include` (the ordinary, correct behaviour — the file is
+not relocatable), and `pkg-config --define-prefix` is what computes the stage's
+own paths for direct use. Meson does not pass that flag through, which is why
+the plugin's build sets the two include directories itself, exactly as
+`--define-prefix` computes them. The smoke's `STAGE` default is the main
+checkout's `build/stage-fast`, which is such a destdir install.
 
 Driving BESS needs the fork's Go SDK, the nested module `sdk/go`; until those
 commits are published, `go.mod` documents the local `replace` to use.
