@@ -60,15 +60,16 @@ fi
 # the module and its workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ -run 'TestLiveSessionProgramsTheDaemon|TestLiveSessionSharedRecords' -count=1 -v || {
+  $GO test ./internal/session/ -run 'TestLiveSessionProgramsTheDaemon|TestLiveSessionSharedRecords' -count=1 -v -cover || {
   echo "session-live: failed; the daemon's log is $LOG" >&2
   exit 1
 }
 
 # The client's own tests: the schema is the contract, and they check it against
-# the daemon that is up.
+# the daemon that is up. Coverage is asked for here rather than in the unit run,
+# because without a daemon these tests skip and the package reports nothing.
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/bess/ -run 'TestLive' -count=1 -v || {
+  $GO test ./internal/bess/ -run 'TestLive' -count=1 -v -cover || {
   echo "session-live: the client's live tests failed; the daemon's log is $LOG" >&2
   exit 1
 }

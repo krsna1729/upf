@@ -37,19 +37,37 @@ func liveCompiler(tb testing.TB) *Compiler {
 		&slog.HandlerOptions{Level: slog.LevelWarn})))
 }
 
+// applyTimer wraps the real client to time the transactions it is given, so the
+// benchmark can report what the compile costs and what the transaction path --
+// our conversion of every change, the RPC and the daemon -- costs. The wrapper
+// is the Applier the compiler is built with, so the two are measured by the same
+// run.
+type applyTimer struct {
+	inner Applier
+	total time.Duration
+	calls int
+}
+
+func (a *applyTimer) Apply(ctx context.Context, changes ...bess.Change) error {
+	start := time.Now()
+	err := a.inner.Apply(ctx, changes...)
+	a.total += time.Since(start)
+	a.calls++
+	return err
+}
+
 // BenchmarkLiveEstablish is the whole control path with nothing faked: the
 // compiler builds the transaction, the SDK sends it to a running bessd, and the
-// daemon answers. It is the number the SMF's observed rate is made of, so it is
-// the one to compare against an entry's own benchmarks: internal/session's
-// BenchmarkEstablish (the compiler alone), internal/n4sim's
-// BenchmarkBuildEstablish plus internal/n4's BenchmarkHandleEstablish (the two
-// ends of the wire), and internal/bess's BenchmarkLiveMessage (the schema-driven
-// message building).
+// daemon answers. It reports the transaction's share separately ("apply-ns/op"),
+// because the compile alone has its own benchmark and the difference is where a
+// session's time actually sits.
 //
 // Sessions are numbered from the clock so that a second run does not re-establish
 // what the first left behind, and they are deleted again afterwards.
 func BenchmarkLiveEstablish(b *testing.B) {
 	c := liveCompiler(b)
+	timer := &applyTimer{inner: c.ap}
+	c.ap = timer
 	base := uint64(time.Now().UnixNano()%1_000_000) * 1000
 	ups := make([]uint64, 0, b.N)
 
@@ -69,6 +87,13 @@ func BenchmarkLiveEstablish(b *testing.B) {
 		ups = append(ups, est.Header.SEID)
 	}
 	b.StopTimer()
+
+	if timer.calls == 0 {
+		b.Fatal("no transaction was applied")
+	}
+	// The transaction's mean, next to the loop's own ns/op: the difference is
+	// the compile, and both are per establishment.
+	b.ReportMetric(float64(timer.total.Nanoseconds())/float64(timer.calls), "apply-ns/op")
 
 	// Leave the daemon as it was found: these sessions are deleted on the way
 	// out, and a failure to delete one is a leftover, not a benchmark failure.
