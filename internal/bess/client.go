@@ -247,8 +247,27 @@ type RuleCount struct {
 // against another schema -- is an error here and not an empty reading: a
 // reporter that read silence as zero usage would report nothing forever.
 func (c *Client) RuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]RuleCount, error) {
+	return c.ruleCounts(ctx, module, true, actionIDs...)
+}
+
+// PeekRuleCounts is RuleCounts without opening the next window: the module keeps
+// each rule's first-packet stamp, so the caller that has not yet done what the
+// stamp is for can read again. The Downlink Data Report path reads this way --
+// a report the SMF never took must be offered again, and a reading that cleared
+// the stamp would lose it -- and clears it by reading the ordinary way once the
+// report is delivered (ConfirmDownlinks).
+func (c *Client) PeekRuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]RuleCount, error) {
+	return c.ruleCounts(ctx, module, false, actionIDs...)
+}
+
+// ruleCounts is both readings: restart says whether the first-packet stamp of
+// each rule asked for is cleared by the reading (the module's get_counts
+// argument), which is the difference between "this window" and "not yet
+// acknowledged".
+func (c *Client) ruleCounts(ctx context.Context, module string, restart bool,
+	actionIDs ...uint32) ([]RuleCount, error) {
 	arg, err := c.Message("upf.pb.UrrCountCommandGetCountsArg",
-		map[string]any{"action_ids": actionIDs, "restart_window": true})
+		map[string]any{"action_ids": actionIDs, "restart_window": restart})
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +338,46 @@ type Change struct {
 	Resource string
 	Key      map[string]any
 	Value    map[string]any
+}
+
+// ReleaseFlow tells a packet store to send the packets it holds for one flow
+// out of its release gate, and DropFlow tells it to discard them. Both are the
+// CP function's "new instruction" arriving at a flow that was buffering
+// (TS 29.244 5.2.4.1: "the UP function shall stop applying buffering when new
+// instruction is received from the CP function. The buffered packets shall be
+// either dropped or forwarded"), and both are commands rather than resource
+// writes because that is the split the daemon's D-129 makes: a command acts on
+// the state a module holds -- here, the packets -- while a resource write is
+// configuration.
+//
+// The flow id is the value the store is keyed by: the ActionId the classifier
+// wrote, which is also the PDR's action record and tunnel key. The argument's
+// type and fields come from the daemon's own schema, as every message this
+// client builds does.
+func (c *Client) ReleaseFlow(ctx context.Context, module string, id uint32) error {
+	arg, err := c.Message("bess.pb.PacketStoreCommandReleaseArg",
+		map[string]any{"id": id, "gate": 0})
+	if err != nil {
+		return err
+	}
+	if _, err := c.sdk.InvokeAction(ctx, module, "release", arg); err != nil {
+		return fmt.Errorf("bess: %s release %d: %w", module, id, err)
+	}
+	return nil
+}
+
+// DropFlow is ReleaseFlow's other half: the held packets are freed instead of
+// forwarded, which is what a session that is going away wants (and what the
+// DROBU flag asks for while one stays).
+func (c *Client) DropFlow(ctx context.Context, module string, id uint32) error {
+	arg, err := c.Message("bess.pb.PacketStoreCommandDropArg", map[string]any{"id": id})
+	if err != nil {
+		return err
+	}
+	if _, err := c.sdk.InvokeAction(ctx, module, "drop", arg); err != nil {
+		return fmt.Errorf("bess: %s drop %d: %w", module, id, err)
+	}
+	return nil
 }
 
 // Apply writes every change in one transaction. The daemon validates all of

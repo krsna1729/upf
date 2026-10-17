@@ -35,6 +35,32 @@ type recorder struct {
 	// entries is the fake's own state for the counting modules: what Apply has
 	// written and not erased (see Apply).
 	entries map[string]bool
+	// released and dropped are the store commands the compiler sent, as
+	// "module/id": what the SMF's instruction did to the packets a buffering
+	// flow held (5.2.4.1), and storeFail is what the fake store answers with
+	// when a test wants the refusal path.
+	released  []string
+	dropped   []string
+	storeFail error
+}
+
+// ReleaseFlow and DropFlow are the packet store's commands (StoreCommands): the
+// fake records them, so a test can see a modification's instruction reach the
+// packets.
+func (r *recorder) ReleaseFlow(_ context.Context, module string, id uint32) error {
+	if r.storeFail != nil {
+		return r.storeFail
+	}
+	r.released = append(r.released, fmt.Sprintf("%s/%d", module, id))
+	return nil
+}
+
+func (r *recorder) DropFlow(_ context.Context, module string, id uint32) error {
+	if r.storeFail != nil {
+		return r.storeFail
+	}
+	r.dropped = append(r.dropped, fmt.Sprintf("%s/%d", module, id))
+	return nil
 }
 
 func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
@@ -104,6 +130,15 @@ func (r *recorder) RuleCounts(_ context.Context, module string, actionIDs ...uin
 		out = append(out, count)
 	}
 	return out, nil
+}
+
+// PeekRuleCounts is RuleCounts without the window restart (WindowReader): the
+// DDN path's reading, which the fake answers from the same table.
+func (r *recorder) PeekRuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
+	if r.readFail != nil {
+		return nil, r.readFail
+	}
+	return r.RuleCounts(context.Background(), module, actionIDs...)
 }
 
 func (r *recorder) last() []bess.Change {

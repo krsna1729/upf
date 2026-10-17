@@ -80,6 +80,17 @@ func run() error {
 	countersDL := flag.String("counters-dl", "cnt_dl",
 		"the downlink UrrCount module (per-rule usage counters); empty: the graph charges nothing")
 	tunnels := flag.String("tunnels", "enc", "the GtpuEncap module (per-session downlink parameters)")
+	bufferStore := flag.String("buffer-store", "",
+		"the packet store module a FAR whose Apply Action is BUFF holds its packets in: with "+
+			"-buffer-counter and -buffer-gate, buffering is served end to end -- the first "+
+			"buffered packet is reported to the SMF over N4, and the held packets are released "+
+			"when the SMF's next instruction moves the path. Empty: such a FAR's rule drops")
+	bufferCounter := flag.String("buffer-counter", "",
+		"the UrrCount module on the buffering branch, in front of the store: its per-rule "+
+			"counters are what marks the first buffered packet of a flow (the Downlink Data "+
+			"Report's trigger), read once per -urr-interval tick")
+	bufferGate := flag.Uint("buffer-gate", 0,
+		"the PDR table gate that delivers on the buffering branch")
 	teidTable := flag.String("teid-table", "teid",
 		"the WildcardMatch module whose rules are the F-TEID match")
 	teidGate := flag.Uint("teid-gate", 0,
@@ -164,6 +175,7 @@ func run() error {
 			actionsUL: *actionsUL, metersUL: *metersUL,
 			actionsDL: *actionsDL, metersDL: *metersDL, tunnels: *tunnels,
 			countersUL: *countersUL, countersDL: *countersDL,
+			bufferStore: *bufferStore, bufferCounter: *bufferCounter, bufferGate: uint32(*bufferGate),
 		})
 		if err != nil {
 			return err
@@ -459,6 +471,28 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 					"octets", dropped.Up.Octets, "held", reportQueueDepth)
 			}
 		}
+		// The downlink half of the same tick: the PDRs whose first buffered
+		// packet has arrived since the previous tick. A Downlink Data Report is
+		// a different message from a usage report (7.5.8.2), so it is sent here
+		// rather than queued with them; the flow is marked reported only once
+		// the SMF has taken the message, so a send that fails is offered again
+		// on the next tick -- and the next tick is also the report's whole
+		// latency (docs/design.md: the trigger is a poll of the branch's
+		// counters, at this loop's period).
+		for _, d := range sessions.EvaluateDownlinks(ctx) {
+			cause, err := sender.Report(ctx, d.CPSEID, d.IEs()...)
+			if err != nil || cause != ie.CauseRequestAccepted {
+				reports.ddnFailed.Add(1)
+				log.Warn("downlink data report not delivered", "seid", d.SEID, "cp_seid", d.CPSEID,
+					"pdrs", d.PDRs, "cause", cause, "error", err)
+				continue
+			}
+			sessions.ConfirmDownlinks(ctx, d.SEID, d.PDRs)
+			reports.ddnSent.Add(1)
+			log.Info("downlink data reported: the SMF has been told about packets being held",
+				"seid", d.SEID, "cp_seid", d.CPSEID, "pdrs", d.PDRs)
+		}
+
 		now := time.Now()
 		// One report per session per tick, and the tick's first transport
 		// failure ends the drain: each send costs the n4 layer's whole retry
@@ -522,6 +556,9 @@ type graphArgs struct {
 	actionsDL          string
 	metersDL           string
 	countersUL         string
+	bufferStore        string
+	bufferCounter      string
+	bufferGate         uint32
 	countersDL         string
 	tunnels            string
 	endMarker          string
@@ -587,6 +624,23 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		},
 		Instances: domains,
 		N3Addr:    addr,
+	}
+	if a.bufferStore != "" {
+		// The buffering branch is all three names or none: a store collects the
+		// packets, the counter in front of it is what the Downlink Data Report
+		// is decided from, and the gate is how a BUFF rule reaches them. Half a
+		// branch would either hold packets nobody reports or report counters
+		// nothing writes.
+		if a.bufferCounter == "" {
+			return session.Config{}, fmt.Errorf(
+				"-buffer-store %q needs -buffer-counter: a store's flows are reported from the branch's counters",
+				a.bufferStore)
+		}
+		graph.Buffering = &session.Buffering{
+			Store:   a.bufferStore,
+			Counter: a.bufferCounter,
+			Gate:    a.bufferGate,
+		}
 	}
 	if graph.N3MAC, err = parseMAC(n3MAC); err != nil {
 		return session.Config{}, fmt.Errorf("-n3-mac: %w", err)

@@ -145,6 +145,20 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   reads it back in the Created PDR, and the PDIs of a session that carry one
   CHOOSE ID share it — one TEID rule for the group, and one value in each of
   their Created PDRs.
+- Downlink buffering and DDN are in, with two recorded deviations: a FAR whose
+  Apply Action is BUFF and not FORW delivers its rule on the graph's buffering
+  gate (`upfd -buffer-store`, `-buffer-counter`, `-buffer-gate`), BESS's own
+  packet store holds the packets keyed by the rule's ActionId, the first one is
+  reported to the SMF as a Downlink Data Report on the reporting tick, and the
+  instruction that moves the path releases what was held into the action path.
+  What is not per-BAR yet is the SMF's own numbers (8.2.29's duration, 8.2.30's
+  count): they are read and modelled, and the store's caps and timeout are the
+  graph's until BESS's per-flow `flows` resource lands. The DDN trigger is a
+  poll of the branch's counters at `-urr-interval`, so its latency is up to one
+  tick and a deployment that wants DDN must set that interval. `ci/buffer-path.sh`
+  proves the whole path against a live daemon (it needs a `bessd` built with
+  BESS's `packet_store` key_attrs change, which is why its graph is
+  `deploy/buffer-path.yaml` rather than the shared one).
 - The two GTP-U path messages are in. `gtpu_echo` answers an Echo Request
   (type 1, TEID 0) with the reply TS 29.281 7.2.2 prescribes — the S flag, the
   request's sequence number, the mandatory Recovery IE and this node's Recovery

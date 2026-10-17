@@ -53,6 +53,12 @@ func (c *Compiler) resources() []string {
 	if c.cfg.Down.Tunnels != "" {
 		add(tunnelsRes(c.cfg.Down))
 	}
+	if c.BufferingConfigured() {
+		// The BUFF branch's counter entries are the session layer's too: an
+		// earlier run's flow would otherwise keep counting into a rule this
+		// process does not know about.
+		add(countersRes(Direction{Counters: c.cfg.Buffering.Counter}))
+	}
 	return names
 }
 

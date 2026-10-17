@@ -46,7 +46,22 @@ func pathEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishment
 // spelled out: the frames are fixed, so a test about a filter's shape (a prefix,
 // for instance) must choose one the frames still match.
 func pathEstablishmentWithSDF(cpSEID uint64, ueIP string, sdf string) *message.SessionEstablishmentRequest {
-	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+	return pathEstablishmentWith(cpSEID, ueIP, sdf, ie.NewCreateFAR(
+		ie.NewFARID(2),
+		ie.NewApplyAction(applyForw),
+		ie.NewForwardingParameters(
+			ie.NewDestinationInterface(ie.DstInterfaceAccess),
+			ie.NewOuterHeaderCreation(0x0100, pathDownTEID, "10.20.30.2", "", 0, 0, 0),
+		),
+	))
+}
+
+// pathEstablishmentWith is the same session with the downlink FAR (and anything
+// else a case needs) supplied by the caller: the uplink half, the UE address and
+// the filter stay fixed, so a test varies exactly what it is about.
+func pathEstablishmentWith(cpSEID uint64, ueIP, sdf string,
+	downFAR *ie.IE, extra ...*ie.IE) *message.SessionEstablishmentRequest {
+	ies := []*ie.IE{
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(cpSEID, nil, nil),
 		ie.NewCreatePDR(
@@ -75,20 +90,14 @@ func pathEstablishmentWithSDF(cpSEID uint64, ueIP string, sdf string) *message.S
 			ie.NewApplyAction(applyForw),
 			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
 		),
-		ie.NewCreateFAR(
-			ie.NewFARID(2),
-			ie.NewApplyAction(applyForw),
-			ie.NewForwardingParameters(
-				ie.NewDestinationInterface(ie.DstInterfaceAccess),
-				ie.NewOuterHeaderCreation(0x0100, pathDownTEID, "10.20.30.2", "", 0, 0, 0),
-			),
-		),
+		downFAR,
 		ie.NewCreateQER(
 			ie.NewQERID(1),
 			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
 			ie.NewMBR(1000, 2000),
 		),
-	)
+	}
+	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0, append(ies, extra...)...)
 }
 
 // TestLiveSessionCarriesPackets is the packet-path proof: a session programmed

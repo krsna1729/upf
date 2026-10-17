@@ -55,6 +55,26 @@ type CounterReader interface {
 	RuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error)
 }
 
+// WindowReader is CounterReader without opening the next window: the same
+// reading, leaving each rule's first-packet stamp where it is (report.go). The
+// Downlink Data Report path needs it -- a report the SMF never took has to be
+// offered again, and a reading that cleared the stamp would read the next tick
+// as "nothing arrived" -- and a dataplane that cannot do it falls back to the
+// ordinary reading, which loses at most the retry of one report.
+type WindowReader interface {
+	PeekRuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error)
+}
+
+// StoreCommands is the dataplane as a command sender for the packet store: the
+// release and drop of what one flow holds (TS 29.244 5.2.4.1). It is a
+// capability of its own for the same reason CounterReader is -- a graph with no
+// store never asks -- and the commands carry the flow id, never configuration:
+// the numbers the SMF sent are resource values (8.2.29, 8.2.30).
+type StoreCommands interface {
+	ReleaseFlow(ctx context.Context, module string, id uint32) error
+	DropFlow(ctx context.Context, module string, id uint32) error
+}
+
 // Field is one entry of the PDR table's key, in the order the deployed graph
 // declared it. The compiler sets a mask per field: a rule matches what its PDI
 // names and masks the rest out, so one table holds every PDR shape.
@@ -194,6 +214,12 @@ type Config struct {
 	// none, and the association response advertises no EMPU for it.
 	EndMarker string
 
+	// Buffering is the graph's buffering branch (TS 29.244 7.5.2.6, 5.2.4):
+	// where the packets of a FAR whose Apply Action is BUFF and not FORW are
+	// held. Nil means the deployment buffers nothing -- such a FAR's rule drops,
+	// which is what docs/compliance.md records for a graph without a store.
+	Buffering *Buffering
+
 	// MaxActions, MaxMeters and MaxTEIDs bound the id spaces: the dataplane's
 	// tables are sized at construction.
 	MaxActions uint32
@@ -257,7 +283,16 @@ type Compiler struct {
 	// and a graph without counting modules is a graph a URR cannot report from
 	// (Evaluate says so rather than reporting zero forever).
 	counters CounterReader
-	log      *slog.Logger
+	// peek is the same counter reader without the window restart, when the
+	// dataplane offers it (WindowReader): the DDN path's reading.
+	peek WindowReader
+	// store is the same dataplane as a command sender, when it can be one: the
+	// release and drop of a buffering flow's held packets (5.2.4.1). A graph
+	// with no store never asks, and a dataplane that cannot send commands
+	// leaves it nil -- a buffering instruction is then applied without the
+	// release that follows it, which upfd's log and metrics say.
+	store StoreCommands
+	log   *slog.Logger
 
 	// endMarkerConn is this run's connection to the graph's end-marker port,
 	// opened on the first marker and dropped when a write fails (the daemon
@@ -316,6 +351,12 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	if reader, ok := ap.(ContentReader); ok {
 		c.contents = reader
 	}
+	if cmds, ok := ap.(StoreCommands); ok {
+		c.store = cmds
+	}
+	if peek, ok := ap.(WindowReader); ok {
+		c.peek = peek
+	}
 	return c
 }
 
@@ -339,6 +380,14 @@ type Session struct {
 	FARs map[uint32]*far
 	QERs map[uint32]*qer
 	URRs map[uint32]*urr
+	// BARs are what the SMF asks a buffering FAR to hold (TS 29.244 7.5.2.6):
+	// the DL Buffering Duration and the DL Buffering Suggested Packet Count,
+	// referenced by the FARs' BAR ID (8.2.55). They are a map rather than a
+	// field of the FAR because an Update BAR arrives on its own -- including in
+	// a Session Report Response, which is how the SMF answers a Downlink Data
+	// Report -- and the flows that reference it must be reprogrammed without a
+	// FAR in the message.
+	BARs map[uint8]*bar
 
 	// chids is the F-TEID the session allocated per CHOOSE ID (TS 29.244
 	// 8.2.3): PDIs whose F-TEID IE carries the same CHOOSE ID are one tunnel
@@ -362,6 +411,15 @@ type Session struct {
 	// old key unless the same transaction writes it, which is what keeps one
 	// key from being written and erased at once (the engine rejects that).
 	stale []*pdr
+
+	// ending holds the flows whose buffering episode this model has ended: the
+	// PDRs a modification took out of buffering, by their ActionId. Their held
+	// packets are released once the transaction that ended the episode has
+	// landed (5.2.4.1), and settle clears the list then -- so a refused
+	// transaction retries the release with the change itself. resolve is what
+	// appends, because a request that carries only the FAR rebuilds no PDR and
+	// this is the one place the transition is visible.
+	ending []uint32
 
 	// ruleKeys are the rule keys this session holds in the compiler's table of
 	// owners, kept here so a release touches only them: a deletion at the
@@ -432,6 +490,17 @@ type pdr struct {
 	meterID  uint32   // the meter record a QER resolved to, in this chain's Meter
 	tunnels  []string // per-session tunnel records to write (downlink)
 	drop     bool     // the FAR drops, or the QER's gate is closed this way
+	// buffer says the FAR asks for the packets to be held (Apply Action BUFF
+	// without FORW) and the deployment has a store: the rule delivers on the
+	// buffering branch instead, and the flow's key is the ActionId the rule
+	// carries. A PDR that buffers is never a PDR that drops -- a closed QER
+	// gate is an instruction to stop, not to hold (resolve).
+	buffer bool
+	// ddnSent says the SMF has been told about this buffering episode's first
+	// packet: the report is owed once per episode ("the first buffered DL
+	// packet", 5.2.4.1), and resolve clears the flag when the PDR stops
+	// buffering -- the instruction that ends the episode.
+	ddnSent bool
 }
 
 // far is one compiled FAR.
@@ -446,6 +515,80 @@ type far struct {
 	// when the SMF named none: the interface a forward out of this FAR leaves
 	// by (resolve).
 	instance string
+
+	// hasBAR and barID are the FAR's BAR ID (8.2.55): the buffering instruction
+	// this FAR's buffered packets live under. resolve refuses a reference to a
+	// BAR the session does not hold, the way it refuses a PDR naming a URR the
+	// session does not have -- compiling a buffer against a rule the SMF never
+	// provisioned would hold packets under numbers nobody sent.
+	hasBAR bool
+	barID  uint8
+}
+
+// Buffering is the deployment's buffering branch: the store a BUFF FAR's
+// packets are held in, the counting module in front of it, and the rule gate
+// that delivers them there.
+//
+// The store is BESS's own packet store (core/modules/packet_store.h), keyed by
+// the ActionId the classifier writes -- the same id the rule's action and
+// tunnel records are keyed by, so one value resolves the whole session. Its
+// "<module>/flows" resource carries what the SMF asked for that flow: the DL
+// Buffering Duration (8.2.29) as a timeout and the DL Buffering Suggested
+// Packet Count (8.2.30) as the flow's cap, both optional, both falling back to
+// the module's own arguments when the SMF named neither. Release and drop stay
+// commands (they act on the packets held, not on configuration).
+type Buffering struct {
+	// Store is the packet store module whose "flows" resource each buffering
+	// rule writes an entry to. Empty means the graph has no store.
+	Store string
+	// Counter is the UrrCount module on the BUFF branch, in front of the store:
+	// the count is what makes "the first buffered DL packet for this PDR"
+	// visible to the reporting side, which polls it. The module the direction's
+	// URR counters live in is a different instance: a buffered packet leaves
+	// the chain at the rule's gate and would never reach that one.
+	Counter string
+	// Gate is the PDR table gate that delivers on that branch.
+	Gate uint32
+}
+
+type bar struct {
+	id uint8
+
+	// hasDuration says the DL Buffering Duration IE (8.2.29) was there. The
+	// IE's one octet is a timer: a unit (bits 8-6) and a value (bits 5-1).
+	// All-zero is the deactivated code -- the timer is stopped, which is no
+	// instruction -- and is what hasDuration false means; the "infinite" unit
+	// is hold-without-expiry, and that is the one case that reaches the store
+	// as a timeout of zero.
+	hasDuration bool
+	duration    time.Duration
+	infinite    bool
+
+	// hasCount says the DL Buffering Suggested Packet Count IE (8.2.30) was
+	// there, in packets. Zero is no instruction (the module's own cap), since
+	// "buffer no packets" is not something an SMF asks for.
+	hasCount bool
+	count    uint32
+}
+
+// empty reports whether the BAR carries no buffering instruction at all: the
+// spec allows a BAR to be provisioned empty and filled in later (5.2.4.1's note
+// about a Session Report Response), so this is a state the compiler writes a
+// flow entry for without any override.
+func (b *bar) empty() bool { return !b.hasDuration && !b.hasCount }
+
+// timeoutNS is the flow's DL Buffering Duration as the store wants it, and
+// whether it has one at all: no override (the module's own timeout), or zero
+// for the infinite unit, which means the packets are held until the SMF says
+// what to do with them.
+func (b *bar) timeoutNS() (uint64, bool) {
+	if b == nil || !b.hasDuration {
+		return 0, false
+	}
+	if b.infinite {
+		return 0, true
+	}
+	return uint64(b.duration), true
 }
 
 type qer struct {
@@ -916,7 +1059,7 @@ func (c *Compiler) settle(s *Session) {
 			s.forgetRuleKey(rkey)
 		}
 	}
-	s.removed, s.stale = nil, nil
+	s.removed, s.stale, s.ending = nil, nil, nil
 }
 
 // releaseSession frees the ids a session's records hold, each exactly once: one
