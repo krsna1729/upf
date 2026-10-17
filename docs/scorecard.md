@@ -115,8 +115,7 @@ the two halves apart.)
 1. **We are behind, and by a specific list.** open5gs 62 and OAI 54 against our
  53 is not noise: it is BAR + DDN (0 against 75) and interop (0 against 100),
  with the tunnel-marker block now *ahead* (100 against 80), URR ahead too
- (80 against 60 for three of them) and the QER block level with the best of the
- field (100 against 67) — and none of what we lead is what a
+ (80 against 60 for three of them) and the QER block ahead too (100 against 67) — and none of what we lead is what a
  handover or a stalled UE notices. Two of those numbers are about to move and are
  deliberately still unscored: the buffering and DLDR code is in, and both blocks
  wait on one live arm (`ci/buffer-path.sh`) that needs a daemon carrying BESS's
