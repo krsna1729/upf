@@ -1,6 +1,6 @@
 module github.com/krsna1729/upf
 
-go 1.24
+go 1.25.0
 
 // The BESS Go SDK is a nested module of the fork:
 //
@@ -23,9 +23,9 @@ require (
 
 require (
 	github.com/krsna1729/bess/sdk/go v0.0.0-20261016142821-0fb10e55b202
-	golang.org/x/net v0.41.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
-	golang.org/x/text v0.26.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
 	google.golang.org/grpc v1.75.1 // indirect
 )
