@@ -89,7 +89,6 @@ type pdrReq struct {
 	precedence uint32
 	srcIfc     uint8
 	ueIP       netip.Addr
-	hasUEIP    bool
 	sdf        *sdfFilter
 	farID      uint32
 	qerIDs     []uint32
@@ -905,15 +904,31 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 				return fmt.Errorf("UE IP address: %w", err)
 			}
 			switch {
-			case fields.IPv4Address != nil:
+			case len(fields.IPv4Address) == 4:
+				// go-pfcp hands back a zero-length (not nil) field when the IE
+				// carries no address, which is the alloc-request form above --
+				// length, not nilness, is what says whether one is present.
 				if a, ok := netip.AddrFromSlice(fields.IPv4Address); ok {
-					p.ueIP, p.hasUEIP = a.Unmap(), true
+					p.ueIP = a.Unmap()
 				}
-			case fields.IPv6Address != nil:
+			case len(fields.IPv4Address) != 0:
+				return fmt.Errorf("%w: the UE IP address is %d bytes", errNotExpressible, len(fields.IPv4Address))
+			case len(fields.IPv6Address) != 0:
 				// The tables' address fields are four bytes: an IPv6 UE address
 				// has no form here, and reading the IE as "no address" would
 				// compile a rule that matches every session's packets.
 				return fmt.Errorf("%w: the UE IP address is IPv6", errNotExpressible)
+			default:
+				// Neither address is present. For CHV4/CHV6 (TS 29.244 8.2.62)
+				// that is the SMF asking the UP function to choose the address
+				// -- the UEIP feature, which this UP neither implements nor
+				// advertises -- because those bits suppress the address field.
+				// Reading it as "no address constraint" lets the session
+				// compile with the other direction's address and answers a
+				// success the SMF reads as "the UP chose one", an address it
+				// would never learn. An IE with nothing in it at all is no
+				// better.
+				return fmt.Errorf("%w: the UE IP address IE carries no address, and this UP does not allocate one", errNotExpressible)
 			}
 		case ie.SDFFilter:
 			fields, err := c.SDFFilter()

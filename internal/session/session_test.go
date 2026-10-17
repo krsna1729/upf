@@ -597,6 +597,39 @@ func TestAnSDFPrefixIsAPrefixNotAnAddress(t *testing.T) {
 	}
 }
 
+func TestAUEIPAllocationRequestIsRefused(t *testing.T) {
+	// CHV4/CHV6 in a UE IP address IE (TS 29.244 8.2.62) is the SMF asking the
+	// UP function to choose the address: the UEIP feature, which this UP does
+	// not implement and does not advertise. The bits suppress the address
+	// field, and reading the IE as "no address constraint" is worse than wrong
+	// once the *other* direction carries an address -- the uplink rule compiles
+	// with it and the answer says "the UP chose one", an address the SMF never
+	// learns. So the request is refused where it is understood.
+	//
+	// The flags are the wire form an SMF sends: V4 (0x02) plus CHV4 (0x10), so
+	// go-pfcp marshals the flags byte alone.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5559, 1, 0,
+		ie.NewFSEID(0x5559, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewUEIPAddress(0x12, "", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a UE IP allocation request answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
 func TestANonIPv4PDIIsRefusedNotWidened(t *testing.T) {
 	// A table field is four bytes: an IPv6 UE address or SDF prefix cannot be
 	// carried by it. Compiling one as "unconstrained" would write a rule that
