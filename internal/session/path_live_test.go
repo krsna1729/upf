@@ -386,32 +386,33 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 		}
 	}()
 
-	// Before the evaluation the session's traffic crosses the chain: the action
-	// table is where a rule that forwards delivers, and the counting module
-	// behind it holds the octets this quota is spent from.
-	before := gatePackets(t, ctx, client, "at_ul")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var counted uint64
-		for _, count := range countersOf(t, ctx, client, "cnt_ul") {
-			counted = count[1]
-		}
-		if counted >= quota && gatePackets(t, ctx, client, "at_ul") > before {
-			break
-		}
+	// The first reading is the window's base -- and reports nothing -- so the
+	// quota is spent by the traffic after it.
+	var counted uint64
+	baseline := time.Now()
+	if reports := evaluateAt(t, c, resp.Header.SEID, baseline); len(reports) != 0 {
+		t.Fatalf("the baseline reading returned %+v, want none", reports)
+	}
+	// Wait for the counter to grow past the quota: the reading the baseline
+	// took is this one, so a growth of the quota (plus a margin, since the
+	// baseline's own reading happens between the two samples) is what the next
+	// evaluation reports.
+	start := octetsOf(t, ctx, client, "cnt_ul")
+	deadline := time.Now().Add(10 * time.Second)
+	for octetsOf(t, ctx, client, "cnt_ul") < start+4*quota {
 		if time.Now().After(deadline) {
-			t.Fatalf("the source's packets did not reach the action table and the counters within 5s "+
-				"(%d octets counted, the quota is %d)", counted, quota)
+			t.Fatalf("the counter did not grow past the quota within 10s: %d octets", octetsOf(t, ctx, client, "cnt_ul"))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	counted = octetsOf(t, ctx, client, "cnt_ul")
 
 	reports, err := c.Evaluate(ctx, resp.Header.SEID, time.Now())
 	if err != nil {
 		t.Fatalf("evaluating the session's usage: %v", err)
 	}
 	if len(reports) != 1 {
-		t.Fatalf("evaluation returned %d reports, want one for the spent quota", len(reports))
+		t.Fatalf("evaluation returned %d reports, want one for the spent quota (%v octets counted)", len(reports), counted)
 	}
 	report := reports[0]
 	if report.Trigger != TriggerVolumeQuota || !report.Enforcing {
@@ -441,6 +442,29 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 	t.Logf("the report: %d packets, %d octets, trigger %v; the source produced %v packets "+
 		"after the enforcement and the action table saw none",
 		report.Up.Packets, report.Up.Octets, report.Trigger, producedAfter-produced)
+}
+
+// evaluateAt is Evaluate at a chosen instant: the live arm of the reporting
+// decision, so a failure prints what the model decided rather than only that the
+// packet path stood still.
+func evaluateAt(t *testing.T, c *Compiler, seid uint64, now time.Time) []Report {
+	t.Helper()
+	reports, err := c.Evaluate(context.Background(), seid, now)
+	if err != nil {
+		t.Fatalf("evaluating the session's usage: %v", err)
+	}
+	return reports
+}
+
+// octetsOf is one counting module's octets for the single rule it measures: the
+// live test's own reading, independent of the compiler's.
+func octetsOf(t *testing.T, ctx context.Context, client *bess.Client, module string) uint64 {
+	t.Helper()
+	var total uint64
+	for _, count := range countersOf(t, ctx, client, module) {
+		total += count[1]
+	}
+	return total
 }
 
 // countersOf is one counting module's reading of every rule it measures, asked
@@ -558,12 +582,15 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 	}
 
 	// The inner IPv4 packet's Total Length: the graph's uplink frame holds
-	// 10.45.0.2:5000 -> 8.8.8.8:53 with a 9-byte payload, 20 + 8 + 9.
+	// 10.45.0.2:5000 -> 8.8.8.8:53 with a 9-byte payload, 20 + 8 + 9. The
+	// product is asserted, not a per-packet average: an integer division would
+	// hide a mixed run and an off-by-a-header remainder, and this test exists
+	// to say the 14-byte Ethernet header is not data volume.
 	const innerOctets = 37
-	if got := octets / packets; got != innerOctets {
-		t.Errorf("the counter reports %d octets per packet, want the inner IP packet's %d "+
-			"(%d packets, %d octets): the frame's Ethernet header is not data volume",
-			got, innerOctets, packets, octets)
+	if octets != innerOctets*packets {
+		t.Errorf("the counter reports %d octets for %d packets, want %d -- the inner IP packet "+
+			"of each 51-byte frame: the frame's Ethernet header is not data volume",
+			octets, packets, innerOctets*packets)
 	}
 	if down := countersOf(t, ctx, client, "cnt_dl"); len(down) != 0 {
 		t.Errorf("the downlink chain, which no URR measures, counts %d rules: %v", len(down), down)
