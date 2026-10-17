@@ -31,13 +31,13 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BESS=${BESS:-$HOME/Projects/bess}
-WT=${WT:-$BESS/.scratch/wt/codecs}          # the worktree whose build holds live_perf
-BUILD=${BUILD:-$WT/build/perf-release}      # release: the daemon and the tool
+WT=${WT:-$BESS}                             # the checkout whose build holds live_perf
+BUILD=${BUILD:-$WT/build/bench}             # release with the benchmarks: the daemon and the tool
 DAEMON=${DAEMON:-$BUILD/core/bessd}
 LIVE_PERF=${LIVE_PERF:-$BUILD/tests/perf/live_perf}
 PLUG=${PLUG:-$ROOT/datapath/build}
-STAGE=${STAGE:-$BESS/.scratch/wt/pkg/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-$WT/deps/dpdk-25.11.3/install/lib}
+STAGE=${STAGE:-$BESS/build/stage-fast/usr/local}
+DPDK_LIB=${DPDK_LIB:-$BESS/deps/dpdk-25.11.3/install/lib}
 ROUNDS=${ROUNDS:-4}
 CPU=${CPU:-4}
 CONTROL_CPU=${CONTROL_CPU:-2}

@@ -25,12 +25,12 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BESS=${BESS:-$HOME/Projects/bess}
-WT=${WT:-$BESS/.scratch/wt/pkg}
-STAGE=${STAGE:-$WT/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-$WT/../../wt/codecs/deps/dpdk-25.11.3/install/lib}
+WT=${WT:-$BESS}
+STAGE=${STAGE:-$BESS/build/stage-fast/usr/local}
+DPDK_LIB=${DPDK_LIB:-$BESS/deps/dpdk-25.11.3/install/lib}
 PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=${GRAPH:-$ROOT/deploy/session-live.yaml}
-LIVE_BENCH=${LIVE_BENCH:-$WT/../codecs/build/perf-release/tests/perf/live_transaction_bench}
+LIVE_BENCH=${LIVE_BENCH:-$WT/build/bench/tests/perf/live_transaction_bench}
 
 MODE=${MODE:-full}                     # full | n4
 SESSIONS=${SESSIONS:-512}
