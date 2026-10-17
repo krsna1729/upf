@@ -73,7 +73,11 @@ func TestLiveDownlinkReportReachesTheSMF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dialing %s: %v", target, err)
 	}
-	defer conn.Close()
+	// Registered as a cleanup rather than deferred: the session deletion below is
+	// also a cleanup, and cleanups run last-in-first-out, so the deletion gets a
+	// live connection. A defer here would close the socket before the deletion
+	// could be sent.
+	t.Cleanup(func() { conn.Close() })
 
 	associate(t, conn, 5)
 	sendMsg(t, conn, bufferedReportEstablishment(6, 0x9003))
@@ -85,6 +89,17 @@ func TestLiveDownlinkReportReachesTheSMF(t *testing.T) {
 		t.Fatalf("the session was not accepted: cause=%d err=%v", cause, err)
 	}
 
+	// The deletion's header SEID is the UP's own F-SEID, which the response
+	// carries in its UP F-SEID IE. It is not resp.SEID(): a PFCP header carries
+	// the *receiver's* SEID, so that is the CP's 0x9003 (which is why the
+	// report below arrives with it too), and upfd would answer a deletion
+	// addressed that way with "session context not found".
+	fields, err := resp.UPFSEID.FSEID()
+	if err != nil {
+		t.Fatalf("reading the establishment response's UP F-SEID: %v", err)
+	}
+	upSEID := fields.SEID
+
 	// The session stays established for the whole test -- it is what holds the
 	// packets the report is about -- and is deleted on the way out. It has to
 	// be: ci/buffer-path.sh runs this test and then the session package's
@@ -92,7 +107,7 @@ func TestLiveDownlinkReportReachesTheSMF(t *testing.T) {
 	// the buffering counter before its own session exists. A session left here
 	// is a counter entry there, and the buffering test failed on exactly that.
 	t.Cleanup(func() {
-		sendMsg(t, conn, message.NewSessionDeletionRequest(0, 0, resp.SEID(), 7, 0))
+		sendMsg(t, conn, message.NewSessionDeletionRequest(0, 0, upSEID, 7, 0))
 		m := recvMsg(t, conn, 5*time.Second)
 		r, ok := m.(*message.SessionDeletionResponse)
 		if !ok {
