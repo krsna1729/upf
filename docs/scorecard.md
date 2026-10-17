@@ -77,7 +77,7 @@ are the survey's (file and symbol, in
 | 2 | establishment; modification; deletion | `ci/session-live.sh`; `TestEstablishCompilesTheSessionIntoOneTransaction` | in every project |
 | 3 | USAR (a report sent when a URR says so); DLDR (one sent when downlink data arrives with no tunnel) | `TestAReportIsAUsageReportTheSMFCanRead`, `TestTheDownlinkReportIsOwedOncePerBufferingEpisode`; live: `internal/n4/live_report_test.go` (USAR, run by `ci/session-report.sh`); the DLDR live arm (`internal/n4/live_ddn_test.go`, `ci/buffer-path.sh`) is written and needs a daemon carrying BESS's `packet_store` key_attrs (128fd237), so the DLDR half is **in, unverified live** and is not scored until that arm passes | OAI (`xdp_urr_apply_kern.c` and its DLDR path), open5gs (`upf_sess_urr_acc_add`, DDN), free5GC (`report.go` types) send both; UPG-VPP sends usage reports, DLDR not evidenced; eUPF's URR is unwired, OMEC has none, so neither can report |
 | 4 | precedence; F-TEID with CH/CHID (FTUP); UE IP; SDF filter incl. port ranges; Network Instance and QFI | `TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID`, `TestThePrecedenceIsInvertedIntoTheClassifiersPriority`, `TestAPDINamingAQFIKeysTheRuleOnIt`, `TestAQERsQFIReachesTheTunnelRecord`, `TestPortRangeIsRefusedNotMatchedTooWidely`, `TestANonIPv4PDIIsRefusedNotWidened`, `ci/smoke-gtpu.sh` (a G-PDU carrying a PDU Session Container, decap reading QFI 5 into metadata) | not examined per project: the survey scores rule types (PDR/FAR/QER/URR/BAR), not PDI sub-features. Only OAI's `ftup=1` is on record, and it is not enough to score the block |
-| 5 | QER gate; MBR; per-flow or GBR semantics | `TestAClosedGateDropsWithoutAnAction`; `TestAQERsQFIReachesTheTunnelRecord` (a QER's QFI reaching the flow's tunnel record, so a session's flows can be policed apart); `ci/smoke-gtpu.sh` (the encap writing the container from the record's QFI); `ci/session-path.sh` | OAI TC-BPF, open5gs `appQER`/`sessionQER`, eUPF one QER per PDR, OMEC app + session QER; free5GC has no QER semantics in userspace (33); UPG-VPP's README says QER is "not yet working" (0) |
+| 5 | QER gate; MBR; per-flow or GBR semantics | `TestAClosedGateDropsWithoutAnAction`; `TestAQERsQFIReachesTheTunnelRecord` (a QER's QFI reaching the flow's tunnel record); `TestTwoQFIKeyedPDRsGetTheirOwnMeters` (two PDRs of one session differing only by QFI, each naming its own QER, compiling to two actions and two meter ids -- the flows are policed apart); `ci/smoke-gtpu.sh` (the encap writing the container from the record's QFI); `ci/session-path.sh` | OAI TC-BPF, open5gs `appQER`/`sessionQER`, eUPF one QER per PDR, OMEC app + session QER; free5GC has no QER semantics in userspace (33); UPG-VPP's README says QER is "not yet working" (0) |
 | 6 | volume; time; thresholds; quota and its enforcement; linked UR-SEQN | `TestEvaluateReportsAUsedUpQuotaAndStopsTheTraffic`, `TestEvaluateReportsTheWindowItMeasured` | UPG-VPP `upf_session.c:640-680` (100); OAI, open5gs and free5GC measure volume and time with thresholds but the survey shows no quota-enforcement or linked half; eUPF unwired; OMEC none |
 | 7 | downlink buffering; DDN; buffering duration; drop-buffered | buffering and DDN: `TestABuffFARIsGatedToTheStoreAndCounted`, `TestTheDownlinkReportIsOwedOncePerBufferingEpisode`, `TestAModificationThatStopsBufferingReleasesTheFlow`, with the live arm `ci/buffer-path.sh` (written; needs the same daemon rebuild, so buffering and DDN are **in, unverified live** and are not scored until that arm passes); a graph with no store still drops (`TestABuffOnlyFARIsADrop`) | OAI and open5gs buffer; free5GC validates BAR and does not buffer (25); OMEC notifies and does not buffer (25); UPG-VPP's README says BAR is "not yet working" |
 | 8 | GTP-U decap; encap; echo request/reply; end marker; inner-to-outer DSCP copy | `ci/smoke-gtpu.sh` (decap, encap, DSCP, and the echo reply byte for byte: `gtpu_echo`, TS 29.281 7.2.2); `ci/session-path.sh` (the End Marker a handover sends, byte for byte: `internal/session/endmarker.go`, TS 29.244 5.3.2) | open5gs and OMEC have both markers (80); everyone decapsulates and encapsulates; echo is not examined per project by the survey |
@@ -113,15 +113,13 @@ the two halves apart.)
 ## Three readings
 
 1. **We are behind, and by a specific list.** open5gs 62 and OAI 54 against our
- 50 is not noise: it is BAR + DDN (0 against 75) and interop (0 against 100),
- with the tunnel-marker block ahead (100 against 80) and URR ahead too (80
- against 60 for three of them). Two of those numbers are about to move and are
+ 53 is not noise: it is BAR + DDN (0 against 75) and interop (0 against 100),
+ with the tunnel-marker block now *ahead* (100 against 80) and URR ahead too
+ (80 against 60 for three of them) — and none of what we lead is what a
+ handover or a stalled UE notices. Two of those numbers are about to move and are
  deliberately still unscored: the buffering and DLDR code is in, and both blocks
  wait on one live arm (`ci/buffer-path.sh`) that needs a daemon carrying BESS's
  packet_store key_attrs.
-   with the tunnel-marker block now *ahead* (100 against 80) and URR ahead too
-   (80 against 60 for three of them) — and none of what we lead is what a
-   handover or a stalled UE notices.
 2. **The mean is not a verdict on the dataplane.** No row here is a throughput
    claim: the same-harness measurement that would settle that (verification plan
    section 2) has not been run. The floors that do exist are per packet and
