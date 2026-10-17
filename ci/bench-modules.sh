@@ -59,7 +59,7 @@ export LD_LIBRARY_PATH=$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 status=0
 $WRAP "$LIVE_PERF" --cpu "$CPU" --control-cpu "$CONTROL_CPU" \
   --build "name=$DAEMON" --plugin "$PLUG" \
-  --tests M.base,M.gtpu_decap.base,M.gtpu_decap,M.gtpu_encap.base,M.gtpu_encap \
+  --tests M.base,M.gtpu_decap.base,M.gtpu_decap,M.gtpu_encap.base,M.gtpu_encap,M.urr_count.base,M.urr_count,M.urr_count.empty \
   --counters --rounds "$ROUNDS" --save "${OUT%.log}.json" >"$OUT" 2>&1 || status=$?
 
 # A wrapper that fails before the tool starts leaves an empty report, and an
@@ -81,13 +81,19 @@ sed -n '/^test /,/^$/p' "$OUT"
 
 # The pair deltas: the report prints every M row as ns/packet above M.base, so
 # an arm minus its control is the module's cost.
-awk '/^M\.gtpu_(decap|encap)(\.base)? +[0-9]/{ v[$1]=$2 }
+awk '/^M\.(gtpu_(decap|encap)|urr_count)(\.base|\.empty)? +[0-9]/{ v[$1]=$2 }
      END {
        if (!("M.gtpu_decap" in v) || !("M.gtpu_encap" in v)) { exit }
        printf "\ndecap: %+.2f ns/pkt over its control (%s - %s)\n",
               v["M.gtpu_decap"] - v["M.gtpu_decap.base"], v["M.gtpu_decap"], v["M.gtpu_decap.base"]
        printf "encap: %+.2f ns/pkt over its control (%s - %s)\n",
               v["M.gtpu_encap"] - v["M.gtpu_encap.base"], v["M.gtpu_encap"], v["M.gtpu_encap.base"]
+       if ("M.urr_count" in v) {
+         printf "urr_count, counting a rule: %+.2f ns/pkt over its control (%s - %s)\n",
+                v["M.urr_count"] - v["M.urr_count.base"], v["M.urr_count"], v["M.urr_count.base"]
+         printf "urr_count, no entry:       %+.2f ns/pkt over its control (%s - %s)\n",
+                v["M.urr_count.empty"] - v["M.urr_count.base"], v["M.urr_count.empty"], v["M.urr_count.base"]
+       }
      }' "$OUT"
 
 echo
