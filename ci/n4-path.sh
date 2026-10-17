@@ -151,7 +151,6 @@ check "the downlink PDR matched the UE's address" "$DOWN_HEX" \
 if [ "$FAIL" = 0 ]; then
   kill "$UPFD_PID" 2>/dev/null || true
   wait "$UPFD_PID" 2>/dev/null || true
-  MARK=$(grep -c "packet dump" "$LOG" || true)
   : >"$UPFD_LOG"
   "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
     -n3-addr "$N3" -log-level info >>"$UPFD_LOG" 2>&1 &
@@ -167,8 +166,12 @@ if [ "$FAIL" = 0 ]; then
     cat "$UPFD_LOG" >&2
     FAIL=1
   fi
-  # And the rules are gone with it: the Sources are still running and the same
-  # G-PDU still arrives, and no rule selects it any more.
+  # And the rules are gone with it: from the moment the sweep was logged on, the
+  # Sources keep running and the same G-PDU still arrives, and no rule selects
+  # it any more. The count is taken here rather than before the restart: the
+  # lines $LOG holds are the first controller's, and packets crossing while the
+  # second one was starting up are not what this checks.
+  MARK=$(grep -c "packet dump" "$LOG" || true)
   sleep 2
   AFTER=$(grep -c "packet dump" "$LOG" || true)
   if [ "$AFTER" = "$MARK" ]; then
