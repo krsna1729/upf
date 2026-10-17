@@ -477,12 +477,18 @@ duplicate checks, the removal and replacement walks). The next step is the same
 run at a commit before those, paired with this one; until then each number is one
 sample of a path whose cost is not pinned down, and none of them is a ceiling.
 
-That is the rate an SMF sees today, and it is per session in flight, not per
-core: with eight in flight the same run answers 7 of 256 establishments within
-5 s and the rest minutes later (the daemon logs those as "answer to no
-request"), so the runway to the transaction numbers above is a client-side
-stall, not the compiler -- the next thing to fix, and the reason the bench's
-default is one worker.
+That is the rate an SMF sees today, per session in flight rather than per core,
+and the answer is in how many a client keeps in flight. The eight-in-flight
+figure here used to be a stall -- 7 of 256 establishments answered inside 5 s,
+with "answer to no request" -- and that line was the *bench's*, not the
+daemon's: n4bench numbered its requests by session index while it registered
+each waiter under a call counter, so with several workers the two orders diverge
+and replies matched nothing (the daemon held all 256 sessions in its action
+tables, programmed correctly). With `send` putting its own number on the
+message, the same run answers all 256: 8 workers, 256 sessions, establish
+13.09 ms p50 (534/s aggregate) against one worker's 1.685 ms p50 (522/s) on the
+same machine -- the aggregate is flat, and the latency is the queue, which is
+what one serialized control path should look like.
 
 The walls, in order:
 

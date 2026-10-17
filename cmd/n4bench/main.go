@@ -198,9 +198,15 @@ func (c *client) read() {
 }
 
 // send registers the sequence before writing, so an answer cannot arrive
-// before the waiter exists, and waits for the answer.
+// before the waiter exists, and waits for the answer. The sequence number it
+// waits under is this client's own counter, and it is put on the message: the
+// builders number requests by session index, and with several workers the
+// indices and the calls advance in different orders, so a request could carry
+// one number while its waiter was registered under another -- the reply then
+// matched nothing ("answer to no request") or the wrong request.
 func (c *client) send(m message.Message, kind opKind, timeout time.Duration) (message.Message, time.Duration, error) {
 	key := c.seq.Add(1)
+	m.SetSequenceNumber(key)
 	ch := make(chan message.Message, 1)
 	c.mu.Lock()
 	c.wait[key] = ch

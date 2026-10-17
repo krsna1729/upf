@@ -34,13 +34,15 @@ LIVE_BENCH=${LIVE_BENCH:-$WT/../codecs/build/perf-release/tests/perf/live_transa
 
 MODE=${MODE:-full}                     # full | n4
 SESSIONS=${SESSIONS:-512}
-# One worker in flight: the client-side stall below is what happens otherwise,
-# and it measures the client's own queue rather than the path. With WORKERS=8,
-# SESSIONS=256 this script's establish phase answered 7 of 256 within the 5 s
-# timeout and the rest minutes later (upfd: "answer to no request"), while one
-# worker sustains establish 786 us p50 / modify 353 us / delete 213 us. That
-# stall is the control path's next piece of work, not a property of the
-# compiler.
+# One worker is the default so these numbers stay comparable with the ones
+# already recorded; any count works. What this comment used to call a
+# client-side stall was the bench's own bookkeeping: requests are numbered by
+# session index while the waiter was registered under a call counter, so with
+# several workers the two orders diverge and answers matched nothing (n4bench's
+# "answer to no request" -- the bench's line, not upfd's). send() now puts its
+# own number on the message. 8 workers over 256 sessions answer all 256 with
+# 534 establish/s (13.09 ms p50) where one worker does 522/s (1.685 ms p50) on
+# the same machine, so the aggregate is flat and the latency is the queue.
 WORKERS=${WORKERS:-1}
 # One mode per run: PFCP has one association per peer, so a second n4bench
 # against the same upfd gets cause 64 rather than joining the first. establish
@@ -105,7 +107,7 @@ echo "n4bench: $WORK/n4bench, upfd: $WORK/upfd"
 
 export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-UPFD_ARGS=(-n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -log-level warn)
+UPFD_ARGS=(-n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -log-level "${UPFD_LOG:-warn}")
 if [ "$MODE" = full ]; then
   echo "== the datapath: bessd with the plugin, then the graph"
   "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" \
