@@ -145,6 +145,32 @@ modules:
   - name: sink_down
     mclass: Sink
 
+  - name: src_down_qfi
+    mclass: Source
+    arg: {pkt_size: 51, burst: 1}
+  - name: rewrite_down_qfi
+    mclass: Rewrite
+    arg:
+      templates:
+        # The same inner frame as the plain downlink chain: what differs is the
+        # tunnel record's QFI, so the encap must write a PDU Session Container
+        # (TS 38.415, extension header 0x85) into the outer header.
+        - "AgAAAAAEAgAAAAADCABFAAAlAAFAAEARILcKAAABCAgICATSADUAEQAAaGVsbG8tdXBm"
+  - name: setattr_down_qfi
+    mclass: SetMetadata
+    arg:
+      attrs:
+        # 2: the ActionId of a session whose QER names QFI 5.
+        - {name: "action_id", size: "4", value_int: "2"}
+  - name: encap_qfi
+    mclass: GtpuEncap
+    arg: {src_ip: "10.20.30.1"}
+  - name: dump_down_qfi
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_down_qfi
+    mclass: Sink
+
 connections:
   - {upstream: src_up, downstream: rewrite_up}
   - {upstream: rewrite_up, downstream: teid}
@@ -169,6 +195,11 @@ connections:
   - {upstream: setattr_down, downstream: encap0}
   - {upstream: encap0, downstream: dump_down}
   - {upstream: dump_down, downstream: sink_down}
+  - {upstream: src_down_qfi, downstream: rewrite_down_qfi}
+  - {upstream: rewrite_down_qfi, downstream: setattr_down_qfi}
+  - {upstream: setattr_down_qfi, downstream: encap_qfi}
+  - {upstream: encap_qfi, downstream: dump_down_qfi}
+  - {upstream: dump_down_qfi, downstream: sink_down_qfi}
 
 workers:
   - {wid: 0, core: 0}
@@ -192,3 +223,13 @@ resources:
         gnb_ip: "10.20.30.2"
         ether_src: "AgAAAAAB"
         ether_dst: "AgAAAAAC"
+  # The same session's flow with a QER that names QFI 5: the encap must write
+  # the PDU Session Container for it (0 = no container, the record above).
+  encap_qfi/tunnels:
+    - key: {action_id: 2}
+      value:
+        teid: 287454020
+        gnb_ip: "10.20.30.2"
+        ether_src: "AgAAAAAB"
+        ether_dst: "AgAAAAAC"
+        qfi: 5

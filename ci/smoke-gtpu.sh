@@ -134,6 +134,18 @@ check "encap wrote UDP/GTP-U toward 2152 with the session TEID" \
 check "the encapsulated frame carries the inner packet" \
       "33 44 45 00 00 25 00 01 40 00 40 11 20 b7"
 
+# Downlink with a QFI: the second chain's tunnel record names QFI 5, so the
+# outer header grows by the four-octet optional tail and a PDU Session
+# Container (TS 38.415, extension header 0x85): IPv4 total 0x51 and UDP length
+# 0x3d (eight more than the plain chain), then flags 0x34 (E set), GTP-U length
+# 0x2d, the tail `00 00 00 85` and the container `01 00 05 00` -- length 1
+# unit, PDU type 0 (downlink), QFI 5, next type 0. Each check stays inside one
+# 16-byte dump line.
+check "the QFI's outer header grew by the container" \
+      "00 51 00 00 40 00 40 11 ea 71 0a 14"
+check "the container carries the QFI and the downlink PDU type" \
+      "33 44 00 00 00 85 01 00 05 00"
+
 # Echo: TEID 0 is no session's rule, so the request took the table's default
 # gate -- the plugin's echo module -- which answered it in place. The request
 # was a conformant one (flags 0x32: S set, as 5.1 requires of an echo; sequence
