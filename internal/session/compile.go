@@ -670,6 +670,12 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 			}
 			return host(p.ueIP)
 		}
+		if p.sdf != nil && p.sdf.srcAssigned {
+			// "from assigned": the UE is the flow's source. On the uplink that
+			// is the fallback below; on the downlink it must be said here,
+			// because the SDF carries no address of its own for this side.
+			return host(p.ueIP)
+		}
 		if p.sdf != nil && p.sdf.srcOK {
 			m, err := pref(p.sdf.src)
 			return m, err == nil, err
@@ -935,7 +941,7 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if err != nil {
 				return fmt.Errorf("SDF filter: %w", err)
 			}
-			filter, err := parseFlowDescription(fields.FlowDescription, p.ueIP)
+			filter, err := parseFlowDescription(fields.FlowDescription)
 			if err != nil {
 				return fmt.Errorf("SDF filter: %w", err)
 			}
@@ -1085,10 +1091,16 @@ type sdfFilter struct {
 	srcOK   bool
 	dst     netip.Prefix
 	dstOK   bool
-	sport   uint16
-	sportOK bool
-	dport   uint16
-	dportOK bool
+	// "assigned" is the session's UE address rather than a value the filter
+	// carries, and a PDI's IEs are a set: the SDF filter may be read before the
+	// UE IP address is known. So the word is kept, and the key builder -- which
+	// runs once the whole session is read -- is where the address is filled in.
+	srcAssigned bool
+	dstAssigned bool
+	sport       uint16
+	sportOK     bool
+	dport       uint16
+	dportOK     bool
 }
 
 // parseFlowDescription reads the IPFilterRule form the SDF Filter IE carries
@@ -1099,7 +1111,7 @@ type sdfFilter struct {
 // A range that is not one value cannot be expressed by a mask, so it is
 // refused here rather than silently matched too widely: the dataplane needs the
 // range kernel of the roadmap's classifier work for that.
-func parseFlowDescription(fd string, ue netip.Addr) (*sdfFilter, error) {
+func parseFlowDescription(fd string) (*sdfFilter, error) {
 	fields := strings.Fields(fd)
 	if len(fields) < 4 {
 		return nil, fmt.Errorf("flow description %q is too short", fd)
@@ -1138,11 +1150,11 @@ func parseFlowDescription(fd string, ue netip.Addr) (*sdfFilter, error) {
 		return nil, fmt.Errorf("flow description %q: expected 'from'", fd)
 	}
 	i++
-	addr, next, err := parseFilterAddr(fields[i], ue)
+	addr, assigned, next, err := parseFilterAddr(fields[i])
 	if err != nil {
 		return nil, fmt.Errorf("flow description %q: %w", fd, err)
 	}
-	f.src, f.srcOK = addr, addr.IsValid()
+	f.src, f.srcOK, f.srcAssigned = addr, addr.IsValid(), assigned
 	i += next
 	if i < len(fields) && fields[i] != "to" {
 		port, err := parseFilterPort(fields[i])
@@ -1159,11 +1171,11 @@ func parseFlowDescription(fd string, ue netip.Addr) (*sdfFilter, error) {
 	if i >= len(fields) {
 		return nil, fmt.Errorf("flow description %q: no destination", fd)
 	}
-	addr, next, err = parseFilterAddr(fields[i], ue)
+	addr, assigned, next, err = parseFilterAddr(fields[i])
 	if err != nil {
 		return nil, fmt.Errorf("flow description %q: %w", fd, err)
 	}
-	f.dst, f.dstOK = addr, addr.IsValid()
+	f.dst, f.dstOK, f.dstAssigned = addr, addr.IsValid(), assigned
 	i += next
 	if i < len(fields) {
 		port, err := parseFilterPort(fields[i])
@@ -1180,36 +1192,33 @@ func parseFlowDescription(fd string, ue netip.Addr) (*sdfFilter, error) {
 }
 
 // parseFilterAddr reads one address of a flow description: "any", "assigned",
-// an address, or a prefix. It returns the prefix (invalid for "any", which is
-// how the caller knows the field is unconstrained) and how many words of the
-// description it read.
-func parseFilterAddr(word string, ue netip.Addr) (netip.Prefix, int, error) {
+// an address, or a prefix. It returns the prefix (invalid for "any", which
+// leaves the field unconstrained, and for "assigned", which is the session's UE
+// address and is filled in later), whether the word was "assigned", and how
+// many words it consumed.
+func parseFilterAddr(word string) (netip.Prefix, bool, int, error) {
 	switch strings.ToLower(word) {
 	case "any":
-		return netip.Prefix{}, 1, nil
+		return netip.Prefix{}, false, 1, nil
 	case "assigned":
-		if !ue.Is4() {
-			return netip.Prefix{}, 0, errors.New(
-				"'assigned' with no UE address in the PDI")
-		}
-		return netip.PrefixFrom(ue, 32), 1, nil
+		return netip.Prefix{}, true, 1, nil
 	}
 	if strings.Contains(word, "/") {
 		p, err := netip.ParsePrefix(word)
 		if err != nil {
-			return netip.Prefix{}, 0, fmt.Errorf("invalid address %q", word)
+			return netip.Prefix{}, false, 0, fmt.Errorf("invalid address %q", word)
 		}
 		// A Flow Description is address/mask (TS 29.244 8.2.2, by way of TS
 		// 29.212 5.4.2): host bits in the address are not a different filter,
 		// they are bits the mask ignores. The rule the table gets carries the
 		// network address and the mask (compile.go, pref).
-		return p, 1, nil
+		return p, false, 1, nil
 	}
 	a, err := netip.ParseAddr(word)
 	if err != nil {
-		return netip.Prefix{}, 0, fmt.Errorf("invalid address %q", word)
+		return netip.Prefix{}, false, 0, fmt.Errorf("invalid address %q", word)
 	}
-	return netip.PrefixFrom(a.Unmap(), a.BitLen()), 1, nil
+	return netip.PrefixFrom(a.Unmap(), a.BitLen()), false, 1, nil
 }
 
 // parseFilterPort reads one port of a flow description: a number, or a range

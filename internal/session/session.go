@@ -423,9 +423,12 @@ func (p *idPool) alloc() (uint32, error) {
 }
 
 // reserve keeps an id the pool did not hand out out of the walk: an F-TEID an
-// SMF pinned. It is not released: the pool never owned it, and freeing a
-// foreign value would hand it to a session that did not ask for it (0x11223344
-// is a legal pin and an illegal allocation).
+// SMF pinned. That a pin is foreign to the pool is what makes the *pin* the
+// pool's problem rather than its business -- a foreign value handed out would
+// go to a session that did not ask for it (0x11223344 is a legal pin and an
+// illegal allocation) -- but the pin is still released when its session goes
+// (releaseSession), and the walk may then hand it out like any freed id. That
+// is what lets an SMF re-pin a value it has finished with.
 func (p *idPool) reserve(id uint32) {
 	if id == 0 {
 		return

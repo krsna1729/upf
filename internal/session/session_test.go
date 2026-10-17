@@ -630,6 +630,37 @@ func TestAUEIPAllocationRequestIsRefused(t *testing.T) {
 	}
 }
 
+func TestAnSDFBeforeTheUEIPResolvesTheSameWay(t *testing.T) {
+	// A PDI's IEs are a set, not a sequence: an SMF may send the SDF filter
+	// before the UE IP address. "assigned" means the PDI's UE address, and the
+	// filter used to resolve it as it was read -- so this perfectly valid order
+	// was refused. The word is kept now, and the key builder, which runs once
+	// the whole session has been read, fills the address in.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x555a, 1, 0,
+		ie.NewFSEID(0x555a, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewSDFFilter("permit out udp from assigned to any", "", "", "", 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.9", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("an SDF before the UE IP IE answered cause %d", got)
+	}
+	// A downlink PDR's SDF names a side by "assigned": the UE is the flow's
+	// source here, so that is what the source field must carry.
+	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 9})
+	if got := rule.value(fieldSrcIP); !bytes.Equal(got, []byte{10, 45, 0, 9}) {
+		t.Errorf("the assigned rule's source value is %v, want the UE address", got)
+	}
+	if got := rule.mask(fieldSrcIP); !bytes.Equal(got, []byte{0xff, 0xff, 0xff, 0xff}) {
+		t.Errorf("the assigned rule's source mask is %v, want a /32", got)
+	}
+}
+
 func TestANonIPv4PDIIsRefusedNotWidened(t *testing.T) {
 	// A table field is four bytes: an IPv6 UE address or SDF prefix cannot be
 	// carried by it. Compiling one as "unconstrained" would write a rule that
