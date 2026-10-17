@@ -75,12 +75,19 @@ func TestABuffFARIsGatedToTheStoreAndCounted(t *testing.T) {
 		t.Fatal("a BUFF FAR's rule carries no ActionId: the store has no flow to key on")
 	}
 	find(t, changes, "cnt_buf/counters", "action_id", flow)
+	// The action record *is* written, and it has to be: the engine validates a
+	// rule's action_id as a reference whatever gate the rule takes (D-021), so a
+	// buffering rule naming an id nothing upserts is refused and the session is
+	// lost -- what the live arm found. The release path reads the same record
+	// when the store's gate 0 re-enters the action path, and the modification
+	// that stops buffering updates this key in place.
+	action := find(t, changes, actionsRes(c.cfg.Down), "id", flow)
+	if got := action.Value["next_hop_id"]; got == nil {
+		t.Error("a BUFF FAR's action record carries no next hop: the release path would have nowhere to send the packets")
+	}
 	for _, ch := range changes {
-		if ch.Resource == actionsRes(c.cfg.Down) {
-			t.Errorf("a BUFF FAR wrote an action record in %s: nothing forwards yet", ch.Resource)
-		}
 		if ch.Resource == c.cfg.Down.Tunnels {
-			t.Errorf("a BUFF FAR wrote a tunnel record in %s", ch.Resource)
+			t.Errorf("a BUFF FAR wrote a tunnel record in %s: nothing is encapsulated until the SMF says forward", ch.Resource)
 		}
 	}
 }

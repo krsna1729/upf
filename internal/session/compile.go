@@ -1411,9 +1411,16 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				// in the store and in the counter in front of it -- the store is
 				// keyed by the same value the classifier wrote (BESS D-141), so
 				// one id resolves the rule, its flow and, once the SMF has said
-				// what to do with the packets, its action. No action *record* is
-				// written: the path that reads one is the forward path, and this
-				// rule does not reach it while it buffers.
+				// what to do with the packets, its action. The record is written
+				// here even though this rule does not read it while it buffers:
+				// the engine validates a rule's action_id as a *reference*
+				// whatever gate the rule takes (D-021, transaction_engine.cc's
+				// reference check, on the transaction's end state), so a rule
+				// naming an id nothing upserts is refused and the session is
+				// lost -- which is exactly what the live arm found. It is also
+				// the record the release path reads: the store's gate 0
+				// re-enters the action path, and the modification that stops
+				// buffering updates this same key in place.
 				gate = uint64(c.cfg.Buffering.Gate)
 				if p.actionID == 0 {
 					id, err := c.actions.alloc()
@@ -1423,6 +1430,20 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 					p.actionID = id
 				}
 				action = p.actionID
+				// The record is written here, after the id exists, because the
+				// engine validates a rule's action_id as a *reference* whatever
+				// gate the rule takes (D-021, transaction_engine.cc's reference
+				// check on the transaction's end state): a rule naming an id
+				// nothing upserts is refused and the session is lost, which is
+				// what the live arm found. It is also the record the release
+				// path reads -- the store's gate 0 re-enters the action path --
+				// and the modification that stops buffering updates this same
+				// key in place.
+				changes = append(changes, bess.Change{
+					Resource: actionsRes(dir),
+					Key:      map[string]any{"id": p.actionID},
+					Value:    map[string]any{"meter_id": p.meterID, "next_hop_id": p.nextHop},
+				})
 			}
 			changes = append(changes, bess.Change{
 				Resource: rulesRes(dir),
