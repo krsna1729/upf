@@ -29,13 +29,23 @@ type fakeDataplane struct {
 	mu     sync.Mutex
 	octets uint64
 	txns   int
+	last   []bess.Change
 }
 
 func (f *fakeDataplane) Apply(_ context.Context, changes ...bess.Change) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.txns += len(changes)
+	f.txns++
+	f.last = changes
 	return nil
+}
+
+// snapshot is the transaction count and the last transaction, taken under the
+// fake's own lock: the loop applies on its own goroutine.
+func (f *fakeDataplane) snapshot() (int, []bess.Change) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.txns, f.last
 }
 
 // RuleCounts answers every rule asked for with the same totals, whatever
@@ -235,9 +245,8 @@ func TestReportLoopSendsAReportTheSMFAcknowledges(t *testing.T) {
 		ie.NewNodeID("", "", "smf.local"), ie.NewRecoveryTimeStamp(time.Now())),
 		message.MsgTypeAssociationSetupResponse)
 	established := exchange(t, smf, target, reportLoopEstablishment(2, 0x9001),
-		message.MsgTypeSessionEstablishmentResponse)
-	if cause, err := established.(*message.SessionEstablishmentResponse).Cause.Cause(); err != nil ||
-		cause != ie.CauseRequestAccepted {
+		message.MsgTypeSessionEstablishmentResponse).(*message.SessionEstablishmentResponse)
+	if cause, err := established.Cause.Cause(); err != nil || cause != ie.CauseRequestAccepted {
 		t.Fatalf("the session was not accepted: cause=%d err=%v", cause, err)
 	}
 
@@ -253,6 +262,7 @@ func TestReportLoopSendsAReportTheSMFAcknowledges(t *testing.T) {
 
 	// The traffic: four times the quota, so the next tick's window holds far
 	// more than the session asked to be told about.
+	before, _ := dp.snapshot()
 	dp.spent(4 * 370)
 	m := readWithin(t, smf, 5*time.Second)
 	if m == nil {
@@ -282,9 +292,43 @@ func TestReportLoopSendsAReportTheSMFAcknowledges(t *testing.T) {
 	if id, err := children[0].URRID(); err != nil || id != 7 {
 		t.Errorf("the report names URR %d (%v), want 7", id, err)
 	}
-	// And the enforcement reached the dataplane: the session's PDRs compile to
-	// a drop, which is a transaction the fake counted.
-	if dp.txns == 0 {
-		t.Error("the enforcement wrote nothing to the dataplane")
+	// The header names the session the way the SMF knows it: its own F-SEID
+	// (0x9001 here), not ours -- a report under the UP F-SEID would be a
+	// session the SMF cannot find.
+	if report.SEID() != 0x9001 {
+		t.Errorf("the report names SEID %#x, want the CP F-SEID 0x9001", report.SEID())
 	}
+	// The establishment response's header is a separate matter: it carries our
+	// F-SEID today, where a conformant UP function puts the CP F-SEID there too
+	// (docs/compliance.md, the 7.2.2.4 row). What this test needs is only that
+	// the session's CP SEID reached the loop, which the assertion above shows.
+	t.Logf("the establishment response's header carried SEID %#x", established.SEID())
+	// And the enforcement the report carries reached the dataplane: the uplink
+	// PDR's rule comes out as a drop, which is a transaction the fake counted
+	// (growth, because the establishment wrote one of its own).
+	after, last := dp.snapshot()
+	if after <= before {
+		t.Errorf("the spent quota wrote no transaction (%d before, %d after)", before, after)
+	}
+	if !dropRule(last, uplinkRules) {
+		t.Errorf("the last transaction does not write the uplink's rule as a drop: %v", last)
+	}
+}
+
+// uplinkRules is the graph's uplink rule table, as the compiler names it.
+const uplinkRules = "pdr_ul/rules"
+
+// dropRule reports whether a transaction writes a rule of that resource with
+// the drop gate: DROP_GATE is 8192 (core/gate.h; internal/session's own
+// constant), and a rule that drops carries no ActionId with it.
+func dropRule(changes []bess.Change, resource string) bool {
+	for _, ch := range changes {
+		if ch.Resource != resource || ch.Value == nil {
+			continue
+		}
+		if gate, ok := ch.Value["gate"].(uint64); ok && gate == 8192 {
+			return true
+		}
+	}
+	return false
 }

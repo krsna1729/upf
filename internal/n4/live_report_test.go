@@ -106,8 +106,12 @@ func TestLiveUsageReportReachesTheSMF(t *testing.T) {
 	sendMsg(t, conn, message.NewSessionReportResponse(0, 0, report.SEID(), report.Sequence(), 0,
 		ie.NewCause(ie.CauseRequestAccepted)))
 
-	if report.SEID() != resp.Header.SEID {
-		t.Errorf("the report names SEID %#x, want the session's %#x", report.SEID(), resp.Header.SEID)
+	// The report is addressed to the SMF, so the header names the session the
+	// way *the SMF* knows it: the CP F-SEID this test allocated (0x9001, the
+	// value in its own F-SEID IE). A report under our own F-SEID would be a
+	// session the SMF cannot find (TS 29.244 7.2.2.4.2).
+	if report.SEID() != 0x9001 {
+		t.Errorf("the report names SEID %#x, want the CP F-SEID 0x9001", report.SEID())
 	}
 	if !report.ReportType.HasUSAR() {
 		t.Errorf("the report's type is not a usage report: %+v", report.ReportType)
