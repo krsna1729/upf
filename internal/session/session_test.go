@@ -27,6 +27,10 @@ import (
 type recorder struct {
 	txns [][]bess.Change
 	fail error
+	// counts is the fake dataplane's counting modules, by module name: what
+	// RuleCounts answers, and the failure it answers with when readFail is set.
+	counts   map[string][]bess.RuleCount
+	readFail error
 }
 
 func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
@@ -35,6 +39,25 @@ func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 	}
 	r.txns = append(r.txns, changes)
 	return nil
+}
+
+// RuleCounts answers the rules asked for; a rule the fake does not hold reads
+// zero, which is what a module with no traffic says.
+func (r *recorder) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
+	if r.readFail != nil {
+		return nil, r.readFail
+	}
+	held := map[uint32]bess.RuleCount{}
+	for _, count := range r.counts[module] {
+		held[count.ActionID] = count
+	}
+	out := make([]bess.RuleCount, 0, len(actionIDs))
+	for _, id := range actionIDs {
+		count := held[id]
+		count.ActionID = id
+		out = append(out, count)
+	}
+	return out, nil
 }
 
 func (r *recorder) last() []bess.Change {
@@ -1016,6 +1039,70 @@ func TestAClosedGateDropsWithoutAnAction(t *testing.T) {
 		if ch.Resource == actions {
 			t.Errorf("a closed gate wrote an action record in %s", actions)
 		}
+	}
+}
+
+// TestAQuotaExhaustedURRDropsItsPDRs is the enforcement half of 5.2.2.2.1: the
+// flag the reporting task sets when a URR's quota is used up is what stops the
+// traffic of the PDRs that name it. Nothing else changes -- no new filter, no
+// message from the SMF that asks for a drop -- so the next transaction (any
+// modification, even one that asks for nothing new) must write the PDR's rule
+// as a drop. That is also what stops the counting: a dropped rule reaches no
+// action, so its counter stands still.
+func TestAQuotaExhaustedURRDropsItsPDRs(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3021, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	// The traffic flows to begin with: the rule names an action, so the packets
+	// of this PDR reach the chain behind it.
+	if before := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2}); before.actionID() == 0 {
+		t.Fatal("the PDR compiled to a drop before any quota was used up")
+	}
+
+	// The reporting task's flip, exactly as it leaves the model. (It is set
+	// there because only the counter reading says a quota is used up; see
+	// docs/design.md, "Usage".)
+	c.mu.Lock()
+	c.findByCP(0x3021).URRs[7].enforcing = true
+	c.mu.Unlock()
+
+	// An update that changes nothing about the PDR: whatever the SMF sends, the
+	// session is recompiled, and the rule must come out as a drop.
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	enforced := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	if got := enforced.gate(); got != dropGate {
+		t.Errorf("with the URR's quota used up the rule gates %d, want the drop gate %d", got, dropGate)
+	}
+	if got, ok := enforced.change.Value["action_id"].(uint32); !ok || got != 0 {
+		t.Errorf("the dropped rule names action %v (%T), want none", got, enforced.change.Value["action_id"])
+	}
+
+	// A new quota is the SMF's own lever for re-opening the traffic
+	// (5.2.2.2.1): provisioning one clears the flag, and the next transaction
+	// writes the rule with its action again.
+	reopen := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
+		ie.NewUpdateURR(ie.NewURRID(7), ie.NewVolumeQuota(0x01, 1<<40, 0, 0)),
+	)
+	if got := cause(t, c.Modify(reopen)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification that provisions a new quota answered cause %d", got)
+	}
+	c.mu.Lock()
+	enforcing := c.findByCP(0x3021).URRs[7].enforcing
+	c.mu.Unlock()
+	if enforcing {
+		t.Error("a new quota left the URR enforcing: the traffic would never come back")
+	}
+	if back := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2}); back.actionID() == 0 {
+		t.Error("the rule is still a drop after the SMF provisioned a new quota")
 	}
 }
 
@@ -2168,6 +2255,183 @@ func TestAnUpdateThatKeepsTheURRMovesTheCounterOnce(t *testing.T) {
 		t.Errorf("the update wrote %d counter entries, want the one it kept", n)
 	}
 	assertNoRepeat(t, rec.last())
+}
+
+// quotaURR is a URR that measures volume and stops the traffic when the quota
+// is reached: the shape a quota test needs, without the threshold and period
+// triggers of fullURR firing first.
+func quotaURR(id uint32, total uint64) *ie.IE {
+	return ie.NewCreateURR(
+		ie.NewURRID(id),
+		ie.NewMeasurementMethod(0, 1, 0),    // VOLUM
+		ie.NewReportingTriggers(0x00, 0x01), // VOLQU
+		ie.NewVolumeQuota(0x01, total, 0, 0),
+	)
+}
+
+func TestEvaluateReportsAUsedUpQuotaAndStopsTheTraffic(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3030, 7, quotaURR(7, 1000))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	// The dataplane has counted 1500 octets of 10 packets for that rule, over
+	// the 1000 the SMF provisioned.
+	rec.counts = map[string][]bess.RuleCount{
+		testConfig().Up.Counters: {{ActionID: rule.actionID(), Packets: 10, Octets: 1500}},
+	}
+
+	reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now())
+	if err != nil {
+		t.Fatalf("evaluating the usage: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("evaluation returned %d reports, want one for the used-up quota", len(reports))
+	}
+	r := reports[0]
+	if r.Trigger != TriggerVolumeQuota {
+		t.Errorf("the report's trigger is %v, want the volume quota", r.Trigger)
+	}
+	if r.Seqn != 0 {
+		t.Errorf("the first report of a URR carries UR-SEQN %d, want 0", r.Seqn)
+	}
+	if r.Up != (Usage{Packets: 10, Octets: 1500}) {
+		t.Errorf("the report carries %+v uplink, want the window's 10 packets and 1500 octets", r.Up)
+	}
+	if !r.Enforcing {
+		t.Error("a report for a used-up quota is not marked as stopping the traffic")
+	}
+	if r.SEID != resp.Header.SEID || r.CPSEID != 0x3030 || r.URRID != 7 {
+		t.Errorf("the report names SEID %d, CP SEID %d, URR %d; want %d, %#x, 7",
+			r.SEID, r.CPSEID, r.URRID, resp.Header.SEID, 0x3030)
+	}
+
+	// The enforcement reached the dataplane: the PDR's rule is a drop, so the
+	// packets stop reaching the chain the URR measures.
+	enforced := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	if got := enforced.gate(); got != dropGate {
+		t.Errorf("after the quota ran out the rule gates %d, want the drop gate %d", got, dropGate)
+	}
+
+	// A second evaluation has nothing to say: the report is made, and the rule
+	// it stopped is not counted any more.
+	again, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now())
+	if err != nil {
+		t.Fatalf("evaluating again: %v", err)
+	}
+	if len(again) != 0 {
+		t.Errorf("the second evaluation returned %d reports, want none", len(again))
+	}
+}
+
+func TestEvaluateReportsTheWindowItMeasured(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3031, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	module := testConfig().Up.Counters
+
+	// The volume threshold in fullURR is 1MiB: below it, and before the 30s
+	// period, the URR owes nothing.
+	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 4, Octets: 400}}}
+	if reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now()); err != nil || len(reports) != 0 {
+		t.Fatalf("a URR under its threshold and inside its period returned %v (%v)", reports, err)
+	}
+
+	// The threshold is reached: the report says which one and carries the
+	// window, and the next one starts where this report ended -- the counter is
+	// cumulative, so 900 octets more is what the following report covers.
+	const threshold = 1 << 20
+	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 9, Octets: threshold + 1}}}
+	reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now())
+	if err != nil {
+		t.Fatalf("evaluating: %v", err)
+	}
+	if len(reports) != 1 || reports[0].Trigger != TriggerVolumeThreshold {
+		t.Fatalf("evaluation returned %+v, want one volume-threshold report", reports)
+	}
+	if got := reports[0].Up; got != (Usage{Packets: 9, Octets: threshold + 1}) {
+		t.Errorf("the first report carries %+v, want the whole window", got)
+	}
+
+	// Another window: only what arrives after the first report counts, so the
+	// threshold needs another 1MiB -- the 900 octets short of it earn nothing.
+	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 10, Octets: threshold + 901}}}
+	if reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now()); err != nil || len(reports) != 0 {
+		t.Fatalf("a window under the threshold returned %v (%v)", reports, err)
+	}
+
+	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 11, Octets: 2*threshold + 901}}}
+	reports, err = c.Evaluate(context.Background(), resp.Header.SEID, time.Now())
+	if err != nil {
+		t.Fatalf("evaluating again: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("evaluation returned %d reports, want the one the new 900 octets earned", len(reports))
+	}
+	if got := reports[0].Up; got != (Usage{Packets: 2, Octets: threshold + 900}) {
+		t.Errorf("the second report carries %+v, want only what arrived since the first", got)
+	}
+	if reports[0].Seqn != 1 {
+		t.Errorf("the second report carries UR-SEQN %d, want 1", reports[0].Seqn)
+	}
+}
+
+func TestEvaluateReportsThePeriodEvenWithNoTraffic(t *testing.T) {
+	// A periodic trigger reports while the URR is measured, traffic or none
+	// (5.2.2.3): a session whose usage stopped must still be visible to the SMF
+	// -- and a window with nothing in it is what says the traffic stopped.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	periodic := ie.NewCreateURR(
+		ie.NewURRID(7),
+		ie.NewMeasurementMethod(0, 1, 0),    // VOLUM
+		ie.NewReportingTriggers(0x01, 0x00), // PERIO alone
+		ie.NewMeasurementPeriod(time.Second),
+	)
+	resp := c.Establish(urrEstablishment(0x3032, 7, periodic)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	// The URR's window starts when it is provisioned, so a moment later the
+	// period has passed with nothing counted.
+	reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now().Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("evaluating: %v", err)
+	}
+	if len(reports) != 1 || reports[0].Trigger != TriggerPeriod {
+		t.Fatalf("evaluation returned %+v, want one periodic report", reports)
+	}
+	if got := reports[0].Up; got != (Usage{}) {
+		t.Errorf("the periodic report carries %+v, want no usage", got)
+	}
+	if reports[0].Enforcing {
+		t.Error("a periodic report with no quota stopped the traffic")
+	}
+	if reports[0].Duration < time.Second {
+		t.Errorf("the report's window is %v, want at least the period", reports[0].Duration)
+	}
+}
+
+func TestEvaluateWithoutCountersInTheDataplaneSaysSo(t *testing.T) {
+	// The graph answers no counters (the Applier has no CounterReader): a URR
+	// whose every report would say zero is refused when it is established, and
+	// this is the same fact found later -- an error, not silence.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3033, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	c.counters = nil
+	if _, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now()); err == nil {
+		t.Error("evaluating against a dataplane with no counters returned no error")
+	}
 }
 
 func TestUnknownSessionIsNotFound(t *testing.T) {

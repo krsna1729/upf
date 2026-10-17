@@ -139,8 +139,14 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   octets of every rule a URR's PDRs name (the entry in `<module>/counters` is
   what says a rule is measured), and its `get_counts` action is how a controller
   reads them — `ci/session-path.sh` drives real packets through it and checks
-  the octets are the inner IP packet's, not the frame's. The URR reporting half
-  (triggers, thresholds, quota, Session Report) is not in yet.
+  that the octets are the inner IP packet's, not the frame's.
+- The decision half of URR reporting is in as well: `session.Evaluate` reads
+  those counters through the module's own command, decides which URR owes a
+  report (the period, the volume and time thresholds, the volume and time
+  quotas), and stops the traffic when a quota is spent -- the PDRs that name the
+  URR compile to a drop until the SMF provisions a new quota. What is left is
+  the send: turning a report into a PFCP Session Report Request (N4), which
+  `docs/design.md` lists as the next slice.
 - Next, in this order: a real SMF (open5gs or free5GC) against `upfd` for
   interop and Causes, packets over the bound N3/N6 ports, route domains in
   `internal/routing` for N9 (the downlink's next hop is per-direction today,

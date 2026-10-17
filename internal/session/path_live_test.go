@@ -287,13 +287,12 @@ func waitForPackets(t *testing.T, ctx context.Context, client *bess.Client, modu
 	}
 }
 
-// pathUrrEstablishment is pathEstablishment with a URR measuring the uplink
-// PDR, and a QER that polices nothing: the meter would drop all but a trickle
-// of the source's packets, and the counting module sits behind it, so a rate
-// here would make the numbers a function of the meter rather than of the
-// packets the source produced. The URR's threshold is far above what a run
-// carries, so nothing in it fires yet (reporting is not implemented).
-func pathUrrEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishmentRequest {
+// pathUrrEstablishment is pathEstablishment with the URR given measuring the
+// uplink PDR, and a QER that polices nothing: the meter would drop all but a
+// trickle of the source's packets, and the counting module sits behind it, so a
+// rate here would make the numbers a function of the meter rather than of the
+// packets the source produced.
+func pathUrrEstablishment(cpSEID uint64, ueIP string, urr *ie.IE) *message.SessionEstablishmentRequest {
 	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(cpSEID, nil, nil),
@@ -337,13 +336,111 @@ func pathUrrEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishm
 			ie.NewQERID(1),
 			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
 		),
-		ie.NewCreateURR(
-			ie.NewURRID(7),
-			ie.NewMeasurementMethod(0, 1, 0),    // VOLUM
-			ie.NewReportingTriggers(0x02, 0x00), // VOLTH
-			ie.NewVolumeThreshold(0x01, 1<<40, 0, 0),
-		),
+		urr,
 	)
+}
+
+// TestLiveQuotaEvaluationStopsTheTraffic is the reporting path on a real
+// daemon, end to end: the compiler's URR is measured by the graph's counting
+// module, Evaluate reads that module's own command, the quota the test
+// provisioned is spent, and the packet path stops carrying the session's
+// traffic -- which is what the counter says, and what the action table's own
+// gate counter says (it keeps rising before the evaluation and stands still
+// after it, while the graph's source runs on).
+func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
+	target := os.Getenv("UPF_BESS_TARGET")
+	if target == "" {
+		t.Skip("set UPF_BESS_TARGET (ci/session-path.sh does) to run against a live bessd")
+	}
+
+	ctx := context.Background()
+	client, err := bess.Dial(ctx, target)
+	if err != nil {
+		t.Fatalf("dialing %s: %v", target, err)
+	}
+	defer client.Close()
+	if err := client.Refresh(ctx); err != nil {
+		t.Fatalf("reading the daemon's schema: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := New(liveConfig(), client, log)
+
+	// A quota the source spends in a moment: ten of its packets, each 37 octets
+	// of IP. The count below waits for the module to hold that much, so the
+	// quota is spent before it is evaluated rather than at some other moment.
+	const quota = 370
+	resp := c.Establish(pathUrrEstablishment(0x5555, "10.45.0.2", ie.NewCreateURR(
+		ie.NewURRID(7),
+		ie.NewMeasurementMethod(0, 1, 0),    // VOLUM
+		ie.NewReportingTriggers(0x00, 0x01), // VOLQU
+		ie.NewVolumeQuota(0x01, quota, 0, 0),
+	))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the daemon refused the establishment with cause %d", got)
+	}
+	defer func() {
+		del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 9, 0)
+		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
+			t.Errorf("the deletion answered cause %d", got)
+		}
+	}()
+
+	// Before the evaluation the session's traffic crosses the chain: the action
+	// table is where a rule that forwards delivers, and the counting module
+	// behind it holds the octets this quota is spent from.
+	before := gatePackets(t, ctx, client, "at_ul")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var counted uint64
+		for _, count := range countersOf(t, ctx, client, "cnt_ul") {
+			counted = count[1]
+		}
+		if counted >= quota && gatePackets(t, ctx, client, "at_ul") > before {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the source's packets did not reach the action table and the counters within 5s "+
+				"(%d octets counted, the quota is %d)", counted, quota)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	reports, err := c.Evaluate(ctx, resp.Header.SEID, time.Now())
+	if err != nil {
+		t.Fatalf("evaluating the session's usage: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("evaluation returned %d reports, want one for the spent quota", len(reports))
+	}
+	report := reports[0]
+	if report.Trigger != TriggerVolumeQuota || !report.Enforcing {
+		t.Errorf("the report is %v (enforcing %v), want an enforcing volume-quota report",
+			report.Trigger, report.Enforcing)
+	}
+	if report.Up.Octets < quota {
+		t.Errorf("the report says %d uplink octets, less than the %d it reports spent",
+			report.Up.Octets, quota)
+	}
+
+	// The enforcement reached the packet path: over the same interval the
+	// source keeps producing and the action table sees nothing.
+	produced := gatePackets(t, ctx, client, "src_up")
+	forwarded := gatePackets(t, ctx, client, "at_ul")
+	time.Sleep(500 * time.Millisecond)
+	producedAfter := gatePackets(t, ctx, client, "src_up")
+	forwardedAfter := gatePackets(t, ctx, client, "at_ul")
+	if producedAfter == produced {
+		t.Fatalf("the graph's source stopped producing (%v packets): this test says nothing about the drop", produced)
+	}
+	if forwardedAfter != forwarded {
+		t.Errorf("after the quota ran out %v more packets reached the action table; "+
+			"the PDRs that name the URR must drop (source produced %v in the same interval)",
+			forwardedAfter-forwarded, producedAfter-produced)
+	}
+	t.Logf("the report: %d packets, %d octets, trigger %v; the source produced %v packets "+
+		"after the enforcement and the action table saw none",
+		report.Up.Packets, report.Up.Octets, report.Trigger, producedAfter-produced)
 }
 
 // countersOf is one counting module's reading of every rule it measures, asked
@@ -418,7 +515,14 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 		t.Fatalf("cnt_ul already measures %d rules before any session exists: %v", len(before), before)
 	}
 
-	resp := c.Establish(pathUrrEstablishment(0x4444, "10.45.0.2")).(*message.SessionEstablishmentResponse)
+	resp := c.Establish(pathUrrEstablishment(0x4444, "10.45.0.2", ie.NewCreateURR(
+		ie.NewURRID(7),
+		ie.NewMeasurementMethod(0, 1, 0),    // VOLUM
+		ie.NewReportingTriggers(0x02, 0x00), // VOLTH
+		// A threshold no run reaches: this arm is about the counting, and a
+		// report would change what the chain carries.
+		ie.NewVolumeThreshold(0x01, 1<<40, 0, 0),
+	))).(*message.SessionEstablishmentResponse)
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the daemon refused the establishment with cause %d", got)
 	}
