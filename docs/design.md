@@ -324,6 +324,50 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 Each milestone lands with its tests and a run that shows it, not with a
 scaffold for the next one.
 
+## Where a table lives: shared, per-worker, or behind a ring
+
+The default is **shared**: a table a controller writes and workers read (the
+classifier's rules, the action table, the tunnel records, the TEID table, the
+next hops) has no reason to be copied per worker. Every write in a session's
+life arrives out of band, one PFCP message at a time, and the BESS contract
+prices the shared read path. Partitioning a controller-written table multiplies
+its memory by the worker count and buys nothing: the writer is not the packet
+path.
+
+**Per-worker state is for writes the packet path makes.** A table whose entries
+change because packets flow -- a NAT binding learned on the wire, a flow's usage
+counters, a forwarding entry learned from traffic -- cannot take a shared write
+per packet. It gets one of two shapes:
+
+- *per-worker tables*, when the flow's owner is knowable: every packet of the
+  session reaches one worker. D-097 and `update_scale_bench` E2 measure 3.4x for
+  sharding by flow owner over one shared table at 3% new flows.
+- *per-worker cells inside a shared table* (the `CounterSet` usage-plane shape),
+  when the owner is not knowable or the reads are control-side: the packet path
+  writes its own slot with no atomic, and a control read sums the planes.
+
+The first shape has an assumption that is easy to miss, and it is a property of
+the *port*, not of the module: **symmetric RSS**. When the two directions of a
+flow hash to different workers -- asymmetric RSS, or a rewrite in the path (NAT
+does this by construction) -- no worker owns a session, so per-worker tables
+cannot hold its state and shared (or the ring below) is the only option. The
+UPF must therefore know the RSS behaviour of its ports instead of assuming it;
+the deployment decides which shape the N3 and N6 sides get.
+
+**A ring to an owner is the third shape**, for when the state must live with a
+specific worker but the packets do not arrive there: a bounded SPSC/MPSC ring
+hands the work, or the record, to the owner core -- the same mechanism as BESS's
+handoff/punt channel. It costs a queue operation per handoff and needs
+back-pressure, so it is for per-flow events and control-side records, not for
+the per-packet path.
+
+**What it costs is measured, not argued.** Each placement above is priced by the
+performance contract (the shared read/write under transactions, per-worker
+tables under `update_scale_bench` E2, counter planes under the URR benchmark of
+wall 2 below), and a placement that only "feels" right does not move the design.
+The one case with no measurement yet is a session's state under asymmetric RSS,
+which the URR benchmark below is to settle.
+
 ## Session scale: 10^6 sessions, dimensioned by PDR/FAR/QER/URR/MAR
 
 The target is a million sessions on one box, with the packet path unchanged
@@ -374,13 +418,25 @@ The walls, in order:
 1. **Per-worker tables.** Classifier rules and action records are per-worker
    (D-097). Sharding by flow owner -- the worker whose queue sees the session
    -- measures 3.4x better than one shared table at 3% new flows
-   (`update_scale_bench` E2), so sessions are sharded, not shared.
+   (`update_scale_bench` E2), so sessions are sharded, not shared. That holds
+   only while one worker sees the whole session: with asymmetric RSS, or the N6
+   side of a rewritten flow, the two directions land on different workers and
+   the sharded form cannot hold a session's state. Which shape this deployment
+   gets is a property of its ports, not of the module (see "Where a table
+   lives"), and that case is not measured yet.
 2. **URR counters.** A counter block is priced per worker slot (`CounterSet`:
    4 KiB for three counters): right for a hot counter, wrong for a million
    mostly-idle sessions. A URR must allocate its block on the worker where the
-   session is live, and a control read must sum the live copies. This is the
-   one structure whose cost model is not in the contract, so it needs its own
-   benchmark (live sessions, counter blocks, read from the control plane).
+   session is live, and a control read must sum the live copies -- which needs
+   either one worker per session (symmetric RSS, wall 1) or a plane per worker
+   per direction summed at the report. A hard byte quota is a budget under the
+   second shape, not a gate: each worker counts the bytes it sees, and only the
+   control side can add them up, so enforcing a quota exactly across workers
+   means the control side pushes allowances down (a ring, per "Where a table
+   lives") rather than the packet path writing a shared total. This is the one
+   structure whose cost model is not in the contract, so it needs its own
+   benchmark (live sessions, counter blocks, read from the control plane,
+   under symmetric and asymmetric RSS).
 3. **The transaction wire.** A typed rule is 131 B and a message is capped at
    64 MiB, about 510K rules, so bulk programming is chunked. This layer already
    programs one session per transaction, below the cap by design.
