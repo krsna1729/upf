@@ -58,6 +58,11 @@ UPFD_PID=""
 cleanup() {
   [ -n "$UPFD_PID" ] && kill "$UPFD_PID" 2>/dev/null || true
   [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
+  # Every background job this script started, not only the ones the variables
+  # still point at: a phase whose own start failed leaves an earlier process
+  # running, and an orphan here holds the daemon slot's lock (its fds are
+  # inherited) long after the run.
+  for pid in $(jobs -p); do kill "$pid" 2>/dev/null || true; done
   for _ in 1 2 3 4 5; do
     { [ -z "$UPFD_PID" ] || ! kill -0 "$UPFD_PID" 2>/dev/null; } && \
     { [ -z "$DAEMON_PID" ] || ! kill -0 "$DAEMON_PID" 2>/dev/null; } && break
@@ -182,8 +187,94 @@ if [ "$FAIL" = 0 ]; then
   fi
 fi
 
+# The checkpoint (docs/design.md's restart wall, the other half): the same
+# restart, with -checkpoint. The second controller is given the first one's
+# journal, so it holds the session the SMF established -- the rules stay in the
+# graph and the packets keep crossing, which the swept run above does not have --
+# and it advertises the *same* Recovery Time Stamp, because that stamp moving is
+# how an SMF learns its sessions are gone (TS 29.244 7.4.1). A node that kept
+# the sessions and told the SMF otherwise would have it re-establish them into
+# rules this node still holds, and every establishment would be refused for the
+# key.
 if [ "$FAIL" = 0 ]; then
-  echo "n4-path: ok (PFCP -> session -> packets, both ways)"
+  CP=$WORK/checkpoint
+  CP1=$WORK/upfd-cp1.log
+  CP2=$WORK/upfd-cp2.log
+  # The run above is still serving the port; this phase is its own pair of
+  # processes, so it starts from nothing.
+  kill "$UPFD_PID" 2>/dev/null || true
+  wait "$UPFD_PID" 2>/dev/null || true
+  "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
+    -n3-addr "$N3" -log-level info -checkpoint "$CP" >>"$CP1" 2>&1 &
+  UPFD_PID=$!
+  for _ in $(seq 1 20); do
+    grep -q "n4 listening" "$CP1" 2>/dev/null && break
+    sleep 0.25
+  done
+  if ! grep -q "n4 listening" "$CP1"; then
+    echo "FAIL: the checkpointed run never listened; log follows" >&2
+    cat "$CP1" >&2
+    FAIL=1
+  fi
+  "$WORK/n4bench" -upf "127.0.0.1:$N4_PORT" -mode establish -sessions 1 -workers 1 \
+    -fteid "$FTEID" -ue-pool "$UE/32" -gnb "$GNB" -n3 "$N3" -timeout 5s
+  MARK=$(grep -c "packet dump" "$LOG" || true)
+  sleep 1
+  LIVE=$(grep -c "packet dump" "$LOG" || true)
+  if [ "$LIVE" -gt "$MARK" ]; then
+    echo "ok: the checkpointed run programmed a session the packets cross"
+  else
+    echo "FAIL: no packet crossed while the checkpointed run held the session" >&2
+    FAIL=1
+  fi
+  STAMP1=$(grep "session checkpoint" "$CP1" | grep -o "recovery_time_stamp=[^ ]*" | head -1 | cut -d= -f2)
+
+  kill "$UPFD_PID" 2>/dev/null || true
+  wait "$UPFD_PID" 2>/dev/null || true
+  "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
+    -n3-addr "$N3" -log-level info -checkpoint "$CP" >>"$CP2" 2>&1 &
+  UPFD_PID=$!
+  for _ in $(seq 1 20); do
+    grep -q "n4 listening" "$CP2" 2>/dev/null && break
+    sleep 0.25
+  done
+  if ! grep -q "n4 listening" "$CP2"; then
+    echo "FAIL: the restarted node never listened; log follows" >&2
+    cat "$CP2" >&2
+    FAIL=1
+  fi
+  if grep -q "checkpoint replayed" "$CP2" && grep -q "sessions=1" "$CP2"; then
+    echo "ok: the restart replayed the checkpoint instead of sweeping it"
+  else
+    echo "FAIL: the restart did not replay the checkpoint; log follows" >&2
+    cat "$CP2" >&2
+    FAIL=1
+  fi
+  STAMP2=$(grep "session checkpoint" "$CP2" | grep -o "recovery_time_stamp=[^ ]*" | head -1 | cut -d= -f2)
+  if [ -n "$STAMP1" ] && [ "$STAMP1" = "$STAMP2" ]; then
+    echo "ok: the restarted node advertises the same Recovery Time Stamp ($STAMP1)"
+  else
+    echo "FAIL: the Recovery Time Stamp moved ($STAMP1 -> $STAMP2) while the sessions were kept" >&2
+    FAIL=1
+  fi
+  # And the rules are the replayed ones: the Sources never stopped, and no SMF
+  # message has been sent since the restart, so packets crossing now can only be
+  # the journal's session selecting them.
+  MARK=$(grep -c "packet dump" "$LOG" || true)
+  sleep 2
+  STILL=$(grep -c "packet dump" "$LOG" || true)
+  if [ "$STILL" -gt "$MARK" ]; then
+    echo "ok: the replayed session's rules still select the packets"
+  else
+    echo "FAIL: the replayed session selects nothing" >&2
+    FAIL=1
+  fi
+  kill "$UPFD_PID" 2>/dev/null || true
+  wait "$UPFD_PID" 2>/dev/null || true
+fi
+
+if [ "$FAIL" = 0 ]; then
+  echo "n4-path: ok (PFCP -> session -> packets, both ways, and across a restart)"
   # The work directory is the run's, not a result: a failed run keeps it (the
   # message above says where), a green one leaves nothing behind.
   rm -rf "$WORK"

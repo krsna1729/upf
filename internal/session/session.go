@@ -15,9 +15,10 @@
 //	           advertised are accepted
 //
 // State here is a cache of what the SMF asked for, not a source of truth --
-// and only for as long as the process lives: a restarted controller has no
-// PFCP state (SEIDs, session identity, URR configuration) to rebuild from
-// yet, which is docs/design.md's restart wall.
+// and only for as long as the process lives, unless the run was given a
+// checkpoint (journal.go): the journal holds the applied session messages and
+// the Recovery Time Stamp, so a restart that restores it advertises that stamp
+// and keeps the sessions the SMF believes in (docs/design.md's restart wall).
 package session
 
 import (
@@ -30,6 +31,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/wmnsk/go-pfcp/message"
 
 	"github.com/krsna1729/upf/internal/bess"
 	"github.com/krsna1729/upf/internal/routing"
@@ -248,6 +251,13 @@ type Compiler struct {
 	// (Evaluate says so rather than reporting zero forever).
 	counters CounterReader
 	log      *slog.Logger
+	// journal is the checkpoint this run writes (journal.go), when there is
+	// one. It is set once, before the PFCP socket opens, and never changes: no
+	// session message can be in flight while the caller is still setting it.
+	// restoring is true while a journal is being replayed into this compiler,
+	// which is what keeps a replay from journalling itself.
+	journal   *Journal
+	restoring bool
 
 	mu       sync.Mutex
 	sessions map[uint64]*Session // by local SEID
@@ -557,6 +567,36 @@ func (c *Compiler) AssociationEnded(reason string) {
 		}
 		c.log.Info("session: removed after the association ended",
 			"seid", s.LocalSEID, "reason", reason)
+	}
+	if c.journal != nil {
+		// The sessions the journal describes went with the association: a later
+		// restart must not replay them for a CP function that considers them
+		// void.
+		if err := c.journal.Reset(); err != nil {
+			c.log.Warn("session: could not clear the checkpoint", "reason", reason, "error", err)
+		}
+	}
+}
+
+// Checkpoint gives the session layer its journal (docs/design.md's restart
+// wall). The caller sets it before the PFCP socket opens, so no session message
+// is in flight while the pointer is written, and it never changes after.
+func (c *Compiler) Checkpoint(j *Journal) { c.journal = j }
+
+// checkpoint appends an applied message to the journal, when there is one. The
+// callers answer the SMF after this returns: that ordering is what makes a
+// restart a reapply rather than a guess -- every change the SMF was told about
+// is in the file, and a record that was cut short belongs to a message nobody
+// was answered for, which the SMF retransmits.
+func (c *Compiler) checkpoint(kind string, seid uint64, msg message.Message) {
+	if c.journal == nil || c.restoring {
+		return
+	}
+	if err := c.journal.record(kind, seid, msg); err != nil {
+		// The change is in the dataplane; the journal no longer describes it,
+		// so the next restart advertises a new Recovery Time Stamp and the SMF
+		// re-establishes. There is nothing else to undo here.
+		c.log.Error("session: the checkpoint did not take the change", "kind", kind, "seid", seid, "error", err)
 	}
 }
 

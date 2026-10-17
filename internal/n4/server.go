@@ -116,6 +116,17 @@ type Config struct {
 	ReportTimeout time.Duration
 	ReportRetries int
 
+	// RecoveryTimeStamp is the Recovery Time Stamp (TS 29.244 8.2.53) this UP
+	// function advertises, in wall-clock seconds. Zero means now, which is what
+	// a start that holds no previous sessions must say: the stamp moving is how
+	// an SMF learns its sessions are gone (7.4.1), so it re-establishes them.
+	// A start that *restored* the sessions from a checkpoint passes the stamp
+	// they were created under instead -- nothing was lost, so telling the SMF
+	// that something was would make it re-establish sessions this node is
+	// holding, and every one of those establishments would be refused for a rule
+	// the restored session still owns (session.compile).
+	RecoveryTimeStamp time.Time
+
 	// Logger receives the operational log; nil means slog.Default().
 	Logger *slog.Logger
 }
@@ -199,14 +210,21 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	// The recovery time stamp (TS 29.244 8.2.53) is the start wall clock, in
-	// NTP seconds. It must be larger after a restart than before it, which
-	// this is unless the clock goes backwards.
+	// NTP seconds. It must be larger after a restart than before it, which this
+	// is unless the clock goes backwards -- unless the caller restored its
+	// sessions from a checkpoint, in which case it passes the stamp those
+	// sessions were created under: the sessions did not go, so the SMF must not
+	// be told that they did (Config.RecoveryTimeStamp).
+	stamp := cfg.RecoveryTimeStamp
+	if stamp.IsZero() {
+		stamp = time.Now()
+	}
 	return &Server{
 		cfg:      cfg,
 		log:      cfg.Logger,
 		nodeID:   nodeID(cfg.NodeID),
 		features: ie.NewUPFunctionFeatures(cfg.UPFunctionFeatures[0], cfg.UPFunctionFeatures[1], cfg.UPFunctionFeatures[2], cfg.UPFunctionFeatures[3]),
-		recovery: ie.NewRecoveryTimeStamp(time.Now()),
+		recovery: ie.NewRecoveryTimeStamp(stamp),
 		wake:     make(chan struct{}, 1),
 		done:     make(chan struct{}),
 	}, nil
@@ -499,7 +517,7 @@ func (s *Server) onAssociationSetup(req *message.AssociationSetupRequest, from n
 	// Recovery Time Stamp, and the UP function's features.
 	s.reply(from, message.NewAssociationSetupResponse(req.Sequence(),
 		s.nodeID, ie.NewCause(ie.CauseRequestAccepted), s.recovery, s.features))
-	s.log.Info("n4: association established", "node_id", id, "from", from, "recovery_time_stamp", hasRecovery)
+	s.log.Info("n4: association established", "node_id", id, "from", from, "has_recovery_time_stamp", hasRecovery)
 }
 
 func (s *Server) onAssociationRelease(req *message.AssociationReleaseRequest, from net.Addr) {

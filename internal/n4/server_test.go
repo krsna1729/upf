@@ -589,6 +589,51 @@ func TestCPRestartVoidsAssociation(t *testing.T) {
 	}
 }
 
+func TestTheAssociationAnswerCarriesTheConfiguredRecoveryTimeStamp(t *testing.T) {
+	// A run that restored its sessions from a checkpoint passes the stamp those
+	// sessions were created under. The SMF decides by the stamp whether this
+	// node lost its state (TS 29.244 7.4.1), so a node that kept the sessions
+	// must not tell it that they went: it would re-establish them into rules
+	// this node still holds.
+	stamp := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	_, addr := startServer(t, n4.Config{RecoveryTimeStamp: stamp})
+	conn := connect(t, addr)
+
+	sendMsg(t, conn, message.NewAssociationSetupRequest(1, ie.NewNodeID(smfID, "", ""),
+		ie.NewRecoveryTimeStamp(time.Now())))
+	resp := recvMsg(t, conn, waitFor)
+	if resp.MessageType() != message.MsgTypeAssociationSetupResponse {
+		t.Fatalf("got %s, want an Association Setup Response", resp.MessageTypeName())
+	}
+	setup, ok := resp.(*message.AssociationSetupResponse)
+	if !ok {
+		t.Fatalf("got %T, want an Association Setup Response", resp)
+	}
+	got, err := setup.RecoveryTimeStamp.RecoveryTimeStamp()
+	if err != nil {
+		t.Fatalf("the answer carries no readable Recovery Time Stamp: %v", err)
+	}
+	if !got.Equal(stamp) {
+		t.Errorf("the answer advertises %v, want the configured %v", got.UTC(), stamp)
+	}
+
+	// And with no configured stamp -- a start that holds no previous sessions --
+	// the answer is the start time, which is what tells the SMF to re-establish.
+	_, addr2 := startServer(t, n4.Config{})
+	conn2 := connect(t, addr2)
+	sendMsg(t, conn2, message.NewAssociationSetupRequest(1, ie.NewNodeID(smfID, "", ""),
+		ie.NewRecoveryTimeStamp(time.Now())))
+	resp2 := recvMsg(t, conn2, waitFor)
+	setup2, ok := resp2.(*message.AssociationSetupResponse)
+	if !ok {
+		t.Fatalf("got %T, want an Association Setup Response", resp2)
+	}
+	now, err := setup2.RecoveryTimeStamp.RecoveryTimeStamp()
+	if err != nil || now.IsZero() {
+		t.Fatalf("the default answer carries no readable Recovery Time Stamp (err=%v)", err)
+	}
+}
+
 func TestVersionNotSupported(t *testing.T) {
 	_, addr := startServer(t, n4.Config{})
 	conn := connect(t, addr)

@@ -345,6 +345,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 	}
 	c.mu.Unlock()
 	c.stats.established.Add(1)
+	c.checkpoint(kindEstablish, local, req)
 
 	c.log.Info("session: established", "cp_seid", cpSEID, "seid", local,
 		"ue_ip", s.UEIP.String(), "pdrs", len(s.PDRs), "changes", len(changes))
@@ -425,6 +426,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	c.mu.Unlock()
 
 	c.log.Info("session: modified", "seid", seid, "pdrs", len(s.PDRs), "changes", len(changes))
+	c.checkpoint(kindModify, s.LocalSEID, req)
 	return modifyResponse(req, hdr, ie.CauseRequestAccepted, created)
 }
 
@@ -463,6 +465,7 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 		return deleteResponse(req, hdr, causeOf(err))
 	}
 	c.log.Info("session: deleted", "seid", seid)
+	c.checkpoint(kindDelete, seid, req)
 	return deleteResponse(req, hdr, ie.CauseRequestAccepted)
 }
 

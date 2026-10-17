@@ -132,8 +132,12 @@ build/stage/bin/bessctl apply deploy/upf.yaml
 - N4 reaches the datapath: `ci/n4-path.sh` starts `upfd` against the same graph
   and establishes a session over PFCP (`cmd/n4bench` as the stand-in SMF); the
   packets that then cross are keyed by the SMF's own values — the F-TEID it
-  pinned, the FAR's TEID and gNB address. `ci/bench-n4.sh` measures the same
-  path's envelope.
+  pinned, the FAR's TEID and gNB address. Its restart steps show both halves of
+  the restart wall: a controller started without a checkpoint takes the previous
+  run's records out and the packets stop being selected, and one started with
+  `-checkpoint` replays the sessions the journal holds — same Recovery Time
+  Stamp, so the SMF keeps them — and the packets cross again. `ci/bench-n4.sh`
+  measures the same path's envelope.
 - The node declares FTUP, and only where the session layer runs: a PDI whose
   F-TEID IE carries the CH flag (8.2.3) is given an F-TEID by the compiler and
   reads it back in the Created PDR, and the PDIs of a session that carry one

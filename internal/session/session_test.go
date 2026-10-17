@@ -353,6 +353,43 @@ func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.S
 	)
 }
 
+// TestABuffOnlyFARIsADrop pins what this UPF does with the one Apply Action it
+// reads but cannot honour. There is no downlink buffer (docs/compliance.md, gap
+// 4), so a FAR that asks for BUFF and not FORW takes the drop the uplink's
+// closed gate also takes. The alternative -- falling through to the forward
+// path -- would deliver the packet the SMF asked to hold, which is worse than
+// not buffering it.
+func TestABuffOnlyFARIsADrop(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x5561, "10.45.0.7")
+	// The downlink FAR asks for buffering and nothing else.
+	req.CreateFAR[1] = ie.NewCreateFAR(
+		ie.NewFARID(2),
+		ie.NewApplyAction(applyBuff),
+		ie.NewForwardingParameters(
+			ie.NewDestinationInterface(ie.DstInterfaceAccess),
+			ie.NewOuterHeaderCreation(0x0100, 0x11223344, "10.20.30.2", "", 0, 0, 0),
+		),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	r := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 45, 0, 7})
+	if got := r.gate(); got != dropGate {
+		t.Errorf("a BUFF-only FAR gates %d, want the drop gate %d", got, dropGate)
+	}
+	actions := actionsRes(c.cfg.Down)
+	for _, ch := range rec.last() {
+		if ch.Resource == actions {
+			t.Errorf("a BUFF-only FAR wrote an action record in %s", actions)
+		}
+		if ch.Resource == c.cfg.Down.Tunnels {
+			t.Errorf("a BUFF-only FAR wrote a tunnel record in %s", ch.Resource)
+		}
+	}
+}
+
 func TestADeletionErasesEachSharedRecordOnce(t *testing.T) {
 	// A session's PDRs name the same records: the meter of a QER in each
 	// direction, and one F-TEID when two uplink PDRs carry it. The deletion
