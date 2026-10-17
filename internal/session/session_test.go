@@ -2037,11 +2037,280 @@ func TestModifyRewritesTheWholeSession(t *testing.T) {
 	}
 }
 
+// -- Usage Reporting Rules ----------------------------------------------------
+//
+// The URR IEs (TS 29.244 7.5.2.4 and 8.2.x) this UP reads, and what it refuses:
+// a report is what the SMF bills from, so a URR field that cannot be honoured
+// is a rule failure, never something quietly not measured.
+
 func TestUnknownSessionIsNotFound(t *testing.T) {
 	c := New(testConfig(), &recorder{}, quietLogger())
 	resp := c.Modify(message.NewSessionModificationRequest(0, 0, 999, 1, 0)).(*message.SessionModificationResponse)
 	if got := cause(t, resp); got != ie.CauseSessionContextNotFound {
 		t.Errorf("modifying an unknown session answered cause %d", got)
+	}
+}
+
+// urrEstablishment is a session with one uplink PDR that names a URR, so a test
+// can vary the URR's own IEs.
+func urrEstablishment(cpSEID uint64, urrID uint32, urr *ie.IE) *message.SessionEstablishmentRequest {
+	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+		ie.NewFSEID(cpSEID, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x1000, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+			ie.NewFARID(1), ie.NewURRID(urrID)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		urr,
+	)
+}
+
+// fullURR is the URR a charging SMF sends: both measurements, the triggers this
+// UP implements, a period, and the four limits.
+func fullURR(id uint32) *ie.IE {
+	return ie.NewCreateURR(
+		ie.NewURRID(id),
+		ie.NewMeasurementMethod(0, 1, 1),    // VOLUM and DURAT
+		ie.NewReportingTriggers(0x07, 0x03), // PERIO|VOLTH|TIMTH, VOLQU|TIMQU
+		ie.NewMeasurementPeriod(30*time.Second),
+		ie.NewVolumeThreshold(0x01, 1<<20, 0, 0), // TOVOL
+		ie.NewTimeThreshold(60*time.Second),
+		ie.NewVolumeQuota(0x06, 0, 1<<30, 1<<30), // ULVOL and DLVOL
+		ie.NewTimeQuota(3600*time.Second),
+	)
+}
+
+// sessionOf is the model the compiler holds for a session, for the tests that
+// assert on what was read rather than on what was written to the dataplane.
+func sessionOf(t *testing.T, c *Compiler, seid uint64) *Session {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.sessions[seid]
+	if s == nil {
+		t.Fatalf("the compiler holds no session %d", seid)
+	}
+	return s
+}
+
+func TestAURRIsReadIntoTheSession(t *testing.T) {
+	// Every IE of the URR the milestone covers is read: the measurement method,
+	// the triggers, the period, both thresholds and both quotas, with the
+	// fields each of them named.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3001, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	u := sessionOf(t, c, resp.Header.SEID).URRs[7]
+	if u == nil {
+		t.Fatal("the session holds no URR 7")
+	}
+	if !u.volume || !u.duration {
+		t.Errorf("the measurement method read as volume=%v duration=%v, want both", u.volume, u.duration)
+	}
+	if !u.periodic || !u.onVolumeTh || !u.onTimeTh || !u.onVolQuota || !u.onTimeQuota {
+		t.Errorf("the triggers read as %+v, want PERIO/VOLTH/TIMTH/VOLQU/TIMQU", u)
+	}
+	if u.period != 30*time.Second {
+		t.Errorf("the measurement period read as %v, want 30s", u.period)
+	}
+	if !u.volThreshold.hasTotal || u.volThreshold.total != 1<<20 || u.volThreshold.hasUL || u.volThreshold.hasDL {
+		t.Errorf("the volume threshold read as %+v, want TOVOL 1MiB alone", u.volThreshold)
+	}
+	if !u.hasTimeTh || u.timeThreshold != time.Minute {
+		t.Errorf("the time threshold read as %v (set %v), want 60s", u.timeThreshold, u.hasTimeTh)
+	}
+	if u.volQuota.hasTotal || !u.volQuota.hasUL || u.volQuota.ul != 1<<30 || !u.volQuota.hasDL || u.volQuota.dl != 1<<30 {
+		t.Errorf("the volume quota read as %+v, want ULVOL and DLVOL of 1GiB", u.volQuota)
+	}
+	if !u.hasTimeQuota || u.timeQuota != time.Hour {
+		t.Errorf("the time quota read as %v (set %v), want 1h", u.timeQuota, u.hasTimeQuota)
+	}
+	if u.enforcing {
+		t.Error("a URR that has never been evaluated is enforcing a quota")
+	}
+}
+
+func TestAOneOctetReportingTriggersIsRead(t *testing.T) {
+	// 8.2.19's octets 6 and 7 are "present only if explicitly specified": an SMF
+	// that asks for periodic reporting alone sends one octet. The pinned
+	// library's ReportingTriggers() reads that as a malformed IE -- it wants two
+	// -- so the compiler reads the IE's payload itself (compile.go, parseURR).
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	urr := ie.NewCreateURR(ie.NewURRID(7),
+		ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x01))
+	resp := c.Establish(urrEstablishment(0x3007, 7, urr)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("a one-octet Reporting Triggers answered cause %d", got)
+	}
+	u := sessionOf(t, c, resp.Header.SEID).URRs[7]
+	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
+		t.Errorf("the triggers read as %+v, want PERIO alone", u)
+	}
+}
+
+func TestAURRWithAnUnimplementedFieldIsRefused(t *testing.T) {
+	// Each case is a URR a real SMF could send and this UP cannot honour. A
+	// silently ignored field would leave the SMF waiting for a report (or
+	// reading a measurement) that never comes, so each is a rule failure.
+	cases := []struct {
+		name string
+		urr  *ie.IE
+	}{
+		{"event measurement", ie.NewCreateURR(
+			ie.NewURRID(7), ie.NewMeasurementMethod(1, 0, 0), ie.NewReportingTriggers(0x02, 0x00))},
+		{"QUHTI trigger", ie.NewCreateURR(
+			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02|0x08, 0x00))},
+		{"a spare trigger bit", ie.NewCreateURR(
+			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00, 0x00, 0x80))},
+		{"no trigger at all", ie.NewCreateURR(
+			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x00, 0x00))},
+		{"a period with no periodic trigger", ie.NewCreateURR(
+			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00),
+			ie.NewMeasurementPeriod(30*time.Second))},
+		{"no measurement method", ie.NewCreateURR(
+			ie.NewURRID(7), ie.NewReportingTriggers(0x02, 0x00))},
+		{"a monitoring time", ie.NewCreateURR(
+			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00),
+			ie.NewMonitoringTime(time.Now()))},
+		{"quota holding time", ie.NewCreateURR(
+			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00),
+			ie.NewQuotaHoldingTime(10*time.Second))},
+		{"measurement information", ie.NewCreateURR(
+			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00),
+			ie.NewMeasurementInformation(0x08))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			c := New(testConfig(), rec, quietLogger())
+			resp := c.Establish(urrEstablishment(0x3002, 7, tc.urr)).(*message.SessionEstablishmentResponse)
+			if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+				t.Errorf("a URR with %s answered cause %d, want a rule failure", tc.name, got)
+			}
+			if len(rec.txns) != 0 {
+				t.Error("a refused session wrote to the dataplane")
+			}
+		})
+	}
+}
+
+func TestAPDRNamingAnUnknownURRIsRefused(t *testing.T) {
+	// The PDR's URR ID is an association with a rule of the same session: an id
+	// the session does not hold means the traffic would be counted by nothing
+	// and the report the SMF expects would never arrive.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3003, 9, fullURR(7))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a PDR naming an unprovisioned URR answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
+	// An Update URR carries the fields that change (7.5.4.4): what it names
+	// replaces the value before it, what it leaves out stays. The other half of
+	// the same rule is that a new quota lifts the drop a quota exhaustion put
+	// on the URR's PDRs, which is how an SMF re-opens the traffic.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3004, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	s := sessionOf(t, c, resp.Header.SEID)
+	s.URRs[7].enforcing = true // as the reporter leaves it after a quota exhaustion
+
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewUpdateURR(
+			ie.NewURRID(7),
+			ie.NewReportingTriggers(0x01),        // PERIO alone
+			ie.NewVolumeQuota(0x02, 0, 1<<40, 0), // a new, larger ULVOL
+		),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	u := sessionOf(t, c, resp.Header.SEID).URRs[7]
+	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
+		t.Errorf("the triggers read as %+v, want PERIO alone", u)
+	}
+	if !u.volQuota.hasUL || u.volQuota.ul != 1<<40 || u.volQuota.hasDL {
+		t.Errorf("the volume quota read as %+v, want ULVOL 1TiB alone", u.volQuota)
+	}
+	if !u.hasTimeQuota || u.timeQuota != time.Hour {
+		t.Errorf("the time quota read as %v (set %v), want the 1h of the establishment", u.timeQuota, u.hasTimeQuota)
+	}
+	if !u.volume || !u.duration {
+		t.Errorf("the measurement method read as volume=%v duration=%v, want the establishment's both", u.volume, u.duration)
+	}
+	if u.enforcing {
+		t.Error("a new quota did not lift the quota exhaustion's drop")
+	}
+	if !u.hasTimeTh || u.volThreshold.total != 1<<20 {
+		t.Error("the modification dropped a threshold it did not name")
+	}
+}
+
+func TestRemoveURRNeedsThePDRsToGoFirst(t *testing.T) {
+	// A URR is what measures the traffic of the PDRs that name it: removing it
+	// while they still do leaves them counted by a rule the SMF has taken away.
+	// The order a modification takes is the PDR first (an Update PDR without the
+	// URR ID), then the URR.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3005, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewRemoveURR(ie.NewURRID(7)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("removing a URR a PDR still names answered cause %d, want a rule failure", got)
+	}
+	if s := sessionOf(t, c, resp.Header.SEID); s.URRs[7] == nil {
+		t.Fatal("the refused removal took the URR out of the model")
+	}
+
+	// The Update PDR is the PDR's whole new form: without the URR ID the PDR no
+	// longer measures anything.
+	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x1000, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+			ie.NewFARID(1)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the PDR update answered cause %d", got)
+	}
+	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 4, 0,
+		ie.NewRemoveURR(ie.NewURRID(7)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the removal answered cause %d", got)
+	}
+	if s := sessionOf(t, c, resp.Header.SEID); s.URRs[7] != nil {
+		t.Error("the session still holds the removed URR")
+	}
+}
+
+func TestAnUpdateURRForAMissingURRIsRefused(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(establishment(0x3006, "10.45.0.2")).(*message.SessionEstablishmentResponse)
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewUpdateURR(ie.NewURRID(4), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("an Update URR for a URR the session does not hold answered cause %d, want a rule failure", got)
 	}
 }
 

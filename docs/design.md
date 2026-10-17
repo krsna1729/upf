@@ -254,6 +254,12 @@ Facts about the pinned version, read in its source rather than assumed:
 - `message.Parse` falls back to `Generic` for a message type it does not know,
   so a type a later release adds arrives without an error and is ignored here,
   as TS 29.244 7.2 requires.
+- `IE.ReportingTriggers()` requires **two** octets (`len(Payload) < 2` is an
+  error) while the IE's own octets 6 and 7 are present only when the SMF sets a
+  bit in them (8.2.19): a periodic-only URR is a one-octet IE, and the accessor
+  reads it as malformed. The compiler reads the IE's payload itself
+  (`internal/session/compile.go`, `parseURR`), which is also what lets it name
+  the trigger bit it refuses.
 - The `Message` interface has no `Marshal`: sending means `MarshalLen` plus
   `MarshalTo` into a buffer the caller owns.
 

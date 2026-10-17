@@ -289,6 +289,7 @@ type pdr struct {
 	sdf        *sdfFilter
 	farID      uint32
 	qerIDs     []uint32
+	urrIDs     []uint32
 
 	teid     uint32   // uplink: the TEID we advertised (0 when not ours)
 	actionID uint32   // the action record this PDR's rule names
@@ -321,8 +322,90 @@ type qer struct {
 	meterDL uint32
 }
 
+// volumeLimit is one volume-valued IE of a URR: the Volume Threshold (8.2.13)
+// or the Volume Quota (8.2.50). The three fields are separate limits -- the
+// spec's TOVOL/ULVOL/DLVOL are three flags, not a sum -- and the flags matter
+// because a limit the SMF did not provision must not fire.
+type volumeLimit struct {
+	hasTotal bool
+	total    uint64 // octets
+	hasUL    bool
+	ul       uint64
+	hasDL    bool
+	dl       uint64
+}
+
+// empty reports whether the SMF provisioned no limit at all.
+func (v volumeLimit) empty() bool { return !v.hasTotal && !v.hasUL && !v.hasDL }
+
+// reached reports whether the measured volumes have reached the limit: any
+// field the SMF provisioned is a limit of its own, per 5.2.2.2.1 ("the measured
+// traffic reaches the quota"), and the total is what both directions together
+// came to.
+func (v volumeLimit) reached(ul, dl uint64) bool {
+	return (v.hasTotal && ul+dl >= v.total) ||
+		(v.hasUL && ul >= v.ul) ||
+		(v.hasDL && dl >= v.dl)
+}
+
+// urr is one Usage Reporting Rule as the SMF provisioned it (TS 29.244 8.2.54
+// and the IEs 7.5.2.4 allows): what it measures, when it reports, and the
+// thresholds and quotas that make it report or stop the traffic.
+//
+// Everything here is control-side state, read by the reporting task
+// (docs/design.md, "Usage"): the packet path counts per rule and knows nothing
+// of thresholds. The reporting bookkeeping lives here too, under the compiler's
+// lock -- the session model is the one place that knows a URR's lifetime, and a
+// map of its own would have to chase session deletion, modification and the
+// refusal rollback to stay in step with it.
 type urr struct {
 	id uint32
+
+	// The Measurement Method (8.2.40): VOLUM, DURAT or both. EVENT is refused
+	// when the URR is read (this UP detects no events), so at least one of
+	// these is set.
+	volume   bool
+	duration bool
+
+	// The Reporting Triggers (8.2.19) this UP implements: the ones a report is
+	// generated from. A trigger the SMF sets and this UP does not implement is
+	// refused when the URR is read -- a URR that reports less often than asked
+	// is a session the SMF mis-bills.
+	periodic    bool
+	onVolumeTh  bool
+	onTimeTh    bool
+	onVolQuota  bool
+	onTimeQuota bool
+
+	// period is the Measurement Period (8.2.42) in seconds, with periodic set.
+	period time.Duration
+
+	// The thresholds (8.2.13, 8.2.14) and quotas (8.2.50, 8.2.51). A quota is
+	// what stops the traffic (5.2.2.2.1): when it is reached the PDRs that name
+	// this URR compile to a drop (enforcing).
+	volThreshold  volumeLimit
+	timeThreshold time.Duration
+	hasTimeTh     bool
+	volQuota      volumeLimit
+	timeQuota     time.Duration
+	hasTimeQuota  bool
+
+	// enforcing is set by the reporting task when a quota is exhausted: the
+	// PDRs that name this URR then drop. A modification that provisions a new
+	// quota or threshold clears it, which is how the SMF re-opens the traffic.
+	enforcing bool
+
+	// The reporting task's bookkeeping. reported is where the last report of
+	// this URR ended, so a report carries the usage of the interval it covers
+	// and the next periodic one has a period to measure; seqn is the UR-SEQN
+	// of the next report (5.2.2.3: the first report of a URR is 0); firstSeen
+	// is when the counters last went from nothing to something, which is when
+	// the duration measurement started (5.2.2.2.1, no Inactivity Detection Time
+	// provisioned: the time measurement runs continuously).
+	reported  time.Time
+	seqn      uint32
+	firstSeen time.Time
+	hasSeen   bool
 }
 
 // AssociationEnded implements n4.SessionHandler: no session of the association
