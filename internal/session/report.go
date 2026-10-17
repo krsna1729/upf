@@ -24,6 +24,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -52,6 +53,11 @@ func (u Usage) since(prev Usage) Usage {
 	}
 	return Usage{Packets: u.Packets - prev.Packets, Octets: u.Octets - prev.Octets}
 }
+
+// errNoSession marks a session the compiler does not hold: the SMF deleted it,
+// which a caller that walks every session (EvaluateAll) meets as a race rather
+// than as a failure.
+var errNoSession = errors.New("no such session")
 
 // Trigger is why a report is on its way: the reporting trigger that fired
 // (TS 29.244 8.2.19).
@@ -108,6 +114,91 @@ type Report struct {
 	Enforcing bool
 }
 
+// flags is the Reporting Trigger this report carries (8.2.19), as the two
+// octets the IE holds: the bits are the ones a URR's own request sets, so the
+// SMF reads back the trigger it asked for.
+func (t Trigger) flags() (octet5, octet6 uint8) {
+	switch t {
+	case TriggerPeriod:
+		return trigPeriodic, 0
+	case TriggerVolumeThreshold:
+		return trigVolumeTh, 0
+	case TriggerTimeThreshold:
+		return trigTimeTh, 0
+	case TriggerVolumeQuota:
+		return 0, trigVolQuota
+	case TriggerTimeQuota:
+		return 0, trigTimeQuota
+	}
+	return 0, 0
+}
+
+// IEs is this report as the IEs a Session Report Request carries (7.5.8.2): the
+// Report Type, and the Usage Report with the URR, the UR-SEQN, the trigger and
+// the volume measured. They are built here, in the package that decided the
+// numbers, so the n4 layer sends what it is given and nothing else has to know
+// which bit means which trigger.
+func (r Report) IEs() []*ie.IE {
+	total := r.Up.add(r.Down)
+	octet5, octet6 := r.Trigger.flags()
+	// The IE holds the octets it needs: a quota's trigger is in octet 6, and
+	// leading with an empty octet 5 would be a bit the SMF did not ask for.
+	trigger := []uint8{octet5}
+	if octet5 == 0 {
+		trigger = []uint8{octet6}
+	} else if octet6 != 0 {
+		trigger = append(trigger, octet6)
+	}
+	return []*ie.IE{
+		// A usage report for this URR, not an event report and not a
+		// downlink-data report: what the counters measured (8.2.18).
+		ie.NewReportType(0, 0, 1, 0),
+		ie.NewUsageReportWithinSessionReportRequest(
+			ie.NewURRID(r.URRID),
+			ie.NewURSEQN(r.Seqn),
+			ie.NewUsageReportTrigger(trigger...),
+			// All six counts: the SMF may bill either the total or the
+			// directions, and the UPF knows all of them (8.2.44).
+			ie.NewVolumeMeasurement(0x3f,
+				total.Octets, r.Up.Octets, r.Down.Octets,
+				total.Packets, r.Up.Packets, r.Down.Packets),
+			ie.NewDurationMeasurement(r.Duration),
+		),
+	}
+}
+
+// EvaluateAll is Evaluate for every session the compiler holds, low SEID first,
+// so one tick of a caller that owns the clock (upfd's reporting loop) is one
+// call. A session the SMF deleted while the counters were being read is skipped
+// rather than failed: the usage belongs to a session nobody has.
+func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
+	c.mu.Lock()
+	seids := make([]uint64, 0, len(c.sessions))
+	for seid := range c.sessions {
+		seids = append(seids, seid)
+	}
+	c.mu.Unlock()
+	slices.Sort(seids)
+
+	var out []Report
+	for _, seid := range seids {
+		reports, err := c.Evaluate(ctx, seid, now)
+		if err != nil {
+			if errors.Is(err, errNoSession) {
+				// The SMF deleted it between the list above and this call: the
+				// usage belongs to a session nobody has.
+				continue
+			}
+			// The counters could not be read, or the dataplane refused the
+			// enforcement: the caller's log is where an operator sees it, and
+			// the reports decided before the failure are still owed.
+			c.log.Warn("session: usage evaluation", "seid", seid, "error", err)
+		}
+		out = append(out, reports...)
+	}
+	return out
+}
+
 // Evaluate reads the counters of one session's URRs and decides what is due:
 // each URR whose period has passed or whose threshold or quota is reached gets
 // a Report, and a URR whose quota is used up stops the traffic of its PDRs --
@@ -124,7 +215,7 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 	s := c.sessions[seid]
 	if s == nil {
 		c.mu.Unlock()
-		return nil, fmt.Errorf("no session with local SEID %d", seid)
+		return nil, fmt.Errorf("no session with local SEID %d: %w", seid, errNoSession)
 	}
 	// The rules to read, by the module that counts them: one per PDR a URR
 	// measures. A PDR a used-up quota already stopped has no counter of its

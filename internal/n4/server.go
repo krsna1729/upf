@@ -12,6 +12,7 @@
 package n4
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -51,6 +52,13 @@ const (
 	DefaultHeartbeatEvery   = 10 * time.Second
 	DefaultHeartbeatTimeout = 5 * time.Second
 	DefaultHeartbeatRetries = 3
+
+	// DefaultReportTimeout and DefaultReportRetries bound the Session Report
+	// Request exchange. A local SMF answers in microseconds; two seconds is the
+	// same order as the heartbeat's timeout, and three attempts is what a
+	// lost-datagram retry needs without holding the reporting loop for long.
+	DefaultReportTimeout = 2 * time.Second
+	DefaultReportRetries = 3
 )
 
 // SessionHandler handles the session-level messages of the associated CP
@@ -100,6 +108,14 @@ type Config struct {
 	HeartbeatTimeout time.Duration
 	HeartbeatRetries int
 
+	// ReportTimeout is how long a Session Report Request waits for the CP
+	// function's answer before it is sent again, and ReportRetries is how many
+	// unanswered requests are given up on. Zero values mean the defaults above.
+	// The usage a report carries is what the SMF bills, so an unanswered one is
+	// retried rather than dropped.
+	ReportTimeout time.Duration
+	ReportRetries int
+
 	// Logger receives the operational log; nil means slog.Default().
 	Logger *slog.Logger
 }
@@ -119,6 +135,15 @@ type pending struct {
 	tries  int
 }
 
+// reportWait is a Session Report Request this node sent and has no answer to
+// yet. The UP function initiates that exchange (TS 29.244 7.5.8), so unlike
+// every other message here it is this node's own transaction, and the answer is
+// handed to the Report call that is waiting for it rather than to a handler.
+type reportWait struct {
+	seq uint32
+	got chan uint8 // the Cause the CP function answered with, buffered once
+}
+
 // Server is a PFCP node on the N4 interface.
 type Server struct {
 	cfg      Config
@@ -133,6 +158,13 @@ type Server struct {
 	lastSeen time.Time
 	pending  *pending
 	seq      uint32
+
+	// reportMu serializes the report exchange: one Session Report Request is in
+	// flight at a time, and report is the one being waited for. The usage a
+	// report carries is a decision the session layer makes serially, so a
+	// second concurrent report is not a case to optimize for.
+	reportMu sync.Mutex
+	report   *reportWait
 
 	wake chan struct{}
 	done chan struct{}
@@ -155,6 +187,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.HeartbeatRetries <= 0 {
 		cfg.HeartbeatRetries = DefaultHeartbeatRetries
+	}
+	if cfg.ReportTimeout <= 0 {
+		cfg.ReportTimeout = DefaultReportTimeout
+	}
+	if cfg.ReportRetries <= 0 {
+		cfg.ReportRetries = DefaultReportRetries
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -283,6 +321,8 @@ func (s *Server) handle(b []byte, from net.Addr) {
 		s.onAssociationSetup(msg.(*message.AssociationSetupRequest), from)
 	case message.MsgTypeAssociationReleaseRequest:
 		s.onAssociationRelease(msg.(*message.AssociationReleaseRequest), from)
+	case message.MsgTypeSessionReportResponse:
+		s.onReportResponse(msg.(*message.SessionReportResponse))
 	case message.MsgTypeSessionEstablishmentRequest,
 		message.MsgTypeSessionModificationRequest,
 		message.MsgTypeSessionDeletionRequest:
@@ -310,6 +350,91 @@ func sequenceNumber(b []byte) uint32 {
 	return uint32(b[off])<<16 | uint32(b[off+1])<<8 | uint32(b[off+2])
 }
 
+// Report sends a Session Report Request for one session and waits for the CP
+// function's answer (TS 29.244 7.5.8.2-7.5.8.3): the UP function initiates this
+// exchange, and the answer's Cause is what says the SMF took the report. An
+// unanswered request is sent again ReportRetries times -- the usage it carries
+// is what the SMF bills, so silence is not an outcome to forget quietly.
+//
+// The Cause and the error are different things: a report the SMF *refused* is an
+// answer (it arrived, and the caller decides what to do with the cause), while
+// an error means no answer came at all. Only one report is in flight at a time.
+func (s *Server) Report(ctx context.Context, seid uint64, ies ...*ie.IE) (uint8, error) {
+	if s.conn == nil {
+		return 0, errors.New("n4: the socket is not bound")
+	}
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+
+	s.mu.Lock()
+	if s.peer == nil || s.peer.addr == nil {
+		s.mu.Unlock()
+		// 7.5.8.2: a report exists on an association. Sending one to nobody
+		// would be a report the SMF never hears.
+		return 0, errors.New("n4: no CP function is associated")
+	}
+	to := s.peer.addr
+	seq := s.nextSequence()
+	wait := &reportWait{seq: seq, got: make(chan uint8, 1)}
+	s.report = wait
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.report == wait {
+			s.report = nil
+		}
+		s.mu.Unlock()
+	}()
+
+	req := message.NewSessionReportRequest(0, 0, seid, seq, 0, ies...)
+	for try := 1; ; try++ {
+		s.reply(to, req)
+		select {
+		case cause := <-wait.got:
+			return cause, nil
+		case <-ctx.Done():
+			return 0, fmt.Errorf("n4: session report for SEID %d: %w", seid, ctx.Err())
+		case <-time.After(s.cfg.ReportTimeout):
+			if try >= s.cfg.ReportRetries {
+				return 0, fmt.Errorf("n4: no answer to the session report for SEID %d after %d requests",
+					seid, try)
+			}
+			s.log.Warn("n4: the session report is unanswered; sending it again",
+				"seid", seid, "try", try, "to", to)
+		}
+	}
+}
+
+// onReportResponse hands the CP function's answer to the Report call waiting
+// for it: the sequence number is the transaction, and a response to a report
+// that already timed out is logged and dropped rather than delivered to the
+// next one.
+func (s *Server) onReportResponse(resp *message.SessionReportResponse) {
+	cause := uint8(ie.CauseRequestRejected)
+	if resp.Cause != nil {
+		if v, err := resp.Cause.Cause(); err == nil {
+			cause = v
+		}
+	}
+	s.mu.Lock()
+	wait := s.report
+	s.mu.Unlock()
+	if wait == nil || wait.seq != resp.Sequence() {
+		s.log.Info("n4: a session report response arrived with no report waiting for it",
+			"seq", resp.Sequence(), "cause", causeName(cause))
+		return
+	}
+	select {
+	case wait.got <- cause:
+	default:
+		// The request was answered twice (this node's own retransmission
+		// answered after the first answer arrived): the first one is the
+		// report's outcome.
+	}
+}
+
+// onHeartbeat handles a Heartbeat Request: the CP function's recovery time
+// stamp, and its own liveness.
 func (s *Server) onHeartbeat(req *message.HeartbeatRequest, from net.Addr) {
 	if req.RecoveryTimeStamp != nil {
 		if ts, err := req.RecoveryTimeStamp.RecoveryTimeStamp(); err == nil {

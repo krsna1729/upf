@@ -18,6 +18,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"github.com/wmnsk/go-pfcp/ie"
 
 	"github.com/krsna1729/upf/internal/bess"
 	"github.com/krsna1729/upf/internal/n4"
@@ -64,6 +67,9 @@ func run() error {
 		"the WildcardMatch module whose rules are the F-TEID match")
 	teidGate := flag.Uint("teid-gate", 0,
 		"the gate a TEID rule delivers on: the decap's output gate")
+	urrInterval := flag.Duration("urr-interval", 0,
+		"how often to read every session's usage counters and report what each URR owes "+
+			"over N4 (0: never, so URRs measure and report nothing)")
 	flag.Parse()
 
 	var lvl slog.Level
@@ -135,7 +141,56 @@ func run() error {
 		log.Info("shutting down")
 		srv.Close()
 	}()
+
+	// The usage reporting loop: nothing else calls Evaluate, so without this
+	// run a URR measures and reports nothing at all (TS 29.244 5.2.2.2.1 --
+	// the UP function is what watches the counters, and a quota nobody reads
+	// never stops the traffic). It walks every session on each tick and sends
+	// what each URR owes over N4, one report at a time.
+	if *urrInterval > 0 {
+		compiler, ok := cfg.Sessions.(*session.Compiler)
+		if !ok {
+			return fmt.Errorf("-urr-interval %v needs -bess: without a session layer there is nothing to evaluate", *urrInterval)
+		}
+		go reportLoop(ctx, compiler, srv, *urrInterval, log)
+	}
 	return srv.Serve()
+}
+
+// reportLoop is upfd's usage reporting: on every tick, evaluate each session's
+// URRs and send the reports they owe to the associated SMF. A report that is
+// unanswered after the n4 retries is logged with its usage and dropped -- the
+// session's next window is what carries the traffic on; the alternative (a
+// queue of undelivered reports) is a state machine without a design yet.
+func reportLoop(ctx context.Context, sessions *session.Compiler, srv *n4.Server, every time.Duration, log *slog.Logger) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		for _, report := range sessions.EvaluateAll(ctx, time.Now()) {
+			cause, err := srv.Report(ctx, report.SEID, report.IEs()...)
+			switch {
+			case err != nil:
+				log.Warn("usage report not delivered", "seid", report.SEID, "urr", report.URRID,
+					"trigger", report.Trigger.String(), "octets", report.Up.Octets, "error", err)
+			case cause != ie.CauseRequestAccepted:
+				log.Warn("usage report refused", "seid", report.SEID, "urr", report.URRID,
+					"trigger", report.Trigger.String(), "cause", cause)
+			default:
+				log.Info("usage report acknowledged", "seid", report.SEID, "urr", report.URRID,
+					"seqn", report.Seqn, "trigger", report.Trigger.String(),
+					"packets", report.Up.Packets, "octets", report.Up.Octets,
+					"down_packets", report.Down.Packets, "down_octets", report.Down.Octets)
+			}
+			if report.Enforcing {
+				log.Info("quota spent: the session's traffic is stopped", "seid", report.SEID, "urr", report.URRID)
+			}
+		}
+	}
 }
 
 // graphArgs is the flag set graphConfig turns into a session.Config.
