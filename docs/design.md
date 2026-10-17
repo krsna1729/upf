@@ -283,6 +283,19 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   that found this: a session established right after a deletion was answered
   `73` with "the meter is still retiring (removed less than a grace period
   ago)".
+- A refused modification is not undone: `merge` has already taken the ids and
+  registered the objects the request named, and only a *definite* refusal of an
+  establishment (`compile.go`, the Establish path) or a deletion frees a
+  session's ids. That is the safe direction -- a live session's records may
+  already name them, and the SMF's retry is what reconciles the model with the
+  dataplane -- but it has a bound worth stating: every refused modification that
+  introduces a *new* CHOOSE ID reserves one more TEID for that session, and each
+  such reservation lasts until a transaction settles (which drops a CHOOSE ID no
+  PDR names) or the session ends. A session therefore cannot run the pool dry
+  through refusals alone: what it can do is hold as many TEIDs as it has PDRs
+  with distinct CHOOSE IDs, plus the ones a refused request reserved that no PDR
+  names yet. Releasing those exactly (provenance for what a failed transaction
+  allocated) is the design's own future item, not a property of today's code.
 - `bessd` restarts: every handle goes stale (`StaleResourceError`), the
   controller re-reads `Capabilities`/`Pipeline`/`Resources`, reapplies the
   graph, and re-programs sessions from its own PFCP state; PFCP peers see
