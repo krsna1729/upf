@@ -245,6 +245,14 @@ type Session struct {
 	QERs map[uint32]*qer
 	URRs map[uint32]*urr
 
+	// chids is the F-TEID the session allocated per CHOOSE ID (TS 29.244
+	// 8.2.3): PDIs whose F-TEID IE carries the same CHOOSE ID are one tunnel
+	// endpoint, and the F-TEID is handed to each of them rather than allocated
+	// once per PDI. An entry lives while some PDR of the session names the TEID
+	// it holds (settle drops the rest), so the map never carries a value the
+	// pool has taken back -- which would put two sessions on one TEID rule.
+	chids map[uint8]uint32
+
 	// removed holds the PDRs a modification took out of the model: their
 	// records are still in the dataplane, and the next transaction that
 	// compiles the session erases them (compile), so the SMF is never told a
@@ -601,6 +609,14 @@ func (c *Compiler) settle(s *Session) {
 		}
 		delete(c.byTEID, p.teid)
 		c.teids.release(p.teid)
+	}
+	// A CHID's F-TEID is the session's while a PDR names it: an entry left
+	// holding a released TEID would hand that value to a later PDR with the same
+	// CHOOSE ID, and two sessions would come to share one TEID rule.
+	for chid, teid := range s.chids {
+		if !teidNamed(s, teid) {
+			delete(s.chids, chid)
+		}
 	}
 	s.removed, s.stale = nil, nil
 }

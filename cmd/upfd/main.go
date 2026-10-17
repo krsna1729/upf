@@ -104,6 +104,12 @@ func run() error {
 			return err
 		}
 		cfg.Sessions = session.New(graph, client, log)
+		// The F-TEID allocation lives in the session layer, so the feature is
+		// advertised only in the run that has it: without -bess this node has no
+		// session layer at all and refuses every session request, and an
+		// association answer promising an F-TEID it cannot allocate would be a
+		// claim nothing behind it honours.
+		cfg.UPFunctionFeatures[0] = n4.FTUP
 		log.Info("session layer ready", "bess", *bessAddr, "bess_version", client.Version(),
 			"daemon_epoch", client.Epoch(), "n3", graph.N3Addr.String())
 	} else {

@@ -15,17 +15,43 @@ which is why the version is named.
 
 ## Declared capabilities (TS 29.244 8.2.25)
 
-The Association Setup Response advertises **no optional UP Function Features**:
-`internal/n4`'s four octets are a config and `cmd/upfd` leaves them zero, so the
-answer says "mandatory behaviour only". That is the honest thing to say while
-every optional feature is a milestone of its own, and it is the conservative
-thing to say while the optional behaviour below is only partly exercised.
+The Association Setup Response advertises **one optional UP Function Feature**:
+FTUP, and only in the run that has a session layer (`upfd -bess`), because that
+is where the F-TEID allocation lives. With no session layer this node refuses
+every session request, so an answer promising an F-TEID it could not allocate
+would be a claim with nothing behind it. Everything else the four octets could
+say stays clear: every other optional feature is still a milestone of its own,
+and the answer otherwise declares mandatory behaviour alone.
 
-Two optional behaviours *are* implemented without being declared:
+What the FTUP bit covers (TS 29.244 8.2.3), and what proves it:
+
+| part of the feature | state | evidence |
+|---|---|---|
+| a PDI whose F-TEID IE carries the CH flag (no TEID field) is given an F-TEID | in: the compiler allocates the TEID, reports it in the Created PDR, and writes the TEID rule in front of the decap from it | `internal/session`: TestACHRequestIsAllocatedWhateverItsFamilyFlag, TestACHOOSEForBothFamiliesGetsTheIPv4FTEID; `internal/n4`: TestAConfiguredFeatureIsAdvertised; `ci/session-live.sh` |
+| the PDIs of one PFCP session that carry the same CHOOSE ID share one F-TEID | in: the session keeps one F-TEID per CHOOSE ID and hands it to every PDI that names it | TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID, TestTwoCHOOSEIDsGetTwoFTEIDs, TestACHOOSEIDIsTheSessionsFTEIDForThatGroup, TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI; `ci/session-live.sh`: TestLiveSessionSharesOneFTEIDPerCHOOSEID |
+| a CHOOSE request for an address family this UP has no address for (V6 set, V4 not) | refused with cause 73, deliberately: the Created PDR would otherwise name a family the SMF did not ask for | TestACHOOSEForIPv6IsRefused |
+
+Two design choices 8.2.3 does not settle, recorded here because the section
+leaves them to the implementation:
+
+- **The group is the session's, not the message's.** The section requires the
+  sharing of "the PDRs requested to be created in a PFCP Session Establishment
+  Request or PFCP Session Modification Request with the same CHOOSE ID value",
+  i.e. within one message. This UPF carries the CHOOSE ID for the session's
+  life, so a PDI a later modification creates with an ID the session has
+  already used is given the same F-TEID: that is what makes the ID a handle an
+  SMF can program against across requests, and a group whose value changed per
+  message would be no group at all. An entry is dropped, and its TEID released,
+  as soon as no PDR of the session names it.
+- **Two CHOOSE IDs are two F-TEIDs.** Nothing in the section makes two values
+  one tunnel, and an SMF that used two IDs to ask for two tunnel endpoints
+  would be given one by an implementation that answered every CHOOSE request
+  with its single F-TEID.
+
+One optional behaviour is implemented without being declared:
 
 | bit | implemented where | why the bit is still off |
 |---|---|---|
-| FTUP | the compiler allocates an F-TEID when a PDI's F-TEID IE carries no TEID (the field is absent exactly when the CH flag asks the UPF to choose) and reports it in the Created PDR (`internal/session/compile.go`) | the milestone turns the bit on; until then a conformant SMF simply never asks, and the path is exercised by the live tests instead. **CHID is not read**: PDIs sharing one CHID should share one F-TEID, and today each PDI gets its own, so a CH-using SMF sees several where it expected one |
 | UEIP | the UE IP IE is a rule key and the session's UE address (`internal/session/compile.go`) | the bit covers the CHV4/CHV6 half too -- the SMF asking the **UP** to choose the address -- and this UP does not allocate one: such a request is refused with a rule failure (`TestAUEIPAllocationRequestIsRefused`), so the feature is half there and the bit stays off until allocation exists |
 
 A milestone that implements a feature turns its bit on in `cmd/upfd`; a feature
@@ -36,7 +62,7 @@ whose bit is on with nothing behind it is the kind of claim
 
 | § | capability | state | evidence |
 |---|---|---|---|
-| 7.4.4.1-7.4.4.2 | Association Setup (Node ID, Recovery Time Stamp, UP Function Features); a second CP function refused | in | `internal/n4`: TestAssociationAndHeartbeat, TestSecondCPFunctionIsRejected |
+| 7.4.4.1-7.4.4.2 | Association Setup (Node ID, Recovery Time Stamp, UP Function Features); a second CP function refused | in | `internal/n4`: TestAssociationAndHeartbeat, TestSecondCPFunctionIsRejected, TestAConfiguredFeatureIsAdvertised |
 | 7.4.4.3-7.4.4.6 | Association Update / Release, sessions end with the association | in | TestAssociationReleaseEndsSessions |
 | 7.4.2 | Heartbeat, both directions, timeout ends the association | in | TestHeartbeatInitiatorKeepsAssociationAlive, TestHeartbeatTimeoutEndsAssociation |
 | 7.4.4.1 | CP restart detection (a new Recovery Time Stamp, 8.2.65) voids the association | in | TestCPRestartVoidsAssociation |
@@ -58,6 +84,7 @@ whose bit is on with nothing behind it is the kind of claim
 |---|---|---|---|
 | 7.5.2.2 (Create PDR); 8.2.36 PDR ID, 8.2.11 precedence, 8.2.2 source interface, 8.2.3 F-TEID, 8.2.62 UE IP address, 8.2.5 SDF filter, 8.2.74 FAR ID, 8.2.75 QER ID | PDR and its PDI, correlated with the FAR and QER | in | `internal/session`: TestEstablishCompilesTheSessionIntoOneTransaction |
 | 8.2.5 | SDF filter: source and destination addresses **and prefixes**, protocol, single ports | in: the key is canonical, the mask says which fields the filter constrains, and a prefix's mask is its length | TestRuleKeysAreCanonical, TestAnSDFPrefixIsAPrefixNotAnAddress (and the live arm with it); `ci/session-path.sh` |
+| 8.2.3 | F-TEID: a PDI whose IE asks the UP function to choose one (CH) is given one, and every PDI of the session that carries the same CHOOSE ID (CHID) is given the same one; a request for an IPv6 F-TEID is refused | in: the F-TEID the answer reports in the Created PDR is the TEID the uplink's rule is written from | TestACHRequestIsAllocatedWhateverItsFamilyFlag, TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID, TestTwoCHOOSEIDsGetTwoFTEIDs, TestACHOOSEIDIsTheSessionsFTEIDForThatGroup, TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI, TestACHOOSEForIPv6IsRefused; `ci/session-live.sh`: TestLiveSessionSharesOneFTEIDPerCHOOSEID |
 | — | a port **range** in an SDF filter | refused, deliberately: a rule that cannot express the range must not match more widely than the filter | TestPortRangeIsRefusedNotMatchedTooWidely |
 | 8.2.62 | a UE IP address IE whose CHV4/CHV6 bit asks the UP function to choose an address -- including a dual-stack IE that carries the IPv4 address and asks for the IPv6 one -- an IE that parses as 0.0.0.0, or one present with no address in it | refused, deliberately: the CH bits are the only sign a request was made (the other family's address is present in the dual-stack case), so reading the IE by its addresses compiles the rule from the other direction's address and answers a success the SMF reads as an allocation it would never learn | TestAUEIPAllocationRequestIsRefused |
 | — | a PDI naming an address or prefix that is not IPv4, and an SDF prefix whose address carries host bits | refused with cause 73 (an IPv6 address cannot be masked into four bytes, and widening it would match another session's packets); a sloppy prefix means its network (`10.10.1.5/16` compiles to `10.10.0.0/16`) | TestANonIPv4PDIIsRefusedNotWidened, TestAnSDFPrefixIsAPrefixNotAnAddress |
@@ -114,10 +141,15 @@ Association Setup Response declares no optional feature it cannot honour.
 6. **IPv6** — an explicit refusal, not a silent gap: a PDI naming an IPv6 UE
    address or SDF prefix is answered cause 73, because the classifier's four
    bytes cannot carry it and widening it would match other sessions' packets
-   (TestANonIPv4PDIIsRefusedNotWidened). The dataplane's tables, the two
+   (TestANonIPv4PDIIsRefusedNotWidened), and an F-TEID IE asking for an IPv6
+   address (CH with V6 and no V4) is refused for the same reason
+   (TestACHOOSEForIPv6IsRefused), which is also why the FTUP bit above cannot
+   promise an IPv6 F-TEID. The dataplane's tables, the two
    address fields and the TEID rule key would all need a second form; until
    then refusing is the honest behaviour, and this is what "IPv6 not
    implemented" means here.
-7. **FTUP's CHID** (8.2.3): several PDIs that share a CHID should share one
-   F-TEID. One TEID per CHID per session is a small change; the compiler reads
-   no flags today, so each such PDI gets its own.
+
+(Gap 7 — FTUP's CHID — closed on 2026-10-17: the compiler reads the F-TEID's
+CH and CHID flags, the session keeps one F-TEID per CHOOSE ID, and `upfd`
+advertises FTUP where the session layer runs. See "Declared capabilities"
+above for what proves it.)

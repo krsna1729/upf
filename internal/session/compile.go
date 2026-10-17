@@ -98,6 +98,12 @@ type pdrReq struct {
 	// use (0: ours to choose) and, for the address, usually 0.
 	hasFTEID bool
 	teid     uint32
+	// hasCHID is the F-TEID's CHOOSE ID flag (TS 29.244 8.2.3) with the CH
+	// flag that makes it meaningful: PDIs that carry the same value are one
+	// tunnel endpoint, and the session allocates one F-TEID for all of them.
+	// Zero is a legal CHOOSE ID, so the flag and the value are two fields.
+	hasCHID bool
+	chid    uint8
 }
 
 type farReq struct {
@@ -154,6 +160,7 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 		FARs:      map[uint32]*far{},
 		QERs:      map[uint32]*qer{},
 		URRs:      map[uint32]*urr{},
+		chids:     map[uint8]uint32{},
 	}
 	if err := c.merge(s, pdrs, fars, qers, nil, nil, nil); err != nil {
 		c.log.Warn("session: cannot carry the establishment request",
@@ -391,6 +398,24 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 				// it back when the session is refused, and Establish's write
 				// after the Apply is the no-op it always was.
 				c.byTEID[p.teid] = s
+			} else if p.hasCHID {
+				// The SMF grouped this PDI with the session's others that carry
+				// the same CHOOSE ID (TS 29.244 8.2.3): they are one tunnel
+				// endpoint, so the session allocates one F-TEID for the group
+				// and hands it to each of them, in this request or in a later
+				// one. A pin is not overridden by the group: the pin branch
+				// above is the SMF naming the TEID itself, and the two cannot
+				// agree on one value by accident.
+				teid, ok := s.chids[p.chid]
+				if !ok {
+					id, err := c.teids.alloc()
+					if err != nil {
+						return fmt.Errorf("%w: %v", errNoResources, err)
+					}
+					teid = id
+					s.chids[p.chid] = id
+				}
+				pdr.teid = teid
 			} else if pdr.teid == 0 {
 				// The SMF left the F-TEID to us (TEID 0): allocate one and
 				// report it in the Created PDR. Failing to is not something to
@@ -1045,6 +1070,31 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			}
 			p.hasFTEID = true
 			p.teid = fields.TEID
+			// CHOOSE ID (8.2.3): with the CH flag the PDI asks us to allocate,
+			// and PDIs that carry the same CHOOSE ID are one tunnel endpoint.
+			// Without CH the IE carries a TEID the SMF pinned, so there is no
+			// allocation for a group to share, and the field's own rule ("this
+			// bit may only be set to 1 if the CH bit is set to 1") has it that
+			// such a request is malformed: reading a value the library does not
+			// parse there would be guessing at an octet the spec puts after the
+			// addresses. It is ignored, and the pin is used as it always was.
+			if fields.HasCh() && fields.HasChID() {
+				p.hasCHID = true
+				p.chid = fields.ChooseID
+			}
+			if fields.HasCh() && fields.HasIPv6() && !fields.HasIPv4() {
+				// V6 with no V4 flag is a request for an IPv6 F-TEID (8.2.3:
+				// the UP function "shall assign an F-TEID with an IP4 or an
+				// IPv6 address if the V4 or V6 bit is set respectively"), and
+				// the address this UP advertises on N3 is IPv4: answering with
+				// one would hand the SMF a family it did not ask for. IPv6 is
+				// an explicit refusal everywhere else too (a PDI naming an IPv6
+				// address or prefix is cause 73, docs/compliance.md). V4|V6
+				// names both families -- either will do -- and a CH bit with no
+				// family at all names none (a shape 8.2.3 does not allow and no
+				// SMF sends), so those are answered with the IPv4 F-TEID.
+				return fmt.Errorf("%w: the F-TEID IE asks for an IPv6 address, and this UP's N3 address is IPv4", errNotExpressible)
+			}
 		case ie.UEIPAddress:
 			fields, err := c.UEIPAddress()
 			if err != nil {
