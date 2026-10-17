@@ -34,6 +34,12 @@ ports:
     driver: PMDPort
     arg: {port_id: 1}
     num_rx_queues: 1
+  # The control plane's End Marker socket: no queues of its own beyond one, and
+  # no PMD, so a deployment binds it without a NIC. The path is what upfd's
+  # -end-marker names.
+  - name: cp_marker
+    driver: UnixSocketPort
+    arg: {path: /tmp/upf-end-marker.sock}
 
 modules:
   # The decap declares "upf_teid" and is listed early: attributes are laid out
@@ -51,6 +57,14 @@ modules:
   - name: n6_in
     mclass: PortInc
     arg: {port: n6}
+
+  # The control plane's End Marker path (TS 29.244 5.3.2): upfd writes a whole
+  # frame to this unix socket, and the port delivers it to the N3 output,
+  # bypassing the rules -- a marker names a tunnel that has just been torn down,
+  # so no session's rule can match it.
+  - name: cp_in
+    mclass: PortInc
+    arg: {port: cp_marker}
 
   # -- ingress -----------------------------------------------------------------
   # A G-PDU arrives on N3: the TEID table is the F-TEID match (one rule per
@@ -172,6 +186,9 @@ connections:
   - {upstream: cnt_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: n3_out}
+  # The marker leaves on the same N3 port a downlink packet would, which is
+  # where the peer that must read it is listening.
+  - {upstream: cp_in, downstream: n3_out}
 
 resources:
   # The actions' next hops: the deployment's, not a session's (a session's

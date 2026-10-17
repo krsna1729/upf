@@ -145,6 +145,17 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   reads it back in the Created PDR, and the PDIs of a session that carry one
   CHOOSE ID share it — one TEID rule for the group, and one value in each of
   their Created PDRs.
+- The two GTP-U path messages are in. `gtpu_echo` answers an Echo Request
+  (type 1, TEID 0) with the reply TS 29.281 7.2.2 prescribes — the S flag, the
+  request's sequence number, the mandatory Recovery IE and this node's Recovery
+  Time Stamp — and `ci/smoke-gtpu.sh` checks the reply byte for byte. An End
+  Marker goes the other way: a Session Modification whose SNDEM flag moves a
+  FAR's F-TEID makes `upfd` construct the 60-byte frame itself — the OLD TEID
+  and peer, this UPF's N3 address as the source — and write it to the graph's
+  `unix_port` (`-end-marker`), whose `PortInc` carries it to the N3 output after
+  the switch has landed; `ci/session-path.sh` checks the frame and that the port
+  carried exactly one. Both bits a peer reads are only advertised where they
+  work: FTUP with `-bess`, EMPU with `-end-marker`.
 - Per-rule usage counters are in: `datapath/urr_count.*` counts the packets and
   octets of every rule a URR's PDRs name (the entry in `<module>/counters` is
   what says a rule is measured), and its `get_counts` action is how a controller

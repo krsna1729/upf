@@ -70,7 +70,7 @@ fi
 # again. Run from the repository root so the module and its workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic' -count=1 -v
+  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveSessionSendsTheEndMarkerOnSNDEM' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log, per dump (the helper
 # is shared with ci/n4-path.sh; see its header for why a dump is scoped).
@@ -79,6 +79,7 @@ FAIL=0
 . "$ROOT/ci/dumphex.sh"
 UP_HEX=$(dump_hex dump_u "$LOG")
 DOWN_HEX=$(dump_hex dump_d "$LOG")
+MARKER_HEX=$(dump_hex dump_m "$LOG")
 check() { # check <description> <the dump's hex> <fixed string it must contain>
   if printf '%s\n' "$2" | grep -Fq -- "$3"; then
     echo "ok: $1"
@@ -104,6 +105,26 @@ check "encap used the session's downlink TEID" "$DOWN_HEX" "55 66 77 88"
 # class would send every downlink packet as best effort. The inner packet's own
 # TOS is b8 as well, and the outer comes first.
 check "the outer header carries the inner DSCP" "$DOWN_HEX" "45 b8 00 49 00 00 40 00 40 11"
+
+# The control plane's End Marker: the handover modification (SNDEM) made the
+# UPF construct a 60-byte frame naming the tunnel the session left -- the OLD
+# TEID (0x11223344) toward the old peer (10.20.30.2), from the UPF's N3
+# address (192.0.2.1) -- and write it to the graph's unix_port, whose dump this
+# is. TS 29.281 7.3.2: type 254, length 0, no optional field.
+check "the end marker's IPv4 header is the UPF's N3 address" "$MARKER_HEX" \
+      "00 24 00 00 40 00 40 11 50 b2 c0 00 02 01 0a 14"
+check "the end marker names the tunnel the session left" "$MARKER_HEX" \
+      "1e 02 08 68 08 68 00 10 00 00 30 fe 00 00 11 22"
+# Exactly one: the live test's handover is this run's only SNDEM, and a second
+# marker would be a stream's end a peer reads twice (or a marker the port
+# carried for a tunnel nothing moved).
+MARKERS=$(printf '%s\n' "$MARKER_HEX" | grep -c "1e 02 08 68 08 68 00 10 00 00 30 fe 00 00 11 22" || true)
+if [ "$MARKERS" = 1 ]; then
+  echo "ok: the port carried exactly one end marker"
+else
+  echo "FAIL: the port carried $MARKERS end markers, want 1" >&2
+  FAIL=1
+fi
 
 if [ "$FAIL" = 0 ]; then
   echo "session-path: ok (uplink and downlink both carried the session's packets)"

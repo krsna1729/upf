@@ -393,6 +393,18 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	}
 	removePDRs, removeFARs, removeURRs := parseRemovals(ies)
 
+	// TS 29.244 5.3.2: a modification that carries FAR(s) with a new
+	// downstream F-TEID and the SNDEM flag asks this UPF to construct and send
+	// End Marker packets on the tunnels it is leaving. The old tunnels are
+	// read out of the session before the merge folds the new ones in, and the
+	// markers go out after the transaction lands -- TS 29.281 7.3.2.2: "after
+	// sending the last G-PDU that needs to be sent on a GTP-U tunnel" -- and
+	// before this request is answered.
+	var leaving []far
+	if c.cfg.EndMarker != "" && sndem(modificationFlags(req)) {
+		leaving = s.leavingTunnels(fars)
+	}
+
 	// merge takes the lock itself.
 	if err := c.merge(s, pdrs, fars, qers, urrs, removePDRs, removeFARs, removeURRs); err != nil {
 		c.log.Warn("session: cannot carry the modification request", "seid", seid, "error", err)
@@ -416,6 +428,29 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		return modifyResponse(req, hdr, causeOf(err), nil)
 	}
 	c.settle(s)
+
+	// The switch has landed: the last G-PDU on each old tunnel preceded this
+	// point in the graph's own order, so the marker is what 7.3.2.2 asks for.
+	// A marker that cannot be sent is a warning and a count, never a refusal:
+	// the SMF's modification did take effect, and answering a failure would
+	// make it re-apply a change that is already in force.
+	//
+	// A replayed journal sends none (c.restoring): those handovers happened in
+	// an earlier run, and the TEID they named may since have been handed to
+	// another subscriber -- a marker toward a context that now exists would
+	// tell that peer a stream it is carrying has ended.
+	if !c.restoring {
+		for _, tunnel := range leaving {
+			frame := endMarkerFrame(tunnel.teid, tunnel.peer, c.cfg.N3Addr, c.cfg.N3MAC, c.cfg.PeerMAC)
+			if err := c.sendEndMarker(frame); err != nil {
+				c.stats.markerFailures.Add(1)
+				c.log.Warn("session: an end marker was not sent", "seid", seid, "teid", tunnel.teid,
+					"error", err)
+				continue
+			}
+			c.stats.markers.Add(1)
+		}
+	}
 
 	c.mu.Lock()
 	for _, p := range pdrsInOrder(s) {
@@ -1429,6 +1464,18 @@ func modificationIEs(req *message.SessionModificationRequest) []*ie.IE {
 		req.UpdatePDR, req.UpdateFAR, req.UpdateQER, req.UpdateURR,
 		req.RemovePDR, req.RemoveFAR, req.RemoveQER, req.RemoveURR,
 	)
+}
+
+// modificationFlags is where a Session Modification Request's per-message
+// flags can sit: the message's own PFCPSMReq-Flags IE and the FARs the message
+// carries, whose forwarding parameters may hold one instead (TS 29.244 5.3.2
+// and 8.2.31 both appear in the field).
+func modificationFlags(req *message.SessionModificationRequest) []*ie.IE {
+	ies := make([]*ie.IE, 0, 1+len(req.CreateFAR)+len(req.UpdateFAR))
+	ies = append(ies, req.PFCPSMReqFlags)
+	ies = append(ies, req.CreateFAR...)
+	ies = append(ies, req.UpdateFAR...)
+	return ies
 }
 
 func cpFSEID(ies []*ie.IE) (uint64, error) {

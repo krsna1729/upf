@@ -262,6 +262,23 @@ func TestAConfiguredFeatureIsAdvertised(t *testing.T) {
 	}
 }
 
+func TestTheEndMarkerFeatureIsAdvertisedWhereTheGraphTakesOne(t *testing.T) {
+	// EMPU (5.3.2, 8.2.25) is set only where the graph carries an End Marker
+	// out: cmd/upfd sets it with -end-marker. The library's reader is what
+	// proves the bit position -- the constant is octet 6's first bit, and a
+	// wrong octet would advertise another feature entirely.
+	_, addr := startServer(t, n4.Config{UPFunctionFeatures: [4]uint8{0, n4.EMPU}})
+	conn := connect(t, addr)
+	setup := associate(t, conn, 4)
+
+	if !setup.UPFunctionFeatures.HasEMPU() {
+		t.Error("a node configured with EMPU does not advertise it")
+	}
+	if setup.UPFunctionFeatures.HasPDIU() {
+		t.Error("PDIU, the second bit of the same octet, is advertised too")
+	}
+}
+
 func TestAssociationReleaseEndsSessions(t *testing.T) {
 	h := newRecorder()
 	srv, addr := startServer(t, n4.Config{Sessions: h})

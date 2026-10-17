@@ -95,6 +95,10 @@ func run() error {
 			"session message is journalled to it before the SMF is answered, and a restart "+
 			"replays it before the PFCP socket opens, keeping the sessions and the "+
 			"Recovery Time Stamp the SMF knows; empty: every start is a clean slate")
+	endMarker := flag.String("end-marker", "",
+		"the graph's unix_port socket an End Marker packet is written to when a "+
+			"modification's SNDEM flag moves a tunnel out from under a session "+
+			"(TS 29.244 5.3.2); empty: this UPF constructs none and advertises no EMPU")
 	flag.Parse()
 
 	var lvl slog.Level
@@ -156,6 +160,7 @@ func run() error {
 			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
+			endMarker: *endMarker,
 			actionsUL: *actionsUL, metersUL: *metersUL,
 			actionsDL: *actionsDL, metersDL: *metersDL, tunnels: *tunnels,
 			countersUL: *countersUL, countersDL: *countersDL,
@@ -209,6 +214,12 @@ func run() error {
 		// association answer promising an F-TEID it cannot allocate would be a
 		// claim nothing behind it honours.
 		cfg.UPFunctionFeatures[0] = n4.FTUP
+		if graph.EndMarker != "" {
+			// EMPU (TS 29.244 5.3.2, 8.2.25 octet 6 bit 1): this UPF
+			// constructs End Marker packets, and says so only where the graph
+			// takes them -- the port the flag names is the whole mechanism.
+			cfg.UPFunctionFeatures[1] |= n4.EMPU
+		}
 		ready := []any{"bess", *bessAddr, "bess_version", client.Version(),
 			"daemon_epoch", client.Epoch(), "n3", graph.N3Addr.String()}
 		if graph.Instances != nil {
@@ -513,6 +524,7 @@ type graphArgs struct {
 	countersUL         string
 	countersDL         string
 	tunnels            string
+	endMarker          string
 }
 
 // graphConfig is the deployed graph's shape, from the flags.
@@ -544,6 +556,9 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	graph := session.Config{
 		TEIDTable: a.teidTable,
 		TEIDGate:  a.teidGate,
+		// The socket an End Marker packet is written to, when the deployment
+		// has one (TS 29.244 5.3.2).
+		EndMarker: a.endMarker,
 		// The graph's tables and these spaces are one number: the modules
 		// refuse an id beyond their capacity.
 		MaxActions: a.capacity,

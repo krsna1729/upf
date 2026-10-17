@@ -35,6 +35,7 @@ to race.
 | Session (CP F-SEID, UP F-SEID) | one transaction's worth of resources, all named `<session-id>/…` |
 | Network Instance (N3/N6/N9) | a route domain; overlapping subscriber prefixes never collide because each domain has its own table |
 | Outer Header Creation (TEID, peer address) | the tunnel encap parameters of the treatment |
+| Path management: an Echo Request (TS 29.281 7.2.1) and an End Marker on a FAR that moves (5.3.2's SNDEM, 7.3.2) | the echo is the datapath's -- the TEID table's default gate is the `gtpu_echo` module behind it, so a message no session names is answered or dropped there, not in the packet path; the end marker is the controller's -- `upfd` builds the 60-byte frame (old TEID, old peer, N3 source) and writes it to the graph's `unix_port` after the transaction that switched the tunnel has landed, because a marker is a message this node *sends*, not state a transaction can hold |
 
 The datapath therefore never chases relations: the PFCP side resolves
 `PDR → QER/FAR` once, at programming time, and the packet carries an

@@ -4,8 +4,13 @@
 # as deploy/session-live.yaml (the module names internal/session's Config
 # names) plus what it takes to put packets through it and see them.
 #
-#   uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> sink_n6
+# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> sink_n6
 #   downlink  src_dn -> rewrite_dn -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> enc -> sink_n3
+#
+# A third, idle path is the control plane's own: the unix_port cp_marker (the
+# port `upfd -end-marker` writes to) delivers an End Marker packet
+# (TS 29.244 5.3.2) to a sink, where ci/session-path.sh reads it out of the
+# daemon's log. Nothing of a session's traffic passes through it.
 #
 # Nothing here is a session: the Go controller writes every rule, action,
 # meter, counter, tunnel and TEID rule, and `ci/session-path.sh` proves a session
@@ -32,6 +37,14 @@
 # that declares "upf_teid" is listed first and the reader that makes it real
 # (a write-only attribute no module reads gets no offset) follows it, as in
 # deploy/smoke-gtpu.yaml.
+
+ports:
+  # The control plane's marker port: a unix socket (SOCK_SEQPACKET) that the
+  # controller writes whole End Marker frames to. BESS unlinks the path when it
+  # binds, so a run that died leaves nothing behind for the next one.
+  - name: cp_marker
+    driver: UnixSocketPort
+    arg: {path: /tmp/upf-end-marker.sock}
 
 modules:
   - name: decap0
@@ -127,6 +140,18 @@ modules:
   - name: sink_n3
     mclass: Sink
 
+  # The control plane's End Marker path: the port a controller writes a marker
+  # to, a dump the arm reads it from, and a sink. The port is SOCK_SEQPACKET
+  # (unix_socket.cc), so one write is one packet.
+  - name: cp_in
+    mclass: PortInc
+    arg: {port: cp_marker}
+  - name: dump_m
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_m
+    mclass: Sink
+
 connections:
   - {upstream: src_up, downstream: rewrite_up}
   - {upstream: rewrite_up, downstream: teid}
@@ -149,6 +174,11 @@ connections:
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: dump_d}
   - {upstream: dump_d, downstream: sink_n3}
+
+  # The control plane's markers: the port's packets go straight to the dump,
+  # never through a rule -- an End Marker is not session traffic.
+  - {upstream: cp_in, downstream: dump_m}
+  - {upstream: dump_m, downstream: sink_m}
 
 workers:
   - {wid: 0, core: 0}
