@@ -7,7 +7,7 @@
 # modify, delete) through the Go SDK -- every transaction built from the
 # daemon's own schema.
 #
-#   ci/session-live.sh                    # default stage: the pkg worktree's stage-fast
+#   ci/session-live.sh                    # default stage: the main checkout's installed stage
 #   STAGE=/some/prefix ci/session-live.sh # any installed bess-dev prefix
 #
 # The plugin must be built first (see README.md); the script uses
@@ -18,8 +18,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STAGE=${STAGE:-/home/krsna1729/Projects/bess/.scratch/wt/pkg/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/.scratch/wt/codecs/deps/dpdk-25.11.3/install/lib}
+STAGE=${STAGE:-/home/krsna1729/Projects/bess/build/stage-fast/usr/local}
+DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/deps/dpdk-25.11.3/install/lib}
 PLUG=${PLUG:-$ROOT/datapath/build}
 SERVER=${SERVER:-127.0.0.1:10514}
 GO=${GO:-mise exec -- go}

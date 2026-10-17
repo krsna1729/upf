@@ -5,7 +5,7 @@
 # over the control plane, and show the packets crossing it both ways -- the
 # uplink decapsulated toward N6 and the downlink encapsulated toward N3.
 #
-#   ci/session-path.sh                    # default stage: the pkg worktree's stage-fast
+#   ci/session-path.sh                    # default stage: the main checkout's installed stage
 #   STAGE=/some/prefix ci/session-path.sh # any installed bess-dev prefix
 #
 # Two halves, deliberately: the Go test programs the session and reads the
@@ -24,8 +24,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STAGE=${STAGE:-/home/krsna1729/Projects/bess/.scratch/wt/pkg/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/.scratch/wt/codecs/deps/dpdk-25.11.3/install/lib}
+STAGE=${STAGE:-/home/krsna1729/Projects/bess/build/stage-fast/usr/local}
+DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/deps/dpdk-25.11.3/install/lib}
 PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
 SERVER=${SERVER:-127.0.0.1:10514}
