@@ -32,7 +32,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BESS=${BESS:-$HOME/Projects/bess}
 WT=${WT:-$BESS}                             # the checkout whose build holds live_perf
-BUILD=${BUILD:-$WT/build/bench}             # release with the benchmarks: the daemon and the tool
+BUILD=${BUILD:-$WT/build/fast}              # the daemon and the tools; the benchmarks build moves to build/bench
 DAEMON=${DAEMON:-$BUILD/core/bessd}
 LIVE_PERF=${LIVE_PERF:-$BUILD/tests/perf/live_perf}
 PLUG=${PLUG:-$ROOT/datapath/build}

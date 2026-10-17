@@ -1,6 +1,7 @@
 package n4_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -387,6 +388,146 @@ func TestHeartbeatInitiatorKeepsAssociationAlive(t *testing.T) {
 	}
 	if _, _, ok := srv.Peer(); !ok {
 		t.Fatalf("association lost while heartbeats were answered")
+	}
+}
+
+// TestReportCarriesTheUsageAndTakesTheAnswer is the exchange upfd's reporting
+// loop runs: the UP function initiates it, the CP function's answer is the
+// Cause Report returns, and the usage it carried is what the SMF reads.
+func TestReportCarriesTheUsageAndTakesTheAnswer(t *testing.T) {
+	srv, addr := startServer(t, n4.Config{})
+	conn := connect(t, addr)
+	associate(t, conn, 1)
+
+	got := make(chan *message.SessionReportRequest, 1)
+	go func() {
+		// The SMF's side: receive the report, answer it.
+		req, ok := recvMsg(t, conn, waitFor).(*message.SessionReportRequest)
+		if !ok {
+			t.Errorf("the SMF received no Session Report Request")
+			got <- nil
+			return
+		}
+		got <- req
+		sendMsg(t, conn, message.NewSessionReportResponse(0, 0, req.SEID(), req.Sequence(), 0,
+			ie.NewCause(ie.CauseRequestAccepted)))
+	}()
+
+	cause, err := srv.Report(context.Background(), 0x1122,
+		ie.NewReportType(0, 0, 1, 0),
+		ie.NewUsageReportWithinSessionReportRequest(
+			ie.NewURRID(7),
+			ie.NewURSEQN(0),
+			ie.NewUsageReportTrigger(0x01, 0x01),
+			ie.NewVolumeMeasurement(0x3f, 4096, 4096, 0, 12, 12, 0),
+		),
+	)
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if cause != ie.CauseRequestAccepted {
+		t.Errorf("the report's answer carries cause %d, want accepted", cause)
+	}
+	req := <-got
+	if req == nil {
+		t.Fatal("no report reached the SMF")
+	}
+	if req.SEID() != 0x1122 || req.Sequence() == 0 {
+		t.Errorf("the report names SEID %#x seq %d, want %#x and a sequence number",
+			req.SEID(), req.Sequence(), 0x1122)
+	}
+	if len(req.UsageReport) != 1 {
+		t.Fatalf("the report carries %d usage reports, want one", len(req.UsageReport))
+	}
+	children, err := req.UsageReport[0].UsageReport()
+	if err != nil {
+		t.Fatalf("the usage report's IEs: %v", err)
+	}
+	if len(children) != 4 {
+		t.Errorf("the usage report holds %d IEs, want the URR, the UR-SEQN, the trigger and the volume", len(children))
+	}
+	if id, err := children[0].URRID(); err != nil || id != 7 {
+		t.Errorf("the usage report names URR %d (%v), want 7", id, err)
+	}
+}
+
+// TestAnUnansweredReportIsRetriedAndFails is the other outcome: a report the SMF
+// never answers is sent ReportRetries times and then reported as undelivered --
+// the usage it carried is not silently forgotten.
+func TestAnUnansweredReportIsRetriedAndFails(t *testing.T) {
+	srv, addr := startServer(t, n4.Config{ReportTimeout: 50 * time.Millisecond, ReportRetries: 3})
+	conn := connect(t, addr)
+	associate(t, conn, 1)
+
+	requests := make(chan message.Message, 8)
+	go func() {
+		// A reader of its own: every attempt is a datagram, and the connection
+		// is closed under this goroutine when the test ends.
+		buf := make([]byte, 65539)
+		for {
+			if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				close(requests)
+				return
+			}
+			n, err := conn.Read(buf)
+			if err != nil {
+				close(requests)
+				return
+			}
+			m, err := message.Parse(buf[:n])
+			if err != nil {
+				close(requests)
+				return
+			}
+			requests <- m
+		}
+	}()
+
+	start := time.Now()
+	_, err := srv.Report(context.Background(), 0x1122, ie.NewReportType(0, 0, 1, 0))
+	if err == nil {
+		t.Fatal("a report nobody answered returned no error")
+	}
+	if !strings.Contains(err.Error(), "no answer") {
+		t.Errorf("the error is %q, want it to say the report went unanswered", err)
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Errorf("the report gave up after %v, want at least the two retries it was configured for", elapsed)
+	}
+	// The reader closes the channel when its read deadline passes, so this
+	// drains every attempt that arrived (and waits the deadline once, at most).
+	sent := 0
+	for range requests {
+		sent++
+	}
+	if sent != 3 {
+		t.Errorf("the SMF received %d reports, want the 3 attempts (1 + 2 retries)", sent)
+	}
+}
+
+// TestAReportWithoutAnAssociationIsRefused: a report exists on an association
+// (7.5.8.2), and sending one to nobody would be a report the SMF never hears.
+func TestAReportWithoutAnAssociationIsRefused(t *testing.T) {
+	srv, _ := startServer(t, n4.Config{})
+	if _, err := srv.Report(context.Background(), 0x1122, ie.NewReportType(0, 0, 1, 0)); err == nil {
+		t.Error("a report with no CP function associated returned no error")
+	}
+}
+
+// TestReportResponsesWithNoWaitingReportAreIgnored: a response to a report that
+// already timed out (or a second answer to the same request) is not an outcome
+// for the next report to take.
+func TestReportResponsesWithNoWaitingReportAreIgnored(t *testing.T) {
+	_, addr := startServer(t, n4.Config{})
+	conn := connect(t, addr)
+	associate(t, conn, 1)
+	// Nothing is waiting: the server must take this and stay usable.
+	sendMsg(t, conn, message.NewSessionReportResponse(0, 0, 0x1122, 77, 0, ie.NewCause(ie.CauseRequestAccepted)))
+	// Proven by the association still answering: an ignored message cannot have
+	// taken the server down or wedged it.
+	sendMsg(t, conn, message.NewHeartbeatRequest(9, ie.NewRecoveryTimeStamp(time.Now()), nil))
+	if m, ok := recvMsg(t, conn, waitFor).(*message.HeartbeatResponse); !ok || m.Sequence() != 9 {
+		t.Error("the node stopped answering after a stray report response")
 	}
 }
 

@@ -48,11 +48,21 @@ func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 	if r.entries == nil {
 		r.entries = map[string]bool{}
 	}
+	// A second operation on one (resource, key) in one transaction is what the
+	// engine rejects (the compiler works around it for rules, actions and
+	// counters); the counting modules are where the fake models it, because
+	// their erases are the ones a session's lifetime walks.
+	touched := map[string]bool{}
 	for i, ch := range changes {
 		if !strings.HasSuffix(ch.Resource, "/counters") {
 			continue
 		}
 		key := ch.Resource + "\x00" + fmt.Sprint(ch.Key)
+		if touched[key] {
+			return fmt.Errorf("change %d touches %s twice in one transaction: %w",
+				i, key, errRepeatedOperation)
+		}
+		touched[key] = true
 		if ch.Value == nil {
 			if !r.entries[key] {
 				return fmt.Errorf("change %d erases %s, which is not there: %w",
@@ -70,6 +80,11 @@ func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 // errEraseMissing is what the fake dataplane answers for an erase of a key it
 // does not hold: bess refuses the whole transaction, exactly as this does.
 var errEraseMissing = errors.New("the key is not there to erase")
+
+// errRepeatedOperation is what it answers for two operations on one key in one
+// transaction: the engine refuses that too (the compiler's bookkeeping exists
+// to avoid it).
+var errRepeatedOperation = errors.New("one key touched twice in one transaction")
 
 // RuleCounts answers the rules asked for; a rule the fake does not hold reads
 // zero, which is what a module with no traffic says.
@@ -2600,15 +2615,30 @@ func TestAMeasuredPDRThatDropsKeepsItsCounterEntry(t *testing.T) {
 	}
 
 	// A second modification, and then the deletion: both must reach the
-	// dataplane (each erases the entry once, and the erase finds it).
-	rename := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
-		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
-			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
-	)
-	if got := cause(t, c.Modify(rename)); got != ie.CauseRequestAccepted {
-		t.Fatalf("the second modification answered cause %d", got)
+	// dataplane. It takes a message that carries the PDR itself to reach the
+	// erase at all -- a replaced PDR's old form is what `counterErase` walks --
+	// so the two updates below are the shape that used to break the session:
+	// the first erases the entry the drop branch no longer wrote, and the
+	// second erases a key that is already gone, which the engine refuses (this
+	// fake does too, through errEraseMissing).
+	updatePDR := func(seq uint32) *message.SessionModificationRequest {
+		return message.NewSessionModificationRequest(0, 0, resp.Header.SEID, seq, 0,
+			ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+					ie.NewFTEID(0x01, 0x2000, net.ParseIP("192.0.2.1"), nil, 0),
+					ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+				ie.NewFARID(1), ie.NewQERID(1), ie.NewURRID(7)),
+			ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		)
 	}
-	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 4, 0))); got != ie.CauseRequestAccepted {
+	if got := cause(t, c.Modify(updatePDR(3))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the first update of the dropped PDR answered cause %d", got)
+	}
+	if got := cause(t, c.Modify(updatePDR(4))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the second update of the dropped PDR answered cause %d", got)
+	}
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 5, 0))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
 	if n := len(rec.entries); n != 0 {
@@ -2662,6 +2692,126 @@ func TestEvaluateTakesTheFirstReadingAsItsBaseline(t *testing.T) {
 	}
 	if gate := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2}).gate(); gate != dropGate {
 		t.Errorf("after the quota was spent the rule gates %d, want the drop gate %d", gate, dropGate)
+	}
+}
+
+// TestAReportIsAUsageReportTheSMFCanRead checks the octets, not our structs: a
+// Report is turned into the IEs of a Session Report Request, marshalled, parsed
+// back as an SMF would (message.Parse), and every field the SMF bills from is
+// read out of the parsed message.
+func TestAReportIsAUsageReportTheSMFCanRead(t *testing.T) {
+	report := Report{
+		SEID: 0x1234, CPSEID: 0x99, URRID: 7, Trigger: TriggerVolumeQuota, Seqn: 3,
+		Up:        Usage{Packets: 10, Octets: 1500},
+		Down:      Usage{Packets: 4, Octets: 600},
+		Duration:  2 * time.Second,
+		Enforcing: true,
+	}
+	req := message.NewSessionReportRequest(0, 0, report.SEID, 42, 0, report.IEs()...)
+	b := make([]byte, req.MarshalLen())
+	if err := req.MarshalTo(b); err != nil {
+		t.Fatalf("marshalling the session report: %v", err)
+	}
+	parsed, err := message.Parse(b)
+	if err != nil {
+		t.Fatalf("parsing the session report: %v", err)
+	}
+	out, ok := parsed.(*message.SessionReportRequest)
+	if !ok {
+		t.Fatalf("the report parsed as %s, want a Session Report Request", parsed.MessageTypeName())
+	}
+	if out.SEID() != report.SEID || out.Sequence() != 42 {
+		t.Errorf("the report names SEID %#x seq %d, want %#x and 42", out.SEID(), out.Sequence(), report.SEID)
+	}
+	// The Report Type says "a usage report": the flag the SMF dispatches on.
+	if !out.ReportType.HasUSAR() {
+		t.Errorf("the Report Type does not say USAR: %+v", out.ReportType)
+	}
+	if len(out.UsageReport) != 1 {
+		t.Fatalf("the report carries %d usage reports, want one", len(out.UsageReport))
+	}
+	usage := out.UsageReport[0]
+	children, err := usage.UsageReport()
+	if err != nil {
+		t.Fatalf("the usage report's own IEs: %v", err)
+	}
+	byType := map[uint16]*ie.IE{}
+	for _, child := range children {
+		byType[child.Type] = child
+	}
+	if id, err := byType[ie.URRID].URRID(); err != nil || id != 7 {
+		t.Errorf("the usage report names URR %d (%v), want 7", id, err)
+	}
+	if seqn, err := byType[ie.URSEQN].URSEQN(); err != nil || seqn != 3 {
+		t.Errorf("the usage report carries UR-SEQN %d (%v), want 3", seqn, err)
+	}
+	// The trigger is the bit the SMF asked for (8.2.19, octet 6 bit 1). The
+	// IE's own payload is read, as the compiler reads a URR's triggers: the
+	// library's accessor wants two octets, and a quota's trigger is one.
+	flags := byType[ie.UsageReportTrigger].Payload
+	if len(flags) != 1 || flags[0]&trigVolQuota == 0 {
+		t.Errorf("the usage report's trigger is %#v, want VOLQU in the first octet", flags)
+	}
+	vol, err := byType[ie.VolumeMeasurement].VolumeMeasurement()
+	if err != nil {
+		t.Fatalf("the volume measurement: %v", err)
+	}
+	if !vol.HasTOVOL() || !vol.HasULVOL() || !vol.HasDLVOL() || vol.TotalVolume != 2100 ||
+		vol.UplinkVolume != 1500 || vol.DownlinkVolume != 600 {
+		t.Errorf("the volume measurement is %+v, want 2100 total, 1500 up and 600 down", vol)
+	}
+	if !vol.HasTONOP() || vol.TotalNumberOfPackets != 14 ||
+		vol.UplinkNumberOfPackets != 10 || vol.DownlinkNumberOfPackets != 4 {
+		t.Errorf("the packet counts are %+v, want 14 total, 10 up and 4 down", vol)
+	}
+	if d, err := byType[ie.DurationMeasurement].DurationMeasurement(); err != nil || d != 2*time.Second {
+		t.Errorf("the duration measurement is %v (%v), want 2s", d, err)
+	}
+}
+
+// TestEvaluateAllWalksEverySession is the arm upfd's loop depends on: one call
+// reaps what every session's URRs owe, and a session with no URR (or none whose
+// limit is reached) adds nothing.
+func TestEvaluateAllWalksEverySession(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	withURR := c.Establish(urrEstablishment(0x3050, 7, quotaURR(7, 100))).(*message.SessionEstablishmentResponse)
+	plain := c.Establish(establishment(0x3051, "10.45.0.9")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, withURR); got != ie.CauseRequestAccepted {
+		t.Fatalf("the measured session answered cause %d", got)
+	}
+	if got := cause(t, plain); got != ie.CauseRequestAccepted {
+		t.Fatalf("the plain session answered cause %d", got)
+	}
+	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 9})
+	_ = rule
+
+	// The baseline reading, then the traffic that spends the one URR's quota.
+	if reports := c.EvaluateAll(context.Background(), time.Now()); len(reports) != 0 {
+		t.Fatalf("the baseline tick returned %+v, want none", reports)
+	}
+	var measured *pdr
+	c.mu.Lock()
+	for _, p := range c.findByCP(0x3050).PDRs {
+		measured = p
+	}
+	c.mu.Unlock()
+	rec.counts = map[string][]bess.RuleCount{
+		testConfig().Up.Counters: {{ActionID: measured.actionID, Packets: 5, Octets: 500}},
+	}
+	reports := c.EvaluateAll(context.Background(), time.Now())
+	if len(reports) != 1 {
+		t.Fatalf("the second tick returned %d reports, want the measured session's one", len(reports))
+	}
+	if reports[0].SEID != withURR.Header.SEID || reports[0].URRID != 7 {
+		t.Errorf("the tick reported SEID %d URR %d, want the measured session's %d/7",
+			reports[0].SEID, reports[0].URRID, withURR.Header.SEID)
+	}
+	if reports[0].Trigger != TriggerVolumeQuota || !reports[0].Enforcing {
+		t.Errorf("the tick's report is %v (enforcing %v), want the spent volume quota", reports[0].Trigger, reports[0].Enforcing)
+	}
+	if reports[0].SEID == plain.Header.SEID {
+		t.Error("the session with no URR was reported")
 	}
 }
 
