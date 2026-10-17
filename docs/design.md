@@ -404,11 +404,16 @@ deployment's own numbers" below is about.
 
 The deployment's own numbers, through the whole N4 path (a PFCP message, the
 session compiler, one transaction, the daemon's answer) with one client in
-flight, 64 sessions, `ci/bench-n4.sh` MODE=full: establish 786 µs p50 (1,184/s),
-modify 353 µs p50 (2,595/s), delete 213 µs p50 (4,256/s); p99 1.54 ms, 636 µs
-and 471 µs. That is the rate an SMF sees today, and it is per session in flight,
-not per core: with eight in flight the same run answers 7 of 256 establishments
-within 5 s and the rest minutes later (the daemon logs those as "answer to no
+flight, 64 sessions, `ci/bench-n4.sh` MODE=establish: establish 2.832 ms p50
+(351/s), p95 3.977 ms, p99 4.321 ms, max 7.211 ms, on 2026-10-17 at load average
+1.3 (`cbd9f53`). Earlier runs of the same script on a quieter machine give
+786 µs p50 (1,184/s) and 439 µs (2,274.8/s, the envelope below). Three samples
+of one path, 3.4x apart, which is why every number here carries the load it was
+taken under and none of them is a ceiling.
+
+That is the rate an SMF sees today, and it is per session in flight, not per
+core: with eight in flight the same run answers 7 of 256 establishments within
+5 s and the rest minutes later (the daemon logs those as "answer to no
 request"), so the runway to the transaction numbers above is a client-side
 stall, not the compiler -- the next thing to fix, and the reason the bench's
 default is one worker.
