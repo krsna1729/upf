@@ -55,6 +55,10 @@ func run() error {
 	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
 	actionsDL := flag.String("actions-dl", "at_dl", "the downlink ActionTable module")
 	metersDL := flag.String("meters-dl", "mt_dl", "the downlink Meter module")
+	countersUL := flag.String("counters-ul", "cnt_ul",
+		"the uplink UrrCount module (per-rule usage counters); empty: the graph charges nothing")
+	countersDL := flag.String("counters-dl", "cnt_dl",
+		"the downlink UrrCount module (per-rule usage counters); empty: the graph charges nothing")
 	tunnels := flag.String("tunnels", "enc", "the GtpuEncap module (per-session downlink parameters)")
 	teidTable := flag.String("teid-table", "teid",
 		"the WildcardMatch module whose rules are the F-TEID match")
@@ -99,6 +103,7 @@ func run() error {
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
 			actionsUL: *actionsUL, metersUL: *metersUL,
 			actionsDL: *actionsDL, metersDL: *metersDL, tunnels: *tunnels,
+			countersUL: *countersUL, countersDL: *countersDL,
 		})
 		if err != nil {
 			return err
@@ -147,6 +152,8 @@ type graphArgs struct {
 	metersUL           string
 	actionsDL          string
 	metersDL           string
+	countersUL         string
+	countersDL         string
 	tunnels            string
 }
 
@@ -179,6 +186,7 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			PDRFields: fields,
 			Actions:   a.actionsUL,
 			Meters:    a.metersUL,
+			Counters:  a.countersUL,
 			NextHop:   a.n6NextHop,
 		},
 		Down: session.Direction{
@@ -186,6 +194,7 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			PDRFields: fields,
 			Actions:   a.actionsDL,
 			Meters:    a.metersDL,
+			Counters:  a.countersDL,
 			NextHop:   a.n3NextHop,
 			Tunnels:   a.tunnels,
 		},

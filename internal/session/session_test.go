@@ -198,6 +198,7 @@ func testConfig() Config {
 			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
 			Actions:   "at_ul",
 			Meters:    "mt_ul",
+			Counters:  "cnt_ul",
 			NextHop:   1,
 		},
 		Down: Direction{
@@ -209,8 +210,9 @@ func testConfig() Config {
 			// too, and a chain whose action names no next hop is a chain the
 			// module fails closed on (deploy/session-path.yaml routes it to the
 			// encap through this hop).
-			NextHop: 2,
-			Tunnels: "enc",
+			NextHop:  2,
+			Tunnels:  "enc",
+			Counters: "cnt_dl",
 		},
 		// The F-TEID match, as deploy/smoke-gtpu.yaml wires it: the rule table
 		// in front of the decap, one rule per TEID.
@@ -2080,6 +2082,92 @@ func TestClosingAGateDropsThePacketsOfALivePDR(t *testing.T) {
 		t.Errorf("a closed gate's rule names action %v (%T), want none",
 			r.change.Value["action_id"], r.change.Value["action_id"])
 	}
+}
+
+// counterKeys is the action ids a transaction carries to a direction's counter
+// resource ("cnt_ul/counters"): one per rule a URR measures.
+func counterKeys(changes []bess.Change, resource string) []uint32 {
+	var out []uint32
+	for _, ch := range changes {
+		if ch.Resource != resource || ch.Value == nil {
+			continue
+		}
+		if id, ok := ch.Key["action_id"].(uint32); ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func TestAPDRATURReasuresIsCounted(t *testing.T) {
+	// What makes a rule's traffic measured is one entry in the direction's
+	// counting module, keyed by the same ActionId the rule names. A PDR no URR
+	// names gets none: the counting module then costs that session's packets
+	// one lookup and nothing else (docs/design.md, "Per feature, per packet").
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := urrEstablishment(0x3010, 7, fullURR(7))
+	// The downlink PDR of the usual establishment, so that "the not-measured
+	// direction gets nothing" is answered from one session rather than two.
+	req.CreatePDR = append(req.CreatePDR, establishment(0x3010, "10.45.0.2").CreatePDR[1])
+	req.CreateFAR = append(req.CreateFAR, establishment(0x3010, "10.45.0.2").CreateFAR...)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	changes := rec.last()
+	up := counterKeys(changes, countersRes(testConfig().Up))
+	if len(up) != 1 {
+		t.Fatalf("the uplink PDR's URR wrote %d counter entries, want one", len(up))
+	}
+	actionID := ruleCarrying(t, changes, fieldSrcIP, []byte{10, 45, 0, 2}).actionID()
+	if up[0] != actionID {
+		t.Errorf("the counter entry names action %d, want the rule's %d", up[0], actionID)
+	}
+	if n := len(counterKeys(changes, countersRes(testConfig().Down))); n != 0 {
+		t.Errorf("the downlink PDR, which no URR measures, wrote %d counter entries", n)
+	}
+	assertNoRepeat(t, changes)
+}
+
+func TestAURRWithoutACountingModuleIsRefused(t *testing.T) {
+	// A graph with no counting module in that direction (a deployment that does
+	// not charge, or a flag left empty) cannot measure anything: the session
+	// must be refused with a rule failure rather than compiled with a URR whose
+	// every report would say zero.
+	cfg := testConfig()
+	cfg.Up.Counters = ""
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	if got := cause(t, c.Establish(urrEstablishment(0x3011, 7, fullURR(7)))); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a URR against a graph with no counters answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+func TestAnUpdateThatKeepsTheURRMovesTheCounterOnce(t *testing.T) {
+	// The entry is keyed by the ActionId, which an update keeps: the replaced
+	// form's entry must not be erased while the same transaction writes it, or
+	// the engine rejects the list (the same rule as the PDR's own key).
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3012, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	if n := len(counterKeys(rec.last(), countersRes(testConfig().Up))); n != 1 {
+		t.Errorf("the update wrote %d counter entries, want the one it kept", n)
+	}
+	assertNoRepeat(t, rec.last())
 }
 
 func TestUnknownSessionIsNotFound(t *testing.T) {

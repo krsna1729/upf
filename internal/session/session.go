@@ -116,6 +116,11 @@ type Direction struct {
 	// Tunnels is the GtpuEncap module whose per-session records the direction
 	// writes (downlink only; empty for the uplink).
 	Tunnels string
+	// Counters is the UrrCount module this direction's per-rule counters live
+	// in ("cnt_ul", "cnt_dl"; empty for a graph with no usage reporting). A
+	// session's PDRs that a URR measures get one entry there, keyed by the
+	// ActionId the rule names, and the module counts what the chain forwards.
+	Counters string
 }
 
 // Config is the deployed graph's shape and the constants a session's resources
@@ -577,11 +582,12 @@ func (p *idPool) release(id uint32) {
 }
 
 // resource names, as the deployed graph spells them.
-func rulesRes(d Direction) string   { return d.PDRTable + "/rules" }
-func (c *Compiler) teidRes() string { return c.cfg.TEIDTable + "/rules" }
-func actionsRes(d Direction) string { return d.Actions + "/actions" }
-func metersRes(d Direction) string  { return d.Meters + "/meters" }
-func tunnelsRes(d Direction) string { return d.Tunnels + "/tunnels" }
+func rulesRes(d Direction) string    { return d.PDRTable + "/rules" }
+func (c *Compiler) teidRes() string  { return c.cfg.TEIDTable + "/rules" }
+func actionsRes(d Direction) string  { return d.Actions + "/actions" }
+func metersRes(d Direction) string   { return d.Meters + "/meters" }
+func tunnelsRes(d Direction) string  { return d.Tunnels + "/tunnels" }
+func countersRes(d Direction) string { return d.Counters + "/counters" }
 
 // teidRuleKey is the key of a session's TEID rule: the four bytes of the TEID,
 // masked all ones. One field, so the table's field order is its argument's.
@@ -645,6 +651,9 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		}
 		if p.teid != 0 {
 			add(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
+		}
+		if dir.Counters != "" && len(p.urrIDs) > 0 && p.actionID != 0 {
+			add(bess.Change{Resource: countersRes(dir), Key: map[string]any{"action_id": p.actionID}})
 		}
 	}
 	// Meters belong to QERs, not to PDRs: compile writes one per policed

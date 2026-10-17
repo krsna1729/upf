@@ -70,7 +70,7 @@ fi
 # again. Run from the repository root so the module and its workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*' -count=1 -v
+  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log, per dump (the helper
 # is shared with ci/n4-path.sh; see its header for why a dump is scoped).

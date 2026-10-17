@@ -51,6 +51,50 @@ message GtpuEncapArg {
 // that names it). Neither resource references another, so a session change is
 // one flat transaction.
 
+// UrrCountArg configures the per-rule usage counters (TS 29.244 7.5.2.4: the
+// data half of a URR's measurement).
+message UrrCountArg {
+  // How many rules the counters hold -- the graph's ActionId space, i.e. the
+  // ActionTable's capacity. A rule's counter is two cells (packets and octets)
+  // per worker, so this is also the module's memory: capacity x 2 x 8 bytes x
+  // 64 (kMaxWorkers, whether or not that many workers run: 64 MiB at the
+  // default capacity). 0 means 65536.
+  uint32 capacity = 1;
+}
+
+// CounterKey is the key of the counting module's "<module>/counters" table: the
+// ActionId of the rule whose traffic is measured -- the id the PDR rule
+// returned and the classifier wrote into the packet's `action_id` metadata.
+message CounterKey {
+  // 0 names no rule.
+  uint32 action_id = 1;
+}
+
+// CounterEntry marks one rule's traffic as measured: the entry's existence is
+// the whole test, so the message has no fields. The counts are not here: they
+// are the module's per-worker planes, because a resource value is copied on
+// every publish and the controller rewrites a session's records on every
+// modification -- a number kept in the value would be zeroed by a handover.
+message CounterEntry {}
+
+// UrrCountCommandGetCountsArg selects the rules to read.
+message UrrCountCommandGetCountsArg {
+  // The rules to read, by ActionId. Empty reads every rule the table holds.
+  repeated uint32 action_ids = 1;
+}
+
+// UrrCountCommandGetCountsResponse is one reading of the counters: every
+// worker's plane summed. A reading is exact for each cell -- a worker writes
+// only its own -- not one global instant.
+message UrrCountCommandGetCountsResponse {
+  message RuleCount {
+    uint32 action_id = 1;
+    uint64 packets = 2;
+    uint64 octets = 3;
+  }
+  repeated RuleCount counts = 1;
+}
+
 // TeidKey is the key of the decap module's "<module>/sessions" table: the TEID
 // of an uplink G-PDU (TS 29.281). The controller writes one entry per session,
 // and the decap accepts only TEIDs the table holds -- a G-PDU for a session
