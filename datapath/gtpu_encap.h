@@ -32,8 +32,15 @@
 // A packet whose action id is 0, has no tunnel record, or has no headroom is
 // dropped: a packet that cannot be tunnelled must not leave unencapsulated.
 // The outer IPv4 source address and the UDP ports are the graph's -- arguments
-// of the module, not session state -- while the TEID, the gNB's address and
-// the two Ethernet addresses are the session's.
+// of the module, not session state -- while the TEID, the gNB's address, the
+// two Ethernet addresses and the QFI are the session's.
+//
+// A session whose record names a QFI gets a PDU Session Container after the
+// GTP-U header (TS 29.281 5.2.2.7; the content is TS 38.415's): the E flag
+// set, the 4-octet optional tail that names the extension header, and the
+// container -- 8 bytes the packet pays for only when it has a QFI to carry, so
+// a session without one leaves the wire byte for byte as it was before the
+// field existed.
 class GtpuEncap final : public Module {
  public:
   static const gate_idx_t kNumOGates = 1;
@@ -46,6 +53,7 @@ class GtpuEncap final : public Module {
     uint32_t gnb_ip;  // network order
     bess::utils::Ethernet::Address ether_src;
     bess::utils::Ethernet::Address ether_dst;
+    uint8_t qfi;      // 0: write no PDU Session Container
   };
 
   // "<module>/tunnels": TunnelKey -> TunnelEntry.

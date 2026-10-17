@@ -7,14 +7,17 @@
 #include "upf_datapath.pb.h"
 
 // Strips the outer Ethernet/IPv4/UDP/GTP-U headers (TS 29.281) and leaves the
-// packet framed, writing the TEID it carried to packet metadata.
+// packet framed, writing the TEID it carried, and the QFI of the PDU Session
+// Container when the G-PDU carried one, to packet metadata.
 //
 // The F-TEID match is the graph's, not this module's: the compiler writes one
 // rule per session into the rule table the graph puts in front of this module,
 // keyed by the TEID's own offset in the outer frame, so a G-PDU whose TEID is
 // no session's never reaches here (the table's default gate drops it). The
-// module keeps no session state, and its packet path is a header strip and one
-// metadata write.
+// module keeps no session state, and its packet path is a header strip and two
+// metadata writes: the TEID, and the QFI -- 0 when the G-PDU's extension
+// header chain carried no PDU Session Container, so a downstream match on the
+// attribute never sees the previous packet's QFI.
 //
 // The graph carries Ethernet frames: BESS's core modules (the router's
 // lookup, the classifiers) read IPv4 behind an Ethernet header, so the outer
@@ -43,6 +46,7 @@ class GtpuDecap final : public Module {
  private:
   uint16_t port_ = 0;
   int teid_attr_ = -1;  // the "upf_teid" attribute id
+  int qfi_attr_ = -1;   // the "qfi" attribute id
 };
 
 #endif  // UPF_DATAPATH_GTPU_DECAP_H_

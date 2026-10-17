@@ -35,6 +35,17 @@ enum {
 constexpr size_t kOuterBytes = bess::tunnel::kEthernetBytes + bess::tunnel::kIpv4Bytes +
                                bess::tunnel::kUdpBytes + bess::tunnel::kGtpuBaseBytes;
 
+// The extension header type of a PDU Session Container (TS 29.281 table
+// 5.2.2.7-1).
+constexpr uint8_t kPduSessionContainer = 0x85;
+
+// What a PDU Session Container adds after the GTP-U base header: the 4-octet
+// optional tail -- sequence number, N-PDU number and the next-extension-header
+// type, which the E flag makes present (TS 29.281 5.1) -- and the container
+// itself, one 4-octet unit: its length, the two content octets that hold the
+// PDU type and the QFI, and the next-type octet that ends the chain.
+constexpr size_t kPduSessionBytes = 8;
+
 // 0 means "the argument did not say": one tunnel record per session of a large
 // access network (a few tens of bytes per slot).
 constexpr size_t kDefaultMaxTunnels = 65536;
@@ -131,6 +142,10 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
             }
             tunnel.ether_src = *ether_src;
             tunnel.ether_dst = *ether_dst;
+            if (value.qfi() > 63) {
+              return std::unexpected("invalid 'qfi' field");
+            }
+            tunnel.qfi = static_cast<uint8_t>(value.qfi());
             return std::any(tunnel);
           },
           // Every live tunnel, as its value names it.
@@ -152,6 +167,7 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
               value.set_ether_dst(std::string(
                   reinterpret_cast<const char *>(tunnel->ether_dst.bytes),
                   sizeof(tunnel->ether_dst.bytes)));
+              value.set_qfi(tunnel->qfi);
               visit(key, value);
             }
           }));
@@ -238,7 +254,15 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     const uint8_t inner_tos =
         pkt.head_data<const bess::utils::Ipv4 *>()->type_of_service;
 
-    auto *outer = static_cast<uint8_t *>(pkt.prepend(kOuterBytes));
+    // The session's QoS flow (TS 29.244 8.2.89): 0 means this session's
+    // G-PDUs carry no PDU Session Container, and every byte below is then
+    // exactly what it was before the tunnel record had a QFI. The extra bytes
+    // are sized before the prepend, because the lengths and the headroom are
+    // one decision: the container is part of the G-PDU.
+    const uint8_t qfi = tunnel->qfi;
+    const size_t ext_bytes = qfi == 0 ? 0 : kPduSessionBytes;
+
+    auto *outer = static_cast<uint8_t *>(pkt.prepend(kOuterBytes + ext_bytes));
     if (outer == nullptr) [[unlikely]] {
       continue;  // no headroom for the outer headers
     }
@@ -251,16 +275,47 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     bess::tunnel::WriteIpv4(outer + bess::tunnel::kEthernetBytes, be32_t(src_ip_),
                             be32_t(tunnel->gnb_ip), bess::utils::Ipv4::Proto::kUdp,
                             static_cast<uint16_t>(bess::tunnel::kUdpBytes +
-                                                  bess::tunnel::kGtpuBaseBytes + inner_len),
+                                                  bess::tunnel::kGtpuBaseBytes +
+                                                  ext_bytes + inner_len),
                             /*ttl=*/64, /*tos=*/inner_tos);
     bess::tunnel::WriteUdp(outer + bess::tunnel::kEthernetBytes + bess::tunnel::kIpv4Bytes,
                            src_port, dst_port_,
-                           static_cast<uint16_t>(bess::tunnel::kGtpuBaseBytes + inner_len));
+                           static_cast<uint16_t>(bess::tunnel::kGtpuBaseBytes + ext_bytes +
+                                                 inner_len));
     // UDP checksum 0: legal for IPv4 (RFC 768), and the packet may still be
     // marked for TX offload downstream (core/packet_tx_checksum.h).
-    bess::tunnel::WriteGtpu(outer + bess::tunnel::kEthernetBytes + bess::tunnel::kIpv4Bytes +
-                                bess::tunnel::kUdpBytes,
-                            tunnel->teid, inner_len);
+    uint8_t *gtpu = outer + bess::tunnel::kEthernetBytes + bess::tunnel::kIpv4Bytes +
+                    bess::tunnel::kUdpBytes;
+    // The GTP-U Length field counts everything after the 8 mandatory octets,
+    // the extension headers included (TS 29.281 5.1).
+    bess::tunnel::WriteGtpu(gtpu, tunnel->teid,
+                            static_cast<uint16_t>(ext_bytes + inner_len));
+
+    if (qfi != 0) {
+      // The E flag makes the 4-octet optional tail present, and its last octet
+      // names the first extension header (TS 29.281 5.1). The S flag stays
+      // clear -- nothing in this packet is sequenced -- so the sequence number
+      // and the N-PDU number are written as zero, the value a receiver that
+      // does not interpret them reads.
+      gtpu[0] |= 0x04;
+      gtpu[bess::tunnel::kGtpuBaseBytes] = 0;      // sequence number
+      gtpu[bess::tunnel::kGtpuBaseBytes + 1] = 0;
+      gtpu[bess::tunnel::kGtpuBaseBytes + 2] = 0;  // N-PDU number
+      gtpu[bess::tunnel::kGtpuBaseBytes + 3] = kPduSessionContainer;
+
+      // The container: one 4-octet unit (length 1), the downlink PDU Session
+      // Information content, and no further extension header. The content is
+      // the minimum two octets -- the PDU type in the high nibble of the first
+      // (0 = DL PDU SESSION INFORMATION, TS 38.415 5.5.3.1) with its QMP, SNP
+      // and spare bits clear, and the QFI in the low six bits of the second
+      // (PPP and RQI above it, 5.5.2.1), which is the field the NG-RAN reads
+      // to place the packet on its QoS flow.
+      uint8_t *container = gtpu + bess::tunnel::kGtpuBaseBytes + 4;
+      container[0] = 1;
+      container[1] = 0x00;
+      container[2] = static_cast<uint8_t>(qfi & 0x3f);
+      container[3] = 0;
+    }
 
     ogates[i] = 0;
   }

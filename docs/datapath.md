@@ -205,12 +205,21 @@ table: `pdr_ul`'s match `fields` name the attribute, and a rule's mask is
 ### `gtpu_encap` — the N3 exit
 
 Writes the outer Eth/IPv4/UDP/GTP-U around a downlink packet from the tunnel
-record the packet's ActionId names — `{teid, gnb_ip, ether_src, ether_dst}` —
-copying the inner TOS onto the outer header (the RAN's transport is
+record the packet's ActionId names — `{teid, gnb_ip, ether_src, ether_dst,
+qfi}` — copying the inner TOS onto the outer header (the RAN's transport is
 DSCP-marked; dropping it would send every downlink packet as best effort) and
 recomputing lengths and checksums. One record per downlink rule: the controller
 resolves the FAR once, at programming time, so the packet path does one indexed
 load and chases no control-plane relation.
+
+A record naming a QFI also gets a PDU Session Container after the GTP-U header
+(TS 29.281 5.2.2.7; the content is TS 38.415's): the E flag set, the 4-octet
+optional tail whose last octet names the extension header, and one 4-octet
+unit of container — length 1, the DL PDU session information content (PDU type
+0 in the high nibble of its first octet, the QFI in the low six bits of its
+second), and no further extension header. That is 8 bytes of the packet's
+headroom, sized before the prepend; a record with `qfi == 0` writes none of it,
+so the wire is byte for byte what it was before the field existed.
 
 ### `gtpu_echo` — path management
 
@@ -268,7 +277,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | control_v2, one transaction per session change | `internal/session` writes a session's rules, actions, meters, counters and tunnels together or not at all, with a request id that survives retries |
 | resources and codecs (D-129) | the four tables above: configuration written in a transaction, a codec that validates the key, and a readback the startup sweep uses. The store's `flows` is BESS's to add; until it lands, a transaction naming it is refused, which is why the compiler writes no flow entry yet |
 | module commands | `get_counts` (counters), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
-| metadata attributes | `action_id` (written by `WildcardMatch`, read by counters, the encap and the store), `upf_teid` (written by the decap), `route_domain`/`vif_id` (the `vif` work) |
+| metadata attributes | `action_id` (written by `WildcardMatch`, read by counters, the encap and the store), `upf_teid` (written by the decap), `qfi` (written by the decap, one byte: the uplink PDU Session Container's QoS flow, read by `pdr_ul`'s match fields), `route_domain`/`vif_id` (the `vif` work) |
 | slot tables (`dataplane/slot_table.h`) | every per-rule table: ids are 1..capacity, an erased key retires for a grace period, and publishing into a retiring slot is refused — which is why released ids wait their walk (`docs/design.md`, the id pool) |
 | packet ownership | `bess::PacketRef` and the store's explicit free/release path; our modules copy no packet and allocate none |
 | tasks (`RegisterTask`/`RunTask`) | BESS's store drains released packets from a task; **none of our modules has one** — nothing in our packet path runs between packets |
