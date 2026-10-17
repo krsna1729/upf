@@ -313,8 +313,8 @@ Used as they are; the configuration is ours and is what the compiler assumes.
   The store was the one exception, and BESS `cdeb4e77` removed it: the module
   has one owner task, `release`/`drop`/`clear` are `Command::THREAD_SAFE` and
   enqueue a request into the store's SPSC request ring (the owner applies it on
-  a later task run), and its `flows` table is published as an immutable snapshot
-  the owner reads once per batch, so `requires_paused_workers` is false. So
+  a later task run), and its `flows` table is live -- an upsert or an erase does
+  not stop the datapath -- so `requires_paused_workers` is false. So
   there is nothing to pause around and nothing that answers `EBUSY`:
   `internal/bess` calls `InvokeAction` directly from `ReleaseFlow`/`DropFlow`/
   `ClearStore`, and the `storeCommand` wrapper that used to try, stop the
