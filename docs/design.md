@@ -126,7 +126,7 @@ costs the arms below are expected to confirm:
 | outer header creation (GTP-U) | header write and the tunnel-table lookup: measured +63 cycles/pkt (below); outer UDP checksum 0, so no recompute | — |
 | QER MBR | token-bucket update | 0 |
 | QER gate closed | drop | 0 |
-| URR volume and time | two additions into worker-local counters (relaxed) | 0 |
+| URR volume and time | two additions into worker-local counters (relaxed), plus the rule's stamp pair written once per batch that counted it (shared) | 0 |
 | BAR | a slot write, only on a buffered packet | 0 |
 | ULCL / branching | one route-domain select from the record | 0 |
 
@@ -165,6 +165,10 @@ ports, workers) goes through `ApplyPipeline`.
 - The plugin's own arms (`GtpuDecap`, `GtpuEncap`) run the same tool with
   `--plugin <plugin dir>`, which appends `--modules=` to the daemon command: that is
   the UPF's perf run, not BESS's, because those modules are not in BESS's tree.
+  `M.urr_count.base`/`M.urr_count`/`M.urr_count.empty` are the counting module's
+  three arms -- its control, a counted rule, and the module with no entry (the
+  one-lookup path a graph that charges nothing pays). Their numbers are owed:
+  the arm exists so the stamps' per-batch cost is measured rather than claimed.
 - `ci/bench-modules.sh` is the thin wrapper: it records the stage and plugin build the
   numbers came from and prints each arm against its control.
 
