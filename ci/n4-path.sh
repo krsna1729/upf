@@ -143,6 +143,42 @@ check "the FAR's gNB is the outer destination" "$DOWN_HEX" "0a 14 1e 02"
 check "the downlink PDR matched the UE's address" "$DOWN_HEX" \
       "08 08 08 08 0a 2d 00 02 13 88 00 35"
 
+# The restart wall (docs/design.md): kill the controller and start a second one
+# against the same daemon. The daemon holds the session the first one
+# programmed, and the second knows nothing about it -- it must take it out
+# before its PFCP socket opens, so the packets that crossed during the first
+# controller's life stop being selected.
+if [ "$FAIL" = 0 ]; then
+  kill "$UPFD_PID" 2>/dev/null || true
+  wait "$UPFD_PID" 2>/dev/null || true
+  MARK=$(grep -c "packet dump" "$LOG" || true)
+  : >"$UPFD_LOG"
+  "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
+    -n3-addr "$N3" -log-level info >>"$UPFD_LOG" 2>&1 &
+  UPFD_PID=$!
+  for _ in $(seq 1 20); do
+    grep -q "n4 listening" "$UPFD_LOG" 2>/dev/null && break
+    sleep 0.25
+  done
+  if grep -q "erased an earlier run's session entries before serving" "$UPFD_LOG"; then
+    echo "ok: the restarted controller took the earlier run's session out at startup"
+  else
+    echo "FAIL: the restarted controller did not sweep; upfd's log follows" >&2
+    cat "$UPFD_LOG" >&2
+    FAIL=1
+  fi
+  # And the rules are gone with it: the Sources are still running and the same
+  # G-PDU still arrives, and no rule selects it any more.
+  sleep 2
+  AFTER=$(grep -c "packet dump" "$LOG" || true)
+  if [ "$AFTER" = "$MARK" ]; then
+    echo "ok: the stale session's rules are gone; no packet is selected any more"
+  else
+    echo "FAIL: $((AFTER - MARK)) packets were selected after the sweep" >&2
+    FAIL=1
+  fi
+fi
+
 if [ "$FAIL" = 0 ]; then
   echo "n4-path: ok (PFCP -> session -> packets, both ways)"
   # The work directory is the run's, not a result: a failed run keeps it (the

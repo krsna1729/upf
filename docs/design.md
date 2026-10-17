@@ -308,11 +308,14 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   an occupied id replaces it: a rule that outlives its controller can come to
   name another session's action, and on the downlink another session's tunnel.
   There is no checkpoint and no replay path yet, so a restart is followed by
-  emptying the session tables -- by the operator, or by `upfd` itself in one
-  transaction at startup, which is the small fix worth having -- or by a
+  emptying the session tables -- the controller does it itself, in one
+  transaction and before its PFCP socket opens (`session.Compiler.Sweep`: it
+  reads the session resources back with `bess.Client.Contents`, erases exactly
+  the entries it found, and leaves the graph's own resources alone) -- or by a
   `bessd` restart, and by the SMF re-establishing, which its own path
-  management forces once the Recovery Time Stamp changes. Wall 4 below is that
-  work.
+  management forces once the Recovery Time Stamp changes. What is still
+  missing is the replay path that would keep the sessions across a restart
+  instead of emptying them: Wall 4 below is that work.
 - Either restart must be a *reapply*, never a trust fall: the controller
   verifies by reading back what it wrote (the SDK's readback and
   `ReadBackDiffers`-style comparison exist for this).
@@ -589,8 +592,9 @@ The walls, in order:
    *dataplane's* state (rules, actions, tunnels, counters), not the control
    plane's: a session's SEIDs, its URR configuration and its identity are
    `upfd`'s, in memory. So a restart needs a checkpoint and a replay path --
-   and, until then, an operator procedure that empties the session tables
-   first, because the previous incarnation's records are indistinguishable
+   and, until then, the controller empties the session tables itself at
+   startup (`session.Compiler.Sweep`, one transaction, before the PFCP socket
+   opens), because the previous incarnation's records are indistinguishable
    from this one's.
 5. **Id and priority space.** uint32 throughout (PDR priority, ActionId, meter
    id): a million sessions at four PDRs is 4M rules, which fits.

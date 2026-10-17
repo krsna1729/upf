@@ -141,6 +141,77 @@ func TestLiveSessionProgramsTheDaemon(t *testing.T) {
 	}
 }
 
+// TestLiveStartupSweepErasesStaleSessions is the restart wall (docs/design.md):
+// a controller that comes up against a daemon still holding an earlier run's
+// session takes it out before it serves PFCP, in one transaction. The stale
+// entries are written the way a previous run wrote them -- through the
+// compiler's own transaction -- so the sweep's readback and its erase keys are
+// exercised against the daemon's schema, and the daemon is the one that says
+// whether the erase was valid.
+func TestLiveStartupSweepErasesStaleSessions(t *testing.T) {
+	target := os.Getenv("UPF_BESS_TARGET")
+	if target == "" {
+		t.Skip("set UPF_BESS_TARGET (ci/session-live.sh does) to run against a live bessd")
+	}
+	ctx := context.Background()
+	client, err := bess.Dial(ctx, target)
+	if err != nil {
+		t.Fatalf("dialing %s: %v", target, err)
+	}
+	defer client.Close()
+	if err := client.Refresh(ctx); err != nil {
+		t.Fatalf("reading the daemon's schema: %v", err)
+	}
+	c := client
+
+	// What an earlier controller left behind: a session programmed into the
+	// daemon before the process died.
+	stale := New(liveConfig(), c, quietLogger())
+	resp := stale.Establish(establishment(0x6201, "10.45.0.2")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the stale establishment answered cause %d", got)
+	}
+
+	// The tables the sweep must cover, from the compiler's own list: one it
+	// stops reading is a stale session it cannot take out.
+	before, err := c.Contents(ctx, stale.resources()...)
+	if err != nil {
+		t.Fatalf("reading the tables the stale session wrote: %v", err)
+	}
+	entries := 0
+	for _, e := range before {
+		entries += len(e)
+	}
+	if entries == 0 {
+		t.Fatal("the stale session left nothing behind: the sweep would have nothing to take out")
+	}
+
+	// The restart: a fresh process sweeps before its PFCP socket opens.
+	fresh := New(liveConfig(), c, quietLogger())
+	if err := fresh.Sweep(ctx); err != nil {
+		t.Fatalf("the startup sweep: %v", err)
+	}
+	after, err := c.Contents(ctx, fresh.resources()...)
+	if err != nil {
+		t.Fatalf("reading the tables after the sweep: %v", err)
+	}
+	for _, name := range fresh.resources() {
+		if n := len(after[name]); n != 0 {
+			t.Errorf("%s holds %d entries after the sweep, want none", name, n)
+		}
+	}
+
+	// The sweep takes out sessions, not the deployment: the graph's own next
+	// hops are not a session's resource and survive.
+	hops, err := c.Contents(ctx, "rt/next_hops")
+	if err != nil {
+		t.Fatalf("reading the graph's next hops: %v", err)
+	}
+	if len(hops["rt/next_hops"]) == 0 {
+		t.Error("the sweep erased the graph's own next hops")
+	}
+}
+
 // TestLiveSessionSharesOneFTEIDPerCHOOSEID programs a session whose two uplink
 // PDIs carry one CHOOSE ID (TS 29.244 8.2.3) into a real daemon. The unit test
 // beside it checks what the compiler builds; this one checks that the daemon

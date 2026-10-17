@@ -209,6 +209,10 @@ func (c Config) withDefaults() Config {
 type Compiler struct {
 	cfg Config
 	ap  Applier
+	// contents is the same dataplane as a reader, when it can be read back at
+	// all: a restarted controller sweeps an earlier run's sessions out of it
+	// (sweep.go), and a test's applier may not offer the reading.
+	contents ContentReader
 	// counters is the same dataplane as a counter reader, when it has that
 	// capability: the Applier interface stays what every applier must answer,
 	// and a graph without counting modules is a graph a URR cannot report from
@@ -244,6 +248,9 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	}
 	if reader, ok := ap.(CounterReader); ok {
 		c.counters = reader
+	}
+	if reader, ok := ap.(ContentReader); ok {
+		c.contents = reader
 	}
 	return c
 }

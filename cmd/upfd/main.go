@@ -115,6 +115,16 @@ func run() error {
 			return err
 		}
 		cfg.Sessions = session.New(graph, client, log)
+		// The restart wall (docs/design.md): the daemon may still hold an
+		// earlier controller's sessions, and this process knows none of them --
+		// they would match packets with ids nothing here can name. They go
+		// before the PFCP socket opens, in one transaction. A daemon that
+		// cannot be read back is a warning, not an outage: refusing to serve
+		// PFCP because the sweep could not read would take the node down over
+		// stale entries the SMF is about to replace anyway.
+		if err := cfg.Sessions.(*session.Compiler).Sweep(ctx); err != nil {
+			log.Warn("could not take an earlier run's sessions out of the dataplane", "error", err)
+		}
 		// The F-TEID allocation lives in the session layer, so the feature is
 		// advertised only in the run that has it: without -bess this node has no
 		// session layer at all and refuses every session request, and an
