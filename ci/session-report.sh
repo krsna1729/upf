@@ -77,7 +77,8 @@ fi
 # defaults, and the tick is short enough that a test's quota is spent inside a
 # couple of them.
 "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-  -n3-addr 192.0.2.1 -urr-interval "$TICK" -log-level info >"$UPFD_LOG" 2>&1 &
+  -n3-addr 192.0.2.1 -pdr-fields-ul src,dst,proto,sport,dport,teid \
+  -urr-interval "$TICK" -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do
   grep -q "n4 listening" "$UPFD_LOG" && break

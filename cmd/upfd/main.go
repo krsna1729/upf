@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 
 	"github.com/krsna1729/upf/internal/bess"
 	"github.com/krsna1729/upf/internal/n4"
+	"github.com/krsna1729/upf/internal/routing"
 	"github.com/krsna1729/upf/internal/session"
 )
 
@@ -51,6 +53,18 @@ func run() error {
 	n3NextHop := flag.Uint("n3-next-hop", 2,
 		"the Router next hop a downlink forward leaves by: the encap's gate "+
 			"(a chain with an ActionTable fails closed when its action names none)")
+	instances := flag.String("instances", "",
+		"the deployment's network instances (TS 29.244 8.2.4), ';'-separated, each "+
+			"\"name=<instance>,domain=<route domain>,next-hop=<id>,pool=<prefix>[,...]\"; "+
+			"empty: the one-instance deployment, where no PDI's Network Instance is read")
+	maxDomains := flag.Uint("max-domains", 1,
+		"the graph's Router max_domains: every -instances domain must be below it, "+
+			"and a packet classified in one the router does not have resolves to no table")
+	pdrFieldsUL := flag.String("pdr-fields-ul", "src,dst,proto,sport,dport",
+		"the uplink PDR table's fields, in the graph's order: src, dst, proto, sport, "+
+			"dport, domain (the vif's route_domain), teid (the decap's upf_teid)")
+	pdrFieldsDL := flag.String("pdr-fields-dl", "src,dst,proto,sport,dport",
+		"the downlink PDR table's fields, in the graph's order")
 	pdrTableUL := flag.String("pdr-table-ul", "pdr_ul",
 		"the WildcardMatch module holding the uplink PDR rules")
 	pdrTableDL := flag.String("pdr-table-dl", "pdr_dl",
@@ -107,6 +121,8 @@ func run() error {
 			capacity:  uint32(*capacity),
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			pdrTableUL: *pdrTableUL, pdrTableDL: *pdrTableDL,
+			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
+			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
 			actionsUL: *actionsUL, metersUL: *metersUL,
 			actionsDL: *actionsDL, metersDL: *metersDL, tunnels: *tunnels,
@@ -132,8 +148,12 @@ func run() error {
 		// association answer promising an F-TEID it cannot allocate would be a
 		// claim nothing behind it honours.
 		cfg.UPFunctionFeatures[0] = n4.FTUP
-		log.Info("session layer ready", "bess", *bessAddr, "bess_version", client.Version(),
-			"daemon_epoch", client.Epoch(), "n3", graph.N3Addr.String())
+		ready := []any{"bess", *bessAddr, "bess_version", client.Version(),
+			"daemon_epoch", client.Epoch(), "n3", graph.N3Addr.String()}
+		if graph.Instances != nil {
+			ready = append(ready, "network_instances", strings.Join(graph.Instances.Names(), ","))
+		}
+		log.Info("session layer ready", ready...)
 	} else {
 		log.Warn("no -bess address: session messages are refused (no session layer)")
 	}
@@ -373,8 +393,12 @@ type graphArgs struct {
 	capacity           uint32
 	n6NextHop          uint32
 	n3NextHop          uint32
+	instances          string
+	maxDomains         uint32
 	pdrTableUL         string
 	pdrTableDL         string
+	pdrFieldsUL        string
+	pdrFieldsDL        string
 	teidTable          string
 	teidGate           uint32
 	actionsUL          string
@@ -395,9 +419,23 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	}
 	// Each table matches the inner IPv4 packet: the UE address on the side the
 	// PDI names, and the SDF tuple where a filter constrains it
-	// (docs/design.md, "The key").
-	fields := []session.Field{session.SrcIP, session.DstIP, session.Proto,
-		session.SrcPort, session.DstPort}
+	// (docs/design.md, "The key"). A graph that also classifies by route domain
+	// or by the tunnel the packet arrived on says so in its own field list --
+	// the manifests declare the offsets, and these flags mirror them.
+	upFields, err := parsePDRFields(a.pdrFieldsUL)
+	if err != nil {
+		return session.Config{}, fmt.Errorf("-pdr-fields-ul: %w", err)
+	}
+	downFields, err := parsePDRFields(a.pdrFieldsDL)
+	if err != nil {
+		return session.Config{}, fmt.Errorf("-pdr-fields-dl: %w", err)
+	}
+	var domains *routing.Domains
+	if a.instances != "" {
+		if domains, err = parseInstances(a.instances, a.maxDomains); err != nil {
+			return session.Config{}, fmt.Errorf("-instances: %w", err)
+		}
+	}
 	graph := session.Config{
 		TEIDTable: a.teidTable,
 		TEIDGate:  a.teidGate,
@@ -412,7 +450,7 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		// ActionId is in the resource its table declares.
 		Up: session.Direction{
 			PDRTable:  a.pdrTableUL,
-			PDRFields: fields,
+			PDRFields: upFields,
 			Actions:   a.actionsUL,
 			Meters:    a.metersUL,
 			Counters:  a.countersUL,
@@ -420,14 +458,15 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		},
 		Down: session.Direction{
 			PDRTable:  a.pdrTableDL,
-			PDRFields: fields,
+			PDRFields: downFields,
 			Actions:   a.actionsDL,
 			Meters:    a.metersDL,
 			Counters:  a.countersDL,
 			NextHop:   a.n3NextHop,
 			Tunnels:   a.tunnels,
 		},
-		N3Addr: addr,
+		Instances: domains,
+		N3Addr:    addr,
 	}
 	if graph.N3MAC, err = parseMAC(n3MAC); err != nil {
 		return session.Config{}, fmt.Errorf("-n3-mac: %w", err)

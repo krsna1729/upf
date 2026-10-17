@@ -22,8 +22,12 @@ func liveConfig() Config {
 	cfg.TEIDTable = "teid"
 	cfg.TEIDGate = 0
 	cfg.Up = Direction{
-		PDRTable:  "pdr_ul",
-		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
+		PDRTable: "pdr_ul",
+		// The tunnel is part of the key: deploy/session-path.yaml's uplink
+		// table classifies by `upf_teid` (the decap's own metadata attribute),
+		// which is what tells two network instances' sessions with one UE
+		// address apart.
+		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID},
 		Actions:   "at_ul",
 		Meters:    "mt_ul",
 		Counters:  "cnt_ul",

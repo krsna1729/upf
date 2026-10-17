@@ -1,0 +1,358 @@
+// SPDX-License-Identifier: BSD-3-Clause
+package session
+
+import (
+	"bytes"
+	"encoding/binary"
+	"net"
+	"net/netip"
+	"strings"
+	"testing"
+
+	"github.com/wmnsk/go-pfcp/ie"
+	"github.com/wmnsk/go-pfcp/message"
+
+	"github.com/krsna1729/upf/internal/bess"
+	"github.com/krsna1729/upf/internal/routing"
+)
+
+// twoInstances is the deployment these tests drive: two network instances that
+// serve the same subscriber prefix -- docs/design.md's milestone 4 -- each with
+// its own route domain, its own egress and its own name.
+func twoInstances(t *testing.T) *routing.Domains {
+	t.Helper()
+	d, err := routing.New([]routing.Interface{
+		{Instance: "internet", Domain: 0, NextHop: 1, Pool: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")}},
+		{Instance: "ims", Domain: 1, NextHop: 3, Pool: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")}},
+	}, 4)
+	if err != nil {
+		t.Fatalf("the two-instance deployment was refused: %v", err)
+	}
+	return d
+}
+
+// instancedConfig is testConfig for a graph whose tables classify by route
+// domain (the downlink) and by the tunnel the packet arrived on (the uplink):
+// the shape deploy/session-path.yaml takes when it serves two instances.
+func instancedConfig(t *testing.T) Config {
+	t.Helper()
+	cfg := testConfig()
+	cfg.Instances = twoInstances(t)
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID}
+	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain}
+	return cfg
+}
+
+// instancedEstablishment is establishmentWithFTEID with every PDI naming a
+// network instance (8.2.4), which is what an SMF serving more than one sends.
+func instancedEstablishment(cpSEID uint64, ueIP string, fteid uint32, instance string) *message.SessionEstablishmentRequest {
+	est := establishmentWithFTEID(cpSEID, ueIP, fteid)
+	est.CreatePDR = []*ie.IE{
+		ie.NewCreatePDR(
+			ie.NewPDRID(1),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewNetworkInstance(instance),
+				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+			),
+			ie.NewFARID(1),
+			ie.NewQERID(1),
+		),
+		ie.NewCreatePDR(
+			ie.NewPDRID(2),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewNetworkInstance(instance),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
+			),
+			ie.NewFARID(2),
+		),
+	}
+	return est
+}
+
+// ruleIn returns the rule a transaction wrote into one direction's table.
+func ruleIn(t *testing.T, changes []bess.Change, table string) rule {
+	t.Helper()
+	for _, r := range rules(changes) {
+		if strings.HasPrefix(r.change.Resource, table+"/") {
+			return r
+		}
+	}
+	t.Fatalf("no rule in %s among %d changes", table, len(changes))
+	return rule{}
+}
+
+// nextHop is the Router next hop an action record names.
+func nextHop(t *testing.T, changes []bess.Change, resource string, actionID uint32) uint32 {
+	t.Helper()
+	c := find(t, changes, resource, "id", actionID)
+	hop, ok := c.Value["next_hop_id"].(uint32)
+	if !ok {
+		t.Fatalf("the action in %s names no next hop: %v", resource, c.Value)
+	}
+	return hop
+}
+
+// TestTwoInstancesRouteIndependently is docs/design.md's milestone 4: two
+// subscribers behind the same private prefix, on two network instances. Both
+// sessions are served, and the rule that selects each one is its own -- the
+// domain on the downlink, the tunnel on the uplink -- so one instance's traffic
+// cannot take the other's exit.
+func TestTwoInstancesRouteIndependently(t *testing.T) {
+	cfg := instancedConfig(t)
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	// The same subscriber address, two tunnels, two instances.
+	resp := c.Establish(instancedEstablishment(1, "10.45.0.2", 0x11223344, "internet"))
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the first instance's session answered cause %d", got)
+	}
+	internet := rec.last()
+	if len(rec.txns) != 1 {
+		t.Fatalf("the establishment wrote %d transactions, want one", len(rec.txns))
+	}
+	resp = c.Establish(instancedEstablishment(2, "10.45.0.2", 0x11223345, "ims"))
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the second instance's session for the same address answered cause %d, want accepted: %s",
+			got, "the domain is what tells the two apart")
+	}
+	ims := rec.last()
+	if len(rec.txns) != 2 {
+		t.Fatalf("the second establishment wrote %d transactions in all, want two", len(rec.txns))
+	}
+
+	// The uplink: the tunnel is the session's own identity, and it is in the
+	// key -- without it the two rules would be one key, and the second session
+	// would silently take the first one's rule.
+	ulInternet := ruleIn(t, internet, "pdr_ul")
+	ulIMS := ruleIn(t, ims, "pdr_ul")
+	if got := binary.BigEndian.Uint32(ulInternet.value(5)); got != 0x11223344 {
+		t.Errorf("the uplink key's tunnel field is %#x, want the internet session's 0x11223344", got)
+	}
+	if got := binary.BigEndian.Uint32(ulIMS.value(5)); got != 0x11223345 {
+		t.Errorf("the uplink key's tunnel field is %#x, want the ims session's 0x11223345", got)
+	}
+	if !bytes.Equal(ulInternet.mask(5), []byte{0xff, 0xff, 0xff, 0xff}) {
+		t.Errorf("the uplink key's tunnel mask is %x, want every byte constrained", ulInternet.mask(5))
+	}
+
+	// The downlink: the domain is what separates the same filter in two
+	// instances, and it is what the deployment's interface writes into the
+	// packet that arrives on it.
+	dlInternet := ruleIn(t, internet, "pdr_dl")
+	dlIMS := ruleIn(t, ims, "pdr_dl")
+	if got := binary.BigEndian.Uint32(dlInternet.value(5)); got != 0 {
+		t.Errorf("the downlink key's domain field is %d, want the internet instance's 0", got)
+	}
+	if got := binary.BigEndian.Uint32(dlIMS.value(5)); got != 1 {
+		t.Errorf("the downlink key's domain field is %d, want the ims instance's 1", got)
+	}
+
+	// And the forwards leave by each instance's own egress.
+	if got := nextHop(t, internet, "at_ul/actions", ulInternet.actionID()); got != 1 {
+		t.Errorf("the internet session's uplink forward takes next hop %d, want its instance's 1", got)
+	}
+	if got := nextHop(t, ims, "at_ul/actions", ulIMS.actionID()); got != 3 {
+		t.Errorf("the ims session's uplink forward takes next hop %d, want its instance's 3", got)
+	}
+	// The downlink keeps the access side's hop: a forward toward the UE leaves
+	// through the encap whatever instance the PDI named.
+	if got := nextHop(t, internet, "at_dl/actions", dlInternet.actionID()); got != 2 {
+		t.Errorf("the internet session's downlink forward takes next hop %d, want the access side's 2", got)
+	}
+	if got := nextHop(t, ims, "at_dl/actions", dlIMS.actionID()); got != 2 {
+		t.Errorf("the ims session's downlink forward takes next hop %d, want the access side's 2", got)
+	}
+}
+
+// TestAPDINamingAnUnknownInstanceIsRefused: a name the deployment does not
+// configure is a rule this UPF cannot place. Before the instance was read at
+// all, such a rule was served by the default interface -- indistinguishable
+// from one naming ours (docs/compliance.md's row over 8.2.89/8.2.4).
+func TestAPDINamingAnUnknownInstanceIsRefused(t *testing.T) {
+	rec := &recorder{}
+	c := New(instancedConfig(t), rec, quietLogger())
+	resp := c.Establish(instancedEstablishment(1, "10.45.0.2", 0x11223344, "voip"))
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a PDI naming an unconfigured instance answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+// TestAPDIWithoutAnInstanceTakesTheDefault: the IE is optional (8.2.4), and a
+// rule that names none is a rule this deployment's first interface serves.
+func TestAPDIWithoutAnInstanceTakesTheDefault(t *testing.T) {
+	rec := &recorder{}
+	c := New(instancedConfig(t), rec, quietLogger())
+	resp := c.Establish(instancedEstablishment(1, "10.45.0.2", 0x11223344, ""))
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("a PDI naming no instance answered cause %d, want accepted", got)
+	}
+	changes := rec.last()
+	ul := ruleIn(t, changes, "pdr_ul")
+	dl := ruleIn(t, changes, "pdr_dl")
+	if got := binary.BigEndian.Uint32(dl.value(5)); got != 0 {
+		t.Errorf("the default interface's domain is %d, want the first configured one's (0)", got)
+	}
+	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 1 {
+		t.Errorf("the default interface's uplink forward takes next hop %d, want its own (1)", got)
+	}
+}
+
+// TestAnAddressOutsideTheInstancesPoolIsRefused: the deployment says what each
+// interface serves, and an address elsewhere is a session this UPF places
+// nowhere -- a success there would leave the SMF believing in a path no packet
+// takes.
+func TestAnAddressOutsideTheInstancesPoolIsRefused(t *testing.T) {
+	rec := &recorder{}
+	c := New(instancedConfig(t), rec, quietLogger())
+	resp := c.Establish(instancedEstablishment(1, "10.46.0.2", 0x11223344, "internet"))
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("an address outside the instance's pool answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+// TestTheTunnelFieldNeedsATunnel: a table that classifies by the tunnel cannot
+// key a PDR whose PDI names no F-TEID -- TEID 0 would be claimed by every such
+// session at once.
+func TestTheTunnelFieldNeedsATunnel(t *testing.T) {
+	cfg := instancedConfig(t)
+	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID}
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	// A downlink PDR has no F-TEID: the field has nothing to key.
+	resp := c.Establish(instancedEstablishment(1, "10.45.0.2", 0x11223344, "internet"))
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a PDR with no tunnel in a tunnel-keyed table answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+// withForwardInstance gives an establishment's uplink FAR a Network Instance
+// inside its forwarding parameters (8.2.4): the shape an SMF uses when the
+// traffic leaves by an instance other than the one the PDI selected.
+func withForwardInstance(est *message.SessionEstablishmentRequest, instance string) *message.SessionEstablishmentRequest {
+	// The first Create FAR is the uplink's (its destination is the core side,
+	// as establishmentWithFTEID builds it); the downlink's is left alone.
+	est.CreateFAR[0] = ie.NewCreateFAR(
+		ie.NewFARID(1),
+		ie.NewApplyAction(applyForw),
+		ie.NewForwardingParameters(
+			ie.NewDestinationInterface(ie.DstInterfaceCore),
+			ie.NewNetworkInstance(instance),
+		),
+	)
+	return est
+}
+
+// TestTheForwardsNetworkInstanceChoosesTheEgress: a FAR's Network Instance
+// (8.2.4 inside the forwarding parameters) is where its traffic leaves by, and
+// an SMF may name one the PDI did not -- the uplink rule of an N9 deployment
+// selects a flow in one instance and sends it toward the peer UPF's.
+func TestTheForwardsNetworkInstanceChoosesTheEgress(t *testing.T) {
+	rec := &recorder{}
+	c := New(instancedConfig(t), rec, quietLogger())
+
+	// The PDI's instance is internet (domain 0), the forward's is ims (next hop
+	// 3): the rule is classified where the flow came from and leaves where the
+	// FAR says.
+	resp := c.Establish(withForwardInstance(
+		instancedEstablishment(1, "10.45.0.2", 0x11223344, "internet"), "ims"))
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("a FAR naming a configured instance answered cause %d, want accepted", got)
+	}
+	changes := rec.last()
+	ul := ruleIn(t, changes, "pdr_ul")
+	if got := binary.BigEndian.Uint32(ul.value(5)); got != 0x11223344 {
+		t.Errorf("the rule's tunnel field is %#x, want the session's own TEID", got)
+	}
+	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 3 {
+		t.Errorf("the forward takes next hop %d, want the FAR's instance's 3", got)
+	}
+
+	// And a name the deployment does not serve is refused, like the PDI's.
+	rec2 := &recorder{}
+	c2 := New(instancedConfig(t), rec2, quietLogger())
+	resp = c2.Establish(withForwardInstance(
+		instancedEstablishment(2, "10.45.0.3", 0x11223346, "internet"), "voip"))
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a FAR naming an unconfigured instance answered cause %d, want a rule failure", got)
+	}
+	if len(rec2.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+// TestAOneInstanceDeploymentIsUnchanged: with no -instances the compiler reads
+// no Network Instance, every rule is domain 0, and each direction keeps the
+// next hop the deployment's flags gave it -- the tables that existed before the
+// domains did keep working.
+func TestAOneInstanceDeploymentIsUnchanged(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(establishmentWithFTEID(1, "10.45.0.2", 0x11223344))
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the one-instance deployment answered cause %d, want accepted", got)
+	}
+	changes := rec.last()
+	ul := ruleIn(t, changes, "pdr_ul")
+	dl := ruleIn(t, changes, "pdr_dl")
+	if len(ul.values) != 5 || len(dl.values) != 5 {
+		t.Errorf("the rules carry %d and %d fields, want the table's own five", len(ul.values), len(dl.values))
+	}
+	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 1 {
+		t.Errorf("the uplink forward takes next hop %d, want -n6-next-hop's 1", got)
+	}
+	if got := nextHop(t, changes, "at_dl/actions", dl.actionID()); got != 2 {
+		t.Errorf("the downlink forward takes next hop %d, want -n3-next-hop's 2", got)
+	}
+}
+
+// TestAnUpdateThatRenamesTheInstanceMovesTheRule: the domain is part of the
+// rule's key, so a modification that puts a PDR in another instance erases the
+// rule it left behind rather than leaving packets selected by both.
+func TestAnUpdateThatRenamesTheInstanceMovesTheRule(t *testing.T) {
+	rec := &recorder{}
+	c := New(instancedConfig(t), rec, quietLogger())
+	if got := cause(t, c.Establish(instancedEstablishment(1, "10.45.0.2", 0x11223344, "internet"))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	moved := instancedEstablishment(1, "10.45.0.2", 0x11223344, "ims")
+	req := message.NewSessionModificationRequest(0, 0, 1, 2, 0,
+		ie.NewFSEID(1, nil, nil),
+		moved.CreatePDR[1], // the downlink PDR, in the other instance now
+	)
+	resp := c.Modify(req)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the update answered cause %d", got)
+	}
+	changes := rec.last()
+	var erased, written bool
+	for _, ch := range changes {
+		if !strings.HasPrefix(ch.Resource, "pdr_dl/") {
+			continue
+		}
+		if ch.Value == nil {
+			erased = true
+		} else {
+			written = true
+		}
+	}
+	if !erased || !written {
+		t.Errorf("the move wrote %d changes in pdr_dl (erased=%v written=%v), want the old key erased and the new one written",
+			len(changes), erased, written)
+	}
+}

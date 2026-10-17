@@ -27,6 +27,7 @@ import (
 	"github.com/wmnsk/go-pfcp/message"
 
 	"github.com/krsna1729/upf/internal/bess"
+	"github.com/krsna1729/upf/internal/routing"
 )
 
 // The Apply Action flags a FAR can carry (TS 29.244 8.2.26, octet 5).
@@ -95,6 +96,10 @@ type pdrReq struct {
 	qerIDs     []uint32
 	urrIDs     []uint32
 
+	// instance is the PDI's Network Instance (TS 29.244 8.2.4): the deployment
+	// interface this rule belongs to, empty when the SMF named none.
+	instance string
+
 	// An uplink PDR's PDI names an F-TEID: the TEID the SMF expects us to
 	// use (0: ours to choose) and, for the address, usually 0.
 	hasFTEID bool
@@ -114,6 +119,12 @@ type farReq struct {
 	teid     uint32
 	peer     netip.Addr
 	hasOuter bool
+
+	// instance is the Network Instance inside the Forwarding Parameters
+	// (8.2.4): the interface this forward leaves by, empty when the SMF named
+	// none. It is not the PDI's instance -- that one says which flow the rule
+	// selects.
+	instance string
 }
 
 type qerReq struct {
@@ -448,6 +459,12 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 			s.FARs[f.id] = entry
 		}
 		entry.apply, entry.destIfc = f.apply, f.destIfc
+		if f.instance != "" {
+			// An update that names no instance keeps the one it had, like the
+			// outer header creation above: the fields this message carries are
+			// what changes (7.5.4.3).
+			entry.instance = f.instance
+		}
 		if f.hasOuter {
 			entry.teid, entry.peer, entry.hasOuter = f.teid, f.peer, true
 		}
@@ -531,6 +548,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 			id: p.id, precedence: p.precedence, srcIfc: p.srcIfc,
 			ueIP: p.ueIP, sdf: p.sdf, farID: p.farID,
 			qerIDs: p.qerIDs, urrIDs: p.urrIDs,
+			instance: p.instance,
 		}
 		if old != nil {
 			// An update keeps the dataplane identity: the rule that already
@@ -626,6 +644,34 @@ func (c *Compiler) resolve(s *Session) error {
 	for _, p := range pdrsInOrder(s) {
 		far := s.FARs[p.farID]
 		dir := c.direction(p.srcIfc)
+		ifc, err := c.interfaceFor(p)
+		if err != nil {
+			return err
+		}
+		p.domain = ifc.Domain
+		p.nextHop = dir.NextHop
+		if c.cfg.Instances != nil && far != nil && far.destIfc != ie.DstInterfaceAccess {
+			// A forward toward the data network leaves by the instance's own
+			// next hop -- the deployment's N6, or the peer UPF an N9 instance
+			// names -- rather than by the direction's. The access side is the
+			// exception: a forward toward the UE leaves through the encap, and
+			// that is the direction's hop whatever instance was named.
+			egress := ifc
+			if far.instance != "" {
+				// The FAR's own Network Instance (8.2.4) is where the traffic
+				// leaves by, and it need not be the one the PDI selected: an
+				// uplink rule can select a flow in one instance and send it out
+				// of N9 toward another.
+				found, ok := c.cfg.Instances.Lookup(far.instance)
+				if !ok {
+					return fmt.Errorf(
+						"%w: the FAR's forwarding parameters name the network instance %q, and this deployment serves %s",
+						errNotExpressible, far.instance, strings.Join(c.cfg.Instances.Names(), ", "))
+				}
+				egress = found
+			}
+			p.nextHop = egress.NextHop
+		}
 		p.drop = far == nil || far.apply&applyForw == 0
 		p.meterID = 0
 		p.tunnels = nil
@@ -689,8 +735,42 @@ func (c *Compiler) resolve(s *Session) error {
 			// session's decapsulated packets at that precedence.
 			p.ueIP = s.UEIP
 		}
+		if c.cfg.Instances != nil && p.ueIP.IsValid() && !ifc.Serves(p.ueIP) {
+			// The deployment says what each interface serves: an address
+			// outside its pool is a session this UPF places nowhere, and
+			// answering a success would leave the SMF believing in a path no
+			// packet takes (docs/design.md: "the UPF maps it to an interface
+			// and an address pool").
+			return fmt.Errorf("%w: PDR %d's address %s is outside the pool of the network instance %q",
+				errNotExpressible, p.id, p.ueIP, ifc.Instance)
+		}
 	}
 	return nil
+}
+
+// interfaceFor resolves a PDR's PDI to the deployment's interface: the network
+// instance the SMF named (TS 29.244 8.2.4), or the deployment's default when it
+// named none. A name the deployment does not configure is a rule it cannot
+// place -- before this was read, a PDI naming another instance was
+// indistinguishable from one naming ours (docs/compliance.md's row over
+// 8.2.89/8.2.4).
+func (c *Compiler) interfaceFor(p *pdr) (routing.Interface, error) {
+	if c.cfg.Instances == nil {
+		// The one-instance deployment: every rule is domain 0, and each
+		// forward takes the direction's own next hop.
+		return routing.Interface{}, nil
+	}
+	ifc := c.cfg.Instances.Default()
+	if p.instance != "" {
+		found, ok := c.cfg.Instances.Lookup(p.instance)
+		if !ok {
+			return routing.Interface{}, fmt.Errorf(
+				"%w: the PDI names the network instance %q, and this deployment serves %s",
+				errNotExpressible, p.instance, strings.Join(c.cfg.Instances.Names(), ", "))
+		}
+		ifc = found
+	}
+	return ifc, nil
 }
 
 // urrHeldByAPDR reports whether a PDR the session still has names this URR.
@@ -949,7 +1029,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		changes = append(changes, bess.Change{
 			Resource: actionsRes(dir),
 			Key:      map[string]any{"id": p.actionID},
-			Value:    map[string]any{"meter_id": p.meterID, "next_hop_id": dir.NextHop},
+			Value:    map[string]any{"meter_id": p.meterID, "next_hop_id": p.nextHop},
 		})
 
 		// A PDR a URR measures carries one counter entry, keyed by the same
@@ -1169,6 +1249,26 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 			return match{value: b, mask: ones(2)}, true, nil
 		}
 		return match{}, false, nil
+	case RouteDomain:
+		// The interface the PDI's network instance resolved to (resolve): the
+		// domain the deployment's interface writes into the packet that arrives
+		// on it, so a rule placed in one instance never selects another's
+		// packets -- which is what lets two instances serve the same subscriber
+		// prefix.
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, p.domain)
+		return match{value: b, mask: ones(4)}, true, nil
+	case UpfTEID:
+		if p.teid == 0 {
+			// The table declares the tunnel as part of the key and the PDI
+			// names none: a rule keyed on TEID 0 would be claimed by every
+			// session that has no tunnel of its own.
+			return match{}, false, fmt.Errorf("%w: the PDI names no F-TEID, so the rule has no tunnel to select by",
+				errNotExpressible)
+		}
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, p.teid)
+		return match{value: b, mask: ones(4)}, true, nil
 	default:
 		return match{}, false, nil
 	}
@@ -1385,6 +1485,16 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if v, err := c.SourceInterface(); err == nil {
 				p.srcIfc = v
 			}
+		case ie.NetworkInstance:
+			// The PDI's Network Instance (TS 29.244 8.2.4), read here and
+			// resolved in resolve: the deployment maps the name to an
+			// interface, its route domain and its pool. A name the deployment
+			// does not configure is refused there rather than served by the
+			// wrong interface -- with one instance configured, a rule naming
+			// another used to be indistinguishable from one naming ours.
+			if v, err := c.NetworkInstance(); err == nil {
+				p.instance = v
+			}
 		case ie.FTEID:
 			fields, err := c.FTEID()
 			if err != nil {
@@ -1513,6 +1623,15 @@ func parseFAR(i *ie.IE) (farReq, error) {
 				case ie.DestinationInterface:
 					if v, err := fp.DestinationInterface(); err == nil {
 						f.destIfc = v
+					}
+				case ie.NetworkInstance:
+					// The forward's own Network Instance (TS 29.244 8.2.4 inside
+					// the Forwarding Parameters): the instance the traffic
+					// leaves by, which is what N9's peer UPF is named with. A
+					// PDI's instance says where the flow came from; this one
+					// says where it goes, and an SMF may name either or both.
+					if v, err := fp.NetworkInstance(); err == nil {
+						f.instance = v
 					}
 				case ie.OuterHeaderCreation:
 					fields, err := fp.OuterHeaderCreation()
