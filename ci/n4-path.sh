@@ -98,7 +98,7 @@ fi
 # The node a real SMF talks to, with the graph's shape (its flags' defaults are
 # deploy/upf.yaml's module names; the N3 address and both next hops match).
 "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-  -n3-addr "$N3" -pdr-fields-ul src,dst,proto,sport,dport,teid -log-level info >"$UPFD_LOG" 2>&1 &
+  -n3-addr "$N3" -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do
   grep -q "n4 listening" "$UPFD_LOG" 2>/dev/null && break
@@ -153,7 +153,7 @@ if [ "$FAIL" = 0 ]; then
   wait "$UPFD_PID" 2>/dev/null || true
   : >"$UPFD_LOG"
   "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-    -n3-addr "$N3" -pdr-fields-ul src,dst,proto,sport,dport,teid -log-level info >>"$UPFD_LOG" 2>&1 &
+    -n3-addr "$N3" -log-level info >>"$UPFD_LOG" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
     grep -q "n4 listening" "$UPFD_LOG" 2>/dev/null && break

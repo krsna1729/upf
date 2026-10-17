@@ -1,0 +1,225 @@
+# SPDX-License-Identifier: BSD-3-Clause
+
+# The UPF's packet path with two network instances on it, on one host, with no
+# NIC: deploy/session-path.yaml's composition plus what a deployment serving two
+# instances needs, and nothing else changed -- the shared manifest keeps the
+# figures `ci/bench-graph.sh` recorded for it (docs/design.md's envelope), so
+# this arm lives in its own file rather than moving that baseline.
+#
+#   uplink    src_up  -> rewrite_up  -\
+#                                      > merge_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> sink_n6 / sink_n9
+#             src_up2 -> rewrite_up2 -/
+#   downlink  src_dn -> rewrite_dn -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> enc -> sink_n3
+#
+# Two uplink streams with one UE address and two tunnels. That is what a
+# deployment serving two network instances looks like from N3: the same private
+# prefix, told apart by the tunnel the G-PDU arrived on -- and the PDR table's
+# key carries it (`upf_teid`, the decap's own metadata attribute), so the two
+# sessions' rules are two rules and each takes its own instance's next hop
+# (docs/design.md, "N3, N6, N9: one port, three interfaces"). Their bursts
+# differ (32 and 4) so the counters say which stream took which exit.
+#
+# Nothing here is a session: the Go controller writes every rule, action,
+# meter, counter, tunnel and TEID rule, and `ci/session-instances.sh` proves a
+# session programmed over the control plane carries packets both ways -- the
+# uplink's count needs the TEID rule, the decap and the PDR rule; the
+# downlink's needs the PDR rule, its action, its meter and the tunnel record the
+# encap reads.
+#
+# The two Sources send continuously from the moment the graph is applied, so a
+# sink's counter is zero exactly when no session selects those packets: that is
+# the control arm, and it is why the packets are evidence rather than a picture.
+# They send in bursts of 32 so the *chains* set the rate rather than the
+# generator's one-packet-per-iteration loop (ci/bench-graph.sh measures it).
+#
+# The frames are the ones the compiler's session makes match:
+#   uplink    G-PDU to TEID 0x11223344 (the F-TEID the session's SMF pins),
+#             holding the UE's packet 10.45.0.2:5000 -> 8.8.8.8:53
+#   downlink  the data network's answer 8.8.8.8:5000 -> 10.45.0.2:53, marked
+#             EF (TOS 0xb8, DSCP 46), which the downlink PDR matches ("to
+#             assigned 53"), the FAR's outer header creation (TEID 0x55667788
+#             toward the gNB) puts GTP-U around, and the encap's DSCP copy
+#             carries onto the outer header.
+#
+# Metadata attributes are laid out in module registration order, so the module
+# that declares "upf_teid" is listed first and the reader that makes it real
+# (a write-only attribute no module reads gets no offset) follows it, as in
+# deploy/smoke-gtpu.yaml.
+
+modules:
+  - name: decap0
+    mclass: GtpuDecap
+  - name: mt_md
+    mclass: MetadataTest
+    arg:
+      read: {upf_teid: 4}
+  - name: dump_u
+    mclass: Dump
+    arg: {interval: 1}
+  - name: src_up
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_up
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAABJAAFAAEARUIwKFB4CwAACAQhoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARIIkKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm"
+  # The second instance's stream: the same UE packet, its own tunnel (TEID
+  # 0x11223345), and a smaller burst so the two exits' counters are
+  # distinguishable.
+  - name: src_up2
+    mclass: Source
+    arg: {pkt_size: 87, burst: 4}
+  - name: rewrite_up2
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAABJAAFAAEARUIwKFB4CwAACAQhoCGgANQAAMP8AJREiM0VFAAAlAAFAAEARIIkKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm"
+  # Both streams reach one TEID table: the rules are its own (one per session),
+  # and a table has one input gate.
+  - name: merge_up
+    mclass: Merge
+  # The G-PDUs as they arrive, before the TEID table: the bytes of both tunnels
+  # on the wire, which is what ci/session-instances.sh checks.
+  - name: dump_t
+    mclass: Dump
+    arg: {interval: 1}
+  - name: teid
+    mclass: WildcardMatch
+    arg:
+      fields:
+        # The G-PDU's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's
+        # flags, type and length (4). One rule per session; a TEID no rule
+        # names is dropped by the default gate.
+        - {offset: 46, num_bytes: 4}
+  - name: pdr_ul
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 26, num_bytes: 4}  # source address (the UE's)
+        - {offset: 30, num_bytes: 4}  # destination address
+        - {offset: 23, num_bytes: 1}  # protocol
+        - {offset: 34, num_bytes: 2}  # source port
+        - {offset: 36, num_bytes: 2}  # destination port
+        # The tunnel the packet arrived on, from the decap's own metadata: two
+        # sessions serving one UE address (two network instances) are told
+        # apart by it. This is the reader that makes the attribute real for
+        # the decap's write (the module registration order above).
+        - {attr_name: upf_teid, num_bytes: 4}
+      # Distinct masks in use at once: a session's shapes are its filters' --
+      # exact addresses, prefixes, ports -- and each is one hash lookup per
+      # batch. Declared rather than defaulted: it is a UPF decision.
+      max_tuples: 8
+      action_resource: at_ul/actions
+  - name: at_ul
+    mclass: ActionTable
+    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
+  - name: mt_ul
+    mclass: Meter
+    arg: {capacity: 65536}
+  - name: cnt_ul
+    mclass: UrrCount
+    arg: {capacity: 65536}
+  - name: rt
+    mclass: Router
+    # Two route domains: this graph serves two network instances, and the
+    # Router's `max_domains` is the bound upfd's -max-domains must agree with.
+    arg: {max_domains: 2}
+  - name: sink_n6
+    mclass: Sink
+  # The second instance's exit (the `ims` instance's next hop 3): a convention
+  # of this graph, not of N6 -- an uplink forward toward a peer UPF leaves on
+  # N9 the same way.
+  - name: sink_n9
+    mclass: Sink
+
+  - name: src_dn
+    mclass: Source
+    arg: {pkt_size: 51, burst: 32}
+  - name: rewrite_dn
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAACCABFuAAlAAFAAEARH9EICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
+  - name: pdr_dl
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 26, num_bytes: 4}
+        - {offset: 30, num_bytes: 4}
+        - {offset: 23, num_bytes: 1}
+        - {offset: 34, num_bytes: 2}
+        - {offset: 36, num_bytes: 2}
+      # Distinct masks in use at once: a session's shapes are its filters' --
+      # exact addresses, prefixes, ports -- and each is one hash lookup per
+      # batch. Declared rather than defaulted: it is a UPF decision.
+      max_tuples: 8
+      action_resource: at_dl/actions
+  - name: at_dl
+    mclass: ActionTable
+    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+  - name: mt_dl
+    mclass: Meter
+    arg: {capacity: 65536}
+  - name: cnt_dl
+    mclass: UrrCount
+    arg: {capacity: 65536}
+  - name: enc
+    mclass: GtpuEncap
+    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
+  - name: dump_d
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_n3
+    mclass: Sink
+
+connections:
+  - {upstream: src_up, downstream: rewrite_up}
+  - {upstream: src_up2, downstream: rewrite_up2}
+  - {upstream: rewrite_up, downstream: merge_up}
+  - {upstream: rewrite_up2, downstream: merge_up}
+  - {upstream: merge_up, downstream: dump_t}
+  - {upstream: dump_t, downstream: teid}
+  - {upstream: teid, downstream: decap0}
+  - {upstream: decap0, downstream: mt_md}
+  - {upstream: mt_md, downstream: dump_u}
+  - {upstream: dump_u, downstream: pdr_ul}
+  - {upstream: pdr_ul, downstream: at_ul}
+  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: mt_ul, downstream: cnt_ul}
+  - {upstream: cnt_ul, downstream: rt}
+  - {upstream: rt, downstream: sink_n6}
+  - {upstream: rt, downstream: sink_n9, ogate: 2}
+
+  - {upstream: src_dn, downstream: rewrite_dn}
+  - {upstream: rewrite_dn, downstream: pdr_dl}
+  - {upstream: pdr_dl, downstream: at_dl}
+  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: mt_dl, downstream: cnt_dl}
+  - {upstream: cnt_dl, downstream: rt}
+  - {upstream: rt, downstream: enc, ogate: 1}
+  - {upstream: enc, downstream: dump_d}
+  - {upstream: dump_d, downstream: sink_n3}
+
+workers:
+  - {wid: 0, core: 0}
+
+resources:
+  # The actions' next hops: the deployment's, not a session's (a session's
+  # action names them by id). Every chain with an ActionTable routes on the id
+  # it writes -- the module fails closed when the attribute has no reader -- so
+  # both directions have one: the uplink's leaves by gate 0 toward N6, the
+  # downlink's by gate 1 toward the encap. A `Router`'s `routes` table is not on
+  # this path: an action that names a next hop has already resolved it, and the
+  # table is for a deployment that wants prefix routing instead (module
+  # `IPLookup`, whose routes are gate-valued and are looked up per packet).
+  rt/next_hops:
+    - key: {id: 1}
+      value: {egress_gate: 0}
+    - key: {id: 2}
+      value: {egress_gate: 1}
+    # The `ims` instance's exit: a session whose PDR names that instance's
+    # route domain takes this hop, so its packets leave by gate 2 whatever
+    # another instance's session does with the same subscriber address.
+    - key: {id: 3}
+      value: {egress_gate: 2}

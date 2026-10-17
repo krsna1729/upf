@@ -368,8 +368,10 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
    real peer UPF, which needs a deployment with a second UPF to name.
    *Proof:* `internal/session`'s TestTwoInstancesRouteIndependently (two
    sessions, one address, two instances, two rule keys and two next hops) and
-   `ci/session-path.sh`'s TestLiveTwoInstancesRouteIndependently (the same, on a
-   real daemon: the router's two exits count each instance's stream).
+   `ci/session-instances.sh`'s TestLiveTwoInstancesRouteIndependently -- its own
+   manifest, `deploy/session-instances.yaml`, because the shared one's figures
+   are recorded and an arm may not move a baseline it never measured. The live
+   arm is written; its run lands with the next daemon slot.
 5. **Usage** — URR counters, reporting triggers, session reports. *Proof:* a
    report matches the packets a source produced, within a known bound.
 
@@ -413,7 +415,9 @@ something writes it into the packet, and on a real port that is the vif's
 `route_domain`, which is not wired. Until it is, a deployment can tell two
 instances' sessions apart by what the ingress *does* write: on the uplink the
 tunnel the G-PDU arrived on (`upf_teid`, the decap's own attribute), which is
-what `deploy/session-path.yaml` declares and its two-instance arm proves.
+what `deploy/session-instances.yaml` declares and `ci/session-instances.sh`
+drives -- its own manifest, so the shared graph's recorded figures stay the
+figures of the arm that produced them.
 
 **A plain NIC cannot put both halves of a session on one worker, and the port
 count is not the reason.** The uplink arrives as GTP-U and the downlink as the
@@ -450,7 +454,7 @@ establishments, modifications, deletions, refusals), the reporting loop's
 (reports sent, refused, held, dropped) and whether a CP function is associated,
 in the Prometheus text format -- the facts this node measured, at the node that
 measured them, with no screen between. Echo and the end marker are the
-dataplane's (a G-PDU's peer-speaks-GTP-U half, and the TP 29.281 packet that
+dataplane's (a G-PDU's peer-speaks-GTP-U half, and the TS 29.281 packet that
 tells a gNB to switch paths), DDN/BAR is the buffering OMEC never had, and the
 checkpoint is the restart wall below.
 
