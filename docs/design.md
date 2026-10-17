@@ -508,13 +508,19 @@ reading the IEs and building every rule's key, match and message, costs 121 µs
 trip, the daemon, and the machine's state: one transaction measures ~175 µs from
 the C++ client, and the whole N4 path 440 µs p50 on a quiet machine. So the
 compiler's share is about a quarter of the quiet figure, and it is
-allocation-heavy (792 allocations per establishment), which is where a later
-optimization would go -- typed messages instead of the schema-driven dynamic
-ones, and a cheaper key than `fmt.Sprint`. The profile that would split that
-121 µs further cannot be taken in this environment (`-cpuprofile` runs are killed
-here, even on a trivial benchmark, leaving an empty profile), so that split is
-unmeasured, and there is no reason to measure it before the UPF's own features
-are done.
+allocation-heavy (792 allocations per establishment). The wire is not where those
+come from: building and marshalling a session establishment costs 13.1 µs on the
+client side, the server's whole way through one datagram -- parse, dispatch,
+handler, reply, send -- 10.6 µs (44 allocations), and building one schema-driven
+message 258 ns (3 allocations), so the compiler's allocations sit in its own rule
+and key construction, not in the messages. Against a running daemon
+(`ci/session-live.sh` runs these too) the whole path measures 2.18 ms per
+establishment over 200 iterations (1938 allocations), the same path the bench
+script reports as 1.685 ms p50, and both are today's machine. The profile that
+would name what is left cannot be taken in this environment (`-cpuprofile` runs
+are killed here, even on a trivial benchmark, leaving an empty profile), so the
+parts are measured one by one, and there is no reason to dig further before the
+UPF's own features are done.
 
 The walls, in order:
 
