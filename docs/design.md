@@ -499,6 +499,23 @@ message, the same run answers all 256: 8 workers, 256 sessions, establish
 same machine -- the aggregate is flat, and the latency is the queue, which is
 what one serialized control path should look like.
 
+Where that time goes, measured in the compiler's own package (`go test -bench`
+over 2000 iterations each, `internal/session/bench_test.go`): parsing an
+establishment request with the PFCP library costs 5.9 µs and marshalling the
+response 1.5 µs -- the wire is not what costs -- while the compiler's own work,
+reading the IEs and building every rule's key, match and message, costs 121 µs
+(39 µs for a deletion). The rest of the figures above is the transaction's round
+trip, the daemon, and the machine's state: one transaction measures ~175 µs from
+the C++ client, and the whole N4 path 440 µs p50 on a quiet machine. So the
+compiler's share is about a quarter of the quiet figure, and it is
+allocation-heavy (792 allocations per establishment), which is where a later
+optimization would go -- typed messages instead of the schema-driven dynamic
+ones, and a cheaper key than `fmt.Sprint`. The profile that would split that
+121 µs further cannot be taken in this environment (`-cpuprofile` runs are killed
+here, even on a trivial benchmark, leaving an empty profile), so that split is
+unmeasured, and there is no reason to measure it before the UPF's own features
+are done.
+
 The walls, in order:
 
 1. **Per-worker tables.** Classifier rules and action records are per-worker
