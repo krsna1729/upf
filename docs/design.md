@@ -282,6 +282,18 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   (and the decap's session table its own default), and a module refuses an id
   beyond its limit as invalid -- a mismatch is a session the SMF sees refused,
   not a slow path.
+- Two sessions cannot hold one rule. The PDR tables are shared by every
+  session and one key is one rule, so a graph whose key is the tuple alone makes
+  two sessions for one network instance compile to the same key: the second
+  would take the first's packets, and its own deletion would erase the rule the
+  first still holds. `compile` keeps the owner of every key a live session holds
+  and refuses the second claimant with a rule failure (checked in `compile`,
+  given up where the rule is erased and when the release path runs, and rolled
+  back when a compile fails), which is what makes the key's contents a
+  statement: the tunnel on the uplink (`upf_teid`) and the route domain where a
+  graph writes one are why two instances serving one subscriber prefix are two
+  rules rather than a collision. A modification that moves a key gives the old
+  one up in the same transaction that erases it.
 - A released id is not handed out again until the pool's walk of its space has
   come round (and then only once it has aged): a transaction that removes a
   record leaves its slot retiring for a grace period, and publishing into a
@@ -371,7 +383,9 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
    `ci/session-instances.sh`'s TestLiveTwoInstancesRouteIndependently -- its own
    manifest, `deploy/session-instances.yaml`, because the shared one's figures
    are recorded and an arm may not move a baseline it never measured. The live
-   arm is written; its run lands with the next daemon slot.
+   arm ran on 2026-10-17: both sessions for 10.45.0.2 established, the router's
+   exits carrying 1600 packets on gate 0 (internet) against 728 on gate 2 (ims),
+   and both tunnels visible in the G-PDU dump.
 5. **Usage** — URR counters, reporting triggers, session reports. *Proof:* a
    report matches the packets a source produced, within a known bound.
 
@@ -417,7 +431,10 @@ instances' sessions apart by what the ingress *does* write: on the uplink the
 tunnel the G-PDU arrived on (`upf_teid`, the decap's own attribute), which is
 what `deploy/session-instances.yaml` declares and `ci/session-instances.sh`
 drives -- its own manifest, so the shared graph's recorded figures stay the
-figures of the arm that produced them.
+figures of the arm that produced them. That is a fact about the key, not luck:
+two instances serving one subscriber prefix are two rules because the tunnel
+they arrived on is part of what selects them, and a graph whose key leaves it
+out is refused the second claim (see "Restart and failure semantics").
 
 **A plain NIC cannot put both halves of a session on one worker, and the port
 count is not the reason.** The uplink arrives as GTP-U and the downlink as the

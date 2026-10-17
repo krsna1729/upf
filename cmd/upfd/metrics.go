@@ -97,16 +97,20 @@ func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportS
 	})
 }
 
-// metricsServer starts the endpoint on addr and stops it when ctx is done. The
-// address is checked here rather than at the first scrape, so a typo in -metrics
-// is a startup failure instead of a listener that never comes up.
-func metricsServer(addr string, handler http.Handler) (*http.Server, error) {
+// metricsServer binds the endpoint on addr and returns it with its listener: a
+// port that is already in use is a startup failure rather than a log line after
+// "listening" has been printed, and the listener's own address is what the log
+// reports, so `:0` (any free port) is a real answer.
+func metricsServer(addr string, handler http.Handler) (*http.Server, net.Listener, error) {
 	if _, _, err := net.SplitHostPort(addr); err != nil {
-		return nil, fmt.Errorf("-metrics %q: %w", addr, err)
+		return nil, nil, fmt.Errorf("-metrics %q: %w", addr, err)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("-metrics: %w", err)
 	}
 	return &http.Server{
-		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
-	}, nil
+	}, ln, nil
 }

@@ -94,17 +94,30 @@ func TestTheMetricsEndpointReportsTheNodesNumbers(t *testing.T) {
 	}
 }
 
-// TestTheMetricsAddressIsCheckedAtStartup: a -metrics that is not host:port is
-// a startup failure, not a listener that never comes up.
-func TestTheMetricsAddressIsCheckedAtStartup(t *testing.T) {
-	if _, err := metricsServer("127.0.0.1:9101", metricsHandler(nil, fakePeer{}, &reportStats{})); err != nil {
-		t.Errorf("a host:port address was refused: %v", err)
+// TestTheMetricsAddressIsBoundAtStartup: a -metrics that is not host:port, or
+// whose port is taken, is a startup failure rather than a log line printed
+// after "listening"; the address the endpoint reports is the listener's own, so
+// :0 (any free port) is a real answer.
+func TestTheMetricsAddressIsBoundAtStartup(t *testing.T) {
+	srv, ln, err := metricsServer("127.0.0.1:0", metricsHandler(nil, fakePeer{}, &reportStats{}))
+	if err != nil {
+		t.Fatalf("127.0.0.1:0 was refused: %v", err)
 	}
+	defer ln.Close()
+	if ln.Addr().String() == "127.0.0.1:0" {
+		t.Error("the endpoint reports the address it was given, not the port it bound")
+	}
+	// The port is taken now, by that listener: a second one on it must fail
+	// here rather than in a goroutine after the node has said it is listening.
+	if _, _, err := metricsServer(ln.Addr().String(), metricsHandler(nil, fakePeer{}, &reportStats{})); err == nil {
+		t.Error("a port already in use was accepted")
+	}
+	_ = srv
 	// A missing port is not an address, and the empty flag is not reached here
 	// (run() only builds a server when the flag is set) -- but an address
 	// without one would listen somewhere the operator did not name.
 	for _, bad := range []string{"127.0.0.1", ""} {
-		if _, err := metricsServer(bad, metricsHandler(nil, fakePeer{}, &reportStats{})); err == nil {
+		if _, _, err := metricsServer(bad, metricsHandler(nil, fakePeer{}, &reportStats{})); err == nil {
 			t.Errorf("%q was accepted as an address", bad)
 		}
 	}

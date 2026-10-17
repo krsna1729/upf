@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1095,6 +1096,36 @@ func TestACHOOSEForBothFamiliesGetsTheIPv4FTEID(t *testing.T) {
 	}
 }
 
+// TestASecondSessionsRuleCannotTakeTheFirsts: the PDR tables are shared by every
+// session and one key is one rule, so a graph whose key is the tuple alone makes
+// two sessions for one UE address compile to the same key. Writing it would take
+// the first session's packets, and the second session's deletion would erase the
+// rule the first still holds -- so the second is refused, and the key is free
+// again when the first goes.
+func TestASecondSessionsRuleCannotTakeTheFirsts(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	if got := cause(t, c.Establish(establishmentWithFTEID(1, "10.45.0.2", 0x11223344))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the first establishment answered cause %d", got)
+	}
+	before := len(rec.txns)
+	resp := c.Establish(establishmentWithFTEID(2, "10.45.0.2", 0x11223345))
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a second session for one UE address answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != before {
+		t.Errorf("the refused session wrote %d transactions, want none", len(rec.txns)-before)
+	}
+	// The first session is untouched, and its own deletion works.
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, 1, 2, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("deleting the first session answered cause %d", got)
+	}
+	// The key is free once its rule is erased: the same session is served now.
+	if got := cause(t, c.Establish(establishmentWithFTEID(2, "10.45.0.2", 0x11223345))); got != ie.CauseRequestAccepted {
+		t.Errorf("after the first session went, the second answered cause %d, want accepted", got)
+	}
+}
+
 func TestTwoUplinkPDRsWithOneFilterAreRefused(t *testing.T) {
 	// An SMF with several QoS flows programs several uplink PDRs onto one F-TEID
 	// and tells them apart only by QFI. This UP does not read QFI
@@ -1534,20 +1565,23 @@ func TestAnSDFPrefixIsAPrefixNotAnAddress(t *testing.T) {
 	// A filter whose address carries host bits means the network: address/mask
 	// is the form, and the mask is what the rule carries. Refusing it would
 	// turn an SMF's slightly sloppy filter into a session that cannot exist.
+	// The prefix is another one: a rule is keyed by the prefix it names, so two
+	// sessions naming one prefix hold one key and the second is refused
+	// (TestASecondSessionsRuleCannotTakeTheFirsts).
 	req = message.NewSessionEstablishmentRequest(0, 0, 0x5557, 1, 0,
 		ie.NewFSEID(0x5557, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any to 10.10.1.5/16", "", "", "", 0)),
+				ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 10.11.1.5/16", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a filter with host bits answered cause %d", got)
 	}
-	sloppy := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0})
-	if got := sloppy.value(fieldDstIP); !bytes.Equal(got, []byte{10, 10, 0, 0}) {
+	sloppy := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 11, 0, 0})
+	if got := sloppy.value(fieldDstIP); !bytes.Equal(got, []byte{10, 11, 0, 0}) {
 		t.Errorf("the sloppy prefix's value is %v, want the network address", got)
 	}
 	if got := sloppy.mask(fieldDstIP); !bytes.Equal(got, []byte{0xff, 0xff, 0, 0}) {
@@ -1801,8 +1835,10 @@ func TestAPinnedFTEIDIsReservedAndOneCollisionIsRefused(t *testing.T) {
 
 	// Session 2 leaves the choice to the UPF, and must not be handed the
 	// pinned value: two sessions sharing a TEID rule send each other's packets.
+	// Each is another subscriber's -- one UE address in one graph is one rule
+	// key, and two sessions may not hold it (compile refuses the second).
 	for i := 0; i < 6; i++ {
-		resp := c.Establish(establishment(0x9300+uint64(i), "10.45.0.20")).(*message.SessionEstablishmentResponse)
+		resp := c.Establish(establishment(0x9300+uint64(i), "10.45.0."+strconv.Itoa(20+i))).(*message.SessionEstablishmentResponse)
 		if got := cause(t, resp); got != ie.CauseRequestAccepted {
 			t.Fatalf("establishment %d answered cause %d", i, got)
 		}
