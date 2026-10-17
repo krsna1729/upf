@@ -267,7 +267,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | `PMDPort` | `n3`, `n6` | `num_rx_queues: 1` each in the deployment's graph; RSS and one worker per queue are the scale path, and the one-port split (per-pattern RSS, `L3_SRC_ONLY` uplink / `L3_DST_ONLY` downlink) is designed in `docs/design.md`, "N3, N6, N9" — no graph wires it yet |
 | `UnixSocketPort` | `cp_marker` | `SOCK_SEQPACKET`: one write from `upfd` is one End Marker frame |
 | `PortInc`/`PortOut`, `Sink`, `Source`, `Rewrite`, `Dump`, `MetadataTest` | graphs | plumbing and lab only; a `Sink` has no output gate, so it appears in no metric — the counters that prove behaviour sit on modules' *output* gates |
-| `PacketStore` | the buffering branch (`buffer-path.yaml`) | `key_attrs: ["action_id"]`, `max_packets`, `max_packets_per_flow`, `timeout_ms`; single worker; `release`/`drop`/`clear` are commands, and both they and (when it lands) a write to its `flows` resource are **refused** while a worker runs the module, so the caller stops the workers around them; a flow it holds nothing for comes back as ENOENT, which `internal/bess` maps to `ErrFlowNotHeld` and the session layer treats as nothing to do -- a BUFF FAR is in force long before any packet arrives (BESS's note: `packet_store: the flow key is a configured attribute, not a fixed pair`, 96d22a8f) |
+| `PacketStore` | the buffering branch (`buffer-path.yaml`) | `key_attrs: ["action_id"]`, `max_packets`, `max_packets_per_flow`, `timeout_ms`; one owner task, any number of workers. `release`/`drop`/`clear` are commands that enqueue into the store's own request ring (`Command::THREAD_SAFE` since BESS `cdeb4e77`), and its `flows` table is live configuration (`requires_paused_workers: false`), so neither a command nor a flow write is refused with EBUSY or RESOURCE_BUSY and nothing stops the datapath; a command is **accepted, not completed** -- the store's owner task applies it on a later run -- so a caller that needs the effect reads it back (`ps/flows`, the drop and release counters, `GetDesc`). A flow the store holds nothing for is a no-op (ENOENT is gone; the only refusal left is ENOSPC, a full request ring), an upsert or an erase moves no packet, and an erase removes configuration only -- `drop` is what frees what a flow holds (BESS's note: `packet_store: the flow key is a configured attribute, not a fixed pair`, 96d22a8f) |
 | `Vif` | not wired yet | the module that would write a packet's `vif_id`/`route_domain` from the PDI's Network Instance (`docs/design.md`, "N3, N6, N9") |
 
 ## Framework and library surface we use
@@ -275,14 +275,14 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | surface | where we use it |
 |---|---|
 | control_v2, one transaction per session change | `internal/session` writes a session's rules, actions, meters, counters and tunnels together or not at all, with a request id that survives retries |
-| resources and codecs (D-129) | the four tables above: configuration written in a transaction, a codec that validates the key, and a readback the startup sweep uses. The store's `flows` is BESS's to add; until it lands, a transaction naming it is refused, which is why the compiler writes no flow entry yet |
+| resources and codecs (D-129) | the tables above: configuration written in a transaction, a codec that validates the key, and a readback the startup sweep uses. The store's `flows` is one of them now (one entry per flow id, each field optional, absent meaning the module-wide argument): an upsert or an erase moves no packet and stops no worker, and an erase is configuration only — `drop` is what frees what a flow holds |
 | module commands | `get_counts` (counters), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
 | metadata attributes | `action_id` (written by `WildcardMatch`, read by counters, the encap and the store), `upf_teid` (written by the decap), `qfi` (written by the decap, one byte: the uplink PDU Session Container's QoS flow, read by `pdr_ul`'s match fields), `route_domain`/`vif_id` (the `vif` work) |
 | slot tables (`dataplane/slot_table.h`) | every per-rule table: ids are 1..capacity, an erased key retires for a grace period, and publishing into a retiring slot is refused — which is why released ids wait their walk (`docs/design.md`, the id pool) |
 | packet ownership | `bess::PacketRef` and the store's explicit free/release path; our modules copy no packet and allocate none |
 | tasks (`RegisterTask`/`RunTask`) | BESS's store drains released packets from a task; **none of our modules has one** — nothing in our packet path runs between packets |
 | `GetSchema`/descriptor set | the controller builds every message from the daemon's own schema, so a field this plugin does not have fails loudly instead of silently |
-| `ListMetrics` (D-116) | per-gate counters: how an unwired gate's drops (store eviction, overflow) and a chain's throughput are read. What it does *not* show is a command's effect on the packets a module holds: `packet_store`'s `drop` frees them with `bess::PacketFree` and only decrements `total_packets_` (visible in `GetDesc`, not in metrics), while `release` and an erase move them to the release queue, which does reach a gate. That is why the session layer counts the *commands* it issued (`Stats.BuffersReleased`/`BuffersDropped`/`BufferFailures`) rather than reading drops back out of the daemon |
+| `ListMetrics` (D-116) | per-gate counters: how an unwired gate's drops (store eviction, overflow) and a chain's throughput are read. What it does *not* show is a command's effect on the packets a module holds: `packet_store`'s `drop` frees them with `bess::PacketFree` and only decrements `total_packets_` (visible in `GetDesc`, not in metrics), while `release` moves them to the release queue, which does reach a gate — and only once the store's owner task has applied the request, since the command is *accepted* when the call returns. That is why the session layer counts the *accepted* commands it issued (`Stats.BuffersReleased`/`BuffersDropped`/`BufferFailures`) rather than reading drops back out of the daemon |
 | `tunnel/tunnel.h`, `conntrack/packet_parse.h` | header-only, experimental: the GTP-U codec and the parse types, installed by `bess-dev` |
 | `utils/{ip,ether,checksum,endian,time,logging}.h`, `dataplane/action_id.h`, `framework/{resource_codec,resource_registry,resource_bindings}.h`, `commands.h`, `pb/module_msg.pb.h` | the rest of the plugin's includes; no module reaches past these into BESS internals |
 
@@ -297,53 +297,56 @@ Used as they are; the configuration is ours and is what the compiler assumes.
   Worker::kMaxWorkers`) and no pause: `urr_count`'s cells are one plane per
   worker, so two workers never touch a line, and its two resources behave like
   the daemon's own concurrent ones.
-* **Which part of this graph needs paused workers: none of it today, and one
-  resource of it later — and the *caller* is the one that stops.** Two facts
-  decide it, and neither is a quiesce: a resource whose codec declares
+* **Which part of this graph needs paused workers: none of it — and no caller
+  stops anything for the store.** A resource whose codec declares
   `requires_paused_workers` is **refused** with `RESOURCE_BUSY` while a worker
   runs its module ("nothing was tried", the SDK's `Resource` comment), and a
-  command declared `THREAD_UNSAFE` — the store's `release`, `drop`, `clear` —
-  is **refused** with `EBUSY` ("There is a running worker and command '%s' is
-  not MT safe", `core/module.cc`). In both cases the daemon leaves the stopping
-  to whoever is writing. The modules that declare the flag are `arp_responder`
-  (`entries`), `bridge` (`statics`), `flowgen` and `vif` (`interfaces`) — none of
-  them in any graph here; every resource the session path writes is a concurrent
-  slot-table resource applied live (`WildcardMatch`'s rules, `ActionTable`'s
-  actions, `Meter`'s meters, `Router`'s next hops, `enc/tunnels`,
-  `cnt_*/counters`). The store's `flows`, when BESS adds it, will be the first
-  paused-worker resource any graph here has.
+  command declared `THREAD_UNSAFE` is **refused** with `EBUSY` ("There is a
+  running worker and command '%s' is not MT safe", `core/module.cc`); in both
+  cases the daemon leaves the stopping to whoever is writing. The modules that
+  declare the flag are `arp_responder` (`entries`), `bridge` (`statics`),
+  `flowgen` and `vif` (`interfaces`) — none of them in any graph here; every
+  resource the session path writes is a concurrent slot-table resource applied
+  live (`WildcardMatch`'s rules, `ActionTable`'s actions, `Meter`'s meters,
+  `Router`'s next hops, `enc/tunnels`, `cnt_*/counters`).
+
+  The store was the one exception, and BESS `cdeb4e77` removed it: the module
+  has one owner task, `release`/`drop`/`clear` are `Command::THREAD_SAFE` and
+  enqueue a request into the store's SPSC request ring (the owner applies it on
+  a later task run), and its `flows` table is published as an immutable snapshot
+  the owner reads once per batch, so `requires_paused_workers` is false. So
+  there is nothing to pause around and nothing that answers `EBUSY`:
+  `internal/bess` calls `InvokeAction` directly from `ReleaseFlow`/`DropFlow`/
+  `ClearStore`, and the `storeCommand` wrapper that used to try, stop the
+  workers on a refusal, retry and start them again — with
+  `TestStoreCommandStopsTheWorkersOnlyWhenTheDaemonRefuses` pinning its
+  orderings — is gone with the refusal it handled. A command there is
+  *accepted*, not completed: the caller that needs the effect reads it back
+  (`ps/flows`, the drop and release counters, `GetDesc`), which is also why a
+  successful call is not evidence that packets moved.
 
   ```
   what stops, and who stops it
 
-  (A) session state -- rules, actions, meters, next hops, tunnels, counters
+  (A) session state -- rules, actions, meters, next hops, tunnels, counters,
+      and the store's live `flows` table
       upfd --commit--> daemon --publish--> concurrent resource
       workers ............................ running throughout: nothing stops
 
-  (B) a thread-unsafe command, or a resource that requires paused workers
-      upfd --invoke/commit--> daemon: is a worker running the module?
-                                 |
-                                 +-- no  --> runs; no pause at all
-                                 |
-                                 +-- yes --> EBUSY / RESOURCE_BUSY, nothing tried
-                                                |
-      upfd --PauseWorkers--> invoke/commit --> ResumeWorkers
-              the only stop in this tree, and it is the caller's to make
+  (B) the store's own commands -- release, drop, clear
+      upfd --invoke--> daemon: enqueue into the store's request ring
+      workers ............................ running throughout: nothing stops
+      the store's owner task applies the request on its next run
   ```
 
-  Both stops are bounded by one command or one commit and happen at signalling
-  rate — a BAR arriving, a DDN answer releasing packets — never per packet.
-  `internal/bess` wraps the three commands in exactly that loop
-  (`storeCommand`), and its five orderings are pinned by
-  `TestStoreCommandStopsTheWorkersOnlyWhenTheDaemonRefuses`: try, and on a
-  refusal stop the workers, retry, start them again -- tried first so a startup
-  clearance cannot start a graph it found stopped, and resumed even when the
-  retry failed so one refusal cannot leave the datapath stopped. The SDK stays
-  explicit (`InvokeAction`, `PauseWorkers`, `ResumeWorkers`) and D-146 keeps the
-  three SDKs' surfaces alike, which makes this shape this layer's policy rather
-  than the SDK's method. The store's `flows` write will need the same wrapper
-  around the one commit that carries it, since the engine does not pause for it.
-  The in-process tests cover the refusal's consequences as well
+  A stop is still the shape for a `THREAD_UNSAFE` command or a paused-worker
+  resource, and BESS's own modules are where either could appear again:
+  `upfd --PauseWorkers--> invoke/commit --> ResumeWorkers`, bounded by one
+  command or one commit and at signalling rate — a BAR arriving, a DDN answer
+  releasing packets — never per packet. The SDK stays explicit (`InvokeAction`,
+  `PauseWorkers`, `ResumeWorkers`) and D-146 keeps the three SDKs' surfaces
+  alike, so such a loop would be this layer's policy rather than the SDK's
+  method. The in-process tests cover a refusal's consequences as well
   (`TestAReleaseTheStoreRefusesIsCountedNotFatal` and the sweep's tests).
 * **Where state lives.** Per-worker: the counters' planes. Shared, atomic,
   written once per batch: the counters' stamps. Per-rule, indexed by the
@@ -409,6 +412,32 @@ modules in `smoke-gtpu.yaml` are the same idea at fixed points, with a per-packe
 copy that a measured graph should not carry. That is the ergonomic half of the
 evidence, and it is a criterion, not a preference: what we would lose is exactly
 the class of mistake the smoke test exists to catch.
+
+**The fused module's table, decided before it is written.** `teid` ⊕
+`gtpu_decap` needs a table keyed by TEID, and the primitive decides the cost the
+fusion exists to win. Our other resources are dense and id-indexed:
+`SlotTable<ActionId, …>` behind `SlotResource` (the tunnels, the counters), built
+on the immutable `ObjectTable` (`core/dataplane/object_table.h`: "extract the id,
+bounds check, validity check, address calculation. No hashing, no search") whose
+generations are published through `RcuPtr` and the runtime's `RcuDomain`. That
+shape does not fit a TEID: ids there are one-based and dense, while a TEID is a
+sparse `uint32` the *SMF* usually chooses (it sends the F-TEID; we only allocate
+when it asks with CHOOSE/CHID, FTUP). A dense encoding — pool index plus a
+generation prefix — would be the cheapest possible lookup, and it is rejected for
+the reason it is tempting: it works only for TEIDs we allocate, and the SMF's own
+TEIDs must be served the same way.
+
+So the table is sparse: `bess::utils::CuckooMap<uint32_t, …>`
+(`core/utils/cuckoo_map.h`), whose header states the split we need — "lookup is
+thread-safe, but update is not" — published the way every other resource here is:
+a session transaction builds a new generation and hands it to the runtime's
+`RcuDomain`, so a reader keeps the old one until it is done and a control thread
+destroys it. Lookup is then one hash probe on four bytes with no mask machinery
+and no key construction, against `WildcardMatch`'s tuple-plus-masks path in the
+split chain; updates are a rebuild, which is a per-session event and not a
+per-packet cost. If the measurement ever shows the probe dominating, the dense
+encoding comes back as an option — but only alongside a translation table for
+SMF-chosen TEIDs, which is a second lookup, i.e. no win at all.
 
 ## Building and loading it
 
