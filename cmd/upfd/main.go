@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -168,13 +169,122 @@ func run() error {
 }
 
 // reportLoop is upfd's usage reporting: on every tick, evaluate each session's
-// URRs and send the reports they owe to the associated SMF. A report that is
-// unanswered after the n4 retries is logged with its usage and dropped -- the
-// session's next window is what carries the traffic on; the alternative (a
-// queue of undelivered reports) is a state machine without a design yet.
-func reportLoop(ctx context.Context, sessions *session.Compiler, srv *n4.Server, every time.Duration, log *slog.Logger) {
+// URRs, decide what the SMF must hear, and send it. What the SMF does not
+// answer is kept and tried again (reportQueue), because an unanswered send
+// leaves the outcome unknown rather than known bad.
+// reportSender is the half of the N4 node the reporting loop uses: one Session
+// Report Request, its Cause, and an error when it was not answered.
+type reportSender interface {
+	Report(ctx context.Context, cpSEID uint64, ies ...*ie.IE) (uint8, error)
+}
+
+// reportQueueDepth bounds one session's reports waiting for an answer, and
+// reportQueueSessions the sessions with queued reports: a CP function that never
+// answers cannot grow this node's memory without bound.
+const (
+	reportQueueDepth    = 4
+	reportQueueSessions = 256
+)
+
+// heldReport is one usage report the SMF has not answered yet.
+type heldReport struct {
+	report   session.Report
+	attempts int
+}
+
+// reportQueue keeps the usage reports a session's SMF has not answered. The
+// Session Report Request is the one message this node initiates, and the SMF is
+// owed each report it asked for: an unanswered send leaves the outcome unknown
+// (the same reason the SDK asks again rather than assuming), so the report is
+// kept and sent before the session's next one -- which is what keeps the
+// UR-SEQNs the SMF reads in order. A *refusal* is a definite answer and is not
+// retried; only silence is. What does not fit is logged with its usage when it
+// is dropped rather than disappearing quietly.
+type reportQueue struct {
+	held map[uint64][]heldReport // by the session's local SEID
+}
+
+func newReportQueue() *reportQueue {
+	return &reportQueue{held: map[uint64][]heldReport{}}
+}
+
+// add queues a report, dropping the oldest one this session still holds when the
+// session's queue is full (or, for a session with no room at all, refusing to
+// hold it): the dropped report is returned for the caller to log.
+func (q *reportQueue) add(r session.Report) (dropped *session.Report) {
+	if _, ok := q.held[r.SEID]; !ok && len(q.held) >= reportQueueSessions {
+		return &r
+	}
+	queue := append(q.held[r.SEID], heldReport{report: r})
+	if len(queue) > reportQueueDepth {
+		old := queue[0]
+		queue = queue[1:]
+		dropped = &old.report
+	}
+	q.held[r.SEID] = queue
+	return dropped
+}
+
+// seids is every session with a report waiting, low SEID first: a drain visits
+// them in the order their sessions were established, and a session that keeps
+// failing does not delay the others.
+func (q *reportQueue) seids() []uint64 {
+	out := make([]uint64, 0, len(q.held))
+	for seid := range q.held {
+		out = append(out, seid)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// head is the report the session has owed its SMF longest, with how many times
+// it has been sent unsanswered.
+func (q *reportQueue) head(seid uint64) (heldReport, bool) {
+	queue := q.held[seid]
+	if len(queue) == 0 {
+		return heldReport{}, false
+	}
+	return queue[0], true
+}
+
+// done takes a session's oldest report out of the queue: the SMF answered it,
+// with a Cause or with a refusal.
+func (q *reportQueue) done(seid uint64) {
+	queue := q.held[seid]
+	if len(queue) == 0 {
+		return
+	}
+	if len(queue) == 1 {
+		delete(q.held, seid)
+		return
+	}
+	q.held[seid] = queue[1:]
+}
+
+// sent records that the session's oldest report went out once more without an
+// answer: it stays where it is, and the next tick tries it first.
+func (q *reportQueue) sent(seid uint64) {
+	queue := q.held[seid]
+	if len(queue) == 0 {
+		return
+	}
+	queue[0].attempts++
+	q.held[seid] = queue
+}
+
+// reportLoop evaluates every session on each tick, decides what the SMF must
+// hear, and sends it: a report the SMF has not answered is kept and tried again
+// on the next tick, before that session's newer ones (see reportQueue).
+func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSender, every time.Duration, log *slog.Logger) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
+	queue := newReportQueue()
+	acknowledge := func(r session.Report, detail string, attrs ...any) {
+		log.Info("usage report "+detail, append([]any{
+			"seid", r.SEID, "cp_seid", r.CPSEID, "urr", r.URRID, "seqn", r.Seqn,
+			"trigger", r.Trigger.String(), "packets", r.Up.Packets, "octets", r.Up.Octets,
+			"down_packets", r.Down.Packets, "down_octets", r.Down.Octets}, attrs...)...)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -182,27 +292,42 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, srv *n4.Server,
 		case <-ticker.C:
 		}
 		for _, report := range sessions.EvaluateAll(ctx, time.Now()) {
-			// The report is addressed to the CP function, and the header's SEID
-			// is the identity the *receiver* looks the session up with: the CP
-			// F-SEID, not ours (TS 29.244 7.2.2.4.2; an SMF looks a report up
-			// by the F-SEID it allocated).
-			cause, err := srv.Report(ctx, report.CPSEID, report.IEs()...)
-			switch {
-			case err != nil:
-				log.Warn("usage report not delivered", "seid", report.SEID, "cp_seid", report.CPSEID,
-					"urr", report.URRID, "trigger", report.Trigger.String(),
-					"octets", report.Up.Octets, "error", err)
-			case cause != ie.CauseRequestAccepted:
-				log.Warn("usage report refused", "seid", report.SEID, "cp_seid", report.CPSEID,
-					"urr", report.URRID, "trigger", report.Trigger.String(), "cause", cause)
-			default:
-				log.Info("usage report acknowledged", "seid", report.SEID, "cp_seid", report.CPSEID,
-					"urr", report.URRID, "seqn", report.Seqn, "trigger", report.Trigger.String(),
-					"packets", report.Up.Packets, "octets", report.Up.Octets,
-					"down_packets", report.Down.Packets, "down_octets", report.Down.Octets)
+			if dropped := queue.add(report); dropped != nil {
+				log.Warn("usage report dropped: the SMF has not answered the ones before it",
+					"seid", dropped.SEID, "cp_seid", dropped.CPSEID, "urr", dropped.URRID,
+					"seqn", dropped.Seqn, "trigger", dropped.Trigger.String(),
+					"octets", dropped.Up.Octets, "held", reportQueueDepth)
 			}
-			if report.Enforcing {
-				log.Info("quota spent: the session's traffic is stopped", "seid", report.SEID, "urr", report.URRID)
+		}
+		for _, seid := range queue.seids() {
+			for attempt := 0; attempt < reportQueueDepth; attempt++ {
+				r, ok := queue.head(seid)
+				if !ok {
+					break
+				}
+				// The report is addressed to the CP function, and the header's
+				// SEID is the identity the *receiver* looks the session up
+				// with: the CP F-SEID, not ours (TS 29.244 7.2.2.4.2).
+				cause, err := sender.Report(ctx, r.report.CPSEID, r.report.IEs()...)
+				if err != nil {
+					queue.sent(seid)
+					log.Warn("usage report not delivered: held for the next tick",
+						"seid", r.report.SEID, "cp_seid", r.report.CPSEID, "urr", r.report.URRID,
+						"trigger", r.report.Trigger.String(), "octets", r.report.Up.Octets,
+						"attempts", r.attempts+1, "error", err)
+					break
+				}
+				queue.done(seid)
+				if cause != ie.CauseRequestAccepted {
+					log.Warn("usage report refused", "seid", r.report.SEID, "cp_seid", r.report.CPSEID,
+						"urr", r.report.URRID, "trigger", r.report.Trigger.String(), "cause", cause)
+				} else {
+					acknowledge(r.report, "acknowledged", "attempts", r.attempts+1)
+				}
+				if r.report.Enforcing {
+					log.Info("quota spent: the session's traffic is stopped",
+						"seid", r.report.SEID, "urr", r.report.URRID)
+				}
 			}
 		}
 	}
