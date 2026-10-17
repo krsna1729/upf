@@ -101,7 +101,7 @@ func TestLiveSessionProgramsTheDaemon(t *testing.T) {
 	if teid == 0 {
 		t.Fatal("the Created PDR carries no F-TEID")
 	}
-	t.Logf("established SEID %d, TEID %#x", resp.Header.SEID, teid)
+	t.Logf("established SEID %d, TEID %#x", upSEID(t, resp), teid)
 
 	// A retransmission must not write again: the daemon would refuse a second
 	// key or, worse, a second session's records would sit in the tables.
@@ -109,14 +109,14 @@ func TestLiveSessionProgramsTheDaemon(t *testing.T) {
 	if got := cause(t, again); got != ie.CauseRequestAccepted {
 		t.Fatalf("the retransmission answered cause %d", got)
 	}
-	if again.Header.SEID != resp.Header.SEID {
+	if upSEID(t, again) != upSEID(t, resp) {
 		t.Errorf("the retransmission got SEID %d, the first answered %d",
-			again.Header.SEID, resp.Header.SEID)
+			upSEID(t, again), upSEID(t, resp))
 	}
 
 	// Modify: the downlink tunnel moves to another gNB endpoint, and the whole
 	// session is rewritten (same keys, new contents) in one transaction.
-	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upSEID(t, resp), 2, 0,
 		ie.NewUpdateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
 			ie.NewForwardingParameters(
 				ie.NewDestinationInterface(ie.DstInterfaceAccess),
@@ -130,13 +130,13 @@ func TestLiveSessionProgramsTheDaemon(t *testing.T) {
 	// Delete: every record the session wrote is erased. The daemon refuses an
 	// erase of a key that is not there, so a clean answer means the compiler
 	// named exactly what it had written.
-	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0))); got != ie.CauseRequestAccepted {
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 3, 0))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the daemon refused the deletion with cause %d", got)
 	}
 
 	// And once more: a retransmitted deletion is answered, not applied (the
 	// session is gone from the compiler, and the daemon from the ledger).
-	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 4, 0))); got != ie.CauseSessionContextNotFound {
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 4, 0))); got != ie.CauseSessionContextNotFound {
 		t.Errorf("a retransmitted deletion answered cause %d, want session-not-found", got)
 	}
 }
@@ -169,7 +169,7 @@ func TestLiveSessionSharesOneFTEIDPerCHOOSEID(t *testing.T) {
 		t.Fatalf("the daemon refused the establishment with cause %d", got)
 	}
 	defer func() {
-		del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 9, 0)
+		del := message.NewSessionDeletionRequest(0, 0, upSEID(t, resp), 9, 0)
 		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
 			t.Errorf("the daemon refused the deletion with cause %d", got)
 		}
@@ -181,5 +181,5 @@ func TestLiveSessionSharesOneFTEIDPerCHOOSEID(t *testing.T) {
 	if one != two {
 		t.Errorf("two PDIs with CHOOSE ID 3 got TEIDs %#x and %#x: they asked for one tunnel", one, two)
 	}
-	t.Logf("established SEID %d: two PDIs, one F-TEID %#x", resp.Header.SEID, one)
+	t.Logf("established SEID %d: two PDIs, one F-TEID %#x", upSEID(t, resp), one)
 }
