@@ -85,6 +85,25 @@ func TestLiveDownlinkReportReachesTheSMF(t *testing.T) {
 		t.Fatalf("the session was not accepted: cause=%d err=%v", cause, err)
 	}
 
+	// The session stays established for the whole test -- it is what holds the
+	// packets the report is about -- and is deleted on the way out. It has to
+	// be: ci/buffer-path.sh runs this test and then the session package's
+	// buffering test against the same daemon, and that test's control arm reads
+	// the buffering counter before its own session exists. A session left here
+	// is a counter entry there, and the buffering test failed on exactly that.
+	t.Cleanup(func() {
+		sendMsg(t, conn, message.NewSessionDeletionRequest(0, 0, resp.SEID(), 7, 0))
+		m := recvMsg(t, conn, 5*time.Second)
+		r, ok := m.(*message.SessionDeletionResponse)
+		if !ok {
+			t.Errorf("the deletion was answered with %v, want a Session Deletion Response", m)
+			return
+		}
+		if cause, err := r.Cause.Cause(); err != nil || cause != ie.CauseRequestAccepted {
+			t.Errorf("the deletion answered cause=%d err=%v", cause, err)
+		}
+	})
+
 	m := recvMsg(t, conn, 20*time.Second)
 	report, ok := m.(*message.SessionReportRequest)
 	if !ok {
