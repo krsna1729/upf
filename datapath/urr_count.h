@@ -38,6 +38,15 @@
 // graph's id space, so the memory is capacity x 2 x 8 bytes x the worker count
 // (docs/design.md, "Where a table lives" and wall 2).
 //
+// The time a rule's traffic ran (TS 29.244 5.2.2.2.1) is a fact about the rule,
+// not about a worker, so it is *not* per-worker: one stamp pair per rule,
+// written by whichever worker conveyed a counted packet -- once per batch that
+// counted one, never once per packet -- and read by the control side. That is
+// this module's one shared packet-path write; a store lost to a concurrent
+// reader costs one packet's stamp, never a count (the cells stay worker-local
+// and additive). A reading clears the first stamp, so the next window's first
+// stamp is the next window's own packet.
+//
 // What is counted is the IP packet's octets -- the IPv4 header's Total Length
 // -- not the frame's: the graph carries frames, and a data volume an SMF
 // compares against its own count of the UE's octets must not carry the
@@ -68,6 +77,13 @@ class UrrCount final : public Module {
   // the space.
   std::pair<uint64_t, uint64_t> Counts(ActionId id) const noexcept;
 
+  // One rule's timestamps, in the reading's monotonic domain
+  // (read_monotonic_ns): the first packet counted since the previous reading
+  // and the last packet counted at all. The first is cleared here, so the next
+  // reading's first stamp is the next window's own; zeros mean no packet was
+  // counted.
+  std::pair<uint64_t, uint64_t> ReadTimes(ActionId id) noexcept;
+
   CommandResponse CommandGetCounts(
       const upf::pb::UrrCountCommandGetCountsArg &arg);
 
@@ -89,6 +105,13 @@ class UrrCount final : public Module {
     std::atomic<uint64_t> cells[kCellsPerLine];
   };
 
+  // The stamps of one rule's counted traffic: shared, because the fact is the
+  // rule's own, and written once per batch that counted a packet of it.
+  struct Times {
+    std::atomic<uint64_t> first_ns{0};
+    std::atomic<uint64_t> last_ns{0};
+  };
+
   // One worker's plane: its own cache lines, and only its own worker writes
   // them, so an add is a plain load-add-store (stats/worker_slots.h's rule).
   void Add(size_t cell, uint64_t n) noexcept {
@@ -108,6 +131,11 @@ class UrrCount final : public Module {
   // The planes: worker-major, one Line at a time, so a plane's base is line
   // aligned by construction.
   std::vector<Line> lines_;
+
+  // One stamp pair per rule, indexed by ActionId - 1: module state like the
+  // cells, not part of "<name>/counters" (a reading is a question, not a
+  // resource write).
+  std::vector<Times> times_;
 
   std::unique_ptr<bess::dataplane::SlotTable<ActionId, Entry>> entries_;
   std::unique_ptr<bess::dataplane::SlotResource<ActionId, Entry>> resource_;

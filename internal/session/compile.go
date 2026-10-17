@@ -493,8 +493,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 			// drop a quota exhaustion put on this URR's PDRs is lifted, and the
 			// next evaluation puts it back if the new limit is already reached.
 			// This is the one place a provisioned quota re-opens the traffic
-			// short of the session being deleted.
+			// short of the session being deleted, and the measurement the new
+			// limit is read against starts again with it: a re-provisioned
+			// quota is not spent by the traffic the old one paid for.
 			entry.enforcing = false
+			entry.active, entry.windowFirst = 0, time.Time{}
 		}
 	}
 	for _, id := range removeURRs {

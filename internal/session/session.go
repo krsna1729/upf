@@ -438,6 +438,21 @@ type urr struct {
 	firstSeen time.Time
 	hasSeen   bool
 
+	// windowFirst is the first packet of the *current* reporting window. The
+	// dataplane stamps a tick's own first packet (a reading clears it), and a
+	// window spans however many ticks its period is, so which packet opened the
+	// window is remembered here; a report opens the next one.
+	windowFirst time.Time
+
+	// active is the time this URR's traffic has run since the quota it carries
+	// was provisioned: a report does not reset a quota (5.2.2.2.1), so each
+	// tick's own running time is added, and a window the traffic left quiet
+	// adds nothing. stamped says whether any reading carried the dataplane's
+	// stamps at all: without them a quota falls back to the window's length,
+	// which is the same number while the traffic is continuous.
+	active  time.Duration
+	stamped bool
+
 	// lastUp and lastDown are the counters these PDRs had counted when the last
 	// report was made, so that report's successor covers the usage after it
 	// rather than the session's lifetime (report.go, "the window"), and

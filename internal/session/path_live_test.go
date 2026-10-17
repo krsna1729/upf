@@ -533,6 +533,11 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := New(liveConfig(), client, log)
 
+	// The run's own clock: the module's packet stamps are absolute times, and
+	// they must be this run's -- a stamp before it would be an earlier run's
+	// traffic, or an invented instant.
+	runStart := time.Now()
+
 	// The control arm: nothing is measured before this session exists, so a
 	// later non-zero reading is the session's doing.
 	if before := countersOf(t, ctx, client, "cnt_ul"); len(before) != 0 {
@@ -592,6 +597,36 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 			"of each 51-byte frame: the frame's Ethernet header is not data volume",
 			octets, packets, innerOctets*packets)
 	}
+	// The stamps the module keeps for the rule, through the SDK's own reading
+	// of them: the module stamps the packet's arrival on its monotonic clock,
+	// the reading carries the wall clock at the same instant, and this side
+	// places them on the clock an SMF reads (8.2.44, 8.2.45). A zero last stamp
+	// for a rule that counted is a report an SMF cannot use.
+	measured := countersOf(t, ctx, client, "cnt_ul")
+	ids := make([]uint32, 0, len(measured))
+	for id := range measured {
+		ids = append(ids, id)
+	}
+	rules, err := client.RuleCounts(ctx, "cnt_ul", ids...)
+	if err != nil {
+		t.Fatalf("reading cnt_ul with its stamps: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("the reading carries %d rules, want the one the session measures", len(rules))
+	}
+	rule := rules[0]
+	if rule.Last.IsZero() {
+		t.Errorf("the reading carries no time for the rule it counted: %+v", rule)
+	}
+	if rule.Last.Before(runStart) || rule.Last.After(time.Now()) {
+		t.Errorf("the rule's last packet is at %v, and this run began at %v: the stamp is not this run's",
+			rule.Last, runStart)
+	}
+	if !rule.First.IsZero() && rule.First.After(rule.Last) {
+		t.Errorf("the window's first packet is %v, after its last %v", rule.First, rule.Last)
+	}
+	t.Logf("cnt_ul times: window first %v, last %v", rule.First, rule.Last)
+
 	if down := countersOf(t, ctx, client, "cnt_dl"); len(down) != 0 {
 		t.Errorf("the downlink chain, which no URR measures, counts %d rules: %v", len(down), down)
 	}

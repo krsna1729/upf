@@ -91,8 +91,22 @@ message UrrCountCommandGetCountsResponse {
     uint32 action_id = 1;
     uint64 packets = 2;
     uint64 octets = 3;
+    // The time of the first and of the last packet this rule counted since the
+    // previous reading, in the reading's own monotonic domain (read_monotonic_ns
+    // below). Both are 0 for a rule whose traffic was not counted since that
+    // reading. They are what Time of First Packet and Time of Last Packet are
+    // made of (TS 29.244 8.2.44, 8.2.45), and where a duration measurement
+    // starts (5.2.2.2.1).
+    uint64 first_packet_ns = 4;
+    uint64 last_packet_ns = 5;
   }
   repeated RuleCount counts = 1;
+  // The reading's own clock: the monotonic stamp the per-rule stamps are in
+  // (tsc_to_ns(rdtsc())) and the wall clock (gettimeofday) at the same moment,
+  // so the control side can place a rule's stamp on the absolute clock a PFCP
+  // timestamp carries.
+  uint64 read_monotonic_ns = 2;
+  uint64 read_wall_unix_ns = 3;
 }
 
 // TeidKey is the key of the decap module's "<module>/sessions" table: the TEID
