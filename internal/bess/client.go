@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -221,10 +222,19 @@ func messageMap(m proto.Message) (map[string]any, error) {
 // keyed by, and the packets and the IP octets of them that crossed the rule,
 // with every worker's plane summed (a reading is exact for each cell -- a
 // worker writes only its own -- not one global instant).
+//
+// First and Last are when the rule's first and last counted packet crossed, as
+// absolute time: the module stamps them on its own monotonic clock and the
+// reading carries the wall clock it read them at, so this side places them on
+// the clock an SMF reads (TS 29.244 8.2.44, 8.2.45). First is the first packet
+// since the previous reading -- a reading clears it, so each reporting window
+// measures its own start -- and either is zero when no packet was counted.
 type RuleCount struct {
 	ActionID uint32
 	Packets  uint64
 	Octets   uint64
+	First    time.Time
+	Last     time.Time
 }
 
 // RuleCounts asks a counting module for the counters of the named rules, or of
@@ -252,6 +262,11 @@ func (c *Client) RuleCounts(ctx context.Context, module string, actionIDs ...uin
 	}
 	fields := response.ProtoReflect().Descriptor().Fields()
 	counts := response.ProtoReflect().Get(fields.ByName("counts")).List()
+	// The reading's clock: the per-rule stamps are in the module's monotonic
+	// domain, and the wall clock it read at the same instant is what places them
+	// on the clock a PFCP timestamp carries.
+	mono := response.ProtoReflect().Get(fields.ByName("read_monotonic_ns")).Uint()
+	wall := int64(response.ProtoReflect().Get(fields.ByName("read_wall_unix_ns")).Uint())
 	out := make([]RuleCount, 0, counts.Len())
 	for i := range counts.Len() {
 		rule := counts.Get(i).Message()
@@ -260,9 +275,27 @@ func (c *Client) RuleCounts(ctx context.Context, module string, actionIDs ...uin
 			ActionID: uint32(rule.Get(rf.ByName("action_id")).Uint()),
 			Packets:  rule.Get(rf.ByName("packets")).Uint(),
 			Octets:   rule.Get(rf.ByName("octets")).Uint(),
+			First:    packetTime(rule.Get(rf.ByName("first_packet_ns")).Uint(), mono, wall),
+			Last:     packetTime(rule.Get(rf.ByName("last_packet_ns")).Uint(), mono, wall),
 		})
 	}
 	return out, nil
+}
+
+// packetTime places a rule's stamp -- nanoseconds of the module's own monotonic
+// clock -- on the wall clock, from the pair the reading carried: the module
+// stamped the packet's arrival and then, when the reading ran, stamped the wall
+// clock at the same instant, so a packet's absolute time is that wall clock
+// less the time between the packet and the reading. A zero stamp ("no packet
+// counted") is unknown -- time.Time's zero value, never an invented instant --
+// and a stamp older than this reading (a rule whose ActionId was reissued)
+// converts to an earlier instant, which the caller gates on: a window in which
+// nothing was counted carries no time to report.
+func packetTime(stamp, mono uint64, wallNs int64) time.Time {
+	if stamp == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, wallNs+int64(stamp)-int64(mono))
 }
 
 // Change is one resource edit of a session's transaction: a map resource's key

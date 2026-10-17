@@ -2,6 +2,8 @@
 
 #include "urr_count.h"
 
+#include <sys/time.h>
+
 #include <format>
 #include <string>
 
@@ -17,6 +19,7 @@
 #include "utils/endian.h"
 #include "utils/ether.h"
 #include "utils/ip.h"
+#include "utils/time.h"
 
 using bess::utils::be16_t;
 using bess::utils::be32_t;
@@ -76,6 +79,9 @@ CommandResponse UrrCount::Init(const upf::pb::UrrCountArg &arg) {
   cells_per_worker_ = (cells + kCellsPerLine - 1) / kCellsPerLine * kCellsPerLine;
   lines_ = std::vector<Line>(static_cast<size_t>(bess::dataplane::kMaxWorkers) *
                              (cells_per_worker_ / kCellsPerLine));
+  // One stamp pair per rule: 16 bytes x capacity (1 MiB at the default), and
+  // nothing per worker -- the stamps are the rule's own fact.
+  times_ = std::vector<Times>(capacity_);
 
   entries_ = std::make_unique<dataplane::SlotTable<ActionId, Entry>>(capacity_);
   resource_ = std::make_unique<dataplane::SlotResource<ActionId, Entry>>(
@@ -148,6 +154,8 @@ void UrrCount::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   const size_t base = static_cast<size_t>(ctx->wid.value()) * cells_per_worker_;
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
+  // The batch's own clock, read at most once and only if a packet is counted.
+  uint64_t now_ns = 0;
 
   for (size_t i = 0; i < cnt; i++) {
     bess::PacketRef pkt = batch->packet(i);
@@ -165,6 +173,18 @@ void UrrCount::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     const size_t cell = base + offset_of(id.value());
     Add(cell + kPackets, 1);
     Add(cell + kBytes, Octets(pkt));
+    // The stamps: the clock is read once per batch that counts anything (an
+    // rdtsc is cheaper than the octets lookup above), and every rule this
+    // batch counted gets it -- the first store of a window is the one a reading
+    // cleared, and the last follows the traffic.
+    if (now_ns == 0) {
+      now_ns = tsc_to_ns(rdtsc());
+    }
+    Times &t = times_[id.value() - 1];
+    if (t.first_ns.load(std::memory_order_relaxed) == 0) {
+      t.first_ns.store(now_ns, std::memory_order_relaxed);
+    }
+    t.last_ns.store(now_ns, std::memory_order_relaxed);
   }
 
   EmitBatch(ctx, batch, ogates);
@@ -188,19 +208,43 @@ std::pair<uint64_t, uint64_t> UrrCount::Counts(ActionId id) const noexcept {
   return {packets, octets};
 }
 
+std::pair<uint64_t, uint64_t> UrrCount::ReadTimes(ActionId id) noexcept {
+  if (id.value() == 0 || id.value() > capacity_) {
+    return {0, 0};
+  }
+  Times &t = times_[id.value() - 1];
+  // The first stamp is read and cleared in one step: the next packet of this
+  // rule starts the next window, whatever else the workers are doing.
+  const uint64_t first = t.first_ns.exchange(0, std::memory_order_relaxed);
+  const uint64_t last = t.last_ns.load(std::memory_order_relaxed);
+  return {first, last};
+}
+
 CommandResponse UrrCount::CommandGetCounts(
     const upf::pb::UrrCountCommandGetCountsArg &arg) {
   upf::pb::UrrCountCommandGetCountsResponse response;
+  // The reading's clock: the stamps below are in this monotonic domain, and the
+  // control side places them on the absolute clock a PFCP timestamp carries
+  // (TS 29.244 8.2.44, 8.2.45) with the wall clock taken at the same instant.
+  struct timeval wall {};
+  gettimeofday(&wall, nullptr);
+  response.set_read_wall_unix_ns(
+      static_cast<uint64_t>(wall.tv_sec) * 1000000000ull +
+      static_cast<uint64_t>(wall.tv_usec) * 1000ull);
+  response.set_read_monotonic_ns(tsc_to_ns(rdtsc()));
   // Every id asked for is reported, entry or no entry: the cells outlive the
   // entry (the erase keeps them), so the control side can still read a rule's
   // final counts after the transaction that removed it -- which is what a
   // termination report is made of.
   auto report = [&](ActionId id) {
     auto [packets, octets] = Counts(id);
+    auto [first_ns, last_ns] = ReadTimes(id);
     auto *count = response.add_counts();
     count->set_action_id(id.value());
     count->set_packets(packets);
     count->set_octets(octets);
+    count->set_first_packet_ns(first_ns);
+    count->set_last_packet_ns(last_ns);
   };
 
   if (arg.action_ids_size() == 0) {

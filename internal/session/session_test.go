@@ -2396,6 +2396,113 @@ func quotaURR(id uint32, total uint64) *ie.IE {
 	)
 }
 
+// timeQuotaURR is a URR that measures time only and stops the traffic when the
+// time quota is reached: the shape the duration half of a measurement is judged
+// by.
+func timeQuotaURR(id uint32, quota time.Duration) *ie.IE {
+	return ie.NewCreateURR(
+		ie.NewURRID(id),
+		ie.NewMeasurementMethod(0, 0, 1),             // DURAT
+		ie.NewReportingTriggers(0x00, trigTimeQuota), // TIME_QUOTA
+		ie.NewTimeQuota(quota),
+	)
+}
+
+// TestATimeQuotaIsSpentByTheTimeTheTrafficRan is the duration half of a URR:
+// the time a quota is measured against is the time the traffic ran (5.2.2.2.1),
+// which the dataplane's own stamps say -- the window's own first packet to the
+// reading's last one -- and not the clock. A quota longer than one tick is
+// reached by running across several of them, a tick the traffic was quiet in
+// spends nothing, and the report carries the window's first and last packet.
+func TestATimeQuotaIsSpentByTheTimeTheTrafficRan(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x4040, 7, timeQuotaURR(7, 2500*time.Millisecond))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	module := testConfig().Up.Counters
+	base := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+
+	// tick is one evaluation: the counters are cumulative (the module's reading
+	// is), and the stamps are the tick's own traffic, ten milliseconds into it
+	// and ten before its end.
+	tick := func(i int, packets uint64, running bool) []Report {
+		t.Helper()
+		count := bess.RuleCount{ActionID: rule.actionID(), Packets: packets, Octets: packets * 100}
+		if running {
+			count.First = base.Add(time.Duration(i)*time.Second + 10*time.Millisecond)
+			count.Last = base.Add(time.Duration(i)*time.Second + 990*time.Millisecond)
+		}
+		rec.counts = map[string][]bess.RuleCount{module: {count}}
+		reports, err := c.Evaluate(context.Background(), seid, base.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+		return reports
+	}
+
+	tick(0, 0, false) // the first reading is the window's baseline
+	if reports := tick(1, 10, true); len(reports) != 0 {
+		t.Fatalf("one second of traffic reported %+v, want nothing under a 2.5 s quota", reports)
+	}
+	if reports := tick(2, 20, true); len(reports) != 0 {
+		t.Fatalf("two seconds of traffic reported %+v, want nothing under a 2.5 s quota", reports)
+	}
+	// A second the traffic was quiet in spends nothing of the quota, whatever
+	// the clock did with it.
+	if reports := tick(3, 20, false); len(reports) != 0 {
+		t.Fatalf("a quiet second reported %+v, want nothing", reports)
+	}
+	reports := tick(4, 30, true)
+	if len(reports) != 1 {
+		t.Fatalf("three running seconds reported %d reports, want the used-up quota's one", len(reports))
+	}
+	r := reports[0]
+	if r.Trigger != TriggerTimeQuota {
+		t.Errorf("the trigger is %v, want the time quota", r.Trigger)
+	}
+	if !r.Enforcing {
+		t.Error("the report does not say the traffic is stopping")
+	}
+	// The window's own first packet opened it on the first tick that carried
+	// traffic, and its last is the reading's -- not the last tick's first.
+	wantFirst := base.Add(time.Second + 10*time.Millisecond)
+	wantLast := base.Add(4*time.Second + 990*time.Millisecond)
+	if !r.First.Equal(wantFirst) || !r.Last.Equal(wantLast) {
+		t.Errorf("the report's stamps are %v..%v, want the window's %v..%v", r.First, r.Last, wantFirst, wantLast)
+	}
+
+	// And the IEs carry them (TS 29.244 8.2.44, 8.2.45), which is what an SMF
+	// reads a duration measurement from.
+	ies := r.IEs()
+	if len(ies) != 2 {
+		t.Fatalf("the report is %d IEs, want the report type and the usage report", len(ies))
+	}
+	var gotFirst, gotLast *ie.IE
+	for _, child := range ies[1].ChildIEs {
+		switch child.Type {
+		case ie.TimeOfFirstPacket:
+			gotFirst = child
+		case ie.TimeOfLastPacket:
+			gotLast = child
+		}
+	}
+	if gotFirst == nil || gotLast == nil {
+		t.Fatalf("the usage report carries no packet times (first %v, last %v)", gotFirst, gotLast)
+	}
+	// The IE carries whole seconds (its own resolution), so the check is that
+	// the second it names is the stamp's.
+	if ts, err := gotFirst.TimeOfFirstPacket(); err != nil || !ts.Equal(wantFirst.Truncate(time.Second)) {
+		t.Errorf("the report's Time of First Packet is %v (%v), want %v", ts, err, wantFirst.Truncate(time.Second))
+	}
+	if ts, err := gotLast.TimeOfLastPacket(); err != nil || !ts.Equal(wantLast.Truncate(time.Second)) {
+		t.Errorf("the report's Time of Last Packet is %v (%v), want %v", ts, err, wantLast.Truncate(time.Second))
+	}
+}
+
 func TestEvaluateReportsAUsedUpQuotaAndStopsTheTraffic(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
