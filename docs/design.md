@@ -324,6 +324,68 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 Each milestone lands with its tests and a run that shows it, not with a
 scaffold for the next one.
 
+## N3, N6, N9: one port, three interfaces
+
+The UPF faces three reference points, and they are **IP-level** interfaces:
+3GPP does not define their L2, so the deployment decides whether they are one
+NIC, one NIC with tagged sub-interfaces, or three.
+
+BESS's `vif` module (`core/modules/vif.{h,cc}`) is built for this and is more
+than a lookup: it matches and strips 802.1Q, finds an interface by `(VLAN,
+destination MAC)` -- and by IP when it answers ARP on that interface's behalf --
+writes `vif_id` and `route_domain` into the packet's metadata, and sends the
+frame out of the vif's own output gate. It is configured through `VifArg` -- a list of `interface`s with `id`, `vlan`,
+`mac_addr`, `ip_addr`, `route_domain` and `gate`, plus a `default_gate` for
+unclassified traffic -- and through `VifCommandAddArg` with the same
+per-interface fields (`protobuf/module_msg.proto`), which is the shape `upfd`
+drives. So N3, N6 and N9 can be
+three interfaces on one PMD port, each with its own address, its own ARP answers
+and its own routing domain; nothing in 3GPP requires a distinct MAC per reference
+point, and a shared MAC is fine where the segments are tagged apart.
+
+`route_domain` is written, not yet read: `core/route/route_domain.h` and `Router`
+(`core/route/router.h`) are domain-aware (`kMaxRouteDomains`, a `max_domains` per
+router, routes taken per domain) and `vif` writes the domain into packet
+metadata, but no module in the tree consumes that attribute today -- the
+vif-to-router link is work, not a given. What a *PDR* selects is not a vif but a
+**network instance** (TS 29.244 8.2.4), beside the **source interface** (8.2.2)
+which this repo does read (`internal/session/compile.go`). The instance is the
+missing link, and docs/compliance.md's row over 8.2.89/8.2.4 says so: the SMF
+names an instance per rule, the UPF maps it to an interface and an address pool,
+and with one instance configured a PDR naming another is indistinguishable from
+one naming ours.
+
+**A plain NIC cannot put both halves of a session on one worker, and the port
+count is not the reason.** The uplink arrives as GTP-U and the downlink as the
+UE's own flow; outer-header hashing sees two unrelated tuples, because the inner
+one is not in the outer header. Three ports hash the same way. N3/N6 (and N9)
+sessions therefore take the shared tables of the placement policy, with
+per-worker cells for what the packet path writes, while per-flow sharding stays
+for what does have one worker across both directions.
+
+That is a statement about outer-header hashing, not about the protocol, and the
+difference matters enough to measure rather than assume. The knobs are in our
+DPDK (`lib/ethdev/rte_ethdev.h`): `RTE_ETH_RSS_LEVEL_INNERMOST` with
+`RTE_ETH_RSS_L3_SRC_ONLY` for the uplink -- the inner source is the UE address --
+and `RTE_ETH_RSS_L3_DST_ONLY` for the downlink, where the inner destination is.
+`RTE_ETH_RSS_GTPU` (bit 23) is not that: it hashes at the tunnel level, and the
+two halves a session really has are a GTP-U packet carrying a per-direction TEID
+and a plain-IP packet carrying no GTP-U header at all. The two L3 bits are also
+mutually exclusive inside one `rss_hf` (the header clears both when both are
+set), so a single port carrying both directions needs per-pattern RSS -- an
+`rte_flow` RSS action -- rather than one port-level setting. Driver support for
+GTP-U exists in both engines we build (mlx5's flow steering, and ice's
+`drivers/net/intel/ice/base/ice_flow.c`), which is what makes this worth
+measuring. Whether this box's NIC and DPDK can do it belongs on the hardware
+list, not in the basis of the placement policy.
+
+What `upfd` owns, then: the ports and their vifs, the graph, the routes per
+instance (the UE pool's next hop out of N6, the peer UPF for N9, the data
+network's default), and the management surface OMEC scattered across flags and
+scripts -- metrics, echo and end-marker handling, DDN/BAR, and the checkpoint a
+restart replays from. `internal/routing` is empty today; the route domains above
+are what it is for.
+
 ## Where a table lives: shared, per-worker, or behind a ring
 
 The default is **shared**: a table a controller writes and workers read (the
