@@ -422,7 +422,9 @@ func (p *idPool) alloc() (uint32, error) {
 		if p.next == p.start {
 			p.walked = true
 		}
-		if !p.taken[id] {
+		if !p.taken[id] && !p.released[id] {
+			// A released id is skipped even though nothing holds it: it is in
+			// the free list, and handing it out here would hand it out twice.
 			return id, nil
 		}
 	}
@@ -442,12 +444,11 @@ func (p *idPool) alloc() (uint32, error) {
 }
 
 // reserve keeps an id the pool did not hand out out of the walk: an F-TEID an
-// SMF pinned. The pin is released when its session goes (releaseSession), which
-// ends the reservation but never queues the value for allocation: a foreign
-// value offered to the free list is a value no session asked for. It comes back
-// only if the walk visits it, so a pin inside the pool's space is handed out
-// again on the next time round and a pin outside it (0x11223344 is a legal pin
-// and an illegal allocation) never is.
+// SMF pinned. The walk visits each id once and never returns, so this matters
+// twice: a pinned value must not be handed out while the session holds it, and
+// once released (releaseSession) the value comes back only because release
+// queues it -- outside the pool's range nothing queues it, which is what keeps
+// 0x11223344 (a legal pin, an illegal allocation) out of the free list.
 func (p *idPool) reserve(id uint32) {
 	if id == 0 {
 		return
@@ -455,22 +456,22 @@ func (p *idPool) reserve(id uint32) {
 	p.taken[id] = true
 }
 
-// release takes back an id the pool handed out. A reserved one (an F-TEID an
-// SMF pinned) ends its reservation here -- the value is free again for the SMF
-// that pinned it -- but is never queued for allocation: the pool did not hand it
-// out, and queueing a foreign value like 0x11223344 would offer it to a session
-// that never asked for it. A zero grace means an id the pool *did* hand out may
-// be reused as soon as the walk is over (for a space whose resource has no
-// retire period: the TEID table's rules are keyed, not slotted).
+// release takes back an id the pool handed out, or ends the reservation of one
+// an SMF pinned. Either way the id is queued for allocation when it lies in the
+// pool's own range: the walk visits each id once and never comes round again, so
+// a value it passed while it was taken or reserved would otherwise be gone for
+// the life of the pool -- the SMF that pinned it could not pin it again, and no
+// other session could be given it. A value outside the range (0x11223344 is a
+// legal pin and an illegal allocation) only ends its reservation: the range is
+// what the deployment's peer expects to see in a TEID. A zero grace means an id
+// may be reused as soon as the walk is over (for a resource with no retire
+// period: the TEID table's rules are keyed, not slotted).
 func (p *idPool) release(id uint32) {
 	if id == 0 {
 		return
 	}
-	if p.taken[id] {
-		delete(p.taken, id)
-		return
-	}
-	if p.released[id] {
+	delete(p.taken, id)
+	if id >= p.limit || p.released[id] {
 		return
 	}
 	p.released[id] = true
@@ -515,7 +516,12 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		seen[k] = true
 		changes = append(changes, ch)
 	}
-	for _, p := range pdrsInOrder(s) {
+	// The records of a PDR a modification removed are still in the dataplane
+	// when the session goes: they are out of the model, so a deletion that
+	// walked only the model would leave them programmed for good.
+	all := pdrsInOrder(s)
+	all = append(all, s.removed...)
+	for _, p := range all {
 		dir := c.direction(p.srcIfc)
 		key, err := p.ruleKey(dir.PDRFields)
 		if err != nil {
@@ -526,19 +532,32 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		}
 		add(bess.Change{Resource: rulesRes(dir), Key: key})
 	}
-	for _, p := range pdrsInOrder(s) {
+	for _, p := range all {
 		dir := c.direction(p.srcIfc)
 		if p.actionID != 0 {
 			add(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
-		}
-		if p.meterID != 0 {
-			add(bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
 		}
 		for _, t := range p.tunnels {
 			add(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
 		}
 		if p.teid != 0 {
 			add(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
+		}
+	}
+	// Meters belong to QERs, not to PDRs: compile writes one per policed
+	// direction whether or not a PDR names it, so a deletion erases them from
+	// the same list. Erasing them per PDR instead would miss the meter of a
+	// direction no PDR of this session uses, and would name the QER's meter
+	// once per PDR.
+	for _, q := range qersInOrder(s) {
+		if !q.hasRate {
+			continue
+		}
+		if q.meterUL != 0 {
+			add(bess.Change{Resource: metersRes(c.cfg.Up), Key: map[string]any{"id": q.meterUL}})
+		}
+		if q.meterDL != 0 {
+			add(bess.Change{Resource: metersRes(c.cfg.Down), Key: map[string]any{"id": q.meterDL}})
 		}
 	}
 	if len(changes) != 0 {
@@ -556,10 +575,20 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 
 // settle forgets the removals a transaction carried out, once the dataplane has
 // taken it. Until then they stay listed, so a refused modification's retry
-// erases the same records rather than leaving them behind.
+// erases the same records rather than leaving them behind. A TEID that no PDR of
+// the session names any more also loses its mapping and its reservation here:
+// nothing else would clear them before the session ends, and every later pin of
+// that value would be refused as this session's.
 func (c *Compiler) settle(s *Session) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	for _, p := range s.removed {
+		if p.teid == 0 || c.byTEID[p.teid] != s || teidInUse(s, p) {
+			continue
+		}
+		delete(c.byTEID, p.teid)
+		c.teids.release(p.teid)
+	}
 	s.removed = nil
 }
 
@@ -577,7 +606,11 @@ func (c *Compiler) releaseSession(s *Session) {
 	teids := map[uint32]bool{}
 	actions := map[uint32]bool{}
 	meters := map[uint32]bool{}
-	for _, p := range pdrsInOrder(s) {
+	all := pdrsInOrder(s)
+	// A PDR a modification removed still holds ids: its records were erased by
+	// the deletion above, and its ids are freed here with the rest.
+	all = append(all, s.removed...)
+	for _, p := range all {
 		if p.teid != 0 && !teids[p.teid] {
 			teids[p.teid] = true
 			// Only if this session is what the mapping names. The mapping goes
@@ -595,9 +628,17 @@ func (c *Compiler) releaseSession(s *Session) {
 			actions[p.actionID] = true
 			c.actions.release(p.actionID)
 		}
-		if p.meterID != 0 && !meters[p.meterID] {
-			meters[p.meterID] = true
-			c.meters.release(p.meterID)
+	}
+	// The meters are the QERs': one per policed direction, allocated with the
+	// QER and not with the PDRs that happen to name it.
+	for _, q := range qersInOrder(s) {
+		if q.meterUL != 0 && !meters[q.meterUL] {
+			meters[q.meterUL] = true
+			c.meters.release(q.meterUL)
+		}
+		if q.meterDL != 0 && !meters[q.meterDL] {
+			meters[q.meterDL] = true
+			c.meters.release(q.meterDL)
 		}
 	}
 }

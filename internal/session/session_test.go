@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -118,6 +119,23 @@ func metersErased(changes []bess.Change) []bess.Change {
 		}
 	}
 	return out
+}
+
+// assertNoRepeat fails when a transaction names one (resource, key) twice. The
+// engine rejects such a list ("second operation on ... in one transaction") and
+// the recorder used by these tests would take it, so this is where a change
+// list that only a fake accepts is caught.
+func assertNoRepeat(t *testing.T, changes []bess.Change) {
+	t.Helper()
+	seen := map[string]int{}
+	for _, ch := range changes {
+		seen[ch.Resource+"\x00"+fmt.Sprint(ch.Key)]++
+	}
+	for k, n := range seen {
+		if n != 1 {
+			t.Errorf("the transaction names %s %d times, which the engine rejects", k, n)
+		}
+	}
 }
 
 // onlyErases is the changes that take records out: a change carries no value
@@ -295,8 +313,8 @@ func TestADeletionErasesEachSharedRecordOnce(t *testing.T) {
 			teidRules++
 		}
 	}
-	if meters != 1 {
-		t.Errorf("the deletion erases %d meter records, want the QER's one (two PDRs share it)", meters)
+	if meters != 2 {
+		t.Errorf("the deletion erases %d meter records, want the QER's two (one per policed direction)", meters)
 	}
 	if teidRules != 1 {
 		t.Errorf("the deletion erases %d TEID rules, want one (two uplink PDRs share the F-TEID)", teidRules)
@@ -365,9 +383,25 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	if n := len(actionsErased(erases)); n != 1 {
 		t.Errorf("%d action records erased, want the removed PDR's one", n)
 	}
-	if n := len(metersErased(erases)); n != 1 {
-		t.Errorf("%d meter records erased, want the uplink QER's one", n)
+	// The QER outlives the PDR, and compile writes a meter for every QER the
+	// session still holds: erasing that meter here would name one key twice in
+	// one transaction, which the engine rejects. It goes when the session does.
+	if n := len(metersErased(erases)); n != 0 {
+		t.Errorf("%d meter records erased, want none while the QER is held", n)
 	}
+	assertNoRepeat(t, erases)
+
+	// And the records it left behind go when the session does: the removed PDR
+	// is out of the model, so a deletion that walked only the model would leave
+	// its meter, and any TEID rule no one else used, programmed for good.
+	del := c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0)).(*message.SessionDeletionResponse)
+	if got := cause(t, del); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	if n := len(metersErased(rec.last())); n != 2 {
+		t.Errorf("%d meter records erased by the deletion, want the QER's two", n)
+	}
+	assertNoRepeat(t, rec.last())
 	// The downlink PDR stays, so its rule is rewritten in the same transaction.
 	written := 0
 	for _, ch := range rules(erases) {
@@ -404,6 +438,48 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	}
 	if n := len(actionsErased(erases)); n != 1 {
 		t.Errorf("%d action records erased, want the removed PDR's one", n)
+	}
+}
+
+func TestAReleasedPinInsideTheRangeComesBack(t *testing.T) {
+	// The walk visits each id once and never comes round again, and a reserved
+	// id is skipped wherever the walk meets it. So a pin the walk has already
+	// passed is gone for the life of the pool unless the release queues it --
+	// the SMF that pinned it could not pin it again, because the pool would
+	// never offer it and the pin would be refused as another session's.
+	p := newIDPool(64, 0)
+	p.reserve(5)
+
+	for {
+		id, err := p.alloc()
+		if err != nil {
+			break
+		}
+		if id == 5 {
+			t.Fatal("the walk handed out a reserved id")
+		}
+	}
+	if !p.walked {
+		t.Fatal("the walk did not finish")
+	}
+	p.release(5)
+	if id, err := p.alloc(); err != nil || id != 5 {
+		t.Errorf("the released pin answered (%d, %v), want the value back", id, err)
+	}
+
+	// A value outside the range is a pin the pool could not have made: ending
+	// its reservation must not put it in the free list, because the next
+	// allocation would then carry a TEID the deployment's peer never expects.
+	q := newIDPool(64, 0)
+	q.reserve(0x11223344)
+	for {
+		if _, err := q.alloc(); err != nil {
+			break
+		}
+	}
+	q.release(0x11223344)
+	if id, err := q.alloc(); err == nil {
+		t.Errorf("an out-of-range pin was handed out as id %d", id)
 	}
 }
 

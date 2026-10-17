@@ -60,7 +60,7 @@ fi
 # the module and its workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ -run TestLiveSessionProgramsTheDaemon -count=1 -v || {
+  $GO test ./internal/session/ -run 'TestLiveSessionProgramsTheDaemon|TestLiveSessionSharedRecords' -count=1 -v || {
   echo "session-live: failed; the daemon's log is $LOG" >&2
   exit 1
 }

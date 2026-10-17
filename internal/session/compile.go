@@ -465,11 +465,13 @@ func teidInUse(s *Session, removed *pdr) bool {
 	return false
 }
 
-// meterInUse is teidInUse for the meter a QER's rate resolved to in one
-// direction: several PDRs are policed by it, so it outlives any one of them.
-func meterInUse(s *Session, meterID uint32) bool {
-	for _, p := range s.PDRs {
-		if p.meterID == meterID {
+// qerHoldsMeter reports whether the meter a removed PDR was policed by still
+// belongs to a QER the session holds. compile writes a meter for every QER with
+// a rate whether or not a PDR names it, so erasing one of those in the same
+// transaction would be a second operation on its key -- the engine rejects it.
+func qerHoldsMeter(s *Session, removed *pdr) bool {
+	for _, q := range s.QERs {
+		if q.meterUL == removed.meterID || q.meterDL == removed.meterID {
 			return true
 		}
 	}
@@ -486,19 +488,44 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	changes := make([]bess.Change, 0, 4*len(s.PDRs)+len(s.QERs))
 	created := make([]*ie.IE, 0, len(s.PDRs))
 
-	// PDRs a modification removed are erased by the same transaction that
-	// writes the rest of the session: the SMF is told they are gone, so their
-	// rules must stop selecting packets. Two of the records a PDR names can
-	// belong to the PDRs that stay -- a rule key when two PDRs compile to the
-	// same one, a QER's meter when several are policed by it, and the TEID rule
-	// when a session's uplink PDRs share an F-TEID -- and those are erased only
-	// if the removed PDR was their last user.
+	// A TEID rule is the session's, not the PDR's: two uplink PDRs that share an
+	// F-TEID name it twice, and the engine rejects a second operation on one
+	// (resource, key) in a transaction. It is written once, with the first PDR's
+	// precedence (pdrsInOrder is an order, so that is the lowest).
+	writtenTEIDs := map[uint32]bool{}
+	// Two PDRs whose filters and precedence compile to one rule key are one rule
+	// the dataplane cannot tell apart: writing both would be rejected by the
+	// engine, and writing either would silently drop the other's action.
+	writtenRules := map[string]bool{}
+	// The rule keys the session still holds, as the transaction will write them.
 	live := map[string]bool{}
 	for _, p := range s.PDRs {
 		dir := c.direction(p.srcIfc)
 		if key, err := p.ruleKey(dir.PDRFields); err == nil {
 			live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
 		}
+	}
+	// PDRs a modification removed are erased by the same transaction that
+	// writes the rest of the session: the SMF is told they are gone, so their
+	// rules must stop selecting packets. Three of the records a PDR names can
+	// belong to what stays, and the engine rejects a second operation on one
+	// (resource, key) -- an erase of a key this transaction also writes, or a
+	// second erase of the same key -- so:
+	//
+	//   - a rule key another PDR compiles to is not erased (the write follows);
+	//   - a QER's meter is erased only when the QER went with the PDR, because
+	//     compile writes a meter for every QER the session still holds;
+	//   - the TEID rule only when no PDR of the session still shares the F-TEID.
+	//
+	// The action record and the tunnel keyed by it are per-PDR: those always go.
+	erased := map[string]bool{}
+	erase := func(ch bess.Change) {
+		k := ch.Resource + "\x00" + fmt.Sprint(ch.Key)
+		if erased[k] {
+			return
+		}
+		erased[k] = true
+		changes = append(changes, ch)
 	}
 	for _, p := range s.removed {
 		dir := c.direction(p.srcIfc)
@@ -507,22 +534,19 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return nil, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
 		}
 		if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
-			changes = append(changes, bess.Change{Resource: rulesRes(dir), Key: key})
+			erase(bess.Change{Resource: rulesRes(dir), Key: key})
 		}
 		if p.actionID != 0 {
-			changes = append(changes, bess.Change{
-				Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
+			erase(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
 		}
 		for _, t := range p.tunnels {
-			changes = append(changes, bess.Change{
-				Resource: t, Key: map[string]any{"action_id": p.actionID}})
+			erase(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
 		}
 		if p.teid != 0 && !teidInUse(s, p) {
-			changes = append(changes, bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
+			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
 		}
-		if p.meterID != 0 && !meterInUse(s, p.meterID) {
-			changes = append(changes, bess.Change{
-				Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
+		if p.meterID != 0 && !qerHoldsMeter(s, p) {
+			erase(bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
 		}
 	}
 
@@ -548,6 +572,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
 		}
+		rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
+		if writtenRules[rkey] {
+			// The rule table knows PDR ids no better than the SMF's filters do:
+			// one key is one rule, and the engine would reject the second
+			// write. Saying so is better than handing the SMF a session whose
+			// second PDR silently has no rule of its own.
+			return nil, nil, fmt.Errorf("%w: two PDRs compile to one rule key", errNotExpressible)
+		}
+		writtenRules[rkey] = true
 		if p.drop && p.actionID == 0 {
 			// A drop needs no action record: the rule's gate is the whole
 			// result, and the packet path pays for nothing else.
@@ -608,14 +641,17 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// A TEID no rule names is dropped there (the table's default gate),
 		// so the decap itself needs no session state.
 		if p.teid != 0 {
-			changes = append(changes, bess.Change{
-				Resource: c.teidRes(),
-				Key:      teidRuleKey(p.teid),
-				Value: map[string]any{
-					"priority": p.precedence,
-					"gate":     uint64(c.cfg.TEIDGate),
-				},
-			})
+			if !writtenTEIDs[p.teid] {
+				writtenTEIDs[p.teid] = true
+				changes = append(changes, bess.Change{
+					Resource: c.teidRes(),
+					Key:      teidRuleKey(p.teid),
+					Value: map[string]any{
+						"priority": p.precedence,
+						"gate":     uint64(c.cfg.TEIDGate),
+					},
+				})
+			}
 			created = append(created, ie.NewCreatedPDR(
 				ie.NewPDRID(p.id),
 				createdFTEID(p.teid, c.cfg.N3Addr)))

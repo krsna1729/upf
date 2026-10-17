@@ -175,6 +175,59 @@ func carriesPackets(t *testing.T, req *message.SessionEstablishmentRequest, cont
 	}
 }
 
+// TestLiveSessionSharedRecords is the shape a real SMF sends when it programs
+// several uplink filters onto one tunnel: two uplink PDRs sharing one F-TEID and
+// one QER, then a Modify that removes one of them. Both halves are where the
+// engine's transaction rules bite -- one TEID rule named twice by the
+// establishment, an erase of a key the same transaction writes by the removal --
+// and the recorder the unit tests use takes anything, so this is the only place
+// the daemon's verdict is heard (core/dataplane/transaction_engine.cc rejects a
+// second operation on one (resource, key) in a transaction).
+func TestLiveSessionSharedRecords(t *testing.T) {
+	target := os.Getenv("UPF_BESS_TARGET")
+	if target == "" {
+		t.Skip("set UPF_BESS_TARGET (ci/session-path.sh does) to run against a live bessd")
+	}
+	ctx := context.Background()
+	client, err := bess.Dial(ctx, target)
+	if err != nil {
+		t.Fatalf("dialing %s: %v", target, err)
+	}
+	defer client.Close()
+	if err := client.Refresh(ctx); err != nil {
+		t.Fatalf("reading the daemon's schema: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := New(liveConfig(), client, log)
+
+	// A TEID the graph's own frames do not use: this test carries no packets,
+	// it only asks the daemon to take the change lists.
+	req := sharedFTEIDEstablishment(0x7770, "10.45.0.3", 0x12340000)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the daemon refused the establishment with cause %d", got)
+	}
+	defer func() {
+		del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 9, 0)
+		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
+			t.Errorf("the deletion answered cause %d", got)
+		}
+	}()
+	t.Logf("established SEID %d with two uplink PDRs on one F-TEID", resp.Header.SEID)
+
+	// Removing one of the two: its own records go, the shared TEID rule and the
+	// QER's meters stay (the surviving PDR needs the first, and the second is
+	// written by the same transaction).
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewRemovePDR(ie.NewPDRID(2)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the daemon refused the removal with cause %d", got)
+	}
+	t.Logf("removed PDR 2; the daemon took the transaction")
+}
+
 // gatePackets is the packets a module's output gate has counted, from the
 // daemon's own metrics (control_v2.ListMetrics): "bess_gate_packets_total" with
 // the module's name, direction "out" and gate 0 -- the single chain each table
