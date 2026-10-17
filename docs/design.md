@@ -1,5 +1,9 @@
 # Design
 
+The architecture, the walls and the costs. The datapath's own engineering
+reference -- module by module, resources and keys, what it takes from BESS,
+placement and state locality -- is `docs/datapath.md`.
+
 ## Deployment shape (fixed by the deployment decision)
 
 - **One `upfd` process.** It terminates PFCP/N4 (UDP 8805 server), owns the

@@ -58,7 +58,7 @@ func (r *recorder) ReleaseFlow(_ context.Context, module string, id uint32) erro
 
 // ClearStore is the restart wall's call (StoreCommands): the fake records it the
 // way it records the release and drop commands.
-func (r *recorder) ClearStore(_ context.Context, module string, _ uint32) error {
+func (r *recorder) ClearStore(_ context.Context, module string) error {
 	if r.storeFail != nil {
 		return r.storeFail
 	}

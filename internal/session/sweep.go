@@ -75,21 +75,21 @@ func (c *Compiler) resources() []string {
 // empty. And nothing is erased when there is nothing to erase, because an
 // empty transaction is not one the daemon accepts.
 func (c *Compiler) Sweep(ctx context.Context) error {
-	if c.contents == nil {
-		return errors.New("session: this dataplane cannot be read back, so an earlier run's sessions cannot be swept")
-	}
-	// Before the tables: what the store holds is a previous run's packets, and
-	// this process knows neither the flows nor the episodes they were held for.
-	// It is not a table and cannot be read back per key -- the module's own
-	// clear is the only way to empty it, and the id it takes is unused (the
-	// command's field exists for the release and drop commands).
+	// First, and before the readback check: what the store holds is a previous
+	// run's packets, and this process knows neither the flows nor the episodes
+	// they were held for. It is not a table of the session layer's, so it is
+	// emptied whether or not this dataplane can be read back -- a store left
+	// holding packets would hand a later session the previous one's.
 	if c.store != nil && c.BufferingConfigured() {
-		if err := c.store.ClearStore(ctx, c.cfg.Buffering.Store, 0); err != nil {
+		if err := c.store.ClearStore(ctx, c.cfg.Buffering.Store); err != nil {
 			// A store that will not clear is a warning: the packets age out by
 			// its own timeout, which is the same bound every other held packet
 			// has, and refusing to serve PFCP over it would take the node down.
 			c.log.Warn("session: the packet store was not cleared", "module", c.cfg.Buffering.Store, "error", err)
 		}
+	}
+	if c.contents == nil {
+		return errors.New("session: this dataplane cannot be read back, so an earlier run's sessions cannot be swept")
 	}
 	names := c.resources()
 	contents, err := c.contents.Contents(ctx, names...)

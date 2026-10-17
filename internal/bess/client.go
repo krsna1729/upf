@@ -380,12 +380,11 @@ func (c *Client) DropFlow(ctx context.Context, module string, id uint32) error {
 	return nil
 }
 
-// ClearStore frees every packet a store holds. Its command takes a flow id and
-// ignores it when the store is emptied wholesale (the module's clear); the id is
-// there for the release and drop commands, which act on one flow. This is the
-// restart wall's call: a previous run's held packets must not outlive the
-// controller that knew which episode they belonged to.
-func (c *Client) ClearStore(ctx context.Context, module string, id uint32) error {
+// ClearStore frees every packet a store holds (the module's own clear, whose
+// argument carries no fields at all). This is the restart wall's call: a
+// previous run's held packets must not outlive the controller that knew which
+// episode they belonged to.
+func (c *Client) ClearStore(ctx context.Context, module string) error {
 	arg, err := c.Message("bess.pb.PacketStoreCommandClearArg", map[string]any{})
 	if err != nil {
 		return err
