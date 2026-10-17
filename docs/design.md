@@ -509,24 +509,34 @@ each; `ci/session-live.sh` runs the live ones against the daemon it starts):
   10.6 µs (`internal/n4/bench_test.go`).
 - The compiler is 121 µs (792 allocations) per establishment and 39 µs per
   deletion (`internal/session/bench_test.go`).
-- The transaction is the rest, and it is nearly all of it. Against a running
-  daemon an establishment measures 2.20 ms, of which `Client.Apply` -- converting
-  every key and value to a schema-driven message, then one `Commit` -- is
-  2.10 ms, 95%, leaving the compile about 103 µs; the bench script reports the
-  same path as 1.685 ms p50, and both are today's machine. The conversion itself
-  is small: 5.2 µs and 20 allocations for one message whose type has two scalar
-  fields (`internal/bess`, `BenchmarkLiveMessage` -- a lower bound, since a rule's
-  type is bigger), so a session's twenty-odd messages are about 0.1 ms and the
-  RPC and the daemon are about 2 ms.
+- The transaction is the rest, and it is most of it. Against a running daemon an
+  establishment measures about 2.1 ms, of which `Client.Apply` is 1.99 ms; the
+  parts inside it are bounded from both sides: converting exactly the changes one
+  real establishment produced -- eleven records, so twenty-two keys and values,
+  by their own field maps -- costs 144 µs (`BenchmarkLiveChangesToMessages`), a
+  single message of any type the graph declares costs 3-7 µs
+  (`BenchmarkLiveMessage`, per type), and one no-op RPC to the same daemon costs
+  120 µs (`BenchmarkLiveCapabilities`). What remains is about 1.7 ms per session,
+  and it is the daemon.
 
-So the lever is the transaction path, and it is ours rather than go-pfcp's. The
-same daemon answers the C++ client at about 175 µs per transaction (the recorded
-5,732 tx/s of `live_transaction_bench`), an order of magnitude under what this Go
-client sees for one. Closing that gap is the next measurement: the SDK's `Commit`
-timed against the engine's own counters, and the C++ bench re-run on this machine
-for a same-day reference. The profile that would name it cannot be taken here
-(`-cpuprofile` runs are killed in this environment, even on a trivial benchmark,
-leaving an empty profile), so the parts are measured one by one.
+So the lever is the daemon's transaction path, not go-pfcp and not the compiler.
+The transactions themselves land between 1.0 and 2.0 ms with a tail to 3 ms (the
+histogram `BenchmarkLiveEstablish` logs, bucketed by the daemon's first backoff),
+and the daemon answers BUSY by sleeping 200 µs, then doubling, up to five retries
+(`kBusyFirstBackoff`, `kBusyRetries`, `core/control/api_v2.*`): a retried
+transaction is slow, not failed, so some of that time can be the engine waiting
+for reclamation rather than working. Which part is which is not measured. The
+engine's own benchmark records 695K sessions a second, but that is in-process,
+with no gRPC, no lock and no plugin graph, so it bounds nothing here -- it makes
+"the session's tables are what cost" a hypothesis worth testing, and the test is
+the same transaction against a minimal graph.
+
+The next measurements, in order: publish the engine's retry counter
+(`busy_retried()` is counted and not in `ListMetrics`) so a run reads retries
+instead of inferring them from a histogram; the minimal-graph comparison; and
+`perf` on bessd under the isolate wrapper this box's paranoid setting requires --
+Go's own `-cpuprofile` is killed here, and that does not say anything about
+`perf`.
 
 The walls, in order:
 
