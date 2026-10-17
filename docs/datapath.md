@@ -65,11 +65,16 @@ downstream is keyed by.
                                         |                     +---------------------+
                                         |                     | rt  Router          |
                                         |                     +----------+----------+
-                                        |                                | next hop 1
+                                        |                                | ogate 0
+                                        |                                v
                                         v                                v
                               +-------------------+          +---------------------+
-                              | n3_out  PortOut   |<---------| n6_out  PortOut     |---> N6
+                              | n3_out  PortOut   |---> N3   | n6_out  PortOut     |---> N6
                               +-------------------+          +---------------------+
+                                 ^                                        ^
+                                 |                                        |
+                          echo0's reply, the                    rt's ogate 0 (next hop 1):
+                          End Marker's frame                    the deployment's N6 port
 ```
 
 ### Downlink
@@ -81,39 +86,57 @@ downstream is keyed by.
  +-----------------+          +--------------------+
  | n6_in  PortInc  |--- 0 --->| pdr_dl  WCM        |
  +-----------------+          |  key: inner 5-tuple|
-                              +----+----------+----+
-                                   | 0        | ogate 1: the buffering branch
-                                   v          | (deploy/buffer-path.yaml only)
-                        +------------------+  |          +---------------------+
-                        | at_dl ActionTable|  +--------->| cnt_buf  UrrCount   |
-                        +--------+---------+             +----------+----------+
-                                 | 0                                  | 0
-                                 v                                    v
-                        +------------------+             +---------------------+
-                        | mt_dl  Meter     |             | buf  PacketStore    |  BESS's own module;
-                        +--------+---------+             |  key_attrs:         |  one queue per rule
-                                 | 0                     |  ["action_id"]      |
-                                 v                       +----+-----------+----+
-                        +------------------+                   | 0         | 1
-                        | cnt_dl  UrrCount |                   |           v
-                        +--------+---------+                   |      (unwired: eviction
-                                 | 0                           |       and overflow drop;
-                                 v                             |       the daemon's gate
-                        +------------------+                   |       counters see them)
-                        | rt  Router       |<------------------+
-                        +--------+---------+   released packets re-enter the
-                                 | ogate 1      action path with the SMF's new
-                                 v              instruction already written
+                              +----+---------------+
+                                   | 0
+                                   v
                         +------------------+
-                        | enc  GtpuEncap   |  per-rule tunnel record
-                        |  outer headers,  |  enc/tunnels{TunnelKey{action_id}}
-                        |  DSCP copy       |
-                        +--------+---------+
-                                 | 0
-                                 v
-                        +------------------+
-                        | n3_out  PortOut  |---> N3
-                        +------------------+
+                        | at_dl ActionTable|<--------------------+
+                        +--------+---------+                     |
+                                 | 0                             |
+                                 v                               |
+                        +------------------+                     |
+                        | mt_dl  Meter     |                     |
+                        +--------+---------+                     |
+                                 | 0                             |
+                                 v                               |
+                        +------------------+                     |
+                        | cnt_dl  UrrCount |                     |
+                        +--------+---------+                     |
+                                 | 0                             |
+                                 v                               |
+                        +------------------+                     |
+                        | rt  Router       |                     |
+                        +--------+---------+                     |
+                                 | ogate 1                       |
+                                 v                               |
+                        +------------------+                     |
+                        | enc  GtpuEncap   |                     |
+                        |  outer headers,  |                     |
+                        |  DSCP copy       |                     |
+                        +--------+---------+                     |
+                                 | 0                             |
+                                 v                               |
+                        +------------------+                     |
+                        | n3_out  PortOut  |---> N3              |
+                        +------------------+                     |
+                                                                 |
+   pdr_dl, ogate 1 (deploy/buffer-path.yaml only)                |
+                                                                 |
+                        +------------------+                     |
+                        | cnt_buf  UrrCount|--- 0 --->+          |
+                        +------------------+           |          |
+                                                       v          |
+                                             +-------------------+--+
+                                             | buf  PacketStore     |  BESS's own module,
+                                             |  key_attrs:          |  one queue per rule
+                                             |  ["action_id"]       |
+                                             +----+-----------------+
+                                                  | gate 0: release, into the action path
+                                                  +-----> at_dl (above), which applies the
+                                                          SMF's new instruction
+                                                  | gate 1: unwired -> dropped
+                                                  +-----> eviction and overflow; the daemon's
+                                                          gate counters see them
 ```
 
 ### The control plane's own port
@@ -247,11 +270,32 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 * **One daemon, one graph, one writer.** `upfd` is the only writer of session
   state; the graph's own resources (next hops, module arguments) are the
   deployment's.
-* **Workers.** The lab graphs pin one (`workers: [{wid: 0, core: 0}]`) so a
-  measurement is not a scheduling artefact; the deployment declares one rx queue
-  per PMD port and leaves the worker count to `bessd`. Our modules allow every
-  worker; BESS's store allows one, and its `flows` resource pauses the workers
-  when written — a per-session event, not per packet.
+* **Workers: who may run where, and what stops.** Each module declares both how
+  many workers it tolerates and whether writing its resources needs the workers
+  stopped. Ours declare *all* workers (`max_allowed_workers_ =
+  Worker::kMaxWorkers`) and no pause: `urr_count`'s cells are one plane per
+  worker, so two workers never touch a line, and its two resources behave like
+  the daemon's own concurrent ones.
+* **Which part of this graph needs paused workers: none of it today, and one
+  resource of it later.** A resource pauses the workers only if its codec says
+  so, and a transaction pauses exactly when it carries ops for such a resource
+  (`core/control/control_plane.cc`: `pause = pause ||
+  (converged->requires_paused_workers && !converged->ops.empty())`). The modules
+  that declare it are `arp_responder` (`entries`), `bridge` (`statics`),
+  `flowgen` and `vif` (`interfaces`) — none of them in any graph here. Every
+  resource the session path writes is a concurrent slot-table resource applied
+  live: `WildcardMatch`'s rules, `ActionTable`'s actions, `Meter`'s meters,
+  `Router`'s next hops, `enc/tunnels`, `cnt_*/counters`. The exception, when it
+  lands, is the store's `flows` resource on the buffering branch, whose write
+  pauses the workers for that one transaction (BESS's decision: a limits map
+  changed live from the control thread would race the packet path). The list RPC
+  advertises the flag, so a controller can see it before it writes.
+  The store's commands are a separate case with the same shape: `release`,
+  `drop` and `clear` are thread-unsafe, so an invocation while a worker is
+  running the module answers `EBUSY` and the caller pauses with `PauseWorkers`
+  first (the SDK says so at `InvokeAction`). Either way the stop is bounded by
+  one operation and belongs to a *session* event — a BAR arriving, a DDN answer
+  releasing packets — not to the packet path.
 * **Where state lives.** Per-worker: the counters' planes. Shared, atomic,
   written once per batch: the counters' stamps. Per-rule, indexed by the
   ActionId the classifier wrote: the tunnel records and the counter entries.
