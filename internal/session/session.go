@@ -483,6 +483,19 @@ func teidRuleKey(teid uint32) map[string]any {
 // backstop, docs/design.md).
 func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	changes := make([]bess.Change, 0, 4*len(s.PDRs)+2)
+	// One erase per (resource, key): a session's PDRs name the same records --
+	// the meter of a QER in each direction, and one F-TEID when two uplink PDRs
+	// carry it -- so erasing per PDR would name the same record several times
+	// in one transaction.
+	seen := map[string]bool{}
+	add := func(ch bess.Change) {
+		k := ch.Resource + "\x00" + fmt.Sprint(ch.Key)
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		changes = append(changes, ch)
+	}
 	for _, p := range pdrsInOrder(s) {
 		dir := c.direction(p.srcIfc)
 		key, err := p.ruleKey(dir.PDRFields)
@@ -492,24 +505,21 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			// than leave the rule behind.
 			return fmt.Errorf("PDR %d: %w", p.id, err)
 		}
-		changes = append(changes, bess.Change{Resource: rulesRes(dir), Key: key})
+		add(bess.Change{Resource: rulesRes(dir), Key: key})
 	}
 	for _, p := range pdrsInOrder(s) {
 		dir := c.direction(p.srcIfc)
 		if p.actionID != 0 {
-			changes = append(changes,
-				bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
+			add(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
 		}
 		if p.meterID != 0 {
-			changes = append(changes,
-				bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
+			add(bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
 		}
 		for _, t := range p.tunnels {
-			changes = append(changes, bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
+			add(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
 		}
 		if p.teid != 0 {
-			changes = append(changes, bess.Change{Resource: c.teidRes(),
-				Key: teidRuleKey(p.teid)})
+			add(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
 		}
 	}
 	if len(changes) != 0 {

@@ -228,6 +228,64 @@ func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.S
 	)
 }
 
+func TestADeletionErasesEachSharedRecordOnce(t *testing.T) {
+	// A session's PDRs name the same records: the meter of a QER in each
+	// direction, and one F-TEID when two uplink PDRs carry it. The deletion
+	// named each of them once per PDR, so one record appeared several times in
+	// a single transaction -- and a second erase of a record a later change in
+	// the same transaction had rewritten is not a no-op a reader can reason
+	// about. (The establishment is the other way round on purpose and this
+	// session exercises it: the shared TEID rule is written once per PDR, and
+	// the transaction's last write is the one that stands. Two PDRs whose rule
+	// keys collide land the same way, because the rule table knows PDR ids no
+	// better than the SMF's filters do.)
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x6660, 1, 0,
+		ie.NewFSEID(0x6660, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x00000011, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.5", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any 1000 to any", "", "", "", 0)),
+			ie.NewFARID(1), ie.NewQERID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x00000011, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.5", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any 2000 to any", "", "", "", 0)),
+			ie.NewFARID(1), ie.NewQERID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		ie.NewCreateQER(ie.NewQERID(1),
+			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			ie.NewMBR(1000, 2000)),
+	)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	del := c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 2, 0)).(*message.SessionDeletionResponse)
+	if got := cause(t, del); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	meters, teidRules := 0, 0
+	for _, ch := range rec.last() {
+		if strings.HasSuffix(ch.Resource, "/meters") {
+			meters++
+		}
+		if ch.Resource == testConfig().TEIDTable+"/rules" {
+			teidRules++
+		}
+	}
+	if meters != 1 {
+		t.Errorf("the deletion erases %d meter records, want the QER's one (two PDRs share it)", meters)
+	}
+	if teidRules != 1 {
+		t.Errorf("the deletion erases %d TEID rules, want one (two uplink PDRs share the F-TEID)", teidRules)
+	}
+}
+
 // A closed gate is not a slow path: the compiler writes the rule's own gate as
 // the drop gate and gives it no action, so the packet is dropped where the
 // session's state says it must be, without a lookup into the action table.

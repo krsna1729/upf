@@ -245,7 +245,9 @@ func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Messa
 		// What this compile allocated is not released: the session is live and
 		// its records name those ids, so freeing them would let the pool hand
 		// them to a session whose record the live one still selects. The ids of
-		// objects a modification removed are leaked for the same reason; a
+		// objects a modification removed are held for the same reason -- safe,
+		// not implemented: those objects' records stay in the dataplane too,
+		// and a naive release would free ids that a live record still names. A
 		// provenance-tracked release is the fix (docs/design.md).
 		return modifyResponse(req, seid, compileCause(err), nil)
 	}
