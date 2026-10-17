@@ -460,9 +460,13 @@ client in flight) is 845 seconds -- 14 minutes -- of control traffic; at the
 transaction engine's ceiling it is 1.4 s. (The envelope table further down
 reports 2,274.8/s for another run of the same script: the p50s differ, 324 vs
 786 µs, so those are two runs of a quiet machine, not two paths.) Either way a
-million sessions is a campaign, not a migration -- and which of the two you get
-is decided by how many answers the client keeps in flight, which is what "the
-deployment's own numbers" below is about.
+million sessions is a campaign, not a migration. And the rate is the *server's*,
+not the client's: upfd's PFCP loop reads one datagram and handles it before
+reading the next, so what the SMF gets is that serial path -- 522/s at one client
+in flight and 534/s at eight on this machine, the same number twice, with the
+eight-worker latency being the queue (13 ms p50 against 1.7 ms). Making the loop
+parallel is what would raise it, and then the in-flight count and the engine's
+cascade budget (`kMaxInFlight` in `internal/bess`) become the limits.
 
 The deployment's own numbers, through the whole N4 path (a PFCP message, the
 session compiler, one transaction, the daemon's answer) with one client in
