@@ -83,6 +83,23 @@ func TestLiveSchemaAndMessage(t *testing.T) {
 	}
 }
 
+// BenchmarkLiveCapabilities is the floor every RPC pays: one round trip that does
+// no work on the daemon. A transaction's cost is measured against this, not
+// against zero -- when a Commit looks slow, this says how much of it is the
+// socket and how much is the daemon's own going.
+func BenchmarkLiveCapabilities(b *testing.B) {
+	c := liveClient(b)
+	sdk := c.SDK()
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := sdk.Capabilities(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // scalarFields is the field map a change carries, for the fields of one type: the
 // numbers get 1, the strings and bytes their field's own name. It is built from
 // the descriptor the daemon reports, and it is what Client.Apply hands to
@@ -118,36 +135,39 @@ func scalarFields(m protoreflect.Message) map[string]any {
 
 // BenchmarkLiveMessage is the schema-driven message building against the real
 // descriptors, with a real field map: this is the conversion Client.Apply does
-// for every key and every value of a session's transaction, so it is the part of
-// Apply that is ours rather than the daemon's. An empty message is not a useful
-// measurement -- it proves nothing about the conversion -- so the fields are
-// filled from the descriptor.
+// for every key and every value of a session's transaction. Every distinct value
+// type the graph declares gets its own case, because they differ by an order of
+// magnitude -- a rule with masks is not a settings message with one number -- and
+// a single number from whichever table came first would say nothing.
 func BenchmarkLiveMessage(b *testing.B) {
 	c := liveClient(b)
-
-	// The first resource with a value type: the graph's first table. Its type is
-	// what a session's rules are built as.
-	var typ string
+	seen := map[string]bool{}
 	for _, name := range c.ResourceNames() {
 		r, err := c.Resource(name)
-		if err != nil || r.ValueType == "" {
+		if err != nil || r.ValueType == "" || seen[r.ValueType] {
 			continue
 		}
-		typ = r.ValueType
-		break
+		seen[r.ValueType] = true
+		b.Run(r.ValueType, func(b *testing.B) {
+			benchmarkMessage(b, c, r.ValueType)
+		})
 	}
-	if typ == "" {
+	if len(seen) == 0 {
 		b.Fatal("no resource with a value type")
 	}
+}
+
+// benchmarkMessage is one type's conversion: build the field map from the
+// descriptor once, then build messages from it.
+func benchmarkMessage(b *testing.B, c *Client, typ string) {
 	empty, err := c.Message(typ, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
 	fields := scalarFields(empty.ProtoReflect())
 	if len(fields) == 0 {
-		b.Fatalf("%s has no scalar fields to set", typ)
+		b.Skipf("%s has no scalar fields to set", typ)
 	}
-	b.Logf("%s: %d scalar fields", typ, len(fields))
 
 	b.ReportAllocs()
 	for b.Loop() {
