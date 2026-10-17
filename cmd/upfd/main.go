@@ -184,12 +184,38 @@ type reportSender interface {
 const (
 	reportQueueDepth    = 4
 	reportQueueSessions = 256
+	// reportBackoffCap is the longest a report waits before it is tried again:
+	// each attempt costs the n4 layer's whole retry budget, and the tick that
+	// makes it also carries the evaluation that enforces every session's quota,
+	// so a silent CP function must not be sent to at the tick's rate.
+	reportBackoffCap = 30 * time.Second
 )
+
+// reportBackoff is how long a held report waits after this many unanswered
+// sends: doubling from one tick to the cap.
+func reportBackoff(attempts int, every time.Duration) time.Duration {
+	d := every
+	for i := 0; i < attempts && d < reportBackoffCap; i++ {
+		d *= 2
+	}
+	if d > reportBackoffCap {
+		return reportBackoffCap
+	}
+	return d
+}
+
+// backoffLogged says whether an attempt should be logged: the first one, and
+// then only when the count doubles -- a report an SMF never answers would
+// otherwise write a log line at the tick's rate for as long as it is held.
+func backoffLogged(attempts int) bool {
+	return attempts == 1 || attempts&(attempts-1) == 0
+}
 
 // heldReport is one usage report the SMF has not answered yet.
 type heldReport struct {
 	report   session.Report
 	attempts int
+	next     time.Time // the earliest this one is sent again
 }
 
 // reportQueue keeps the usage reports a session's SMF has not answered. The
@@ -262,13 +288,14 @@ func (q *reportQueue) done(seid uint64) {
 }
 
 // sent records that the session's oldest report went out once more without an
-// answer: it stays where it is, and the next tick tries it first.
-func (q *reportQueue) sent(seid uint64) {
+// answer: it stays where it is, and it is tried again after the backoff.
+func (q *reportQueue) sent(seid uint64, now time.Time, backoff time.Duration) {
 	queue := q.held[seid]
 	if len(queue) == 0 {
 		return
 	}
 	queue[0].attempts++
+	queue[0].next = now.Add(backoff)
 	q.held[seid] = queue
 }
 
@@ -299,35 +326,42 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 					"octets", dropped.Up.Octets, "held", reportQueueDepth)
 			}
 		}
+		now := time.Now()
+		// One report per session per tick, and the tick's first transport
+		// failure ends the drain: each send costs the n4 layer's whole retry
+		// budget, and this same tick carries the evaluation that opens windows
+		// and enforces quotas -- a CP function that has stopped answering must
+		// not hold it. What is not sent now keeps its place (and its backoff).
 		for _, seid := range queue.seids() {
-			for attempt := 0; attempt < reportQueueDepth; attempt++ {
-				r, ok := queue.head(seid)
-				if !ok {
-					break
-				}
-				// The report is addressed to the CP function, and the header's
-				// SEID is the identity the *receiver* looks the session up
-				// with: the CP F-SEID, not ours (TS 29.244 7.2.2.4.2).
-				cause, err := sender.Report(ctx, r.report.CPSEID, r.report.IEs()...)
-				if err != nil {
-					queue.sent(seid)
-					log.Warn("usage report not delivered: held for the next tick",
+			r, ok := queue.head(seid)
+			if !ok || r.next.After(now) {
+				continue
+			}
+			// The report is addressed to the CP function, and the header's
+			// SEID is the identity the *receiver* looks the session up with:
+			// the CP F-SEID, not ours (TS 29.244 7.2.2.4.2).
+			cause, err := sender.Report(ctx, r.report.CPSEID, r.report.IEs()...)
+			if err != nil {
+				backoff := reportBackoff(r.attempts+1, every)
+				queue.sent(seid, now, backoff)
+				if backoffLogged(r.attempts + 1) {
+					log.Warn("usage report not delivered: held and backed off",
 						"seid", r.report.SEID, "cp_seid", r.report.CPSEID, "urr", r.report.URRID,
 						"trigger", r.report.Trigger.String(), "octets", r.report.Up.Octets,
-						"attempts", r.attempts+1, "error", err)
-					break
+						"attempts", r.attempts+1, "retry_in", backoff, "error", err)
 				}
-				queue.done(seid)
-				if cause != ie.CauseRequestAccepted {
-					log.Warn("usage report refused", "seid", r.report.SEID, "cp_seid", r.report.CPSEID,
-						"urr", r.report.URRID, "trigger", r.report.Trigger.String(), "cause", cause)
-				} else {
-					acknowledge(r.report, "acknowledged", "attempts", r.attempts+1)
-				}
-				if r.report.Enforcing {
-					log.Info("quota spent: the session's traffic is stopped",
-						"seid", r.report.SEID, "urr", r.report.URRID)
-				}
+				break
+			}
+			queue.done(seid)
+			if cause != ie.CauseRequestAccepted {
+				log.Warn("usage report refused", "seid", r.report.SEID, "cp_seid", r.report.CPSEID,
+					"urr", r.report.URRID, "trigger", r.report.Trigger.String(), "cause", cause)
+			} else {
+				acknowledge(r.report, "acknowledged", "attempts", r.attempts+1)
+			}
+			if r.report.Enforcing {
+				log.Info("quota spent: the session's traffic is stopped",
+					"seid", r.report.SEID, "urr", r.report.URRID)
 			}
 		}
 	}
