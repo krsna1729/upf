@@ -29,7 +29,7 @@ downstream is keyed by.
  | n3_in  PortInc  |--- 0 --->| teid   WCM         |--- 0 --->| decap0  GtpuDecap   |
  +-----------------+          |  key: GTP-U TEID   |          |  strips Eth/IP/UDP/ |
                               |  one rule/session  |          |  GTP-U; writes      |
-                              +---------+----------+          |  upf_teid (be32)    |
+                              +---------+----------+          |  upf_teid, qfi (u8) |
                                         |                     +----------+----------+
                           ogate 1: default gate                         | 0
                           (TEID 0, no rule)                              v
@@ -168,7 +168,7 @@ built only against the installed `bess-dev` stage.
 
 | module | mclass | resource it owns (key) | state it holds | workers |
 |---|---|---|---|---|
-| `gtpu_decap.{h,cc}` | `gtpu_decap` | none | `port_`, one attribute id | all |
+| `gtpu_decap.{h,cc}` | `gtpu_decap` | none | `port_`, two attribute ids | all |
 | `gtpu_encap.{h,cc}` | `gtpu_encap` | `<module>/tunnels` (`TunnelKey{action_id}`) | `src_ip_`, `max_tunnels_` | all |
 | `gtpu_echo.{h,cc}` | `gtpu_echo` | none | `port_`, a Recovery Time Stamp | all |
 | `urr_count.{h,cc}` | `urr_count` | `<module>/counters` (`CounterKey{action_id}`) | per-worker cell planes, per-rule stamp pairs | all |
@@ -188,6 +188,19 @@ so something downstream must read it or it gets no offset at all
 (`core/metadata.cc`) — `MetadataTest mt_ul_read` in `upf.yaml` and the lab
 graphs, and the encap further along the same chain. Attributes are laid out in
 module registration order, which is why the decap is listed early everywhere.
+
+It also writes the QFI the incoming G-PDU's PDU Session Container carried into
+the one-byte `qfi` attribute — the GTP-U extension header of type 0x85
+(TS 29.281 5.2.2.7), whose QFI is the low six bits of the container's second
+content octet (TS 38.415 5.5.2.1). That is the QoS flow the gNB put the uplink
+packet on, and it is what tells two uplink PDRs that share one F-TEID apart.
+The module walks the extension header chain for it (the tunnel library reports
+the chain's first type and skips the rest) and writes `0` for a G-PDU with no
+container; the zero is written rather than skipped because a packet's metadata
+is reused buffer space that nothing clears, so a skipped write would let one
+packet's QFI reach the next packet's rule lookup. The reader is the uplink rule
+table: `pdr_ul`'s match `fields` name the attribute, and a rule's mask is
+`0xff` when its PDR named a QFI and `0x00` when it did not.
 
 ### `gtpu_encap` — the N3 exit
 
@@ -372,10 +385,19 @@ there is to win.
 length or a dropped option is caught at the stage that wrote it. Fusing two
 modules removes that boundary: a tcpdump between them is no longer possible, and
 "did the decap strip it or did the encap write it wrong" stops being answerable
-from the wire. So a fusion is acceptable only if the fused stage is still
-observable -- BESS's per-gate taps, or a `Dump` at the fused module's own output
--- and the tap has to be removable from the measured graph, since a copy per
-packet is not something the base path pays for. That is the ergonomic half of the
+from the wire. The tap that does not cost anything to have *off* is the daemon's
+own: `core/gate_hooks/tcpdump.cc` and `pcapng.cc` are gate hooks switched at
+runtime through control_v2's `SetCapture` (`core/control/admin_v2.cc:138`, a
+direction of INPUT or OUTPUT, `FORMAT_PCAP` or `FORMAT_PCAPNG` to a fifo, one
+gate or every gate of a module). No module is in the graph and the base path pays
+nothing while the capture is off, which is what makes it usable as the evidence
+for a stage -- and `pcapng` writes the metadata block, so a capture on `decap0`'s
+output gate shows each packet's `qfi` and `action_id` next to its bytes, which is
+how the QFI slice's own live check is taken (the Go SDK exposes it:
+`sdk/go/bess/client.go:866`). So a fusion is acceptable only if the fused stage
+stays observable through that surface or a per-gate tap of its own; the `Dump`
+modules in `smoke-gtpu.yaml` are the same idea at fixed points, with a per-packet
+copy that a measured graph should not carry. That is the ergonomic half of the
 evidence, and it is a criterion, not a preference: what we would lose is exactly
 the class of mistake the smoke test exists to catch.
 
