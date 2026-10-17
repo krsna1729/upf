@@ -256,6 +256,10 @@ type Compiler struct {
 	actions  *idPool
 	meters   *idPool
 	teids    *idPool
+
+	// stats counts what this compiler's three entry points answered: what a
+	// management endpoint reports (Stats).
+	stats counters
 }
 
 // New returns a compiler writing through ap.

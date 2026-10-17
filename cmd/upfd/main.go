@@ -10,10 +10,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -82,6 +84,9 @@ func run() error {
 		"the WildcardMatch module whose rules are the F-TEID match")
 	teidGate := flag.Uint("teid-gate", 0,
 		"the gate a TEID rule delivers on: the decap's output gate")
+	metricsAddr := flag.String("metrics", "",
+		"serve this node's own numbers (Prometheus text format) on host:port; "+
+			"empty: no endpoint")
 	urrInterval := flag.Duration("urr-interval", 0,
 		"how often to read every session's usage counters and report what each URR owes "+
 			"over N4 (0: never, so URRs measure and report nothing)")
@@ -110,6 +115,9 @@ func run() error {
 	defer stop()
 
 	cfg := n4.Config{NodeID: id, Listen: *n4Addr, Logger: log}
+	// The session layer, when there is one: the metrics endpoint reports what
+	// it holds whatever the run, and the reporting loop needs it to exist.
+	var compiler *session.Compiler
 	if *bessAddr != "" {
 		client, err := bess.Dial(ctx, *bessAddr)
 		if err != nil {
@@ -132,6 +140,7 @@ func run() error {
 			return err
 		}
 		cfg.Sessions = session.New(graph, client, log)
+		compiler = cfg.Sessions.(*session.Compiler)
 		// The restart wall (docs/design.md): the daemon may still hold an
 		// earlier controller's sessions, and this process knows none of them --
 		// they would match packets with ids nothing here can name. They go
@@ -178,12 +187,31 @@ func run() error {
 	// the UP function is what watches the counters, and a quota nobody reads
 	// never stops the traffic). It walks every session on each tick and sends
 	// what each URR owes over N4, one report at a time.
+	reports := &reportStats{}
 	if *urrInterval > 0 {
-		compiler, ok := cfg.Sessions.(*session.Compiler)
-		if !ok {
+		if compiler == nil {
 			return fmt.Errorf("-urr-interval %v needs -bess: without a session layer there is nothing to evaluate", *urrInterval)
 		}
-		go reportLoop(ctx, compiler, srv, *urrInterval, log)
+		go reportLoop(ctx, compiler, srv, *urrInterval, reports, log)
+	}
+
+	// The management endpoint: this node's own numbers, so an operator reads
+	// them from the same place a scraper does. It is off unless asked for.
+	if *metricsAddr != "" {
+		mux, err := metricsServer(*metricsAddr, metricsHandler(compiler, srv, reports))
+		if err != nil {
+			return err
+		}
+		go func() {
+			if err := mux.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("the metrics endpoint stopped", "addr", *metricsAddr, "error", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			_ = mux.Close()
+		}()
+		log.Info("metrics listening", "addr", *metricsAddr)
 	}
 	return srv.Serve()
 }
@@ -322,7 +350,8 @@ func (q *reportQueue) sent(seid uint64, now time.Time, backoff time.Duration) {
 // reportLoop evaluates every session on each tick, decides what the SMF must
 // hear, and sends it: a report the SMF has not answered is kept and tried again
 // on the next tick, before that session's newer ones (see reportQueue).
-func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSender, every time.Duration, log *slog.Logger) {
+func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSender, every time.Duration,
+	reports *reportStats, log *slog.Logger) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	queue := newReportQueue()
@@ -340,6 +369,7 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 		}
 		for _, report := range sessions.EvaluateAll(ctx, time.Now()) {
 			if dropped := queue.add(report); dropped != nil {
+				reports.dropped.Add(1)
 				log.Warn("usage report dropped: the SMF has not answered the ones before it",
 					"seid", dropped.SEID, "cp_seid", dropped.CPSEID, "urr", dropped.URRID,
 					"seqn", dropped.Seqn, "trigger", dropped.Trigger.String(),
@@ -362,6 +392,7 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 			// the CP F-SEID, not ours (TS 29.244 7.2.2.4.2).
 			cause, err := sender.Report(ctx, r.report.CPSEID, r.report.IEs()...)
 			if err != nil {
+				reports.held.Add(1)
 				backoff := reportBackoff(r.attempts+1, every)
 				queue.sent(seid, now, backoff)
 				if backoffLogged(r.attempts + 1) {
@@ -374,9 +405,11 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 			}
 			queue.done(seid)
 			if cause != ie.CauseRequestAccepted {
+				reports.refused.Add(1)
 				log.Warn("usage report refused", "seid", r.report.SEID, "cp_seid", r.report.CPSEID,
 					"urr", r.report.URRID, "trigger", r.report.Trigger.String(), "cause", cause)
 			} else {
+				reports.sent.Add(1)
 				acknowledge(r.report, "acknowledged", "attempts", r.attempts+1)
 			}
 			if r.report.Enforcing {

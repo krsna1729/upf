@@ -155,6 +155,10 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   while nothing arrives) -- `ci/session-report.sh` runs bessd, the graph and
   upfd, and the test in `internal/n4` is the SMF that receives the report and
   answers it.
+- The numbers are served: `upfd -metrics host:port` answers a scrape with this
+  node's own counters -- sessions held, establishments, modifications,
+  deletions, refusals, usage reports sent/refused/held/dropped, and whether a CP
+  function is associated -- in the Prometheus text format.
 - Next, in this order: a real SMF (open5gs or free5GC) against `upfd` for
   interop and Causes, packets over the bound N3/N6 ports (the port split and
   its placement measurement are the hardware items), the vif that writes a

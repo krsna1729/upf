@@ -443,8 +443,16 @@ What `upfd` owns, then: the ports and their vifs, the graph, the routes per
 instance (the UE pool's next hop out of N6, the peer UPF for N9, the data
 network's default), and the management surface OMEC scattered across flags and
 scripts -- metrics, echo and end-marker handling, DDN/BAR, and the checkpoint a
-restart replays from. `internal/routing` is empty today; the route domains above
-are what it is for.
+restart replays from. `internal/routing` holds the interfaces the route domains
+above are made of. Of the management surface, the numbers are in: `upfd
+-metrics host:port` serves the session layer's own counters (sessions held,
+establishments, modifications, deletions, refusals), the reporting loop's
+(reports sent, refused, held, dropped) and whether a CP function is associated,
+in the Prometheus text format -- the facts this node measured, at the node that
+measured them, with no screen between. Echo and the end marker are the
+dataplane's (a G-PDU's peer-speaks-GTP-U half, and the TP 29.281 packet that
+tells a gNB to switch paths), DDN/BAR is the buffering OMEC never had, and the
+checkpoint is the restart wall below.
 
 ## Where a table lives: shared, per-worker, or behind a ring
 
