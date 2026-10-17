@@ -473,9 +473,14 @@ flight, 64 sessions, `ci/bench-n4.sh` MODE=establish: establish 2.832 ms p50
 one of them taken on a quiet machine. Which of the two the spread belongs to is
 not settled, and the load is not evidence on its own: the compile path has gained
 work since the fastest sample (the key maps built for the transaction's own
-duplicate checks, the removal and replacement walks). The next step is the same
-run at a commit before those, paired with this one; until then each number is one
-sample of a path whose cost is not pinned down, and none of them is a ceiling.
+duplicate checks, the removal and replacement walks). That is now checked rather
+than assumed: paired against the commit before those changes (`c8814a6`), two
+rounds each on this machine at load ~0.2, the old tree gave 2.439 and 1.757 ms
+p50 and this one 2.552 and 2.552 -- a difference inside the old tree's own
+run-to-run spread, so the compile path has not regressed and the distance from
+the 786 µs sample is the machine's state, not these changes. Which machine state
+is a question of its own (governor and frequency, and pinning, are open items),
+so each number here is still one sample, and none of them is a ceiling.
 
 That is the rate an SMF sees today, per session in flight rather than per core,
 and the answer is in how many a client keeps in flight. The eight-in-flight
