@@ -332,6 +332,30 @@ Used as they are; the configuration is ours and is what the compiler assumes.
   queue), take a lock, read a control-plane structure, or look a rule up twice —
   the classifier's result is the id everything downstream is keyed by.
 
+## What we would fuse, and what decides it
+
+The chain is split into the modules above because each one has a single job and its
+state is owned at one layer. Fusion is available to us — our modules can hold a
+table, and BESS's own primitives (the wildcard matcher, the meter's token bucket)
+are ordinary C++ we can call — but a fusion *costs* a lookup's worth of state
+ownership and gains a dispatch and a table lookup per packet. The measured arms are
+what decide it (`docs/design.md`'s table, taken with `ci/bench-modules.sh`): the
+front end is 8.09 ns/pkt, `gtpu_decap` +13.4 ns and 612 instructions over its
+control, `gtpu_encap` +18.1 ns and 414 instructions, `urr_count` +4.19 ns for a
+counted rule and +1.34 ns for a miss.
+
+| fusion | what it removes per packet | what it costs |
+|---|---|---|
+| `teid` ⊕ `gtpu_decap` | one wildcard lookup and one batch dispatch — the decap already parses the header the lookup keys on | the decap would own a rule table and its TEID id space; today it owns none (its header comment says so) |
+| `pdr_ul` ⊕ `at_ul` | one ActionTable lookup | the ActionId stops being the single id the meter, counter, tunnel and store flow all key on — the saving is one lookup, the cost is the whole downstream contract, so this is the fusion *not* to make |
+| `mt_ul` ⊕ `cnt_ul` | one lookup and one dispatch | one module holding both the policer's bucket and the counter cells; both primitives are available to us (BESS's meter, our counters), and the cells' per-worker planes are the thing that must survive |
+| `rt` ⊕ `enc` | the router's lookup on the downlink | the encap gains the route table; on a single-port N3/N6/N9 deployment (docs/design.md's port section) the next hop is a queue rather than a port, which is exactly the case where this fusion starts to look right |
+
+None of these is done. The rule is `docs/design.md`'s "measure before any placement
+change" and its "per feature, per packet" obligation: an arm in
+`ci/bench-modules.sh` that measures the fused module against the same work split,
+on the frames `smoke-gtpu.sh` uses, is the evidence, not the argument.
+
 ## Building and loading it
 
 ```sh
