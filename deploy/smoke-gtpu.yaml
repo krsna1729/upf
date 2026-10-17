@@ -40,12 +40,23 @@ modules:
     arg: {interval: 1}
   - name: src_up
     mclass: Source
-    arg: {pkt_size: 87, burst: 1}
+    arg: {pkt_size: 95, burst: 1}
   - name: rewrite_up
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4BChQeAghoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARILcKAAABCAgICATSADUAEQAAaGVsbG8tdXBm"
+        # The same frame as before the QFI existed, with one thing added: the
+        # G-PDU carries a PDU Session Container (TS 29.281's extension header
+        # type 0x85, TS 38.415's contents) because that is where a real gNB
+        # puts the QoS flow. The E flag (0x34) makes the four-octet optional
+        # tail present, whose last octet names the container; the container's
+        # length octet 0x01 covers the two content octets and its next-type
+        # octet, the first content octet 0x10 is the uplink PDU type (1), and
+        # the QFI 5 sits in the low six bits of the second. The three lengths
+        # grew by the eight bytes (IPv4 0x51, UDP 0x3d, GTP-U 0x2d) and the
+        # IPv4 checksum with them; the inner packet is byte for byte what it
+        # was, so the decap's own checks below still read it.
+        - "AgAAAAABAgAAAAACCABFAABRAAFAAEAR6nAKFB4BChQeAghoCGgAPQAANP8ALREiM0QAAACFARAFAEUAACUAAUAAQBEgtwoAAAEICAgIBNIANQARAABoZWxsby11cGY="
   - name: teid
     mclass: WildcardMatch
     arg:
@@ -67,7 +78,7 @@ modules:
       # (core/metadata.cc, FillOffsetArrays), so the writes the smoke checks
       # for would be no-ops. This module declares nothing of its own; it
       # passes packets through.
-      read: {upf_teid: 4}
+      read: {upf_teid: 4, qfi: 1}
   - name: dump_up
     mclass: Dump
     arg: {interval: 1}

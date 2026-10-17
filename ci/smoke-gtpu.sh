@@ -108,6 +108,13 @@ check "decap left the inner packet in a frame" \
 # real one; the padding after it is another attribute's, so only the TEID is
 # checked here).
 check_metadata "decap wrote upf_teid into metadata" "11 22 33 44"
+# The uplink frame carries a PDU Session Container (TS 38.415, extension header
+# 0x85) with QFI 5, so the decap must have read it: the metadata dump's first
+# line is the TEID it wrote followed by the QFI, in the layout mt_md declares
+# (upf_teid 4 bytes, then qfi 1). A graph that stopped reading `qfi` would make
+# the write inert (core/metadata.cc) and this line would be `11 22 33 44 00`.
+check "decap read the PDU Session Container's QFI into metadata" \
+      "00000000: 11 22 33 44 05"
 
 # The session table is what makes a TEID ours: the second uplink chain's frame
 # carries TEID 0x55667788, which no entry names, so the decap dropped it -- its
