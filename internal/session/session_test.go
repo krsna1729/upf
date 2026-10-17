@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -213,6 +216,11 @@ func (r rule) actionID() uint32 { v, _ := r.change.Value["action_id"].(uint32); 
 // gate is the gate the rule delivers.
 func (r rule) gate() uint64 { v, _ := r.change.Value["gate"].(uint64); return v }
 
+// priority is the rule's priority in its table: the classifier's reading of the
+// PDR's Precedence (8.2.11, inverted by rulePriority), which is what decides
+// between two rules of the table that both match a packet.
+func (r rule) priority() int64 { v, _ := r.change.Value["priority"].(int64); return v }
+
 // actionsErased is the action records a transaction takes out: a change with no
 // value, which is what an erase is.
 func actionsErased(changes []bess.Change) []bess.Change {
@@ -307,10 +315,13 @@ func testConfig() Config {
 	return Config{
 		// Both tables match the inner IPv4 packet, as deploy/session-live.yaml
 		// declares them: one table per direction, because a rule names an
-		// ActionId and a table declares one actions resource.
+		// ActionId and a table declares one actions resource. The uplink table
+		// carries the decap's `qfi` attribute last (8.2.89), the downlink none:
+		// the QFI of a downlink packet is the encap's to write, not a field to
+		// match on.
 		Up: Direction{
 			PDRTable:  "pdr_ul",
-			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
+			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, QFI},
 			Actions:   "at_ul",
 			Meters:    "mt_ul",
 			Counters:  "cnt_ul",
@@ -1357,10 +1368,13 @@ func TestAnUnansweredApplyKeepsTheSessionsKeys(t *testing.T) {
 
 func TestTwoUplinkPDRsWithOneFilterAreRefused(t *testing.T) {
 	// An SMF with several QoS flows programs several uplink PDRs onto one F-TEID
-	// and tells them apart only by QFI. This UP does not read QFI
-	// (docs/compliance.md), so those PDRs are one rule key, and the session is
-	// refused with a rule failure: the SMF can then fix it, where a PDR that
-	// exists and matches nothing would have looked like a working session.
+	// and tells them apart by their QFIs. The uplink table carries the QFI in
+	// its key, so two PDRs that name *different* flows are two rules (the test
+	// below); two that name the same PDI down to the QFI are one rule key, and
+	// the session is refused with a rule failure: writing both would be refused
+	// by the engine, and writing either would silently drop the other's action.
+	// The SMF can then fix it, where a PDR that exists and matches nothing
+	// would have looked like a working session.
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	req := message.NewSessionEstablishmentRequest(0, 0, 0x9991, 1, 0,
@@ -1382,6 +1396,387 @@ func TestTwoUplinkPDRsWithOneFilterAreRefused(t *testing.T) {
 	}
 	if len(rec.txns) != 0 {
 		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+// qfiField is the index of the QFI field in the test graph's uplink key: the
+// graphs declare it last, and testConfig mirrors them.
+func qfiField(t *testing.T) int {
+	t.Helper()
+	for i, f := range testConfig().Up.PDRFields {
+		if f == QFI {
+			return i
+		}
+	}
+	t.Fatal("the test graph's uplink table declares no QFI field")
+	return 0
+}
+
+// uplinkPDR is a Create PDR for the session's uplink: the PDI's source
+// interface, the F-TEID the SMF pinned (0 leaves the choice to us, as a
+// conformant SMF does), the UE address, the SDF filter it names (empty when the
+// PDI constrains nothing but the address) and -- when qfi is not 0 -- the QoS
+// flow the PDI names (TS 29.244 8.2.89).
+func uplinkPDR(id uint16, precedence uint32, ueIP string, fteid uint32, sdf string, qfi uint8) *ie.IE {
+	pdi := []*ie.IE{
+		ie.NewSourceInterface(ie.SrcInterfaceAccess),
+		ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+		ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+	}
+	if sdf != "" {
+		pdi = append(pdi, ie.NewSDFFilter(sdf, "", "", "", 0))
+	}
+	if qfi != 0 {
+		pdi = append(pdi, ie.NewQFI(qfi))
+	}
+	return ie.NewCreatePDR(
+		ie.NewPDRID(id),
+		ie.NewPrecedence(precedence),
+		ie.NewPDI(pdi...),
+		ie.NewFARID(1),
+	)
+}
+
+// ruleWithQFI is the rule of a transaction whose QFI field carries a value
+// under a mask, or false when no rule does.
+func ruleWithQFI(changes []bess.Change, field int, value, mask []byte) (rule, bool) {
+	for _, r := range rules(changes) {
+		if field < len(r.masks) && bytes.Equal(r.value(field), value) && bytes.Equal(r.mask(field), mask) {
+			return r, true
+		}
+	}
+	return rule{}, false
+}
+
+// TestAPDINamingAQFIKeysTheRuleOnIt: the PDI's QFI (8.2.89) is the last field
+// of the uplink table's key, so the PDR of one QoS flow is selected by the
+// flow's own byte -- which is what lets one session hold a rule per flow.
+func TestAPDINamingAQFIKeysTheRuleOnIt(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x9100, "10.45.0.2")
+	req.CreatePDR[0] = uplinkPDR(1, 100, "10.45.0.2", 0x11223344, "", 5)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("an uplink PDI naming a QFI answered cause %d, want accepted", got)
+	}
+	i := qfiField(t)
+	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	if got := r.mask(i); !bytes.Equal(got, []byte{0xff}) {
+		t.Errorf("the rule's QFI mask is %v, want all ones: the PDI named the flow", got)
+	}
+	if got := r.value(i); !bytes.Equal(got, []byte{5}) {
+		t.Errorf("the rule's QFI value is %v, want the PDI's 5", got)
+	}
+	// The rule delivers on the action record written for this PDR, keyed by the
+	// ActionId it carries: a rule whose action is another session's would send
+	// its packets down the other's chain.
+	if got := r.actionID(); got == 0 {
+		t.Fatal("the rule names no action")
+	}
+	action := find(t, rec.last(), testConfig().Up.Actions+"/actions", "id", r.actionID())
+	if got := action.Value["next_hop_id"]; got != uint32(1) {
+		t.Errorf("the rule's action takes next hop %v, want the uplink's", got)
+	}
+}
+
+// TestAPDIWithoutAQFIIsTheSessionsGeneralRule: a PDI that names no QFI leaves
+// the field masked out of its key, so it keeps matching every flow of the
+// session -- and still gets its rule.
+func TestAPDIWithoutAQFIIsTheSessionsGeneralRule(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	if got := cause(t, c.Establish(establishment(0x9101, "10.45.0.2"))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	i := qfiField(t)
+	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	if got := r.mask(i); !bytes.Equal(got, []byte{0}) {
+		t.Errorf("a PDI that names no QFI constrains it: mask %v", got)
+	}
+	if got := r.value(i); !bytes.Equal(got, []byte{0}) {
+		t.Errorf("a PDI that names no QFI keys the field on %v, want the canonical zero", got)
+	}
+	if got := r.actionID(); got == 0 {
+		t.Error("the session's general rule names no action")
+	}
+	if _, ok := ruleWithQFI(rec.last(), i, []byte{0}, []byte{0xff}); ok {
+		t.Error("a PDI that names no QFI wrote a rule keyed on one")
+	}
+}
+
+// TestTwoUplinkPDRsToldApartByQFIAreTwoRules is the case the compiler used to
+// refuse: an SMF programs several uplink PDRs onto one F-TEID and one UE
+// address and tells them apart by their QFIs. Each flow's PDR has a key of its
+// own now: the flow's rule requires the QFI, the session's general rule masks it
+// out, and a packet of the flow matches both -- so which one serves it is the
+// SMF's Precedence and nothing else, carried into the classifier's opposite
+// ordering (rulePriority). The SMF gave the flow's PDR the higher Precedence
+// here (100 against the general rule's 200: 8.2.11's lower value is the higher
+// precedence), so it is also the classifier's higher priority, exactly as the
+// SMF wrote the two.
+func TestTwoUplinkPDRsToldApartByQFIAreTwoRules(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x9102, "10.45.0.2")
+	req.CreatePDR[0] = uplinkPDR(1, 200, "10.45.0.2", 0x11223344, "", 0)
+	req.CreatePDR = append(req.CreatePDR, uplinkPDR(3, 100, "10.45.0.2", 0x11223344, "", 5))
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("two PDRs told apart by QFI answered cause %d, want accepted", got)
+	}
+	i := qfiField(t)
+	specific, ok := ruleWithQFI(rec.last(), i, []byte{5}, []byte{0xff})
+	if !ok {
+		t.Fatalf("no rule keyed on QFI 5 among %d rules", len(rules(rec.last())))
+	}
+	general, ok := ruleWithQFI(rec.last(), i, []byte{0}, []byte{0})
+	if !ok {
+		t.Fatal("no rule for the PDR that names no QFI")
+	}
+	if specific.actionID() == general.actionID() {
+		t.Error("the two PDRs share one action: the rules cannot be told apart")
+	}
+	// The SMF gave the flow's PDR the lower Precedence value (100 against the
+	// general rule's 200), so it carries the classifier's higher priority: the
+	// classifier applies the higher one of two rules that match, and the packet
+	// that matches both takes the flow's action. The absolute numbers are the
+	// inversion's own test below.
+	if specific.priority() <= general.priority() {
+		t.Errorf("the SMF's higher-Precedence PDR carries priority %d and the other %d: a packet both match would take the wrong action",
+			specific.priority(), general.priority())
+	}
+}
+
+// TestThePrecedenceIsInvertedIntoTheClassifiersPriority: PFCP orders PDRs one
+// way and the classifier the other. 8.2.11: "the lower precedence values
+// indicate higher precedence of the PDR, and the higher precedence values
+// indicate lower precedence of the PDR when matching a packet"; WildcardMatch:
+// "the rule with higher priority will be applied" (module_msg.proto:347). A
+// compiler that copied the Precedence into the priority would therefore invert
+// the SMF's ordering -- of two overlapping PDRs (an SDF-specific rule the SMF
+// gave 10 beside a catch-all it gave 20) the catch-all would take the flow's
+// traffic. Every rule carries the inversion: the PDR rules and the TEID rule in
+// front of the decap.
+func TestThePrecedenceIsInvertedIntoTheClassifiersPriority(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x9107, "10.45.0.2")
+	// Two uplink PDRs that overlap: the flow's rule and the session's general
+	// one. The SMF wants the flow's rule to win, so it carries the lower
+	// Precedence value.
+	req.CreatePDR[0] = uplinkPDR(1, 10, "10.45.0.2", 0x11223344, "", 9)
+	req.CreatePDR = append(req.CreatePDR, uplinkPDR(3, 20, "10.45.0.2", 0x11223344, "", 0))
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("two PDRs of one tunnel answered cause %d, want accepted", got)
+	}
+	i := qfiField(t)
+	flow, ok := ruleWithQFI(rec.last(), i, []byte{9}, []byte{0xff})
+	if !ok {
+		t.Fatal("no rule for the flow's PDR")
+	}
+	general, ok := ruleWithQFI(rec.last(), i, []byte{0}, []byte{0})
+	if !ok {
+		t.Fatal("no rule for the general PDR")
+	}
+	// The values are the inversion, not the Precedence: 10 maps to the larger
+	// priority, 20 to the smaller.
+	if want := int64(math.MaxUint32) - 10; flow.priority() != want {
+		t.Errorf("Precedence 10's rule carries priority %d, want %d", flow.priority(), want)
+	}
+	if want := int64(math.MaxUint32) - 20; general.priority() != want {
+		t.Errorf("Precedence 20's rule carries priority %d, want %d", general.priority(), want)
+	}
+	// The classifier applies the higher priority of two rules that match, so
+	// the packet that matches both takes the action of the PDR the SMF gave the
+	// lower Precedence value -- the flow's rule, and its own action record.
+	if flow.priority() <= general.priority() {
+		t.Errorf("the SMF's higher-precedence PDR carries priority %d, not above the other's %d: the ordering is inverted",
+			flow.priority(), general.priority())
+	}
+	if action := find(t, rec.last(), actionsRes(testConfig().Up), "id", flow.actionID()); action.Value["next_hop_id"] != uint32(1) {
+		t.Errorf("the winning rule's action is not its PDR's: %v", action.Value)
+	}
+	// The TEID rule in front of the decap is inverted the same way: it is
+	// written once for the session, from the first PDR's Precedence (PDR 1's
+	// 10 here), and a G-PDU matches at most one TEID rule, so the value only
+	// has to be the same mapping every other rule uses.
+	teid, ok := teidRule(rec.last(), testConfig().TEIDTable+"/rules", 0x11223344)
+	if !ok {
+		t.Fatal("no TEID rule for the pinned F-TEID")
+	}
+	if want := int64(math.MaxUint32) - 10; teid.Value["priority"] != want {
+		t.Errorf("the TEID rule's priority is %v, want Precedence 10's %d", teid.Value["priority"], want)
+	}
+}
+
+// TestAQFIThatIsNotAQFIIsRefused: a QFI is one of 1..63 (8.2.89). 0 is not a
+// QFI, and a byte with the spare bits set is a flow no packet carries, so a
+// rule keyed on either would match nothing -- or, for 0, the packets of a
+// session's flows that carry no container at all. Both are refused with the
+// cause the SMF can fix, and nothing reaches the dataplane.
+func TestAQFIThatIsNotAQFIIsRefused(t *testing.T) {
+	for _, qfi := range []uint8{0, 64, 255} {
+		rec := &recorder{}
+		c := New(testConfig(), rec, quietLogger())
+		req := establishment(0x9103, "10.45.0.2")
+		req.CreatePDR[0] = ie.NewCreatePDR(
+			ie.NewPDRID(1),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x11223344, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0),
+				ie.NewQFI(qfi),
+			),
+			ie.NewFARID(1),
+		)
+		if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+			t.Errorf("a PDI naming QFI %d answered cause %d, want a rule failure", qfi, got)
+		}
+		if len(rec.txns) != 0 {
+			t.Errorf("a PDI naming QFI %d wrote to the dataplane", qfi)
+		}
+	}
+}
+
+// downlinkPDRWithQER is a Create PDR for the session's downlink that the named
+// QER polices: the QER's QFI reaches the dataplane through the tunnel record of
+// the PDR that names it, because that is the record its rule's action resolves.
+func downlinkPDRWithQER(id uint16, ueIP string, qerID uint32) *ie.IE {
+	return ie.NewCreatePDR(
+		ie.NewPDRID(id),
+		ie.NewPrecedence(100),
+		ie.NewPDI(
+			ie.NewSourceInterface(ie.SrcInterfaceCore),
+			ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+			ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
+		),
+		ie.NewFARID(2),
+		ie.NewQERID(qerID),
+	)
+}
+
+// TestAQERsQFIReachesTheTunnelRecord: the QFI a downlink packet must carry in
+// its PDU Session Container (8.2.89) is the QER's, and the graph's encap reads
+// it from the tunnel record the FAR's outer header creation writes -- keyed, as
+// the record is, by the ActionId the PDR's rule carries. A QER that names no
+// flow leaves the field out of the record: 0 is not a QFI, and the encap then
+// writes no container.
+func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
+	tunnelOf := func(t *testing.T, rec *recorder, ue string) bess.Change {
+		t.Helper()
+		dl := ruleCarrying(t, rec.last(), fieldDstIP, netip.MustParseAddr(ue).AsSlice())
+		return find(t, rec.last(), testConfig().Down.Tunnels+"/tunnels", "action_id", dl.actionID())
+	}
+
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	withFlow := establishment(0x9104, "10.45.0.2")
+	withFlow.CreatePDR[1] = downlinkPDRWithQER(2, "10.45.0.2", 1)
+	withFlow.CreateQER[0] = ie.NewCreateQER(
+		ie.NewQERID(1),
+		ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+		ie.NewQFI(5),
+	)
+	if got := cause(t, c.Establish(withFlow)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a QER naming a QFI answered cause %d, want accepted", got)
+	}
+	if got := tunnelOf(t, rec, "10.45.0.2").Value["qfi"]; got != uint32(5) {
+		t.Errorf("the tunnel record carries QFI %v (%T), want the QER's 5", got, got)
+	}
+
+	// A second session, whose QER names no flow: the field is absent from its
+	// record rather than zero, since 0 means "write no container".
+	noFlow := establishment(0x9105, "10.45.0.3")
+	noFlow.CreatePDR[1] = downlinkPDRWithQER(2, "10.45.0.3", 1)
+	if got := cause(t, c.Establish(noFlow)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a QER with no QFI answered cause %d, want accepted", got)
+	}
+	if got, ok := tunnelOf(t, rec, "10.45.0.3").Value["qfi"]; ok {
+		t.Errorf("the tunnel record of a QER with no QFI carries %v, want no field", got)
+	}
+}
+
+// graphMaxTuples is what a deploy graph declares for one module's max_tuples:
+// the number of distinct masks that table may hold at once (WildcardMatch
+// refuses a new one beyond it with ENOSPC; module_msg.proto's WildcardMatchArg).
+// It reads the manifest's own text, so the number a rule shape is held against
+// is the one the deployment actually carries.
+func graphMaxTuples(t *testing.T, path, module string) int {
+	t.Helper()
+	text, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	in := false
+	for _, line := range strings.Split(string(text), "\n") {
+		line = strings.TrimSpace(line)
+		if name, ok := strings.CutPrefix(line, "- name: "); ok {
+			in = name == module
+			continue
+		}
+		if !in {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, "max_tuples:"); ok {
+			n, err := strconv.Atoi(strings.TrimSpace(rest))
+			if err != nil {
+				t.Fatalf("%s: %s's max_tuples is not a number: %v", path, module, err)
+			}
+			return n
+		}
+	}
+	t.Fatalf("%s declares no max_tuples for %s", path, module)
+	return 0
+}
+
+// TestTheUplinkMaskBudgetCoversTheRuleShapes holds the compiler's rule shapes
+// against the budget each graph declares. A WildcardMatch table keeps one hash
+// table per distinct mask in use at once, and one more than max_tuples is
+// refused with ENOSPC -- so the number a graph declares bounds the shapes the
+// deployment can hold, and a session that needs more is refused by the daemon
+// at its establishment rather than programmed. The mask a rule carries is the
+// field pattern its PDI names: an address or a filter masked out, an exact
+// address, a prefix, the ports, and the QFI named or left open. The qfi field
+// doubled the shapes a session's rules take, which is why the graphs' budget
+// doubled with it (8 to 16); this is the figure and the shapes kept together.
+func TestTheUplinkMaskBudgetCoversTheRuleShapes(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x9106, "10.45.0.2")
+	// Every shape a session's uplink can ask for: the address alone, an SDF of
+	// exact addresses and ports, an SDF of prefixes, and each with the QoS flow
+	// the SMF named and without it.
+	req.CreatePDR[0] = uplinkPDR(1, 100, "10.45.0.2", 0x11223344, "", 0)
+	req.CreatePDR = append(req.CreatePDR,
+		uplinkPDR(3, 110, "10.45.0.2", 0x11223344, "", 9),
+		uplinkPDR(4, 120, "10.45.0.2", 0x11223344,
+			"permit out udp from 10.45.0.2/32 to 10.10.20.30/32 80", 0),
+		uplinkPDR(5, 130, "10.45.0.2", 0x11223344,
+			"permit out udp from 10.45.0.0/16 to 10.10.0.0/16 443", 9),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the session of every shape answered cause %d, want accepted", got)
+	}
+	shapes := map[string]bool{}
+	for _, r := range rules(rec.last()) {
+		if r.change.Resource != rulesRes(testConfig().Up) {
+			continue
+		}
+		shapes[fmt.Sprint(r.masks)] = true
+	}
+	// The shapes the session asked for are four distinct masks at least: a test
+	// that compiled them to fewer would be holding the budget against nothing.
+	if len(shapes) < 4 {
+		t.Fatalf("the session's uplink rules carry %d mask shapes, want the four it asked for", len(shapes))
+	}
+	t.Logf("one session's uplink rules use %d distinct masks", len(shapes))
+	for _, graph := range []string{"upf.yaml", "session-live.yaml", "session-path.yaml",
+		"session-instances.yaml", "buffer-path.yaml"} {
+		budget := graphMaxTuples(t, filepath.Join("..", "..", "deploy", graph), "pdr_ul")
+		if len(shapes) > budget {
+			t.Errorf("%s declares max_tuples %d for pdr_ul, and one session's rules already use %d masks",
+				graph, budget, len(shapes))
+		}
 	}
 }
 
@@ -3528,14 +3923,18 @@ func TestRuleKeysAreCanonical(t *testing.T) {
 	c := New(testConfig(), rec, quietLogger())
 	c.Establish(establishment(0x9999, "10.45.0.10"))
 
-	fields := testConfig().Up.PDRFields
+	tables := map[string][]Field{
+		testConfig().Up.PDRTable:   testConfig().Up.PDRFields,
+		testConfig().Down.PDRTable: testConfig().Down.PDRFields,
+	}
 	rs := rules(rec.last())
 	if len(rs) != 2 {
 		t.Fatalf("%d rules, want 2", len(rs))
 	}
 	for _, r := range rs {
+		fields := tables[strings.TrimSuffix(r.change.Resource, "/rules")]
 		if len(r.values) != len(fields) {
-			t.Fatalf("%d key fields, want %d", len(r.values), len(fields))
+			t.Fatalf("%s carries %d key fields, want %d", r.change.Resource, len(r.values), len(fields))
 		}
 		for i := range fields {
 			mask, value := r.mask(i), r.value(i)

@@ -103,6 +103,17 @@ const (
 	// sessions may serve one UE address -- two network instances -- because the
 	// tunnel, not the address, is what tells those packets apart then.
 	UpfTEID
+	// QFI is the QoS Flow Identifier (TS 29.244 8.2.89) of the packet: the
+	// decap writes the six bits a decapsulated uplink packet carries in its
+	// PDU Session Container to the packet's `qfi` attribute, and the uplink
+	// table declares the field last. It is what tells two uplink PDRs of one
+	// session apart when nothing else does -- a QoS flow's rule beside the
+	// session's general one -- so the PDI's QFI is the rule's last key field: a
+	// PDI that names one is selected by it, and one that names none masks it
+	// out and still matches. A deployment whose uplink table declares no such
+	// field ignores a PDI's QFI, and two PDRs it alone told apart then compile
+	// to one rule key and are refused rather than half-programmed (compile).
+	QFI
 )
 
 // width is the field's width in bytes, as the packet carries it.
@@ -110,7 +121,7 @@ func (f Field) width() int {
 	switch f {
 	case SrcIP, DstIP:
 		return 4
-	case Proto:
+	case Proto, QFI:
 		return 1
 	case SrcPort, DstPort:
 		return 2
@@ -140,6 +151,8 @@ func (f Field) String() string {
 		return "route domain"
 	case UpfTEID:
 		return "tunnel endpoint"
+	case QFI:
+		return "QFI"
 	default:
 		return "field " + strconv.Itoa(int(f))
 	}
@@ -486,6 +499,19 @@ type pdr struct {
 	// sends the forward out.
 	instance string
 	domain   uint32
+
+	// hasQFI and qfi are the QFI the PDI named (TS 29.244 8.2.89): the QoS flow
+	// this rule selects, and the last field of the uplink table's key. A PDI
+	// that names none leaves the field open -- the session's general rule for
+	// the flow -- and the rule then matches every QFI of it.
+	hasQFI bool
+	qfi    uint8
+	// encapQFI is the QFI of the QER this PDR's downlink record carries
+	// (resolve), or 0 when no QER of the PDR named one: the QoS flow the encap
+	// writes into the PDU Session Container the gNB reads. 0 is not a QFI
+	// (8.2.89), so it is also the "none" the record is written without.
+	encapQFI uint8
+
 	// nextHop is the Router next hop this PDR's forward leaves by: the
 	// deployment's for the direction, or the network instance's when the FAR
 	// forwards toward the data network (resolve).
@@ -604,6 +630,14 @@ type qer struct {
 	mbUL    uint64 // bytes per second, as the dataplane's meter wants it
 	mbDL    uint64
 	hasRate bool
+
+	// hasQFI and qfi are the QER's QFI (TS 29.244 8.2.89): the QoS flow this
+	// QER polices, which is also the one the downlink encap must write into the
+	// PDU Session Container of the packets it tunnels (resolve takes it into
+	// the tunnel record the PDR's FAR names). The IE is optional -- a QER
+	// without one polices the session's flows and marks none of them.
+	hasQFI bool
+	qfi    uint8
 
 	// One meter record per policed direction, allocated with the session and
 	// released with it. Each lives in that direction's chain.

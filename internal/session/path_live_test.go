@@ -751,7 +751,7 @@ func TestLiveTwoInstancesRouteIndependently(t *testing.T) {
 	// packet arrived on (`upf_teid`, the decap's own metadata attribute): that
 	// is what tells two instances' sessions with one UE address apart, and the
 	// field list here mirrors the manifest's the way every other list does.
-	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID}
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := New(cfg, client, log)

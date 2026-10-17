@@ -7,8 +7,8 @@
 #include "upf_datapath.pb.h"
 
 // Strips the outer Ethernet/IPv4/UDP/GTP-U headers (TS 29.281) and leaves the
-// packet framed, writing the TEID it carried, and the QFI of the PDU Session
-// Container when the G-PDU carried one, to packet metadata.
+// packet framed, writing the TEID it carried and the QFI of its PDU Session
+// Container (0 when it carried none) to packet metadata.
 //
 // The F-TEID match is the graph's, not this module's: the compiler writes one
 // rule per session into the rule table the graph puts in front of this module,

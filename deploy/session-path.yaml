@@ -81,10 +81,18 @@ modules:
         - {offset: 23, num_bytes: 1}  # protocol
         - {offset: 34, num_bytes: 2}  # source port
         - {offset: 36, num_bytes: 2}  # destination port
+        # The QoS flow the packet belongs to, as the decap read it out of the
+        # G-PDU's PDU Session Container (TS 29.244 8.2.89): what tells a
+        # session's several uplink PDRs for one F-TEID apart. It is last, so the
+        # fields before it keep the positions they had.
+        - {attr_name: qfi, num_bytes: 1}
       # Distinct masks in use at once: a session's shapes are its filters' --
-      # exact addresses, prefixes, ports -- and each is one hash lookup per
-      # batch. Declared rather than defaulted: it is a UPF decision.
-      max_tuples: 8
+      # exact addresses, prefixes, ports, and the QFI either named or left open
+      # -- and each is one hash lookup per batch. Declared rather than
+      # defaulted: it is a UPF decision. The QFI field doubles the mask shapes a
+      # session's rules take (one variant per existing shape), so the number the
+      # five-field list was sized for no longer covers a table with it.
+      max_tuples: 16
       action_resource: at_ul/actions
   - name: at_ul
     mclass: ActionTable

@@ -25,6 +25,7 @@ func parsePDRFields(spec string) ([]session.Field, error) {
 		"dport":  session.DstPort,
 		"domain": session.RouteDomain,
 		"teid":   session.UpfTEID,
+		"qfi":    session.QFI,
 	}
 	fields := make([]session.Field, 0, len(names))
 	for _, name := range strings.Split(spec, ",") {
@@ -34,7 +35,7 @@ func parsePDRFields(spec string) ([]session.Field, error) {
 		}
 		f, ok := names[name]
 		if !ok {
-			return nil, fmt.Errorf("field %q is not one of src, dst, proto, sport, dport, domain, teid", name)
+			return nil, fmt.Errorf("field %q is not one of src, dst, proto, sport, dport, domain, teid, qfi", name)
 		}
 		fields = append(fields, f)
 	}
