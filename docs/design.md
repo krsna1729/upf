@@ -129,6 +129,7 @@ costs the arms below are expected to confirm:
 | URR volume and time | two additions into worker-local counters (relaxed), plus the rule's stamp pair written once per batch that counted it (shared) | 0 |
 | BAR | a slot write, only on a buffered packet | 0 |
 | ULCL / branching | one route-domain select from the record | 0 |
+| echo (TS 29.281 path management) | one parse and a 67-byte reply, on a message no session's rule matched | 0 |
 
 **State policy (the path to 400G).** What the *controller* writes is shared and read,
 never written, by the packet path: one classifier table and one `ActionTable` per

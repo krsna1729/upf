@@ -54,13 +54,22 @@ modules:
 
   # -- ingress -----------------------------------------------------------------
   # A G-PDU arrives on N3: the TEID table is the F-TEID match (one rule per
-  # session, written by the controller), and its default gate drops a G-PDU no
-  # session names. Its output is the decap.
+  # session, written by the controller). Its default gate is the echo module,
+  # not a drop: the only message that reaches a UPF on a TEID no session names
+  # is an Echo Request (TS 29.281 7.2, TEID 0), which a peer's path management
+  # needs answered. The module answers those and drops everything else, so a
+  # G-PDU no session names is still dropped. Its output is the decap.
   - name: teid
     mclass: WildcardMatch
     arg:
       fields:
         - {offset: 46, num_bytes: 4}
+      default_gate: 1
+
+  - name: echo0
+    mclass: GtpuEcho
+    # No argument: the standard GTP-U port 2152. It declares no metadata
+    # attribute, so it does not move the layout of the ones above.
 
   # -- the two PDR tables ------------------------------------------------------
   # Each direction has its own table, because a rule names an ActionId and a
@@ -144,6 +153,10 @@ modules:
 connections:
   - {upstream: n3_in, downstream: teid}
   - {upstream: teid, downstream: decap0}
+  # The table's default gate (ogate 1): the echo module's reply leaves on the
+  # N3 port it arrived on, which is where a peer's path management listens.
+  - {upstream: teid, downstream: echo0, ogate: 1}
+  - {upstream: echo0, downstream: n3_out}
   - {upstream: decap0, downstream: mt_ul_read}
   - {upstream: mt_ul_read, downstream: pdr_ul}
   - {upstream: pdr_ul, downstream: at_ul}

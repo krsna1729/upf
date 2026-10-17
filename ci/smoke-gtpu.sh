@@ -79,6 +79,17 @@ check_metadata() { # check_metadata <description> <fixed string>
   fi
 }
 
+# check_next greps for a line and then for a string in the line after it: a
+# packet's Ethernet and IPv4 headers together span two 16-byte dump lines.
+check_next() { # check_next <description> <fixed string> <fixed string in the next line>
+  if grep -A 1 -- "$2" "$LOG" | grep -q -- "$3"; then
+    echo "smoke: ok    $1"
+  else
+    echo "smoke: FAIL  $1 (no '$2' followed by '$3' in $LOG)" >&2
+    FAIL=1
+  fi
+}
+
 refute() { # refute <description> <fixed string the log must not contain>
   if grep -q -- "$2" "$LOG"; then
     echo "smoke: FAIL  $1 ('$2' is in $LOG)" >&2
@@ -115,6 +126,29 @@ check "encap wrote UDP/GTP-U toward 2152 with the session TEID" \
       "08 68 00 35 00 00 30 ff 00 25 11 22"
 check "the encapsulated frame carries the inner packet" \
       "33 44 45 00 00 25 00 01 40 00 40 11 20 b7"
+
+# Echo: TEID 0 is no session's rule, so the request took the table's default
+# gate -- the plugin's echo module -- which answered it in place. The request
+# was a conformant one (flags 0x32: S set, as 5.1 requires of an echo; sequence
+# 0x1234; a Recovery Time Stamp IE of its own), and the reply is that message
+# with its Ethernet and IPv4 addresses swapped, its type set to 2 and its
+# payload replaced: 36 bytes of outer IPv4 (0x24 -> 0x35: 20 + UDP 33) with the
+# checksum that header recomputes to, UDP 2152 -> 2152 with length 33 and
+# checksum 0, and a GTP-U message whose length is 17 -- the S-flag field with
+# the request's sequence number, the Recovery IE (14 00: the restart counter is
+# zero, 8.2) and a Recovery Time Stamp of this node's own (231, 8 octets).
+check_next "echo swapped the addresses and rewrote the IPv4 header in place" \
+      "02 00 00 00 00 02 02 00 00 00 00 01 08 00 45 00" \
+      "00 35 00 00 40 00 40 11 ea 8d 0a 14 1e 01 0a 14"
+check "echo answered with S set, its length 17, and TEID 0" \
+      "1e 02 08 68 08 68 00 21 00 00 32 02 00 11 00 00"
+check "echo carried the request's sequence, the Recovery IE, and its own stamp" \
+      "00 00 12 34 00 00 0e 00 e7 00 08"
+# The request carried a Recovery Time Stamp of its own (de ad be ef 00 00 00
+# 00). The reply must carry this node's, not that one: a peer reads the stamp
+# to tell when the entity it is talking to started. Any occurrence of those
+# bytes would come from the reply, because the request itself is never dumped.
+refute "echo replaced the request's stamp instead of echoing it" "de ad be ef"
 
 if [ "$FAIL" = 0 ]; then
   echo "smoke: PASS (log: $LOG)"
