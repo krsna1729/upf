@@ -156,8 +156,9 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   upfd, and the test in `internal/n4` is the SMF that receives the report and
   answers it.
 - Next, in this order: a real SMF (open5gs or free5GC) against `upfd` for
-  interop and Causes, packets over the bound N3/N6 ports, route domains in
-  `internal/routing` for N9 (the downlink's next hop is per-direction today,
-  and the deployment's id 2 stands in for a real N3 domain), the classifier's
-  explicit tuple budget (`max_tuples`), then usage reporting. `docs/design.md`
-  holds the milestones and what each one must prove.
+  interop and Causes, packets over the bound N3/N6 ports (the port split and
+  its placement measurement are the hardware items), the vif that writes a
+  packet's route domain so a downlink rule's key can carry it (`internal/routing`
+  and the Network Instance are in; the packet-side half is not), then the
+  classifier's explicit tuple budget (`max_tuples`). `docs/design.md` holds the
+  milestones and what each one must prove.

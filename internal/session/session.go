@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/krsna1729/upf/internal/bess"
+	"github.com/krsna1729/upf/internal/routing"
 )
 
 // Applier writes a session's changes to the dataplane, all or nothing.
@@ -61,6 +62,17 @@ const (
 	Proto
 	SrcPort
 	DstPort
+	// RouteDomain is not in the packet: it is the metadata attribute the
+	// deployment's interface writes for the interface a packet arrived on
+	// (BESS's `route_domain`). It is what keeps two network instances'
+	// overlapping prefixes apart -- the same filter in two instances is two
+	// rules, because their domains differ (internal/routing).
+	RouteDomain
+	// UpfTEID is the decap's own metadata attribute: the tunnel a decapsulated
+	// packet arrived on. A graph declares it in the uplink table when two
+	// sessions may serve one UE address -- two network instances -- because the
+	// tunnel, not the address, is what tells those packets apart then.
+	UpfTEID
 )
 
 // width is the field's width in bytes, as the packet carries it.
@@ -72,6 +84,9 @@ func (f Field) width() int {
 		return 1
 	case SrcPort, DstPort:
 		return 2
+	case RouteDomain, UpfTEID:
+		// Both are four-byte metadata attributes, as the graph declares them.
+		return 4
 	default:
 		return 0
 	}
@@ -91,6 +106,10 @@ func (f Field) String() string {
 		return "source port"
 	case DstPort:
 		return "destination port"
+	case RouteDomain:
+		return "route domain"
+	case UpfTEID:
+		return "tunnel endpoint"
 	default:
 		return "field " + strconv.Itoa(int(f))
 	}
@@ -148,6 +167,16 @@ type Config struct {
 
 	// Up and Down are the two chains.
 	Up, Down Direction
+
+	// Instances is the deployment's network instances (internal/routing): the
+	// names a PDI's Network Instance (TS 29.244 8.2.4) may use, the route
+	// domain each is classified in, the addresses each serves, and the next
+	// hop a forward out of it takes. Nil is the one-instance deployment: no
+	// PDI's instance is resolved, every rule is domain 0, and each direction's
+	// next hop is the deployment's own (the -n6-next-hop and -n3-next-hop
+	// flags), which is what the rows in docs/compliance.md describe until a
+	// deployment configures more than one.
+	Instances *routing.Domains
 
 	// N3Addr is the UPF's N3 IPv4 address: the F-TEID we advertise, and the
 	// outer source of a downlink packet.
@@ -322,6 +351,17 @@ type pdr struct {
 	qerIDs     []uint32
 	urrIDs     []uint32
 
+	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
+	// empty when the SMF named none: resolve turns it into the deployment's
+	// interface, whose route domain goes into the rule's key and whose next hop
+	// sends the forward out.
+	instance string
+	domain   uint32
+	// nextHop is the Router next hop this PDR's forward leaves by: the
+	// deployment's for the direction, or the network instance's when the FAR
+	// forwards toward the data network (resolve).
+	nextHop uint32
+
 	teid     uint32   // uplink: the TEID we advertised (0 when not ours)
 	actionID uint32   // the action record this PDR's rule names
 	meterID  uint32   // the meter record a QER resolved to, in this chain's Meter
@@ -337,6 +377,10 @@ type far struct {
 	teid     uint32
 	peer     netip.Addr
 	hasOuter bool
+	// instance is the Forwarding Parameters' Network Instance (8.2.4), empty
+	// when the SMF named none: the interface a forward out of this FAR leaves
+	// by (resolve).
+	instance string
 }
 
 type qer struct {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"github.com/wmnsk/go-pfcp/message"
 
 	"github.com/krsna1729/upf/internal/bess"
+	"github.com/krsna1729/upf/internal/routing"
 )
 
 // The two TEIDs the lab graph's frames name. An SMF assigns the F-TEID of the
@@ -28,6 +30,9 @@ import (
 const (
 	pathUpTEID   = 0x11223344 // the TEID the graph's G-PDU carries
 	pathDownTEID = 0x55667788 // the TEID the graph's encap must write
+	// pathUpTEID2 is the second uplink stream's tunnel: the same UE packet, a
+	// different instance's session (deploy/session-path.yaml's src_up2).
+	pathUpTEID2 = 0x11223345
 )
 
 // pathEstablishment is establishment() with those two TEIDs pinned and the UE
@@ -244,6 +249,13 @@ func TestLiveSessionSharedRecords(t *testing.T) {
 // in this graph has.
 func gatePackets(t *testing.T, ctx context.Context, client *bess.Client, module string) float64 {
 	t.Helper()
+	return gatePacketsAt(t, ctx, client, module, "0")
+}
+
+// gatePacketsAt is gatePackets for a chosen output gate: a graph whose chains
+// fan out (the router's two exits) is read by which gate carried what.
+func gatePacketsAt(t *testing.T, ctx context.Context, client *bess.Client, module, gate string) float64 {
+	t.Helper()
 	samples, err := client.SDK().Metrics(ctx)
 	if err != nil {
 		t.Fatalf("reading metrics: %v", err)
@@ -256,11 +268,11 @@ func gatePackets(t *testing.T, ctx context.Context, client *bess.Client, module 
 		}
 		have = append(have, labels["module"]+"/"+labels["direction"]+"/g"+labels["gate"]+"="+
 			strconv.FormatFloat(s.GetValue(), 'f', 0, 64))
-		if labels["module"] == module && labels["direction"] == "out" && labels["gate"] == "0" {
+		if labels["module"] == module && labels["direction"] == "out" && labels["gate"] == gate {
 			return s.GetValue()
 		}
 	}
-	t.Fatalf("the daemon reports no output counter for module %q; it reports %v", module, have)
+	t.Fatalf("the daemon reports no output counter for module %q gate %s; it reports %v", module, gate, have)
 	return 0
 }
 
@@ -655,4 +667,126 @@ func chainCounters(t *testing.T, ctx context.Context, client *bess.Client) []str
 	}
 	sort.Strings(out)
 	return out
+}
+
+// instancedUplinkEstablishment is one uplink PDR for one network instance: the
+// F-TEID the graph's stream carries, the UE's address, and the instance's name
+// (TS 29.244 8.2.4) -- what an SMF serving more than one instance sends. The
+// FAR forwards toward the data network, so the forward takes the instance's own
+// next hop.
+func instancedUplinkEstablishment(cpSEID uint64, ueIP string, upTEID uint32, instance string) *message.SessionEstablishmentRequest {
+	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(cpSEID, nil, nil),
+		ie.NewCreatePDR(
+			ie.NewPDRID(1),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewNetworkInstance(instance),
+				ie.NewFTEID(0x01, upTEID, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+			),
+			ie.NewFARID(1),
+		),
+		ie.NewCreateFAR(
+			ie.NewFARID(1),
+			ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
+		),
+	)
+}
+
+// TestLiveTwoInstancesRouteIndependently is docs/design.md's milestone 4 on a
+// real daemon: two sessions for the *same* subscriber address, one per network
+// instance, each carrying its own tunnel on N3. The graph's two uplink streams
+// carry one session each (TEIDs 0x11223344 and 0x11223345, bursts 32 and 4), so
+// the router's two output gates say which stream left by which exit: the
+// internet session's packets by gate 0, the ims session's by gate 2, which is
+// that instance's next hop.
+//
+// The instance is what a deployment classifies each packet's flow by, and on
+// the uplink the packet's own tag is the tunnel it arrived on: one UE address
+// cannot tell two instances' sessions apart, and before the tunnel was part of
+// the rule's key the second session's rule was keyed identically to the first's
+// -- one rule, one action, whichever session wrote last.
+func TestLiveTwoInstancesRouteIndependently(t *testing.T) {
+	target := os.Getenv("UPF_BESS_TARGET")
+	if target == "" {
+		t.Skip("set UPF_BESS_TARGET (ci/session-path.sh does) to run against a live bessd")
+	}
+	ctx := context.Background()
+	client, err := bess.Dial(ctx, target)
+	if err != nil {
+		t.Fatalf("dialing %s: %v", target, err)
+	}
+	defer client.Close()
+	if err := client.Refresh(ctx); err != nil {
+		t.Fatalf("reading the daemon's schema: %v", err)
+	}
+
+	instances, err := routing.New([]routing.Interface{
+		{Instance: "internet", Domain: 0, NextHop: 1, Pool: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")}},
+		{Instance: "ims", Domain: 1, NextHop: 3, Pool: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")}},
+	}, 2)
+	if err != nil {
+		t.Fatalf("the graph's two instances: %v", err)
+	}
+	cfg := liveConfig()
+	cfg.Instances = instances
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := New(cfg, client, log)
+
+	// One session per stream, both for 10.45.0.2: the same subscriber address,
+	// two instances, two tunnels.
+	for _, s := range []struct {
+		cpSEID   uint64
+		teid     uint32
+		instance string
+	}{
+		{0x3311, pathUpTEID, "internet"},
+		{0x3312, pathUpTEID2, "ims"},
+	} {
+		resp := c.Establish(instancedUplinkEstablishment(s.cpSEID, "10.45.0.2", s.teid, s.instance)).(*message.SessionEstablishmentResponse)
+		if got := cause(t, resp); got != ie.CauseRequestAccepted {
+			t.Fatalf("the %s session for 10.45.0.2 answered cause %d, want accepted", s.instance, got)
+		}
+		// The session layer looks a session up by the SEID *it* allocated, which
+		// is what the answer's F-SEID carries.
+		seid := upFSEID(t, resp)
+		t.Logf("established the %s session for 10.45.0.2: SEID %d, uplink TEID %#x", s.instance, seid, s.teid)
+		defer func() {
+			del := message.NewSessionDeletionRequest(0, 0, seid, 9, 0)
+			if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
+				t.Errorf("deleting the %s session answered cause %d", s.instance, got)
+			}
+		}()
+	}
+
+	// Each stream leaves by its own instance's exit, and the two exits' counts
+	// say which is which: the streams' bursts differ by 8, so the internet
+	// session's gate must outgrow the ims one's. A single rule would send both
+	// streams to one gate.
+	beforeN6 := gatePacketsAt(t, ctx, client, "rt", "0")
+	beforeN9 := gatePacketsAt(t, ctx, client, "rt", "2")
+	deadline := time.Now().Add(10 * time.Second)
+	var n6, n9 float64
+	for {
+		n6 = gatePacketsAt(t, ctx, client, "rt", "0") - beforeN6
+		n9 = gatePacketsAt(t, ctx, client, "rt", "2") - beforeN9
+		if n6 > 0 && n9 > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the two instances' exits carried %v and %v packets in 10s, want both moving: %v",
+				n6, n9, chainCounters(t, ctx, client))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("internet's exit (gate 0) carried %v packets, ims's (gate 2) %v", n6, n9)
+	if n6 <= n9 {
+		t.Errorf("the internet session's exit carried %v packets and the ims session's %v: the streams' bursts differ "+
+			"by 8, so the counters say which instance's traffic took which exit", n6, n9)
+	}
 }

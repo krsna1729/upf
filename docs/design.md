@@ -349,6 +349,27 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 4. **Routing** — N3/N6/N9 domains, next hops, UE IP pools, SDF filters with
    port ranges. *Proof:* two subscribers with overlapping private prefixes in
    different network instances route independently.
+   *In:* `internal/routing` holds the deployment's interfaces -- each a network
+   instance name (8.2.4), a route domain, the next hop a forward out of it takes,
+   and the subscriber prefixes it serves -- with two instances allowed to serve
+   one prefix and one interface not; `upfd -instances`/`-max-domains` configure
+   them; the compiler reads the Network Instance of a PDI *and* of a FAR's
+   forwarding parameters, resolves each against them, refuses a name the
+   deployment does not serve (cause 73, naming what it does) and an address
+   outside the interface's pool, puts the interface's domain in the rule's key
+   wherever the graph declares it (`domain` in `-pdr-fields-*`), and sends a
+   forward out by the FAR's instance (or the PDI's) rather than by the
+   direction's. Port ranges stay refused rather than widened (see the
+   classifier work below).
+   *Out:* the vif wiring (the section above: a real port's interface writes
+   `route_domain`, and until then only a graph with a writer declares the
+   domain field -- on the uplink a rule keys on the tunnel it arrived on, which
+   is what tells two instances' sessions with one UE address apart), and N9's
+   real peer UPF, which needs a deployment with a second UPF to name.
+   *Proof:* `internal/session`'s TestTwoInstancesRouteIndependently (two
+   sessions, one address, two instances, two rule keys and two next hops) and
+   `ci/session-path.sh`'s TestLiveTwoInstancesRouteIndependently (the same, on a
+   real daemon: the router's two exits count each instance's stream).
 5. **Usage** — URR counters, reporting triggers, session reports. *Proof:* a
    report matches the packets a source produced, within a known bound.
 
@@ -380,11 +401,19 @@ router, routes taken per domain) and `vif` writes the domain into packet
 metadata, but no module in the tree consumes that attribute today -- the
 vif-to-router link is work, not a given. What a *PDR* selects is not a vif but a
 **network instance** (TS 29.244 8.2.4), beside the **source interface** (8.2.2)
-which this repo does read (`internal/session/compile.go`). The instance is the
-missing link, and docs/compliance.md's row over 8.2.89/8.2.4 says so: the SMF
-names an instance per rule, the UPF maps it to an interface and an address pool,
-and with one instance configured a PDR naming another is indistinguishable from
-one naming ours.
+which this repo does read (`internal/session/compile.go`). That link is in now:
+`internal/routing` is the deployment's interfaces (name, route domain, next hop,
+subscriber pool), the compiler resolves the Network Instance of a PDI and of a
+FAR's forwarding parameters against them -- refusing a name the deployment does
+not serve, and an address outside the interface's pool -- puts the interface's
+domain in the rule's key wherever the graph declares it (`domain` in
+`-pdr-fields-*`) and sends a forward out by the FAR's instance. What is still
+missing is the packet-side half: a rule's key can carry the domain only where
+something writes it into the packet, and on a real port that is the vif's
+`route_domain`, which is not wired. Until it is, a deployment can tell two
+instances' sessions apart by what the ingress *does* write: on the uplink the
+tunnel the G-PDU arrived on (`upf_teid`, the decap's own attribute), which is
+what `deploy/session-path.yaml` declares and its two-instance arm proves.
 
 **A plain NIC cannot put both halves of a session on one worker, and the port
 count is not the reason.** The uplink arrives as GTP-U and the downlink as the

@@ -18,6 +18,7 @@ func validArgs() graphArgs {
 		n6NextHop:  1,
 		n3NextHop:  2,
 		pdrTableUL: "pdr_ul", pdrTableDL: "pdr_dl",
+		pdrFieldsUL: "src,dst,proto,sport,dport", pdrFieldsDL: "src,dst,proto,sport,dport",
 		teidTable: "teid", teidGate: 0,
 		actionsUL: "at_ul", metersUL: "mt_ul",
 		actionsDL: "at_dl", metersDL: "mt_dl",

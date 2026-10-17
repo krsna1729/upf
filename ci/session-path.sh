@@ -67,10 +67,12 @@ fi
 "$BESSCTL" resume >/dev/null
 
 # The Go half: the control arm (counters zero), the session, then the counters
-# again. Run from the repository root so the module and its workspace resolve.
+# again -- and, with two sessions for one subscriber address in two network
+# instances, which of the router's exits each instance's traffic took. Run from
+# the repository root so the module and its workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic' -count=1 -v
+  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveTwoInstancesRouteIndependently' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log, per dump (the helper
 # is shared with ci/n4-path.sh; see its header for why a dump is scoped).
