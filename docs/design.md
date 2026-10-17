@@ -590,7 +590,7 @@ structure this design uses, so the arithmetic below is that table at this shape
 | per session | state in BESS | measured bytes | at 10^6 sessions |
 |---|---|---|---|
 | 4 PDR | WildcardMatch rule (one masked table, shared by the workers) | not measured: 16-byte key, mask, value, priority, result, cuckoo body | about 360 MB (2.9 GB only if the table were copied per worker, which it is not) |
-| 4 FAR | ActionTable record (`ObjectTable`) | 64 B/object | 256 MB |
+| 4 FAR | ActionTable record (`dataplane::SlotTable<ActionId, Action>`, one cache line per record) | 64 B/object | 256 MB |
 | 2 QER | `MeterSet` | 64 B state + 8 B pointer | 144 MB (1,048,576 meters measure 64 MiB) |
 | 2 URR | `CounterSet` block | 4 KiB for three counters (each slot per worker: 64 slots) | the wall: 8 GB if each URR owns a full per-worker block |
 | 1 MAR (ATSSS, P1) | per-session record | not measured, small | about 64 MB |
@@ -729,6 +729,24 @@ The walls, in order:
    startup (`session.Compiler.Sweep`, one transaction, before the PFCP socket
    opens), because the previous incarnation's records are indistinguishable
    from this one's.
+   What is still missing is the replay path that would keep the sessions across
+   a restart instead of emptying them, and its form is chosen here rather than
+   left to the implementation: an append-only journal of the *applied* PFCP
+   session messages (`upfd -checkpoint <path>`), **not yet built** -- the
+   compliance rows say what is -- and not a serialisation of the model, because
+   the messages are already the complete description of what a session is, any
+   second format would be a second thing to keep in step with the first, and
+   replaying messages is what an SMF does. A restart sweeps first -- the
+   dataplane's records are the graph's, and dropping them wholesale is what
+   makes the replay an installation rather than a trust fall -- and then replays
+   the journal in order, pinning each session's local SEID to the value the
+   journal recorded, so a retransmission of an establishment the previous
+   incarnation accepted is answered with the same SEID and the SMF's path
+   management finds either that session or a clean slate, never half of one. The
+   file is appended to and never rewritten, so a change costs its own record;
+   folding a long session's chain into one record is compaction, and it is not a
+   prerequisite for the replay being correct, because a replay reads the records
+   in the order they were written.
 5. **Id and priority space.** uint32 throughout (PDR priority, ActionId, meter
    id): a million sessions at four PDRs is 4M rules, which fits.
 
