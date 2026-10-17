@@ -702,6 +702,259 @@ func TestACHRequestIsAllocatedWhateverItsFamilyFlag(t *testing.T) {
 	}
 }
 
+// createdTEID is the F-TEID the answer reports for one PDR, from the answer's
+// Created PDR list. Zero means the answer carries no Created PDR for that PDR,
+// which is what a downlink PDR looks like: only a PDR we gave a TEID has one.
+func createdTEID(t *testing.T, created []*ie.IE, pdrID uint16) uint32 {
+	t.Helper()
+	for _, i := range created {
+		children, err := i.CreatedPDR()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var id uint16
+		var teid uint32
+		for _, ch := range children {
+			switch ch.Type {
+			case ie.PDRID:
+				if v, err := ch.PDRID(); err == nil {
+					id = v
+				}
+			case ie.FTEID:
+				f, err := ch.FTEID()
+				if err != nil {
+					t.Fatal(err)
+				}
+				teid = f.TEID
+			}
+		}
+		if id == pdrID {
+			return teid
+		}
+	}
+	return 0
+}
+
+// chidEstablishment is a session whose two uplink PDIs each ask us to allocate
+// an F-TEID and carry a CHOOSE ID (TS 29.244 8.2.3: V4|CH|CHID = 0x0d, no
+// TEID field). The two filters name different source ports, so the PDIs are two
+// rules while their F-TEID IEs are two requests for a tunnel endpoint.
+func chidEstablishment(cpSEID uint64, ueIP string, first, second uint8) *message.SessionEstablishmentRequest {
+	uplink := func(id uint16, port int, chid uint8) *ie.IE {
+		return ie.NewCreatePDR(ie.NewPDRID(id), ie.NewPrecedence(uint32(10*id)),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x0d, 0, nil, nil, chid),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewSDFFilter(fmt.Sprintf("permit out udp from any %d to any", port), "", "", "", 0)),
+			ie.NewFARID(1), ie.NewQERID(1))
+	}
+	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+		ie.NewFSEID(cpSEID, nil, nil),
+		uplink(1, 1000, first),
+		uplink(2, 2000, second),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		ie.NewCreateQER(ie.NewQERID(1),
+			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			ie.NewMBR(1000, 2000)),
+	)
+}
+
+func TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID(t *testing.T) {
+	// TS 29.244 8.2.3: with the CHID flag set, the UP function "shall assign
+	// the same F-TEID to the PDRs requested to be created ... with the same
+	// CHOOSE ID value". Two uplink PDIs that are two filters on one tunnel are
+	// the shape that asks for it, and without the CHOOSE ID each would get a
+	// TEID of its own: the answer names one TEID in both Created PDRs, and the
+	// transaction writes one TEID rule -- which is also what the engine takes,
+	// since it rejects a second operation on one (resource, key).
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(chidEstablishment(0x9992, "10.45.0.6", 5, 5)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	one, two := createdTEID(t, resp.CreatedPDR, 1), createdTEID(t, resp.CreatedPDR, 2)
+	if one == 0 || two == 0 {
+		t.Fatalf("the answer carries no F-TEID for one of the two PDIs (%#x, %#x)", one, two)
+	}
+	if one != two {
+		t.Errorf("two PDIs with CHOOSE ID 5 got TEIDs %#x and %#x: they asked for one tunnel", one, two)
+	}
+	changes := rec.last()
+	assertNoRepeat(t, changes)
+	teids := 0
+	for _, ch := range changes {
+		if ch.Resource == testConfig().TEIDTable+"/rules" {
+			teids++
+		}
+	}
+	if teids != 1 {
+		t.Errorf("the transaction writes %d TEID rules, want one for the group", teids)
+	}
+	if _, ok := teidRule(changes, testConfig().TEIDTable+"/rules", one); !ok {
+		t.Errorf("the transaction writes no TEID rule for %#x, the TEID it answered with", one)
+	}
+	// The group is the tunnel, not the filter: each PDI still has its own rule.
+	if n := len(rules(changes)); n != 2 {
+		t.Errorf("%d PDR rules in the transaction, want one per PDI", n)
+	}
+}
+
+func TestTwoCHOOSEIDsGetTwoFTEIDs(t *testing.T) {
+	// Two CHOOSE IDs are two groups, and nothing in 8.2.3 makes two values one
+	// tunnel: an SMF that asks for two gets two, each shared by the PDIs that
+	// name it. (An implementation that gave every CHOOSE request in a session
+	// one F-TEID would pass the single-group test above and fail this one.)
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(chidEstablishment(0x9993, "10.45.0.7", 5, 6)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	one, two := createdTEID(t, resp.CreatedPDR, 1), createdTEID(t, resp.CreatedPDR, 2)
+	if one == 0 || two == 0 {
+		t.Fatalf("the answer carries no F-TEID for one of the two PDIs (%#x, %#x)", one, two)
+	}
+	if one == two {
+		t.Errorf("CHOOSE IDs 5 and 6 share TEID %#x: they are two tunnels", one)
+	}
+	changes := rec.last()
+	assertNoRepeat(t, changes)
+	for _, teid := range []uint32{one, two} {
+		if _, ok := teidRule(changes, testConfig().TEIDTable+"/rules", teid); !ok {
+			t.Errorf("the transaction writes no TEID rule for %#x", teid)
+		}
+	}
+}
+
+func TestACHOOSEIDIsTheSessionsFTEIDForThatGroup(t *testing.T) {
+	// The CHOOSE ID names a group of PDIs, not one request: a PDI a later
+	// modification creates with the ID the session has already used gets the
+	// same F-TEID -- a group whose value changed per message would be no group
+	// at all, and the SMF would have no way to learn that its second request
+	// was answered with another tunnel.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(chidEstablishment(0x9994, "10.45.0.8", 7, 7)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	want := createdTEID(t, resp.CreatedPDR, 1)
+
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewCreatePDR(ie.NewPDRID(3), ie.NewPrecedence(30),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x0d, 0, nil, nil, 7),
+				ie.NewUEIPAddress(0x02, "10.45.0.8", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any 3000 to any", "", "", "", 0)),
+			ie.NewFARID(1), ie.NewQERID(1)),
+	)
+	modified := c.Modify(mod).(*message.SessionModificationResponse)
+	if got := cause(t, modified); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	if got := createdTEID(t, modified.CreatedPDR, 3); got != want {
+		t.Errorf("the PDI created with CHOOSE ID 7 got TEID %#x, want the group's %#x", got, want)
+	}
+	assertNoRepeat(t, rec.last())
+}
+
+func TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI(t *testing.T) {
+	// The session holds an F-TEID per group while a PDR of that group is live.
+	// Once the last one is gone the TEID is back in the pool, and a PDI created
+	// later with the same CHOOSE ID must not be handed it from a stale
+	// grouping: the pool may have given the value to another session by then,
+	// and two sessions naming one TEID rule is two sessions' uplink landing in
+	// whichever wrote it last.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(chidEstablishment(0x9995, "10.45.0.9", 9, 9)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	gone := createdTEID(t, resp.CreatedPDR, 1)
+
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewRemovePDR(ie.NewPDRID(1)), ie.NewRemovePDR(ie.NewPDRID(2)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the removal answered cause %d", got)
+	}
+
+	mod = message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
+		ie.NewCreatePDR(ie.NewPDRID(3), ie.NewPrecedence(30),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x0d, 0, nil, nil, 9),
+				ie.NewUEIPAddress(0x02, "10.45.0.9", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any 4000 to any", "", "", "", 0)),
+			ie.NewFARID(1), ie.NewQERID(1)),
+	)
+	modified := c.Modify(mod).(*message.SessionModificationResponse)
+	if got := cause(t, modified); got != ie.CauseRequestAccepted {
+		t.Fatalf("the creation answered cause %d", got)
+	}
+	if got := createdTEID(t, modified.CreatedPDR, 3); got == gone {
+		t.Errorf("a CHOOSE ID whose PDIs are gone kept TEID %#x, which the pool has taken back", gone)
+	}
+}
+
+func TestACHOOSEForIPv6IsRefused(t *testing.T) {
+	// 8.2.3: with the CH bit set, "the UP function shall assign an F-TEID with
+	// an IP4 or an IPv6 address if the V4 or V6 bit is set respectively". A
+	// request with V6 alone is therefore for an IPv6 F-TEID, and this UP's N3
+	// address is IPv4: answering with an IPv4 one would hand the SMF a family
+	// it did not ask for. IPv6 has no form anywhere else in this tree either
+	// (docs/compliance.md), so it is refused, with a rule failure the SMF can
+	// act on -- not an accepted session it cannot use.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x9996, 1, 0,
+		ie.NewFSEID(0x9996, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x06, 0, nil, nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("an IPv6 CHOOSE request answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+func TestACHOOSEForBothFamiliesGetsTheIPv4FTEID(t *testing.T) {
+	// The other shapes 8.2.3 allows, and the one it does not: V4 alone is what
+	// an SMF sends, V4|V6 asks for an address of either family ("if the V4 or
+	// V6 bit is set"), and a CH bit with no family at all names none -- a shape
+	// the section forbids and no SMF sends, kept lenient because nothing about
+	// it asks for an address this UP does not have. All three are answered with
+	// the IPv4 N3 address the UPF has.
+	for _, flags := range []uint8{0x05, 0x07, 0x04} {
+		rec := &recorder{}
+		c := New(testConfig(), rec, quietLogger())
+		req := message.NewSessionEstablishmentRequest(0, 0, 0x9997, 1, 0,
+			ie.NewFSEID(0x9997, nil, nil),
+			ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+					ie.NewFTEID(flags, 0, nil, nil, 0),
+					ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+				ie.NewFARID(1)),
+			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		)
+		resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+		if got := cause(t, resp); got != ie.CauseRequestAccepted {
+			t.Errorf("a CHOOSE request with flags %#x answered cause %d", flags, got)
+			continue
+		}
+		if teid := createdTEID(t, resp.CreatedPDR, 1); teid == 0 {
+			t.Errorf("a CHOOSE request with flags %#x carries no allocated TEID", flags)
+		}
+	}
+}
+
 func TestTwoUplinkPDRsWithOneFilterAreRefused(t *testing.T) {
 	// An SMF with several QoS flows programs several uplink PDRs onto one F-TEID
 	// and tells them apart only by QFI. This UP does not read QFI

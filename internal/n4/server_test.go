@@ -236,6 +236,31 @@ func TestAssociationAndHeartbeat(t *testing.T) {
 	}
 }
 
+func TestAConfiguredFeatureIsAdvertised(t *testing.T) {
+	// The four octets are a config (TS 29.244 8.2.25), and cmd/upfd sets the
+	// bits this tree implements: FTUP once a PDI's F-TEID IE can ask us to
+	// allocate one, one per CHOOSE ID (8.2.3). The library's own reader is what
+	// proves the bit position -- a shift here would advertise another feature
+	// without any test above noticing.
+	_, addr := startServer(t, n4.Config{UPFunctionFeatures: [4]uint8{n4.FTUP}})
+	conn := connect(t, addr)
+	setup := associate(t, conn, 3)
+
+	if !setup.UPFunctionFeatures.HasFTUP() {
+		t.Error("a node configured with FTUP does not advertise it")
+	}
+	features, err := setup.UPFunctionFeatures.UPFunctionFeatures()
+	if err != nil {
+		t.Fatalf("reading the features: %v", err)
+	}
+	if len(features) != 4 || features[1] != 0 || features[2] != 0 || features[3] != 0 {
+		t.Errorf("the features IE is %v, want FTUP alone in the first octet", features)
+	}
+	if setup.UPFunctionFeatures.HasUEIP() || setup.UPFunctionFeatures.HasBUCP() {
+		t.Error("a feature nothing implements is advertised alongside FTUP")
+	}
+}
+
 func TestAssociationReleaseEndsSessions(t *testing.T) {
 	h := newRecorder()
 	srv, addr := startServer(t, n4.Config{Sessions: h})

@@ -33,6 +33,18 @@ const maxDatagram = 4 + 65535
 // maxSequence is the largest PFCP sequence number: it is 3 octets long.
 const maxSequence = 0xffffff
 
+// The UP Function Features bits of TS 29.244 8.2.25, octet 5, that this tree
+// implements. A milestone turns its bit on in cmd/upfd as it lands: an optional
+// feature is advertised only where the code behind it exists, and the answer
+// otherwise declares the mandatory behaviour alone.
+const (
+	// FTUP is F-TEID allocation in the UP function: a PDI whose F-TEID IE
+	// carries the CH flag is given an F-TEID, reported in the Created PDR --
+	// one per PDI, and one for all the PDIs of a PFCP session that carry the
+	// same CHOOSE ID (8.2.3; internal/session).
+	FTUP = 0x10
+)
+
 // Liveness parameters, as in common PFCP practice: ask after 10 s of silence,
 // wait 5 s for an answer, retry three times, then consider the peer gone.
 const (

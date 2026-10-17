@@ -130,6 +130,11 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   packets that then cross are keyed by the SMF's own values — the F-TEID it
   pinned, the FAR's TEID and gNB address. `ci/bench-n4.sh` measures the same
   path's envelope.
+- The node declares FTUP, and only where the session layer runs: a PDI whose
+  F-TEID IE carries the CH flag (8.2.3) is given an F-TEID by the compiler and
+  reads it back in the Created PDR, and the PDIs of a session that carry one
+  CHOOSE ID share it — one TEID rule for the group, and one value in each of
+  their Created PDRs.
 - Next, in this order: a real SMF (open5gs or free5GC) against `upfd` for
   interop and Causes, packets over the bound N3/N6 ports, route domains in
   `internal/routing` for N9 (the downlink's next hop is per-direction today,

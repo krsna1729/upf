@@ -138,3 +138,46 @@ func TestLiveSessionProgramsTheDaemon(t *testing.T) {
 		t.Errorf("a retransmitted deletion answered cause %d, want session-not-found", got)
 	}
 }
+
+// TestLiveSessionSharesOneFTEIDPerCHOOSEID programs a session whose two uplink
+// PDIs carry one CHOOSE ID (TS 29.244 8.2.3) into a real daemon. The unit test
+// beside it checks what the compiler builds; this one checks that the daemon
+// takes it -- two PDIs on one TEID rule is one (resource, key) written once,
+// which is what the engine's transaction rules allow -- and that the answer the
+// SMF would read names one TEID for both.
+func TestLiveSessionSharesOneFTEIDPerCHOOSEID(t *testing.T) {
+	target := os.Getenv("UPF_BESS_TARGET")
+	if target == "" {
+		t.Skip("set UPF_BESS_TARGET (ci/session-live.sh does) to run against a live bessd")
+	}
+
+	ctx := context.Background()
+	client, err := bess.Dial(ctx, target)
+	if err != nil {
+		t.Fatalf("dialing %s: %v", target, err)
+	}
+	defer client.Close()
+	if err := client.Refresh(ctx); err != nil {
+		t.Fatalf("reading the daemon's schema: %v", err)
+	}
+
+	c := New(liveConfig(), client, quietLogger())
+	resp := c.Establish(chidEstablishment(0x2222, "10.45.0.4", 3, 3)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the daemon refused the establishment with cause %d", got)
+	}
+	defer func() {
+		del := message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 9, 0)
+		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
+			t.Errorf("the daemon refused the deletion with cause %d", got)
+		}
+	}()
+	one, two := createdTEID(t, resp.CreatedPDR, 1), createdTEID(t, resp.CreatedPDR, 2)
+	if one == 0 || two == 0 {
+		t.Fatalf("the answer carries no F-TEID for one of the two PDIs (%#x, %#x)", one, two)
+	}
+	if one != two {
+		t.Errorf("two PDIs with CHOOSE ID 3 got TEIDs %#x and %#x: they asked for one tunnel", one, two)
+	}
+	t.Logf("established SEID %d: two PDIs, one F-TEID %#x", resp.Header.SEID, one)
+}

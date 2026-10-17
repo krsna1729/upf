@@ -28,6 +28,7 @@ to race.
 | PFCP | BESS |
 |---|---|
 | PDR (Precedence, PDI: Source Interface, F-TEID, Network Instance, UE IP, SDF filters) | one rule in the PDR table (WildcardMatch over masked keys) whose result is `{gate, ActionId}`; a port *range* is refused today — see the OMEC table below |
+| F-TEID the CP function asks the UP function to choose (8.2.3: the CH flag, and CHID for a group the CP function names) | one TEID rule in front of the decap per F-TEID we allocate; the PDIs of a session that carry one CHOOSE ID share the F-TEID the session gave that group, so an SMF's several filters on one tunnel are one rule and one Created PDR value |
 | FAR (Apply Action, Forwarding Parameters: Destination Interface, Network Instance, Outer Header Creation) | a *treatment* resource the action references (forward / drop / buffer / notify) plus the next hop and GTP-U encap parameters |
 | QER (Gate Status, MBR, QFI) | a meter resource per QER, referenced from the action |
 | URR (Measurement Method, Reporting Triggers, thresholds, period) | a counter resource per URR plus a reporting task; reports become PFCP Session Reports |
