@@ -204,3 +204,11 @@ done
 grep -rn -E "FTUP|UEIP|UDBC|EMPU" /tmp/upfcmp/*/ --include=*.c --include=*.go | grep -v _test | head
 grep -rni "\bURR\b" /tmp/upfcmp/*/ --include=*.go --include=*.c | head
 ```
+
+## The score
+
+This file is the survey. The score it supports -- one percentage per compliance
+block, per project, with the sub-features and the evidence behind each -- is
+[`scorecard.md`](scorecard.md).
+
+
