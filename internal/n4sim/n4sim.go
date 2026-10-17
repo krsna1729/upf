@@ -52,12 +52,14 @@ func (s Session) sdf() string {
 
 // fteidIE is the F-TEID IE an SMF sends. With a value pinned, that is a V4
 // F-TEID (flag 0x01 -- go-pfcp's HasIPv4 is the first bit; 0x02 is V6) carrying
-// the TEID and the UPF's N3 address. With nothing pinned it is the CH request
-// (flag 0x04) with no TEID at all: a TEID of zero *with* the V4 flag is a
-// pinned zero, a shape no SMF sends and only a lenient UPF reads as "choose".
+// the TEID and the UPF's N3 address. With nothing pinned it is the CH request:
+// the CH bit (0x04) with the family the UP function is to assign (V4, 0x01), so
+// 0x05 -- which is what TS 29.244 8.2.3 has an SMF send, and carries no TEID at
+// all. A TEID of zero *with* the V4 flag alone is a pinned zero, a shape no SMF
+// sends and only a lenient UPF reads as "choose".
 func fteidIE(s Session) *ie.IE {
 	if s.FTEID == 0 {
-		return ie.NewFTEID(0x04, 0, nil, nil, 0)
+		return ie.NewFTEID(0x05, 0, nil, nil, 0)
 	}
 	return ie.NewFTEID(0x01, s.FTEID, net.ParseIP(s.N3IP), nil, 0)
 }

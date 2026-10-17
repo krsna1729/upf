@@ -80,8 +80,13 @@ cleanup() {
   pgrep -x upfd >/dev/null && echo "bench-n4: WARNING an upfd is still running" >&2
   # After the kills, not before them: the answer here is a fact, not a forecast.
   echo "== nothing left running: bessd $(pgrep -x bessd >/dev/null && echo RUNNING || echo stopped), upfd $(pgrep -x upfd >/dev/null && echo RUNNING || echo stopped)"
+  # Where a failed run's files are. Every failure path exits before the end of
+  # the script, so this is the only place that can say it.
+  if [ "${1:-0}" != 0 ] && [ -n "${WORK:-}" ]; then
+    echo "== failed run kept: $WORK (bessd.log, upfd.log, n4bench-*.json)"
+  fi
 }
-trap cleanup EXIT
+trap 'cleanup $?' EXIT
 
 echo "== environment"
 echo "upf:    $ROOT ($(env git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo untracked))"
@@ -139,10 +144,9 @@ if [ -x "$LIVE_BENCH" ]; then
     echo "(live_transaction_bench needs a bessd of its own; run it separately)"
 fi
 
-echo "== logs: $WORK (bessd.log, upfd.log; kept only when this run failed -- the"
-echo "   numbers are above and in the n4bench-*.json samples, which are kept)"
+echo "== samples kept: $WORK/n4bench-$MODES.json (a failed run keeps its logs"
+echo "   too, and the trap above says where)"
 
 # The run's own files, not a result: the samples are what this run produced and
 # stay where they are printed from, the logs and the extracted binaries go.
 rm -f "$WORK"/bessd.log "$WORK"/upfd.log "$WORK"/n4bench "$WORK"/upfd
-echo "== samples kept: $WORK/n4bench-$MODES.json"

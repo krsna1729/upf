@@ -525,9 +525,14 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	}
 	// The records of a PDR a modification removed are still in the dataplane
 	// when the session goes: they are out of the model, so a deletion that
-	// walked only the model would leave them programmed for good.
+	// walked only the model would leave them programmed for good. A replaced
+	// PDR's old form is here for the same reason: an update that was refused
+	// left the model holding the new key while the old one is still programmed.
+	// The dedupe above is what lets both lists name the same records as the
+	// PDRs that stayed.
 	all := pdrsInOrder(s)
 	all = append(all, s.removed...)
+	all = append(all, s.stale...)
 	for _, p := range all {
 		dir := c.direction(p.srcIfc)
 		key, err := p.ruleKey(dir.PDRFields)
@@ -615,9 +620,11 @@ func (c *Compiler) releaseSession(s *Session) {
 	actions := map[uint32]bool{}
 	meters := map[uint32]bool{}
 	all := pdrsInOrder(s)
-	// A PDR a modification removed still holds ids: its records were erased by
-	// the deletion above, and its ids are freed here with the rest.
+	// A PDR a modification removed still holds ids, and a replaced PDR's old
+	// form holds the TEID it used to have: the records are erased by the
+	// deletion above, and the ids are freed here with the rest.
 	all = append(all, s.removed...)
+	all = append(all, s.stale...)
 	for _, p := range all {
 		if p.teid != 0 && !teids[p.teid] {
 			teids[p.teid] = true

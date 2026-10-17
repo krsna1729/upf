@@ -564,6 +564,174 @@ func TestAnUpdateThatChangesTheKeyErasesTheOldRule(t *testing.T) {
 	assertNoRepeat(t, txn)
 }
 
+func TestADeletionErasesTheOldKeyOfARefusedUpdate(t *testing.T) {
+	// A refused modification leaves the model holding what the SMF asked for --
+	// merge folds it in before the transaction is applied -- and the dataplane
+	// holding what it had, so the replaced form is the only record of the rule
+	// that is still programmed. A deletion that walked only the model would
+	// leave that rule selecting the PDR's action for the old filter's packets,
+	// for the life of the dataplane.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x8890, 1, 0,
+		ie.NewFSEID(0x8890, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+
+	rec.fail = &bess.RejectedError{}
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 10.20.0.0/16 1000", "", "", "", 0)),
+			ie.NewFARID(1)),
+	)
+	if got := cause(t, c.Modify(mod)); got == ie.CauseRequestAccepted {
+		t.Fatal("a refused modification was answered as accepted")
+	}
+	rec.fail = nil
+
+	del := c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0)).(*message.SessionDeletionResponse)
+	if got := cause(t, del); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	txn := rec.last()
+	old := ruleCarrying(t, txn, fieldDstIP, []byte{10, 10, 0, 0})
+	if old.change.Value != nil {
+		t.Error("the key the refused update left programmed was rewritten, not erased")
+	}
+	assertNoRepeat(t, txn)
+}
+
+func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
+	// The other half of the stale-key rule: an update that changes something
+	// else about the PDR -- its FAR here -- keeps the rule's key, and the
+	// replaced form's key is the same key. Without the live-set guard the
+	// transaction would erase and write one key, which the engine rejects.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x8891, 1, 0,
+		ie.NewFSEID(0x8891, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	actionID := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0}).change.Value["action_id"]
+
+	mod := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
+			ie.NewFARID(2)),
+		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	txn := rec.last()
+	// One key, one operation: an erase of the key the write below carries is
+	// what the engine rejects, so this is the assertion that names the fault.
+	assertNoRepeat(t, txn)
+	written := ruleCarrying(t, txn, fieldDstIP, []byte{10, 10, 0, 0})
+	if written.change.Value == nil {
+		t.Fatal("the update did not write the rule")
+	}
+	if got := written.change.Value["action_id"]; got != actionID {
+		t.Errorf("the update gave the PDR action %v, want the one it had (%v)", got, actionID)
+	}
+}
+
+func TestACHRequestIsAllocatedWhateverItsFamilyFlag(t *testing.T) {
+	// TS 29.244 8.2.3: with the CH bit set, the V4/V6 bits say which address
+	// family the UP function is to assign, so a real request reads 0x05 (CH|V4)
+	// and carries no TEID. What makes it a request here is the absent TEID, and
+	// the family bit must not be read as a value the SMF pinned: the session is
+	// accepted and the Created PDR carries a TEID the SMF did not send.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x9990, 1, 0,
+		ie.NewFSEID(0x9990, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x05, 0, nil, nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("a CH request answered cause %d", got)
+	}
+	if n := len(resp.CreatedPDR); n != 1 {
+		t.Fatalf("%d Created PDRs in the answer, want the one PDR", n)
+	}
+	created, err := resp.CreatedPDR[0].CreatedPDR()
+	if err != nil {
+		t.Fatalf("reading the Created PDR: %v", err)
+	}
+	var teid uint32
+	for _, child := range created {
+		if child.Type != ie.FTEID {
+			continue
+		}
+		fields, err := child.FTEID()
+		if err != nil {
+			t.Fatalf("reading the Created PDR's F-TEID: %v", err)
+		}
+		teid = fields.TEID
+	}
+	if teid == 0 {
+		t.Error("the answer carries no allocated TEID")
+	}
+}
+
+func TestTwoUplinkPDRsWithOneFilterAreRefused(t *testing.T) {
+	// An SMF with several QoS flows programs several uplink PDRs onto one F-TEID
+	// and tells them apart only by QFI. This UP does not read QFI
+	// (docs/compliance.md), so those PDRs are one rule key, and the session is
+	// refused with a rule failure: the SMF can then fix it, where a PDR that
+	// exists and matches nothing would have looked like a working session.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x9991, 1, 0,
+		ie.NewFSEID(0x9991, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x40000001, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x40000001, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("two PDRs with one filter answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
 func TestAClosedGateDropsWithoutAnAction(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())

@@ -55,8 +55,13 @@ cleanup() {
   sleep 1
   [ -n "$UPFD_PID" ] && kill -9 "$UPFD_PID" 2>/dev/null || true
   [ -n "$DAEMON_PID" ] && kill -9 "$DAEMON_PID" 2>/dev/null || true
+  # Where a failed run's files are: every failure path exits before the end of
+  # the script, so the trap is the only place that can say it.
+  if [ "${1:-0}" != 0 ] && [ -n "${WORK:-}" ]; then
+    echo "== failed run kept: $WORK (the daemon's log and dumps)"
+  fi
 }
-trap cleanup EXIT
+trap 'cleanup $?' EXIT
 
 (cd "$ROOT" && $GO build -o "$WORK/upfd" ./cmd/upfd && $GO build -o "$WORK/n4bench" ./cmd/n4bench)
 
@@ -113,9 +118,7 @@ echo "         PDR); metered_ul = rt gate 0 (what reached N6 through the SMF's Q
 echo "         the session's MBR shapes it); dl_to_N3 = dump_d's output (the downlink"
 echo "         through the PDR, action, meter and encap, unmetered in this session);"
 echo "         input_Mpps = both chains' input per second, Mpps."
-echo "== logs: $WORK (the daemon's log and graph dumps; kept only when this run"
-echo "   failed -- the numbers are above)"
-
-# The run's own files, not a result: a failed run keeps everything (the line
-# above says where), a green one drops the logs and keeps the directory.
-rm -f "$WORK"/*.log
+# The run's own files, not a result: this bench prints numbers rather than
+# samples, so a green run leaves nothing behind. A failed one keeps everything
+# and the trap above says where.
+rm -rf "$WORK"

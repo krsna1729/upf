@@ -503,9 +503,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// cannot tell apart -- precedence is part of the rule's value, not its key,
 	// so differing precedence does not separate them. Writing both would be
 	// rejected by the engine, and writing either would silently drop the other's
-	// action. An SMF that programs two filters for one direction will not hit
-	// this; one that sends the same filter twice is told so rather than having
-	// one of its PDRs quietly do nothing.
+	// action. The case that reaches this is an SMF that programs several uplink
+	// PDRs onto one F-TEID with no SDF, distinguishing them only by QFI: this UP
+	// does not read QFI (docs/compliance.md), so they are one key, and the
+	// session is refused with a rule failure rather than half-programmed.
 	writtenRules := map[string]bool{}
 	// The rule keys the session still holds, as the transaction will write them.
 	live := map[string]bool{}
