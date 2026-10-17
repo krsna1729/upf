@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"slices"
@@ -135,6 +136,36 @@ type farReq struct {
 	// none. It is not the PDI's instance -- that one says which flow the rule
 	// selects.
 	instance string
+
+	// hasBAR and barID are the FAR's BAR ID (8.2.55, one octet): the buffering
+	// instruction this FAR's held packets live under.
+	hasBAR bool
+	barID  uint8
+}
+
+// barReq is a Create BAR or Update BAR as the message carried it (TS 29.244
+// 7.5.2.6): the session's buffering instruction for the FARs that name it.
+type barReq struct {
+	id uint8
+
+	// hasDuration says the message carried the DL Buffering Duration IE
+	// (8.2.29). The IE is a timer: a unit in bits 8-6 and a value in bits 5-1.
+	// Two of its codes are not durations: unit and value both zero is the
+	// deactivated code ("the timer is stopped"), which clears the session's
+	// override rather than setting a zero duration, and the infinite unit is
+	// hold-without-expiry, the one value that reaches the store as a timeout of
+	// zero ("hold until the SMF says what to do"). The two are separate fields
+	// because zero is a legal value of neither.
+	hasDuration bool
+	deactivated bool
+	duration    time.Duration
+	infinite    bool
+
+	// hasCount says the message carried the DL Buffering Suggested Packet Count
+	// (8.2.30). A zero is folded into "not instructed" by merge: a cap of no
+	// packets is not an instruction an SMF sends.
+	hasCount bool
+	count    uint32
 }
 
 type qerReq struct {
@@ -267,7 +298,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		// the SEID field, and 0 names no session).
 		return establishResponse(req, 0, 0, ie.CauseMandatoryIEMissing, nil)
 	}
-	pdrs, fars, qers, urrs, err := parseCreate(ies)
+	pdrs, fars, bars, qers, urrs, err := parseCreate(ies)
 	if err != nil {
 		c.log.Warn("session: cannot read the establishment request", "error", err)
 		return establishResponse(req, cpSEID, 0, parseCause(err), nil)
@@ -293,9 +324,10 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		FARs:      map[uint32]*far{},
 		QERs:      map[uint32]*qer{},
 		URRs:      map[uint32]*urr{},
+		BARs:      map[uint8]*bar{},
 		chids:     map[uint8]uint32{},
 	}
-	if err := c.merge(s, pdrs, fars, qers, urrs, nil, nil, nil); err != nil {
+	if err := c.merge(s, pdrs, fars, bars, qers, urrs, nil, nil, nil, nil); err != nil {
 		c.log.Warn("session: cannot carry the establishment request",
 			"cp_seid", cpSEID, "error", err)
 		// merge allocates as it goes (the F-TEID among them) and refuses when a
@@ -386,12 +418,12 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	}
 
 	ies := modificationIEs(req)
-	pdrs, fars, qers, urrs, err := parseCreate(ies)
+	pdrs, fars, bars, qers, urrs, err := parseCreate(ies)
 	if err != nil {
 		c.log.Warn("session: cannot read the modification request", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, parseCause(err), nil)
 	}
-	removePDRs, removeFARs, removeURRs := parseRemovals(ies)
+	removePDRs, removeFARs, removeBARs, removeURRs := parseRemovals(ies)
 
 	// TS 29.244 5.3.2: a modification that carries FAR(s) with a new
 	// downstream F-TEID and the SNDEM flag asks this UPF to construct and send
@@ -406,7 +438,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	}
 
 	// merge takes the lock itself.
-	if err := c.merge(s, pdrs, fars, qers, urrs, removePDRs, removeFARs, removeURRs); err != nil {
+	if err := c.merge(s, pdrs, fars, bars, qers, urrs, removePDRs, removeFARs, removeBARs, removeURRs); err != nil {
 		c.log.Warn("session: cannot carry the modification request", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
@@ -426,6 +458,17 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
 		c.log.Warn("session: the dataplane refused the modification", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, causeOf(err), nil)
+	}
+	// The flows this request took out of buffering, read before settle clears
+	// the replaced and removed forms: the packets they hold are released once
+	// the transaction has landed, so that they leave under the instruction this
+	// very request wrote.
+	var ending, discarded []uint32
+	if c.BufferingConfigured() {
+		c.mu.Lock()
+		ending = endedFlows(s)
+		discarded = removedFlows(s)
+		c.mu.Unlock()
 	}
 	c.settle(s)
 
@@ -450,6 +493,18 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 			}
 			c.stats.markers.Add(1)
 		}
+	}
+
+	// The held packets go out now, for the same reason the end marker does: the
+	// switch has landed. A replayed journal releases nothing -- the store's
+	// contents died with the daemon that held them, and the flows it names may
+	// since have been handed to another subscriber.
+	if !c.restoring {
+		c.releaseFlows(context.Background(), seid, ending)
+		// A PDR the request removed leaves nothing to forward to, so what it
+		// held is dropped rather than released (5.2.4.1 gives the two as the
+		// alternatives).
+		c.dropFlows(context.Background(), seid, discarded)
 	}
 
 	c.mu.Lock()
@@ -495,9 +550,24 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 		// deletion must not be an error).
 		return deleteResponse(req, hdr, ie.CauseSessionContextNotFound)
 	}
+	// The held packets go with the session: 5.2.4.1 has them "either dropped or
+	// forwarded", and a session that no longer exists has no path to forward
+	// them over. Read before remove erases the model.
+	c.mu.Lock()
+	var held []uint32
+	for _, p := range s.PDRs {
+		if p.buffer && p.actionID != 0 {
+			held = append(held, p.actionID)
+		}
+	}
+	held = append(held, removedFlows(s)...)
+	c.mu.Unlock()
 	if err := c.remove(context.Background(), s); err != nil {
 		c.log.Warn("session: the dataplane refused the deletion", "seid", seid, "error", err)
 		return deleteResponse(req, hdr, causeOf(err))
+	}
+	if !c.restoring {
+		c.dropFlows(context.Background(), seid, held)
 	}
 	c.log.Info("session: deleted", "seid", seid)
 	c.checkpoint(kindDelete, seid, req)
@@ -505,8 +575,9 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 }
 
 // merge folds a request's objects into the session's model.
-func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq,
-	urrs []urrReq, removePDRs []uint16, removeFARs []uint32, removeURRs []uint32) error {
+func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq, qers []qerReq,
+	urrs []urrReq, removePDRs []uint16, removeFARs []uint32, removeBARs []uint8,
+	removeURRs []uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -563,6 +634,33 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		}
 		if f.hasOuter {
 			entry.teid, entry.peer, entry.hasOuter = f.teid, f.peer, true
+		}
+		if f.hasBAR {
+			entry.hasBAR, entry.barID = true, f.barID
+		}
+	}
+	for _, b := range bars {
+		entry := s.BARs[b.id]
+		if entry == nil {
+			entry = &bar{id: b.id}
+			s.BARs[b.id] = entry
+		}
+		// An Update BAR carries what changes (7.5.4.3's update form is how a
+		// Session Modification Request or a Session Report Response hands the
+		// SMF's next instruction over): the parameters it names replace the
+		// ones before. All-zero Duration is the deactivated code rather than a
+		// value -- 8.2.29's timer is stopped -- so it clears the override, and
+		// a Suggested Packet Count of zero does the same, since "hold no
+		// packets" is not an instruction anyone sends.
+		if b.hasDuration {
+			if b.deactivated {
+				entry.hasDuration = false
+			} else {
+				entry.hasDuration, entry.duration, entry.infinite = true, b.duration, b.infinite
+			}
+		}
+		if b.hasCount {
+			entry.hasCount, entry.count = b.count > 0, b.count
 		}
 	}
 	for _, u := range urrs {
@@ -635,6 +733,20 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 	for _, id := range removeFARs {
 		delete(s.FARs, id)
 	}
+	for _, id := range removeBARs {
+		for _, f := range s.FARs {
+			if f.hasBAR && f.barID == id {
+				// The FAR still asks to buffer under a BAR the SMF has taken
+				// away: the instruction is gone, so the association is dropped
+				// rather than left dangling -- resolve writes the flow with the
+				// store's own defaults, and the parameters the CP function
+				// removes stop being applied, which is what 5.2.4.1 says
+				// happens when the numbers end.
+				f.hasBAR, f.barID = false, 0
+			}
+		}
+		delete(s.BARs, id)
+	}
 	for _, p := range pdrs {
 		old := s.PDRs[p.id]
 		// A request may remove a PDR and create it again; the removal folded in
@@ -653,6 +765,13 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 			pdr.actionID = old.actionID
 			pdr.teid = old.teid
 			pdr.meterID = old.meterID
+			// A PDR that keeps buffering keeps its episode: the SMF is owed one
+			// Downlink Data Report per episode ("the first buffered DL packet"),
+			// not one per modification. The buffering state itself is carried
+			// over too, so that resolve can see a transition -- a PDR the
+			// message rebuilds would otherwise look like it never buffered, and
+			// the release its instruction owes would be missed.
+			pdr.ddnSent, pdr.buffer = old.ddnSent, old.buffer
 		}
 		if p.hasFTEID && p.srcIfc == ie.SrcInterfaceAccess {
 			if p.teid != 0 {
@@ -768,7 +887,41 @@ func (c *Compiler) resolve(s *Session) error {
 			}
 			p.nextHop = egress.NextHop
 		}
-		p.drop = far == nil || far.apply&applyForw == 0
+		// A FAR that asks for buffering and not for forwarding (Apply Action
+		// BUFF, 8.2.26) is the idle-UE downlink case: the packets are held and
+		// the SMF is told they arrived. Where the deployment has a store
+		// (Config.Buffering), the rule delivers them on that branch; where it
+		// has none, they are dropped, because delivering traffic the SMF asked
+		// to hold would be worse than dropping it (docs/compliance.md's row
+		// over 7.5.2.6).
+		wasBuffering := p.buffer
+		// Buffering is the downlink's: a BAR is the instruction for downlink data
+		// (5.2.4.1), and only the downlink chain has the branch. A BUFF-only FAR
+		// on an uplink PDR -- which no SMF should send -- keeps the drop it had,
+		// rather than gating to a branch that is not in its chain.
+		p.buffer = c.cfg.Buffering != nil && far != nil && p.srcIfc != ie.SrcInterfaceAccess &&
+			far.apply&applyForw == 0 && far.apply&applyBuff != 0
+		p.drop = far == nil || (far.apply&applyForw == 0 && !p.buffer)
+		if !p.buffer {
+			// The episode is over: this PDR no longer holds packets, so a later
+			// BUFF is a new one and owes its own first-packet report (5.2.4.1),
+			// and what the flow held is released once the transaction that
+			// ended it has landed (5.2.4.1's "stop applying buffering when new
+			// instruction is received").
+			p.ddnSent = false
+			if wasBuffering && p.actionID != 0 {
+				s.ending = append(s.ending, p.actionID)
+			}
+		}
+		if p.buffer && far.hasBAR && s.BARs[far.barID] == nil {
+			// The FAR names a BAR the session does not hold. 5.2.4.1 makes the
+			// BAR the CP function's instruction ("the CP function needs to
+			// provision a (possibly empty) BAR and associate it to the FARs"),
+			// so buffering under numbers nobody sent is a guess -- refused the
+			// way a PDR naming a URR the session does not have is.
+			return fmt.Errorf("%w: PDR %d's FAR names BAR %d, which the session does not hold",
+				errNotExpressible, p.id, far.barID)
+		}
 		p.meterID = 0
 		p.tunnels = nil
 		for _, qid := range p.qerIDs {
@@ -778,14 +931,16 @@ func (c *Compiler) resolve(s *Session) error {
 			}
 			if p.srcIfc == ie.SrcInterfaceAccess {
 				if entry.gateUL == ie.GateStatusClosed {
-					p.drop = true
+					// A closed gate is an instruction to stop, not to hold: it
+					// outranks the FAR's BUFF for this PDR.
+					p.drop, p.buffer = true, false
 				}
 				if entry.hasRate {
 					p.meterID = entry.meterUL
 				}
 			} else {
 				if entry.gateDL == ie.GateStatusClosed {
-					p.drop = true
+					p.drop, p.buffer = true, false
 				}
 				if entry.hasRate {
 					p.meterID = entry.meterDL
@@ -905,6 +1060,30 @@ func writeCounter(p *pdr, dir Direction) []bess.Change {
 	}
 	return []bess.Change{{
 		Resource: countersRes(dir),
+		Key:      map[string]any{"action_id": p.actionID},
+		Value:    map[string]any{},
+	}}
+}
+
+// bufferCountersRes is the BUFF branch's counting module's counter resource.
+func bufferCountersRes(b *Buffering) string { return b.Counter + "/counters" }
+
+// flowRes is the store's per-flow resource: what the SMF's BAR asks this flow to
+// hold (8.2.29's duration and 8.2.30's count), keyed by the rule's ActionId.
+func flowsRes(b *Buffering) string { return b.Store + "/flows" }
+
+// writeBufferCounter writes the counting module's entry for a PDR that buffers.
+// The module sits on the BUFF branch, in front of the store, so its counters are
+// what makes "the first buffered DL packet for this PDR" visible to the
+// reporting side (TS 29.244 5.2.4.1) -- the direction's URR counter is a
+// different instance, and a buffered packet leaves the chain at the rule's gate
+// without ever reaching it.
+func writeBufferCounter(b *Buffering, p *pdr) []bess.Change {
+	if b == nil || b.Counter == "" || p.actionID == 0 {
+		return nil
+	}
+	return []bess.Change{{
+		Resource: bufferCountersRes(b),
 		Key:      map[string]any{"action_id": p.actionID},
 		Value:    map[string]any{},
 	}}
@@ -1039,6 +1218,34 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		erase(bess.Change{Resource: countersRes(dir), Key: map[string]any{"action_id": p.actionID}})
 	}
+	// liveBufferCounters is the same set for the BUFF branch's counter: a PDR
+	// that buffers is counted by the module in front of the store, and an entry
+	// a live PDR still needs must not be erased in the transaction that writes
+	// it.
+	liveBufferCounters := map[string]bool{}
+	if c.cfg.Buffering != nil && c.cfg.Buffering.Counter != "" {
+		for _, p := range s.PDRs {
+			if p.buffer && p.actionID != 0 {
+				liveBufferCounters[bufferCountersRes(c.cfg.Buffering)+"\x00"+
+					strconv.FormatUint(uint64(p.actionID), 10)] = true
+			}
+		}
+	}
+	// bufferCounterErase takes the BUFF branch's counter entry out for a PDR
+	// that is going away or that no longer buffers: the entry is what makes the
+	// rule's arrivals visible, and a rule that no longer holds packets has
+	// nothing to report.
+	bufferCounterErase := func(p *pdr) {
+		if !p.buffer || p.actionID == 0 || c.cfg.Buffering == nil || c.cfg.Buffering.Counter == "" {
+			return
+		}
+		if liveBufferCounters[bufferCountersRes(c.cfg.Buffering)+"\x00"+
+			strconv.FormatUint(uint64(p.actionID), 10)] {
+			return
+		}
+		erase(bess.Change{Resource: bufferCountersRes(c.cfg.Buffering),
+			Key: map[string]any{"action_id": p.actionID}})
+	}
 	for _, p := range s.removed {
 		dir := c.direction(p.srcIfc)
 		key, err := p.ruleKey(dir.PDRFields)
@@ -1061,6 +1268,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			erase(bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
 		}
 		counterErase(p)
+		bufferCounterErase(p)
 	}
 	// A PDR a modification replaced keeps its action and its tunnel, but its
 	// rule key can change under it (a new filter, a new address): the old key
@@ -1068,6 +1276,20 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// It is erased unless the same transaction writes it, which is the update
 	// that changed nothing about the key -- and the reason this cannot collide
 	// with a write (the engine rejects two operations on one key).
+	// The flows whose episode this model ended (resolve), which a FAR-only
+	// modification leaves out of removed/stale entirely: their counter entry is
+	// what said "arrivals are news", and a flow that no longer holds anything
+	// must not go on being read.
+	for _, id := range s.ending {
+		if liveBufferCounters[bufferCountersRes(c.cfg.Buffering)+"\x00"+
+			strconv.FormatUint(uint64(id), 10)] {
+			continue
+		}
+		if c.BufferingConfigured() && id != 0 {
+			erase(bess.Change{Resource: bufferCountersRes(c.cfg.Buffering),
+				Key: map[string]any{"action_id": id}})
+		}
+	}
 	for _, old := range s.stale {
 		dir := c.direction(old.srcIfc)
 		key, err := old.ruleKey(dir.PDRFields)
@@ -1081,6 +1303,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(old.teid)})
 		}
 		counterErase(old)
+		bufferCounterErase(old)
 	}
 
 	// Meters first: an action references the meter its QER resolved to. One
@@ -1134,7 +1357,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			}
 		}
 		c.rules[rkey] = s.LocalSEID
-		if p.drop {
+		if p.drop || p.buffer {
 			// A drop needs no action record: the rule's gate is the whole
 			// result, and the packet path pays for nothing else. The PDR may
 			// hold an action id from the form being replaced (a modification
@@ -1142,13 +1365,32 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// names none, so that record is what the PDR no longer uses -- kept
 			// in the model, and erased when the PDR is (a PDR that stops
 			// forwarding and starts again keeps its identity, docs/design.md).
+			gate, action := uint64(dropGate), uint32(0)
+			if p.buffer {
+				// A buffering rule does carry an ActionId: it is the flow's key
+				// in the store and in the counter in front of it -- the store is
+				// keyed by the same value the classifier wrote (BESS D-141), so
+				// one id resolves the rule, its flow and, once the SMF has said
+				// what to do with the packets, its action. No action *record* is
+				// written: the path that reads one is the forward path, and this
+				// rule does not reach it while it buffers.
+				gate = uint64(c.cfg.Buffering.Gate)
+				if p.actionID == 0 {
+					id, err := c.actions.alloc()
+					if err != nil {
+						return nil, nil, fmt.Errorf("allocating an action for PDR %d: %w", p.id, err)
+					}
+					p.actionID = id
+				}
+				action = p.actionID
+			}
 			changes = append(changes, bess.Change{
 				Resource: rulesRes(dir),
 				Key:      key,
 				Value: map[string]any{
 					"priority":  p.precedence,
-					"gate":      uint64(dropGate),
-					"action_id": uint32(0),
+					"gate":      gate,
+					"action_id": action,
 				},
 			})
 			// A URR that measures this PDR still holds its counter entry: the
@@ -1157,6 +1399,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// so that a later erase has something to erase. The counter counts
 			// nothing while the rule drops: no packet reaches the action.
 			changes = append(changes, writeCounter(p, dir)...)
+			if p.buffer {
+				changes = append(changes, writeBufferCounter(c.cfg.Buffering, p)...)
+			}
 			continue
 		}
 		if p.actionID == 0 {
@@ -1450,7 +1695,7 @@ func requestIEs(lists ...[]*ie.IE) []*ie.IE {
 // establishmentIEs is what an establishment request carries.
 func establishmentIEs(req *message.SessionEstablishmentRequest) []*ie.IE {
 	return requestIEs(
-		[]*ie.IE{req.NodeID, req.CPFSEID},
+		[]*ie.IE{req.NodeID, req.CPFSEID, req.CreateBAR},
 		req.CreatePDR, req.CreateFAR, req.CreateQER, req.CreateURR,
 	)
 }
@@ -1462,6 +1707,7 @@ func modificationIEs(req *message.SessionModificationRequest) []*ie.IE {
 		[]*ie.IE{req.NodeID, req.CPFSEID},
 		req.CreatePDR, req.CreateFAR, req.CreateQER, req.CreateURR,
 		req.UpdatePDR, req.UpdateFAR, req.UpdateQER, req.UpdateURR,
+		[]*ie.IE{req.CreateBAR, req.UpdateBAR, req.RemoveBAR},
 		req.RemovePDR, req.RemoveFAR, req.RemoveQER, req.RemoveURR,
 	)
 }
@@ -1493,9 +1739,10 @@ func cpFSEID(ies []*ie.IE) (uint64, error) {
 }
 
 // parseCreate reads the Create/Update lists a session message carries.
-func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []qerReq, []urrReq, error) {
+func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []barReq, []qerReq, []urrReq, error) {
 	var pdrs []pdrReq
 	var fars []farReq
+	var bars []barReq
 	var qers []qerReq
 	var urrs []urrReq
 	for _, i := range ies {
@@ -1503,36 +1750,44 @@ func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []qerReq, []urrReq, error) {
 		case ie.CreatePDR, ie.UpdatePDR:
 			p, err := parsePDR(i)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, err
 			}
 			pdrs = append(pdrs, p)
 		case ie.CreateFAR, ie.UpdateFAR:
 			f, err := parseFAR(i)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, err
 			}
 			fars = append(fars, f)
+		case ie.CreateBAR, ie.UpdateBARWithinSessionModificationRequest,
+			ie.UpdateBARWithinSessionReportResponse:
+			b, err := parseBAR(i)
+			if err != nil {
+				return nil, nil, nil, nil, nil, err
+			}
+			bars = append(bars, b)
 		case ie.CreateQER, ie.UpdateQER:
 			q, err := parseQER(i)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, err
 			}
 			qers = append(qers, q)
 		case ie.CreateURR, ie.UpdateURR:
 			u, err := parseURR(i)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, err
 			}
 			urrs = append(urrs, u)
 		}
 	}
-	return pdrs, fars, qers, urrs, nil
+	return pdrs, fars, bars, qers, urrs, nil
 }
 
-// parseRemovals reads the PDR, FAR and URR ids a modification removes.
-func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint32) {
+// parseRemovals reads the PDR, FAR, BAR and URR ids a modification removes.
+func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint8, []uint32) {
 	var pdrs []uint16
 	var fars []uint32
+	var bars []uint8
 	var urrs []uint32
 	for _, i := range ies {
 		switch i.Type {
@@ -1562,6 +1817,19 @@ func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint32) {
 					fars = append(fars, id)
 				}
 			}
+		case ie.RemoveBAR:
+			children, err := i.RemoveBAR()
+			if err != nil {
+				continue
+			}
+			for _, c := range children {
+				if c.Type != ie.BARID {
+					continue
+				}
+				if id, err := c.BARID(); err == nil {
+					bars = append(bars, id)
+				}
+			}
 		case ie.RemoveURR:
 			children, err := i.RemoveURR()
 			if err != nil {
@@ -1577,7 +1845,7 @@ func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint32) {
 			}
 		}
 	}
-	return pdrs, fars, urrs
+	return pdrs, fars, bars, urrs
 }
 
 func parsePDR(i *ie.IE) (pdrReq, error) {
@@ -1783,6 +2051,60 @@ func decodeDNSLabels(b []byte) (string, bool) {
 	return strings.Join(labels, "."), true
 }
 
+// parseBAR reads a Create BAR or an Update BAR (TS 29.244 7.5.2.6): the BAR ID
+// and the two parameters this UP function can honour. The BAR is what a
+// buffering FAR's packets live under, so a value that is not a duration and not
+// a count is refused the way every other unplaceable value is -- the SMF is
+// told the rule failed rather than getting buffering it did not ask for.
+func parseBAR(i *ie.IE) (barReq, error) {
+	children, err := i.CreateBAR()
+	what := "Create BAR"
+	if i.Type == ie.UpdateBARWithinSessionModificationRequest ||
+		i.Type == ie.UpdateBARWithinSessionReportResponse {
+		children, err = i.UpdateBAR()
+		what = "Update BAR"
+	}
+	if err != nil {
+		return barReq{}, fmt.Errorf("%s: %w", what, err)
+	}
+	b := barReq{}
+	for _, c := range children {
+		switch c.Type {
+		case ie.BARID:
+			if id, err := c.BARID(); err == nil {
+				b.id = id
+			}
+		case ie.DLBufferingDuration:
+			d, err := c.DLBufferingDuration()
+			if err != nil {
+				return barReq{}, fmt.Errorf("DL Buffering Duration: %w", err)
+			}
+			b.hasDuration = true
+			switch {
+			case d == 0:
+				// The timer is stopped (8.2.29: unit and value both zero): no
+				// duration is instructed, so this clears the session's override
+				// instead of holding packets for zero seconds.
+				b.deactivated = true
+			case d == time.Duration(math.MaxInt64):
+				b.infinite = true
+			default:
+				b.duration = d
+			}
+		case ie.DLBufferingSuggestedPacketCount:
+			n, err := c.DLBufferingSuggestedPacketCount()
+			if err != nil {
+				return barReq{}, fmt.Errorf("DL Buffering Suggested Packet Count: %w", err)
+			}
+			b.hasCount, b.count = true, uint32(n)
+		}
+	}
+	if b.id == 0 {
+		return barReq{}, errors.New("BAR without a BAR ID")
+	}
+	return b, nil
+}
+
 func parseFAR(i *ie.IE) (farReq, error) {
 	children, err := i.CreateFAR()
 	what := "Create FAR"
@@ -1816,6 +2138,13 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			}
 			if err := parseForwardingParameters(&f, fwd); err != nil {
 				return farReq{}, err
+			}
+		case ie.BARID:
+			// The FAR's BAR ID (8.2.55): what this FAR's buffered packets are
+			// held under. resolve refuses a reference the session cannot
+			// resolve, the way it refuses a PDR naming an unprovisioned URR.
+			if id, err := c.BARID(); err == nil {
+				f.hasBAR, f.barID = true, id
 			}
 		case ie.UpdateForwardingParameters:
 			// An Update FAR carries the same fields in the update form (7.5.4.3

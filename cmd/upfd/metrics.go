@@ -22,6 +22,10 @@ type reportStats struct {
 	refused atomic.Uint64
 	held    atomic.Uint64
 	dropped atomic.Uint64
+	// The downlink half: the reports that told the SMF about packets being
+	// held, and the ones it would not take (offered again on the next tick).
+	ddnSent   atomic.Uint64
+	ddnFailed atomic.Uint64
 }
 
 // peerState is the part of the PFCP node the endpoint reports: whether a CP
@@ -38,6 +42,7 @@ type peerState interface {
 //	upf_sessions_{established,modified,deleted}_total
 //	upf_sessions_refused_total         requests answered with a cause but accepted
 //	upf_end_markers_total{outcome}     End Markers sent, or failed (the graph's port took none)
+//	upf_buffer_flows_total{outcome}    buffering flows released, dropped, or failed
 //	upf_usage_reports_total{outcome}   sent, refused, held (no answer yet), dropped
 //	upf_pfcp_associated                a CP function is associated (1) or not (0)
 //	upf_pfcp_peer_info{node_id,address}  the associated CP function, if any
@@ -69,6 +74,11 @@ func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportS
 		fmt.Fprintf(&b, "# TYPE upf_end_markers_total counter\n")
 		fmt.Fprintf(&b, "upf_end_markers_total{outcome=\"sent\"} %d\n", stats.Markers)
 		fmt.Fprintf(&b, "upf_end_markers_total{outcome=\"failed\"} %d\n", stats.MarkerFailures)
+		fmt.Fprintf(&b, "# HELP upf_buffer_flows_total Buffering flows whose held packets the store released or dropped on the SMF's instruction, and the commands it refused.\n")
+		fmt.Fprintf(&b, "# TYPE upf_buffer_flows_total counter\n")
+		fmt.Fprintf(&b, "upf_buffer_flows_total{outcome=\"released\"} %d\n", stats.BuffersReleased)
+		fmt.Fprintf(&b, "upf_buffer_flows_total{outcome=\"dropped\"} %d\n", stats.BuffersDropped)
+		fmt.Fprintf(&b, "upf_buffer_flows_total{outcome=\"failed\"} %d\n", stats.BufferFailures)
 
 		fmt.Fprintf(&b, "# HELP upf_usage_reports_total PFCP Session Report Requests by outcome.\n")
 		fmt.Fprintf(&b, "# TYPE upf_usage_reports_total counter\n")
@@ -76,6 +86,10 @@ func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportS
 		fmt.Fprintf(&b, "upf_usage_reports_total{outcome=\"refused\"} %d\n", reports.refused.Load())
 		fmt.Fprintf(&b, "upf_usage_reports_total{outcome=\"held\"} %d\n", reports.held.Load())
 		fmt.Fprintf(&b, "upf_usage_reports_total{outcome=\"dropped\"} %d\n", reports.dropped.Load())
+		fmt.Fprintf(&b, "# HELP upf_downlink_reports_total Downlink Data Reports by outcome: delivered, or not taken (retried next tick).\n")
+		fmt.Fprintf(&b, "# TYPE upf_downlink_reports_total counter\n")
+		fmt.Fprintf(&b, "upf_downlink_reports_total{outcome=\"sent\"} %d\n", reports.ddnSent.Load())
+		fmt.Fprintf(&b, "upf_downlink_reports_total{outcome=\"failed\"} %d\n", reports.ddnFailed.Load())
 
 		node, addr, associated := pfcp.Peer()
 		fmt.Fprintf(&b, "# HELP upf_pfcp_associated A CP function is associated with this node.\n")

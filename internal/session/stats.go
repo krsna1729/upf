@@ -28,6 +28,14 @@ type counters struct {
 	// marker path -- the graph's unix_port -- is not there.
 	markers        atomic.Uint64
 	markerFailures atomic.Uint64
+	// buffersReleased, buffersDropped and bufferFailures count what the store
+	// did with the packets a buffering flow held when the SMF's instruction
+	// arrived (5.2.4.1): released into the action path, dropped because the
+	// session was going away, or neither -- the last is an operator's signal
+	// that the graph's store would not take the command.
+	buffersReleased atomic.Uint64
+	buffersDropped  atomic.Uint64
+	bufferFailures  atomic.Uint64
 }
 
 // StatsSnapshot is the counters at one instant, copied out so a reader is
@@ -40,6 +48,11 @@ type StatsSnapshot struct {
 	Refused        uint64 // requests answered with a cause other than accepted
 	Markers        uint64 // End Marker packets sent
 	MarkerFailures uint64 // End Marker packets the graph's port refused
+	// The buffering half: flows whose held packets the store released or
+	// dropped on the SMF's instruction, and the commands it refused.
+	BuffersReleased uint64
+	BuffersDropped  uint64
+	BufferFailures  uint64
 }
 
 // Stats is what the session layer has done, and what it holds now. A node with
@@ -57,7 +70,10 @@ func (c *Compiler) Stats() StatsSnapshot {
 		Modified:       c.stats.modified.Load(),
 		Deleted:        c.stats.deleted.Load(),
 		Refused:        c.stats.refused.Load(),
-		Markers:        c.stats.markers.Load(),
+		Markers:         c.stats.markers.Load(),
+		BuffersReleased: c.stats.buffersReleased.Load(),
+		BuffersDropped:  c.stats.buffersDropped.Load(),
+		BufferFailures:  c.stats.bufferFailures.Load(),
 		MarkerFailures: c.stats.markerFailures.Load(),
 	}
 }
