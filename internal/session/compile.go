@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
@@ -124,7 +125,106 @@ type qerReq struct {
 	hasRate bool
 }
 
-type urrReq struct{ id uint32 }
+type urrReq struct {
+	id uint32
+
+	// create is a Create URR (7.5.2.4), whose Measurement Method and Reporting
+	// Triggers are mandatory; an Update URR carries only what changes, so the
+	// has* flags below say what it named.
+	create      bool
+	hasMethod   bool
+	volume      bool
+	duration    bool
+	hasTriggers bool
+	periodic    bool
+	onVolumeTh  bool
+	onTimeTh    bool
+	onVolQuota  bool
+	onTimeQuota bool
+	hasPeriod   bool
+	period      time.Duration
+
+	hasVolThreshold bool
+	volThreshold    volumeLimit
+	hasTimeTh       bool
+	timeThreshold   time.Duration
+	hasVolQuota     bool
+	volQuota        volumeLimit
+	hasTimeQuota    bool
+	timeQuota       time.Duration
+}
+
+// The Measurement Method bits (TS 29.244 8.2.40, octet 5).
+const (
+	methodDuration = 0x01 // DURAT
+	methodVolume   = 0x02 // VOLUM
+	methodEvent    = 0x04 // EVENT
+)
+
+// The Reporting Triggers bits this UP implements (TS 29.244 8.2.19), one octet
+// at a time: PERIO, VOLTH and TIMTH in the first, VOLQU and TIMQU in the
+// second. Every other bit -- QUHTI, START, STOPT, DROTH, LIUSA, ENVCL, MACAR,
+// EVETH, EVEQU, IPMJL, QUVTI, REEMR, UPINT, and the spares -- is refused when
+// the URR is read: a trigger the SMF asked for and this UP quietly ignores is a
+// report the SMF never gets, and it bills from them.
+var (
+	triggersImplemented = [2]uint8{trigPeriodic | trigVolumeTh | trigTimeTh, trigVolQuota | trigTimeQuota}
+	triggersFirstOctet  = map[uint8]string{0x08: "QUHTI", 0x10: "START", 0x20: "STOPT", 0x40: "DROTH", 0x80: "LIUSA"}
+	triggersSecondOctet = map[uint8]string{0x04: "ENVCL", 0x08: "MACAR", 0x10: "EVETH", 0x20: "EVEQU", 0x40: "IPMJL", 0x80: "QUVTI"}
+	triggersThirdOctet  = map[uint8]string{0x01: "REEMR", 0x02: "UPINT"}
+)
+
+const (
+	trigPeriodic  = 0x01 // PERIO (octet 5 bit 1)
+	trigVolumeTh  = 0x02 // VOLTH (octet 5 bit 2)
+	trigTimeTh    = 0x04 // TIMTH (octet 5 bit 3)
+	trigVolQuota  = 0x01 // VOLQU (octet 6 bit 1)
+	trigTimeQuota = 0x02 // TIMQU (octet 6 bit 2)
+)
+
+// triggerName names a bit the UP function does not implement, for the refusal.
+func triggerName(octet byte, bit uint8) string {
+	switch octet {
+	case 5:
+		return triggersFirstOctet[bit]
+	case 6:
+		return triggersSecondOctet[bit]
+	default:
+		return triggersThirdOctet[bit]
+	}
+}
+
+// urrUnsupported is the IEs of a URR that change what the SMF would read from a
+// report and that this UP does not implement: an event count, a monitoring
+// time, an inactivity detector, a quota that expires on a timer, a link to
+// another URR's report, a limit on how many reports to send, a dropped-traffic
+// threshold. Each is refused when the URR is read rather than silently not
+// measured: the SMF bills from these reports, and one that arrives without what
+// was asked for is worse than a rule failure it can act on. (The list is by IE
+// name: the clause numbers of the refused ones are not this milestone's, and a
+// wrong number in a refusal is worse than none.)
+var urrUnsupported = map[uint16]string{
+	ie.MeasurementInformation:    "Measurement Information",
+	ie.MonitoringTime:            "Monitoring Time",
+	ie.InactivityDetectionTime:   "Inactivity Detection Time",
+	ie.QuotaHoldingTime:          "Quota Holding Time",
+	ie.QuotaValidityTime:         "Quota Validity Time",
+	ie.DroppedDLTrafficThreshold: "Dropped DL Traffic Threshold",
+	ie.UserPlaneInactivityTimer:  "User Plane Inactivity Timer",
+	ie.NumberOfReports:           "Number of Reports",
+	ie.LinkedURRID:               "Linked URR ID",
+	ie.AggregatedURRs:            "Aggregated URRs",
+	ie.TimeQuotaMechanism:        "Time Quota Mechanism",
+	ie.EventThreshold:            "Event Threshold",
+	ie.EventQuota:                "Event Quota",
+	ie.SubsequentVolumeThreshold: "Subsequent Volume Threshold",
+	ie.SubsequentTimeThreshold:   "Subsequent Time Threshold",
+	ie.SubsequentVolumeQuota:     "Subsequent Volume Quota",
+	ie.SubsequentTimeQuota:       "Subsequent Time Quota",
+	ie.SubsequentEventThreshold:  "Subsequent Event Threshold",
+	ie.SubsequentEventQuota:      "Subsequent Event Quota",
+	ie.AdditionalMonitoringTime:  "Additional Monitoring Time",
+}
 
 // Establish implements n4.SessionHandler.
 func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.Message {
@@ -134,7 +234,7 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 		c.log.Warn("session: the establishment request names no CP F-SEID", "error", err)
 		return establishResponse(req, 0, ie.CauseMandatoryIEMissing, nil)
 	}
-	pdrs, fars, qers, err := parseCreate(ies)
+	pdrs, fars, qers, urrs, err := parseCreate(ies)
 	if err != nil {
 		c.log.Warn("session: cannot read the establishment request", "error", err)
 		return establishResponse(req, 0, parseCause(err), nil)
@@ -162,7 +262,7 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 		URRs:      map[uint32]*urr{},
 		chids:     map[uint8]uint32{},
 	}
-	if err := c.merge(s, pdrs, fars, qers, nil, nil, nil); err != nil {
+	if err := c.merge(s, pdrs, fars, qers, urrs, nil, nil, nil); err != nil {
 		c.log.Warn("session: cannot carry the establishment request",
 			"cp_seid", cpSEID, "error", err)
 		// merge allocates as it goes (the F-TEID among them) and refuses when a
@@ -233,15 +333,15 @@ func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Messa
 	}
 
 	ies := modificationIEs(req)
-	pdrs, fars, qers, err := parseCreate(ies)
+	pdrs, fars, qers, urrs, err := parseCreate(ies)
 	if err != nil {
 		c.log.Warn("session: cannot read the modification request", "seid", seid, "error", err)
 		return modifyResponse(req, seid, parseCause(err), nil)
 	}
-	removePDRs, removeFARs := parseRemovals(ies)
+	removePDRs, removeFARs, removeURRs := parseRemovals(ies)
 
 	// merge takes the lock itself.
-	if err := c.merge(s, pdrs, fars, qers, nil, removePDRs, removeFARs); err != nil {
+	if err := c.merge(s, pdrs, fars, qers, urrs, removePDRs, removeFARs, removeURRs); err != nil {
 		c.log.Warn("session: cannot carry the modification request", "seid", seid, "error", err)
 		return modifyResponse(req, seid, compileCause(err), nil)
 	}
@@ -297,7 +397,7 @@ func (c *Compiler) Delete(req *message.SessionDeletionRequest) message.Message {
 
 // merge folds a request's objects into the session's model.
 func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq,
-	urrs []urrReq, removePDRs []uint16, removeFARs []uint32) error {
+	urrs []urrReq, removePDRs []uint16, removeFARs []uint32, removeURRs []uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -340,9 +440,61 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		}
 	}
 	for _, u := range urrs {
-		if s.URRs[u.id] == nil {
-			s.URRs[u.id] = &urr{id: u.id}
+		entry := s.URRs[u.id]
+		if entry == nil {
+			if !u.create {
+				// An Update URR for a URR the session does not hold: the SMF
+				// named something that is not there, and accepting it would
+				// make a URR out of half a request.
+				return fmt.Errorf("%w: the URR %d is not in the session", errNotExpressible, u.id)
+			}
+			entry = &urr{id: u.id}
+			s.URRs[u.id] = entry
 		}
+		// An Update URR carries what changed (7.5.4.4); the fields it names
+		// replace the ones before, and the ones it leaves out stay.
+		if u.hasMethod {
+			entry.volume, entry.duration = u.volume, u.duration
+		}
+		if u.hasTriggers {
+			entry.periodic, entry.onVolumeTh, entry.onTimeTh = u.periodic, u.onVolumeTh, u.onTimeTh
+			entry.onVolQuota, entry.onTimeQuota = u.onVolQuota, u.onTimeQuota
+		}
+		if u.hasPeriod {
+			entry.period = u.period
+		}
+		if u.hasVolThreshold {
+			entry.volThreshold = u.volThreshold
+		}
+		if u.hasTimeTh {
+			entry.timeThreshold, entry.hasTimeTh = u.timeThreshold, true
+		}
+		if u.hasVolQuota {
+			entry.volQuota = u.volQuota
+		}
+		if u.hasTimeQuota {
+			entry.timeQuota, entry.hasTimeQuota = u.timeQuota, true
+		}
+		if u.hasVolQuota || u.hasTimeQuota || u.hasVolThreshold || u.hasTimeTh {
+			// A new quota (or threshold) is the SMF granting more usage: the
+			// drop a quota exhaustion put on this URR's PDRs is lifted, and the
+			// next evaluation puts it back if the new limit is already reached.
+			// This is the one place a provisioned quota re-opens the traffic
+			// short of the session being deleted.
+			entry.enforcing = false
+		}
+	}
+	for _, id := range removeURRs {
+		if urrHeldByAPDR(s, id) {
+			// The URR measures the traffic of the PDRs that name it, and a
+			// report for a URR whose PDRs are still programmed would name a
+			// URR the SMF has removed. The CP function disassociates the PDRs
+			// first (an Update PDR that does not name the URR), which is the
+			// order a modification takes.
+			return fmt.Errorf("%w: the URR %d is still named by a PDR of the session",
+				errNotExpressible, id)
+		}
+		delete(s.URRs, id)
 	}
 	for _, id := range removePDRs {
 		if old := s.PDRs[id]; old != nil {
@@ -364,7 +516,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		pdr := &pdr{
 			id: p.id, precedence: p.precedence, srcIfc: p.srcIfc,
 			ueIP: p.ueIP, sdf: p.sdf, farID: p.farID,
-			qerIDs: p.qerIDs,
+			qerIDs: p.qerIDs, urrIDs: p.urrIDs,
 		}
 		if old != nil {
 			// An update keeps the dataplane identity: the rule that already
@@ -473,6 +625,17 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		if dir.Tunnels != "" && far != nil && far.hasOuter {
 			p.tunnels = []string{tunnelsRes(dir)}
 		}
+		for _, uid := range p.urrIDs {
+			if s.URRs[uid] == nil {
+				// A PDR the SMF associated with a URR it did not provision (or
+				// removed in the same message): the traffic would be counted by
+				// nobody, and the report the SMF expects for that URR would
+				// never arrive. A URR that exists but measures nothing is the
+				// other half of this check, below.
+				return fmt.Errorf("%w: PDR %d names the URR %d, which the session does not have",
+					errNotExpressible, p.id, uid)
+			}
+		}
 		if !p.ueIP.IsValid() {
 			// The PDI names no address of its own, so the session's is the one
 			// an SMF means (it may send the address on one direction only). An
@@ -482,6 +645,20 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		}
 	}
 	return nil
+}
+
+// urrHeldByAPDR reports whether a PDR the session still has names this URR.
+// Removing a URR the session's PDRs still measure would leave those PDRs
+// counted by a rule the SMF has taken away.
+func urrHeldByAPDR(s *Session, id uint32) bool {
+	for _, p := range s.PDRs {
+		for _, uid := range p.urrIDs {
+			if uid == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // teidNamed reports whether a PDR the session still has names this F-TEID. The
@@ -945,39 +1122,47 @@ func cpFSEID(ies []*ie.IE) (uint64, error) {
 }
 
 // parseCreate reads the Create/Update lists a session message carries.
-func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []qerReq, error) {
+func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []qerReq, []urrReq, error) {
 	var pdrs []pdrReq
 	var fars []farReq
 	var qers []qerReq
+	var urrs []urrReq
 	for _, i := range ies {
 		switch i.Type {
 		case ie.CreatePDR, ie.UpdatePDR:
 			p, err := parsePDR(i)
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			pdrs = append(pdrs, p)
 		case ie.CreateFAR, ie.UpdateFAR:
 			f, err := parseFAR(i)
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			fars = append(fars, f)
 		case ie.CreateQER, ie.UpdateQER:
 			q, err := parseQER(i)
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			qers = append(qers, q)
+		case ie.CreateURR, ie.UpdateURR:
+			u, err := parseURR(i)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+			urrs = append(urrs, u)
 		}
 	}
-	return pdrs, fars, qers, nil
+	return pdrs, fars, qers, urrs, nil
 }
 
-// parseRemovals reads the PDR and FAR ids a modification removes.
-func parseRemovals(ies []*ie.IE) ([]uint16, []uint32) {
+// parseRemovals reads the PDR, FAR and URR ids a modification removes.
+func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint32) {
 	var pdrs []uint16
 	var fars []uint32
+	var urrs []uint32
 	for _, i := range ies {
 		switch i.Type {
 		case ie.RemovePDR:
@@ -1006,9 +1191,22 @@ func parseRemovals(ies []*ie.IE) ([]uint16, []uint32) {
 					fars = append(fars, id)
 				}
 			}
+		case ie.RemoveURR:
+			children, err := i.RemoveURR()
+			if err != nil {
+				continue
+			}
+			for _, c := range children {
+				if c.Type != ie.URRID {
+					continue
+				}
+				if id, err := c.URRID(); err == nil {
+					urrs = append(urrs, id)
+				}
+			}
 		}
 	}
-	return pdrs, fars
+	return pdrs, fars, urrs
 }
 
 func parsePDR(i *ie.IE) (pdrReq, error) {
@@ -1039,6 +1237,13 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 		case ie.QERID:
 			if id, err := c.QERID(); err == nil {
 				p.qerIDs = append(p.qerIDs, id)
+			}
+		case ie.URRID:
+			// The URRs this PDR's traffic is measured by (7.5.2.2). An Update
+			// PDR replaces the list, like every other field it carries: the
+			// request is the PDR's whole new form.
+			if id, err := c.URRID(); err == nil {
+				p.urrIDs = append(p.urrIDs, id)
 			}
 		case ie.PDI:
 			pdiChildren, err := c.PDI()
@@ -1215,6 +1420,151 @@ func parseFAR(i *ie.IE) (farReq, error) {
 		return farReq{}, errors.New("FAR without a FAR ID")
 	}
 	return f, nil
+}
+
+// parseURR reads a Create URR or an Update URR (TS 29.244 7.5.2.4): what the
+// rule measures, when it reports, and its thresholds and quota. Anything this UP
+// does not implement is refused here -- see urrUnsupported for why a silently
+// ignored URR field is not an option.
+func parseURR(i *ie.IE) (urrReq, error) {
+	children, err := i.CreateURR()
+	what := "Create URR"
+	u := urrReq{create: true}
+	if i.Type == ie.UpdateURR {
+		children, err = i.UpdateURR()
+		what, u.create = "Update URR", false
+	}
+	if err != nil {
+		return urrReq{}, fmt.Errorf("%s: %w", what, err)
+	}
+	for _, c := range children {
+		if name, ok := urrUnsupported[c.Type]; ok {
+			return urrReq{}, fmt.Errorf("%w: the URR names %s, and this UP does not implement it",
+				errNotExpressible, name)
+		}
+		switch c.Type {
+		case ie.URRID:
+			if id, err := c.URRID(); err == nil {
+				u.id = id
+			}
+		case ie.MeasurementMethod:
+			flags, err := c.MeasurementMethod()
+			if err != nil {
+				return urrReq{}, fmt.Errorf("Measurement Method: %w", err)
+			}
+			if flags&methodEvent != 0 {
+				// An event is preconfigured detection logic in the UPF
+				// (5.2.2.2.1, note 7); this UP has none, and a report whose
+				// event count never moves is worse than the refusal.
+				return urrReq{}, fmt.Errorf("%w: the URR asks for event measurement, and this UP detects no events",
+					errNotExpressible)
+			}
+			if flags&(methodVolume|methodDuration) == 0 {
+				return urrReq{}, fmt.Errorf("%w: the Measurement Method names no measurement", errNotExpressible)
+			}
+			u.hasMethod = true
+			u.volume = flags&methodVolume != 0
+			u.duration = flags&methodDuration != 0
+		case ie.ReportingTriggers:
+			// The IE's own payload, not the library's ReportingTriggers():
+			// that accessor wants two octets, while 8.2.19's octets 6 and 7 are
+			// present only when the SMF sets a bit in them -- a periodic-only
+			// URR is one octet, which the accessor reads as a malformed IE.
+			flags := c.Payload
+			if len(flags) == 0 {
+				return urrReq{}, fmt.Errorf("%w: the Reporting Triggers IE is empty", errNotExpressible)
+			}
+			// 8.2.19: "At least one bit shall be set to 1", and the octets are
+			// coded in order -- the first is octet 5, the next octet 6.
+			any := false
+			for n, octet := range flags {
+				for bit := uint8(1); bit != 0; bit <<= 1 {
+					if octet&bit == 0 {
+						continue
+					}
+					any = true
+					if n < len(triggersImplemented) && triggersImplemented[n]&bit != 0 {
+						continue
+					}
+					name := triggerName(byte(5+n), bit)
+					if name == "" {
+						name = fmt.Sprintf("the spare bit %#x of octet %d", bit, 5+n)
+					}
+					return urrReq{}, fmt.Errorf(
+						"%w: the URR asks for the %s reporting trigger, and this UP does not implement it",
+						errNotExpressible, name)
+				}
+			}
+			if !any {
+				return urrReq{}, fmt.Errorf("%w: the Reporting Triggers IE names no trigger", errNotExpressible)
+			}
+			u.hasTriggers = true
+			u.periodic = flags[0]&trigPeriodic != 0
+			u.onVolumeTh = flags[0]&trigVolumeTh != 0
+			u.onTimeTh = flags[0]&trigTimeTh != 0
+			if len(flags) > 1 {
+				u.onVolQuota = flags[1]&trigVolQuota != 0
+				u.onTimeQuota = flags[1]&trigTimeQuota != 0
+			}
+		case ie.MeasurementPeriod:
+			v, err := c.MeasurementPeriod()
+			if err != nil {
+				return urrReq{}, fmt.Errorf("Measurement Period: %w", err)
+			}
+			u.hasPeriod = true
+			u.period = v
+		case ie.VolumeThreshold:
+			fields, err := c.VolumeThreshold()
+			if err != nil {
+				return urrReq{}, fmt.Errorf("Volume Threshold: %w", err)
+			}
+			u.hasVolThreshold = true
+			u.volThreshold = volumeLimit{
+				hasTotal: fields.Flags&0x01 != 0, total: fields.TotalVolume,
+				hasUL: fields.Flags&0x02 != 0, ul: fields.UplinkVolume,
+				hasDL: fields.Flags&0x04 != 0, dl: fields.DownlinkVolume,
+			}
+		case ie.TimeThreshold:
+			v, err := c.TimeThreshold()
+			if err != nil {
+				return urrReq{}, fmt.Errorf("Time Threshold: %w", err)
+			}
+			u.hasTimeTh, u.timeThreshold = true, v
+		case ie.VolumeQuota:
+			fields, err := c.VolumeQuota()
+			if err != nil {
+				return urrReq{}, fmt.Errorf("Volume Quota: %w", err)
+			}
+			u.hasVolQuota = true
+			u.volQuota = volumeLimit{
+				hasTotal: fields.Flags&0x01 != 0, total: fields.TotalVolume,
+				hasUL: fields.Flags&0x02 != 0, ul: fields.UplinkVolume,
+				hasDL: fields.Flags&0x04 != 0, dl: fields.DownlinkVolume,
+			}
+		case ie.TimeQuota:
+			v, err := c.TimeQuota()
+			if err != nil {
+				return urrReq{}, fmt.Errorf("Time Quota: %w", err)
+			}
+			u.hasTimeQuota, u.timeQuota = true, v
+		}
+	}
+	if u.id == 0 {
+		return urrReq{}, errors.New("URR without a URR ID")
+	}
+	if u.create && (!u.hasMethod || !u.hasTriggers) {
+		// Both are mandatory in a Create URR (7.5.2.4's table). Accepting a URR
+		// with neither would leave a rule nobody can report from.
+		return urrReq{}, fmt.Errorf("%w: a Create URR needs a Measurement Method and Reporting Triggers",
+			errNotExpressible)
+	}
+	if u.hasPeriod && !u.periodic {
+		// The period is what the periodic trigger fires on; without the trigger
+		// it is a value the SMF would never see acted on.
+		return urrReq{}, fmt.Errorf("%w: a Measurement Period without the periodic trigger",
+			errNotExpressible)
+	}
+	return u, nil
 }
 
 func parseQER(i *ie.IE) (qerReq, error) {
