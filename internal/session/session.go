@@ -73,6 +73,12 @@ type WindowReader interface {
 type StoreCommands interface {
 	ReleaseFlow(ctx context.Context, module string, id uint32) error
 	DropFlow(ctx context.Context, module string, id uint32) error
+	// ClearStore frees everything the store holds. The restart wall wants it:
+	// the packets a previous run's flows held live in the daemon, and a
+	// controller that comes up knows neither the flows nor the episode they
+	// belonged to -- leaving them to age out would hand a later session the
+	// previous one's packets.
+	ClearStore(ctx context.Context, module string, id uint32) error
 }
 
 // Field is one entry of the PDR table's key, in the order the deployed graph

@@ -41,6 +41,7 @@ type recorder struct {
 	// when a test wants the refusal path.
 	released  []string
 	dropped   []string
+	cleared   []string
 	storeFail error
 }
 
@@ -52,6 +53,16 @@ func (r *recorder) ReleaseFlow(_ context.Context, module string, id uint32) erro
 		return r.storeFail
 	}
 	r.released = append(r.released, fmt.Sprintf("%s/%d", module, id))
+	return nil
+}
+
+// ClearStore is the restart wall's call (StoreCommands): the fake records it the
+// way it records the release and drop commands.
+func (r *recorder) ClearStore(_ context.Context, module string, _ uint32) error {
+	if r.storeFail != nil {
+		return r.storeFail
+	}
+	r.cleared = append(r.cleared, module)
 	return nil
 }
 

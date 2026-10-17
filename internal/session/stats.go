@@ -65,16 +65,16 @@ func (c *Compiler) Stats() StatsSnapshot {
 	sessions := len(c.sessions)
 	c.mu.Unlock()
 	return StatsSnapshot{
-		Sessions:       sessions,
-		Established:    c.stats.established.Load(),
-		Modified:       c.stats.modified.Load(),
-		Deleted:        c.stats.deleted.Load(),
-		Refused:        c.stats.refused.Load(),
+		Sessions:        sessions,
+		Established:     c.stats.established.Load(),
+		Modified:        c.stats.modified.Load(),
+		Deleted:         c.stats.deleted.Load(),
+		Refused:         c.stats.refused.Load(),
 		Markers:         c.stats.markers.Load(),
 		BuffersReleased: c.stats.buffersReleased.Load(),
 		BuffersDropped:  c.stats.buffersDropped.Load(),
 		BufferFailures:  c.stats.bufferFailures.Load(),
-		MarkerFailures: c.stats.markerFailures.Load(),
+		MarkerFailures:  c.stats.markerFailures.Load(),
 	}
 }
 

@@ -289,6 +289,15 @@ func run() error {
 		}
 		go reportLoop(ctx, compiler, srv, *urrInterval, reports, log)
 	}
+	if *bufferStore != "" && *urrInterval <= 0 {
+		// The DDN trigger is that loop's reading of the branch's counters
+		// (docs/design.md): without it a BUFF FAR's packets are held, nobody is
+		// told, and the store times them out silently -- which is worse than the
+		// drop a graph with no store gives. A deployment that means to buffer
+		// must say how often to look.
+		return fmt.Errorf("-buffer-store %q needs a positive -urr-interval: the Downlink Data Report is what that loop's reading of the buffering counters owes the SMF",
+			*bufferStore)
+	}
 
 	// The management endpoint: this node's own numbers, so an operator reads
 	// them from the same place a scraper does. It is off unless asked for.

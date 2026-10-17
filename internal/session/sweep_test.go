@@ -15,6 +15,7 @@ import (
 type sweepFake struct {
 	contents map[string][]bess.Entry
 	changes  [][]bess.Change
+	cleared  []string
 	err      error
 }
 
@@ -25,6 +26,20 @@ func (f *sweepFake) Apply(_ context.Context, changes ...bess.Change) error {
 	f.changes = append(f.changes, changes)
 	return nil
 }
+
+// ClearStore, ReleaseFlow and DropFlow are StoreCommands: the sweep clears the
+// store (a previous run's held packets), and the fake records that it asked.
+func (f *sweepFake) ClearStore(_ context.Context, module string, _ uint32) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.cleared = append(f.cleared, module)
+	return nil
+}
+
+func (f *sweepFake) ReleaseFlow(_ context.Context, module string, id uint32) error { return nil }
+
+func (f *sweepFake) DropFlow(_ context.Context, module string, id uint32) error { return nil }
 
 func (f *sweepFake) Contents(_ context.Context, names ...string) (map[string][]bess.Entry, error) {
 	if f.err != nil {
@@ -75,6 +90,33 @@ func TestSweepNamesTheGraphsResources(t *testing.T) {
 		if n == "/counters" || n == "cnt_ul/counters" || n == "cnt_dl/counters" {
 			t.Errorf("a graph without counters still sweeps %s", n)
 		}
+	}
+}
+
+// TestSweepClearsTheStoreAndNamesItsCounter pins the buffering half of the
+// restart wall: the branch's counter is a session resource like the others, and
+// what the store held belongs to the run that ended -- a controller that comes
+// up knows neither the flows nor the episodes they were held for, so the store
+// is cleared rather than left to hand a later session the previous one's
+// packets.
+func TestSweepClearsTheStoreAndNamesItsCounter(t *testing.T) {
+	cfg := testConfig()
+	cfg.Buffering = &Buffering{Store: "buf", Counter: "cnt_buf", Gate: 1}
+	fake := &sweepFake{}
+	if err := New(cfg, fake, quietLogger()).Sweep(context.Background()); err != nil {
+		t.Fatalf("sweeping with a store: %v", err)
+	}
+	found := false
+	for _, name := range New(cfg, fake, quietLogger()).resources() {
+		if name == "cnt_buf/counters" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the sweep does not read the buffering branch's counter")
+	}
+	if len(fake.cleared) != 1 || fake.cleared[0] != "buf" {
+		t.Errorf("the store was cleared %v, want one clear of buf", fake.cleared)
 	}
 }
 
