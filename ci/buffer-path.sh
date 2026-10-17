@@ -43,11 +43,46 @@ WORK=$(mktemp -d /tmp/upf-buffer-XXXXXX)
 LOG=$WORK/bessd.log
 UPFD_LOG=$WORK/upfd.log
 UPFD_PID=
+BESSD_PID=
+
+# stop_bessd ends the daemon this script started, and only then is the run
+# over: the pid is the daemon's own (it runs in the foreground, -f, so $! is
+# it), the pidfile is the fallback when the shell lost it, and the RPC is the
+# last resort for a daemon that outlived both. SIGTERM, then a moment, then
+# SIGKILL -- a daemon this script leaves behind holds the port and the
+# hugepage-free memory node the next run needs.
+stop_bessd() {
+  [ -n "$BESSD_PID" ] && kill "$BESSD_PID" 2>/dev/null || true
+  if [ -n "$BESSD_PID" ]; then
+    for _ in $(seq 1 50); do
+      kill -0 "$BESSD_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -9 "$BESSD_PID" 2>/dev/null || true
+  fi
+  # A daemon whose pid this shell no longer has -- one from an earlier run on
+  # this port -- still answers: `shutdown` is bessctl's own stop (there is no
+  # `kill` command), and the daemon unlinks its pidfile as it goes.
+  if "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
+    "$BESSCTL" -s "127.0.0.1:$BESS_PORT" shutdown >/dev/null 2>&1 || true
+  fi
+  if [ -f "$WORK/bessd.pid" ]; then
+    kill -9 "$(cat "$WORK/bessd.pid")" 2>/dev/null || true
+  fi
+}
 
 cleanup() {
+  local status=$?
   [ -n "$UPFD_PID" ] && kill "$UPFD_PID" 2>/dev/null || true
-  "$BESSCTL" -s "127.0.0.1:$BESS_PORT" kill 2>/dev/null || true
-  rm -rf "$WORK"
+  stop_bessd
+  if [ "$status" = 0 ]; then
+    rm -rf "$WORK"
+  else
+    # A failed run keeps what it left: the daemon's log is where the refusal
+    # is, and the controller's is where its own account of it is.
+    echo "buffer-path: exit $status; the daemon's log is $LOG and the controller's is $UPFD_LOG" >&2
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -62,6 +97,7 @@ export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
 "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" \
   -modules="$PLUG" -f >"$LOG" 2>&1 &
+BESSD_PID=$!
 for _ in $(seq 1 60); do
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break
   sleep 0.5
@@ -84,7 +120,7 @@ fi
   -buffer-store buf -buffer-counter cnt_buf -buffer-gate 1 -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do
-  grep -q "n4 listening" "$UPFD_LOG" && break
+  grep -q -F -- "n4 listening" "$UPFD_LOG" && break
   sleep 0.5
 done
 kill -0 "$UPFD_PID" 2>/dev/null || {
@@ -111,7 +147,10 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=127.0.0.1:$BESS_PORT 
 
 FAIL=0
 check() { # check <description> <the line the log must carry>
-  if grep -q "$2" "$UPFD_LOG"; then
+  # The description is the test; the line is a fixed string, matched as one
+  # (-F --): an unquoted bracket in it is a bracket expression to grep, so
+  # "pdrs=[2]" would match the "pdrs=2" of every establishment.
+  if grep -q -F -- "$2" "$UPFD_LOG"; then
     echo "ok: $1"
   else
     echo "FAIL: $1 (no '$2' in the controller's log)" >&2
