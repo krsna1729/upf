@@ -4,9 +4,9 @@
 # The two-instance arm: two sessions for one subscriber address, one per network
 # instance, each taking its own instance's exit. The Go test programs them and
 # reads the router's two output gates (the internet session's traffic leaves by
-# gate 0, the ims session's by gate 2, its instance's next hop), and this script
-# checks the two tunnels' bytes in the daemon's Dump of the G-PDUs as they
-# arrive.
+# gate 0, the ims session's by gate 2, its instance's next hop); this script
+# checks that the graph's two G-PDUs carry the two tunnels those sessions'
+# uplink rules are keyed on, in the daemon's Dump of them as they arrive.
 #
 # It is its own manifest (deploy/session-instances.yaml), not an extension of
 # deploy/session-path.yaml: that graph's figures are recorded (docs/design.md's
@@ -50,6 +50,8 @@ export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 DAEMON=$!
 cleanup() {
   kill "$DAEMON" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do kill -0 "$DAEMON" 2>/dev/null || break; sleep 1; done
+  kill -9 "$DAEMON" 2>/dev/null || true
   wait "$DAEMON" 2>/dev/null || true
   echo "instances: daemon log in $LOG"
 }
@@ -89,11 +91,13 @@ check() { # check <description> <the dump's hex> <fixed string it must contain>
 }
 
 # Both tunnels are on the wire: the two sessions' F-TEIDs, in the G-PDUs the
-# graph's two sources send.
+# graph's two sources send. The dump is upstream of the TEID table, so this says
+# what the sessions' uplink rules are keyed on, not where the packets go -- that
+# is the Go half's two gate counts above.
 check "the internet stream's G-PDU carries its tunnel" "$TEID_HEX" "11 22 33 44"
 check "the ims stream's G-PDU carries its tunnel" "$TEID_HEX" "11 22 33 45"
 
 if [ "$FAIL" = 0 ]; then
-  echo "instances: both instances' sessions carry their own traffic"
+  echo "instances: both tunnels are on the wire (the exits' counters are the Go half's)"
 fi
 exit "$FAIL"

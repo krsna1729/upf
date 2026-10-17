@@ -704,7 +704,10 @@ func instancedUplinkEstablishment(cpSEID uint64, ueIP string, upTEID uint32, ins
 // uplink streams, one per session (TEIDs 0x11223344 and 0x11223345, bursts 32
 // and 4), so the router's two output gates say which stream left by which exit:
 // the internet session's packets by gate 0, the ims session's by gate 2, which
-// is that instance's next hop.
+// is that instance's next hop. The window the exits are measured over is fixed
+// once both are moving: a snapshot taken the instant the second stream starts
+// says nothing, and the ratio over a window is the streams' own 8 (measured
+// 8.00, three runs of 2 s).
 //
 // The instance is what a deployment classifies each packet's flow by, and on
 // the uplink the packet's own tag is the tunnel it arrived on: one UE address
@@ -790,9 +793,27 @@ func TestLiveTwoInstancesRouteIndependently(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Logf("internet's exit (gate 0) carried %v packets, ims's (gate 2) %v", n6, n9)
-	if n6 <= n9 {
-		t.Errorf("the internet session's exit carried %v packets and the ims session's %v: the streams' bursts differ "+
-			"by 8, so the counters say which instance's traffic took which exit", n6, n9)
+	// Both exits are moving, so the two streams' own rates can be compared over
+	// a fixed window instead of at the instant the second one starts: the
+	// streams' bursts differ by 8, and a single rule would send both to one
+	// gate, whichever session wrote last.
+	window := 2 * time.Second
+	startN6, startN9 := n6, n9
+	time.Sleep(window)
+	winN6 := gatePacketsAt(t, ctx, client, "rt", "0") - beforeN6 - startN6
+	winN9 := gatePacketsAt(t, ctx, client, "rt", "2") - beforeN9 - startN9
+	if winN6 == 0 || winN9 == 0 {
+		t.Fatalf("in %v the exits carried %v and %v packets, want both moving: %v",
+			window, winN6, winN9, chainCounters(t, ctx, client))
+	}
+	t.Logf("in %v: gate 0 carried %v packets, gate 2 %v, ratio %.2f (the streams' bursts differ by 8)",
+		window, winN6, winN9, winN6/winN9)
+	// The ratio is not itself the proof of separation -- the two rules' keys
+	// are -- but it says both streams are flowing and neither is leaking onto
+	// the other's exit, which is what a single shared rule would do. Measured
+	// 8.00 on three runs of this window.
+	if ratio := winN6 / winN9; ratio < 6 || ratio > 10 {
+		t.Errorf("the exits carried %v and %v packets in %v (ratio %.2f), want the streams' own 8: one exit per stream",
+			winN6, winN9, window, ratio)
 	}
 }

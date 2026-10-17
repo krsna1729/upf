@@ -43,6 +43,26 @@ func instancedConfig(t *testing.T) Config {
 	return cfg
 }
 
+// threeInstanceConfig is instancedConfig with a third instance: a test that
+// moves a forward between instances has to see a hop that is neither the one it
+// starts at nor the one a cleared field falls back to.
+func threeInstanceConfig(t *testing.T) Config {
+	t.Helper()
+	cfg := testConfig()
+	d, err := routing.New([]routing.Interface{
+		{Instance: "internet", Domain: 0, NextHop: 1, Pool: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")}},
+		{Instance: "ims", Domain: 1, NextHop: 3, Pool: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")}},
+		{Instance: "voip", Domain: 2, NextHop: 4, Pool: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")}},
+	}, 4)
+	if err != nil {
+		t.Fatalf("the three-instance deployment was refused: %v", err)
+	}
+	cfg.Instances = d
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID}
+	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain}
+	return cfg
+}
+
 // instancedEstablishment is establishmentWithFTEID with every PDI naming a
 // network instance (8.2.4), which is what an SMF serving more than one sends.
 func instancedEstablishment(cpSEID uint64, ueIP string, fteid uint32, instance string) *message.SessionEstablishmentRequest {
@@ -314,6 +334,9 @@ func TestTheInstanceIsReadInBothTheFormsAnSMFSends(t *testing.T) {
 		{"a dotted name's bytes", "my.dnn", ie.NewNetworkInstance("my.dnn"), true},
 		{"a dotted name in labels", "my.dnn", ie.NewNetworkInstanceFQDN("my.dnn"), true},
 		{"a name that is not served", "ims", ie.NewNetworkInstance("internet"), false},
+		{"a digit-led plain name", "5gc", ie.NewNetworkInstance("5gc"), true},
+		{"labels with a root octet", "internet", ie.New(ie.NetworkInstance, []byte("\x08internet\x00")), true},
+		{"the bytes with a root octet", "internet", ie.New(ie.NetworkInstance, []byte("internet\x00")), true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := instancedConfig(t)
@@ -358,48 +381,69 @@ func TestTheInstanceIsReadInBothTheFormsAnSMFSends(t *testing.T) {
 
 // TestAnUpdateFARKeepsWhatItDoesNotCarry: an Update FAR carries what changes
 // (7.5.4.3), and the fields it leaves out keep the values the session has --
-// their zero values are not neutral. No Apply Action means no forward, and
-// destination interface 0 is the access side, which would send an uplink
-// forward back out of N3; a session whose forward moved because the SMF updated
-// something else is a rule that stops carrying its traffic.
+// their zero values are not neutral. No Apply Action means no forward,
+// destination interface 0 is the access side (which stops the instance being
+// resolved at all, so an uplink forward would go back out of N3), and an empty
+// instance falls back to the PDI's, which is another exit. Each update below
+// moves the forward to a hop that neither of the bugs above would produce.
 func TestAnUpdateFARKeepsWhatItDoesNotCarry(t *testing.T) {
 	rec := &recorder{}
-	c := New(instancedConfig(t), rec, quietLogger())
+	c := New(threeInstanceConfig(t), rec, quietLogger())
 	if got := cause(t, c.Establish(withForwardInstance(
 		instancedEstablishment(1, "10.45.0.2", 0x11223344, "internet"), "ims"))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-
-	// Only the Apply Action: the destination interface and the instance stay,
-	// so the forward still leaves by the FAR's instance (next hop 3).
-	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, 1, 2, 0,
-		ie.NewFSEID(1, nil, nil),
-		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw))))); got != ie.CauseRequestAccepted {
-		t.Fatalf("the Apply-Action-only update answered cause %d", got)
+	hop := func(t *testing.T, req *message.SessionModificationRequest) uint32 {
+		t.Helper()
+		if got := cause(t, c.Modify(req)); got != ie.CauseRequestAccepted {
+			t.Fatalf("the update answered cause %d", got)
+		}
+		changes := rec.last()
+		ul := ruleIn(t, changes, "pdr_ul")
+		return nextHop(t, changes, "at_ul/actions", ul.actionID())
 	}
-	changes := rec.last()
-	ul := ruleIn(t, changes, "pdr_ul")
-	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 3 {
+
+	// Only the Apply Action: the forward does not move, so it still leaves by
+	// the FAR's instance (ims, 3) -- not by the PDI's (internet, 1), which is
+	// where the zero destination interface and the empty instance would send it.
+	if got := hop(t, message.NewSessionModificationRequest(0, 0, 1, 2, 0,
+		ie.NewFSEID(1, nil, nil),
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)))); got != 3 {
 		t.Errorf("after an Apply-Action-only update the forward takes next hop %d, want the instance's 3 still", got)
 	}
 
-	// And the update form of the forwarding parameters is read at all: naming
-	// the instance there moves the forward (the update form is a different IE
-	// from the create form, and reading only the create form would leave the
-	// destination interface at its zero, the access side).
-	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, 1, 3, 0,
+	// Only the instance, in the update form: that form is a different IE from
+	// the create form, and the destination interface it does not carry stays
+	// core -- so the forward leaves by voip (4), not by the uplink's own hop
+	// (1), which is where a zeroed destination interface takes it.
+	if got := hop(t, message.NewSessionModificationRequest(0, 0, 1, 3, 0,
 		ie.NewFSEID(1, nil, nil),
 		ie.NewUpdateFAR(ie.NewFARID(1),
 			ie.NewApplyAction(applyForw),
-			ie.NewUpdateForwardingParameters(
-				ie.NewDestinationInterface(ie.DstInterfaceCore),
-				ie.NewNetworkInstance("internet")))))); got != ie.CauseRequestAccepted {
-		t.Fatalf("the update answered cause %d", got)
+			ie.NewUpdateForwardingParameters(ie.NewNetworkInstance("voip"))))); got != 4 {
+		t.Errorf("naming an instance in the update form took next hop %d, want voip's 4", got)
 	}
-	changes = rec.last()
-	ul = ruleIn(t, changes, "pdr_ul")
-	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 1 {
-		t.Errorf("after naming internet in the update the forward takes next hop %d, want that instance's 1", got)
+
+	// Only the destination interface, and its value is 0: the access side is a
+	// value an SMF names, not an absent field, so the forward moves -- the
+	// instance is not resolved then, and the rule takes the uplink's own hop.
+	if got := hop(t, message.NewSessionModificationRequest(0, 0, 1, 4, 0,
+		ie.NewFSEID(1, nil, nil),
+		ie.NewUpdateFAR(ie.NewFARID(1),
+			ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))))); got != 1 {
+		t.Errorf("an update to the access side took next hop %d, want the uplink's own 1", got)
+	}
+
+	// And back to the core side: the instance those two updates did not carry
+	// is voip still. An update that cleared it would leave the forward on the
+	// PDI's instance (1) instead.
+	if got := hop(t, message.NewSessionModificationRequest(0, 0, 1, 5, 0,
+		ie.NewFSEID(1, nil, nil),
+		ie.NewUpdateFAR(ie.NewFARID(1),
+			ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))))); got != 4 {
+		t.Errorf("an update back to the core side took next hop %d, want voip's 4 still", got)
 	}
 }
 

@@ -1126,6 +1126,106 @@ func TestASecondSessionsRuleCannotTakeTheFirsts(t *testing.T) {
 	}
 }
 
+func TestAFailedCompileKeepsTheKeysTheSessionHeld(t *testing.T) {
+	// A compile that fails partway gives up the claims it made on the way, and
+	// only those: a key the session already held has its rule in the dataplane,
+	// and freeing it would let the next session program over a rule that is
+	// still selecting this one's packets.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	// The F-TEID is pinned, so the modification can name the session's own.
+	if got := cause(t, c.Establish(establishmentWithFTEID(0x9601, "10.45.0.2", 0x22222222))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	// A third uplink PDR whose PDI compiles to the first's rule key: the
+	// refusal lands in the middle of the compile, after the model's own keys
+	// have been walked -- which is where a rollback that freed everything the
+	// walk touched would free the keys the session really holds.
+	same := message.NewSessionModificationRequest(0, 0, 1, 2, 0,
+		ie.NewCreatePDR(ie.NewPDRID(3), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x22222222, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+			ie.NewFARID(1), ie.NewQERID(1)),
+	)
+	if got := cause(t, c.Modify(same)); got != ie.CauseRuleCreationModificationFailure {
+		t.Fatalf("two PDRs compiling to one rule key answered cause %d, want a rule failure", got)
+	}
+	// The failed compile wrote nothing, and the session's keys are still its
+	// own: a second session for the same address is refused. (With the claims
+	// dropped on the way out, it was served -- and the first session's retry
+	// would then have erased its rules.)
+	if got := cause(t, c.Establish(establishment(0x9602, "10.45.0.2"))); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a session for an address a live session holds answered cause %d, want a rule failure", got)
+	}
+}
+
+func TestARefusedMoveKeepsTheKeysRule(t *testing.T) {
+	// A modification that moves a rule's key erases the rule it left behind.
+	// The claim on that key goes when the erasing transaction has landed: a
+	// refused transaction leaves the old rule programmed, so a claim dropped at
+	// build time would let another session write over the rule -- and be erased
+	// by this session's retry.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(establishment(0x9701, "10.45.0.2")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	// The downlink PDR moves to another UE address: the key it leaves
+	// (-, 10.45.0.2, udp, -, 53) is erased by a transaction the dataplane then
+	// refuses.
+	move := func() *message.SessionModificationRequest {
+		return message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
+			ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+					ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
+				ie.NewFARID(2)),
+		)
+	}
+	rec.fail = &bess.RejectedError{}
+	if got := cause(t, c.Modify(move())); got == ie.CauseRequestAccepted {
+		t.Fatal("a refused modification was answered as accepted")
+	}
+	rec.fail = nil
+	// Another session whose downlink rule is the key the refused transaction
+	// would have erased: while the old rule is programmed the key is the first
+	// session's, and this one is refused.
+	other := func() *message.SessionEstablishmentRequest {
+		return message.NewSessionEstablishmentRequest(0, 0, 0x9702, 1, 0,
+			ie.NewFSEID(0x9702, nil, nil),
+			ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(100),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+					ie.NewFTEID(0x01, 0x11223345, net.ParseIP("192.0.2.1"), nil, 0),
+					ie.NewUEIPAddress(0x02, "10.45.0.5", "", 0, 0)),
+				ie.NewFARID(1)),
+			ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x02, "10.45.0.5", "", 0, 0),
+					ie.NewSDFFilter("permit out udp from any to 10.45.0.2/32 53", "", "", "", 0)),
+				ie.NewFARID(2)),
+			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+			ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(
+					ie.NewDestinationInterface(ie.DstInterfaceAccess),
+					ie.NewOuterHeaderCreation(0x0100, 0x55667788, "10.20.30.2", "", 0, 0, 0))),
+		)
+	}
+	if got := cause(t, c.Establish(other())); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a session for a key a refused update left programmed answered cause %d, want a rule failure", got)
+	}
+	// The retry is what the refusal invites: once the erasing transaction has
+	// landed, the key is given up and the same session is served.
+	if got := cause(t, c.Modify(move())); got != ie.CauseRequestAccepted {
+		t.Fatalf("the retry answered cause %d", got)
+	}
+	if got := cause(t, c.Establish(other())); got != ie.CauseRequestAccepted {
+		t.Errorf("after the retry the second session answered cause %d, want accepted", got)
+	}
+}
+
 func TestTwoUplinkPDRsWithOneFilterAreRefused(t *testing.T) {
 	// An SMF with several QoS flows programs several uplink PDRs onto one F-TEID
 	// and tells them apart only by QFI. This UP does not read QFI
@@ -1572,7 +1672,7 @@ func TestAnSDFPrefixIsAPrefixNotAnAddress(t *testing.T) {
 		ie.NewFSEID(0x5557, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.11.1.5/16", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),

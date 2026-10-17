@@ -132,13 +132,30 @@ costs the arms below are expected to confirm:
 
 **State policy (the path to 400G).** No shared mutable state in the packet path:
 classifiers and records are per-worker copies published by RCU; URR counters are
-worker-local and summed by the reporting task (no atomics in the path); token buckets
-are per flow, and under RSS a flow maps to one worker, so a flow-level QER is enforced
-exactly by that worker. A *session*-level QER spans flows on several workers, which is
-the one place where exactness and scale conflict: the default is a per-worker share of
-the session's MBR (an approximation, bounded by the worker count), with a
-shared-counter mode for deployments that need a hard session limit. The choice is a
-QER property, not a global switch.
+worker-local and summed by the reporting task (no atomics in the path). Policing is the
+one state that cannot be summed after the fact: a counter's read is order-free and can
+be taken later, but a rate's decision -- the colour *this* packet gets -- has to be
+taken at the packet, so the bucket is shared at the point of decision. MBR policing
+goes through the `Meter` module, which creates every controller-written meter as
+`kShared` (`core/modules/meter.cc:158`; `Reconfigure` keeps the mode, so it is
+`kShared` for the meter's life): one token bucket, each check under the meter's own
+spinlock. The rate is therefore enforced *once* regardless of how many workers a
+session's flow reaches; the cost is serialization on one cache line, not N times the
+rate. `kWorkerExclusive` would remove the lock but requires the flow to be pinned to one
+worker, and no control-plane path selects it today (`datapath/` and `internal/` name no
+sharing mode, and the graph's `Meter` takes none).
+
+The counterpoint is NAT, where a shared table is the multi-worker mode by *decision*
+rather than by default: a binding cannot be partitioned at all -- the rewrite changes
+the tuple, so the two directions hash differently, and endpoint-independent mapping
+needs every flow of an internal endpoint on one worker -- so a shared multi-writer
+table is the only mode above one worker (BESS's design scratch,
+`.scratch/design/table_policy.md`, §5.1; its decision 6: NAT never uses rte_flow
+steering, `SHARED` is the multi-worker mode). The URR counter plane is priced by that
+plan's own table rather than by a new one: `table_policy.md`'s benchmark plan, its
+Usage counters (G5) row in §7a -- per-packet cost of NoUsage vs InlineUsage vs
+AtomicUsage vs PerWorkerUsage at 1-8 workers, NoUsage's disassembly identical and the
+costs reported.
 
 **Install order, one transaction.** Resources first (meters, counters, next hops,
 routes), then the action record, then the rule that names it. A worker that wins the
@@ -167,8 +184,9 @@ ports, workers) goes through `ApplyPipeline`.
   the UPF's perf run, not BESS's, because those modules are not in BESS's tree.
   `M.urr_count.base`/`M.urr_count`/`M.urr_count.empty` are the counting module's
   three arms -- its control, a counted rule, and the module with no entry (the
-  one-lookup path a graph that charges nothing pays). Their numbers are owed:
-  the arm exists so the stamps' per-batch cost is measured rather than claimed.
+  one-lookup path a graph that charges nothing pays). Their numbers are in the
+  run recorded below: the arms exist so the stamps' per-batch cost is measured
+  rather than claimed.
 - `ci/bench-modules.sh` is the thin wrapper: it records the stage and plugin build the
   numbers came from and prints each arm against its control.
 
@@ -193,23 +211,26 @@ Reproduced the same night by a second `ci/bench-modules.sh` run: delta +13.54 ns
 publishable module cost looks like.
 
 **The counting arms, and the owed re-run (2026-10-17).** The three `M.urr_count`
-arms were taken with `ci/bench-modules.sh` as `WRAP="taskset -c 2,4" ROUNDS=4`
--- pinned to CPUs 2,4, every governor `powersave`, `no_turbo=0`, **not**
-`--isolate`d (the isolating wrapper swallows the command; see below). Pairs 0/4,
-plugin 519584 bytes of 2026-10-17, so the DSCP copy is in:
+arms were taken by `ci/bench-modules.sh` inside the host's perf slot --
+`WRAP="taskset -c 2,4" ROUNDS=4 slot perf ci/bench-modules.sh`, so no build ran
+while the window was open -- pinned to CPUs 2,4, plugin 519584 bytes of
+2026-10-17 (the DSCP copy is in), the daemon and the tool from `build/fast`:
 
 | arm | ns/pkt (above `M.base`) | over its control |
 |---|---|---|
-| `M.urr_count.base` | 1.04 | -- |
-| `M.urr_count` | 4.92 | **+3.88 ns for a counted rule** |
-| `M.urr_count.empty` | 2.60 | **+1.56 ns with no entry** |
+| `M.urr_count.base` | 1.21 | -- |
+| `M.urr_count` | 5.40 | **+4.19 ns for a counted rule** |
+| `M.urr_count.empty` | 2.55 | **+1.34 ns with no entry** |
 
-From the same run, the two module arms against their controls: decap +12.42 ns
-(26.68 - 14.26) and encap +17.44 ns (18.52 - 1.08) -- the encap's cost *with* the
-DSCP copy, which is the re-run the paragraph above owes. These are indicative
-rather than published: an isolated re-take on a quiet machine is what the table
-above is held to, and the pinned figures are the shape of the cost, not the
-figure for the envelope.
+The four rounds' paired deltas: a counted rule 3.69-4.46 ns, no entry 1.09-1.64 ns.
+From the same run, the module arms: decap +12.45 ns (12.20-15.09 per round; round 3
+sampled 39.7 ns against its 24.7 ns control) and encap +17.77 ns (17.49-18.03) --
+the encap's cost *with* the DSCP copy, which is the re-run the paragraph below owes.
+An earlier run of the same arms with `taskset` alone gave +3.88 and +1.56 ns, within
+0.3 ns of these: the shape was right, and these are the figures. There is no
+instruction column: `live_perf` reports `perf stat failed; no counters (needs perf
+and kernel.perf_event_paranoid <= 0)` and this host's setting is 2, so the 2026-10-16
+run's instructions/pkt remain the only ones on record.
 
 **After that measurement** the encap learned to copy the inner packet's TOS to the
 outer header (the DSCP copy; `ci/session-path.sh` checks the outer header carries the
@@ -303,16 +324,22 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   not a slow path.
 - Two sessions cannot hold one rule. The PDR tables are shared by every
   session and one key is one rule, so a graph whose key is the tuple alone makes
-  two sessions for one network instance compile to the same key: the second
-  would take the first's packets, and its own deletion would erase the rule the
-  first still holds. `compile` keeps the owner of every key a live session holds
-  and refuses the second claimant with a rule failure (checked in `compile`,
-  given up where the rule is erased and when the release path runs, and rolled
-  back when a compile fails), which is what makes the key's contents a
-  statement: the tunnel on the uplink (`upf_teid`) and the route domain where a
-  graph writes one are why two instances serving one subscriber prefix are two
-  rules rather than a collision. A modification that moves a key gives the old
-  one up in the same transaction that erases it.
+  two sessions whose keys agree -- one UE address, or one SDF prefix -- compile
+  to the same key: the second would take the first's packets, and its own
+  deletion would erase the rule the first still holds. `compile` keeps the owner
+  of every key a live session holds and refuses the second claimant with a rule
+  failure; the check and the claim are one critical section under `compile`'s
+  lock, so two sessions cannot both find a key free. A claim goes at exactly two
+  points, both after a transaction has landed -- `settle` releases the keys a
+  transaction erased, `releaseSession` the keys of a session that has been
+  deleted -- because a refused transaction leaves the old rules programmed: a
+  claim dropped while a transaction is in the air would let another session
+  write a rule this one's retry then erases. A compile that fails gives up only
+  the keys it was the first to claim; the keys the session already held stay,
+  their rules being in the dataplane. What makes the key's contents a statement
+  is the same fact from the other side: the tunnel on the uplink (`upf_teid`)
+  and the route domain where a graph writes one are why two instances serving
+  one subscriber prefix are two rules rather than a collision.
 - A released id is not handed out again until the pool's walk of its space has
   come round (and then only once it has aged): a transaction that removes a
   record leaves its slot retiring for a grace period, and publishing into a
@@ -402,9 +429,12 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
    `ci/session-instances.sh`'s TestLiveTwoInstancesRouteIndependently -- its own
    manifest, `deploy/session-instances.yaml`, because the shared one's figures
    are recorded and an arm may not move a baseline it never measured. The live
-   arm ran on 2026-10-17: both sessions for 10.45.0.2 established, the router's
-   exits carrying 1600 packets on gate 0 (internet) against 728 on gate 2 (ims),
-   and both tunnels visible in the G-PDU dump.
+   arm ran on 2026-10-17: both sessions for 10.45.0.2 established, and in a 2 s
+   window taken once both exits were moving, gate 0 carried 16,524,544 packets
+   against gate 2's 2,065,620 -- ratio 8.00, the streams' own burst ratio (32
+   against 4; the same 8.00 in three runs), with both tunnels visible in the
+   G-PDU dump. A snapshot at the instant the second stream starts says nothing:
+   an earlier look caught 1600 against 728 and the window is what settled it.
 5. **Usage** — URR counters, reporting triggers, session reports. *Proof:* a
    report matches the packets a source produced, within a known bound.
 
@@ -533,10 +563,11 @@ the per-packet path.
 
 **What it costs is measured, not argued.** Each placement above is priced by the
 performance contract (the shared read/write under transactions, per-worker
-tables under `update_scale_bench` E2, counter planes under the URR benchmark of
-wall 2 below), and a placement that only "feels" right does not move the design.
+tables under `update_scale_bench` E2, counter planes under the G5 row of
+`table_policy.md`'s benchmark plan -- the plan wall 2 names), and a placement that
+only "feels" right does not move the design.
 The one case with no measurement yet is a session's state under asymmetric RSS,
-which the URR benchmark below is to settle.
+which the G5 plan wall 2 names is to settle.
 
 ## Session scale: 10^6 sessions, dimensioned by PDR/FAR/QER/URR/MAR
 
@@ -667,9 +698,13 @@ The walls, in order:
    control side can add them up, so enforcing a quota exactly across workers
    means the control side pushes allowances down (a ring, per "Where a table
    lives") rather than the packet path writing a shared total. This is the one
-   structure whose cost model is not in the contract, so it needs its own
-   benchmark (live sessions, counter blocks, read from the control plane,
-   under symmetric and asymmetric RSS).
+   structure whose cost model is not in the contract, so it takes a plan from
+   the table policy rather than a new one: `table_policy.md`'s benchmark plan,
+   its Usage counters (G5) row in §7a -- per-packet cost of NoUsage vs
+   InlineUsage vs AtomicUsage vs PerWorkerUsage at 1-8 workers, NoUsage's
+   disassembly identical and the costs reported -- read back the way this one
+   has to be, from the control plane, over live sessions under symmetric and
+   asymmetric RSS.
 3. **The transaction wire.** A typed rule is 131 B and a message is capped at
    64 MiB, about 510K rules, so bulk programming is chunked. This layer already
    programs one session per transaction, below the cap by design.
@@ -688,8 +723,8 @@ What proves it, on a quiet machine: `BM_ClassifyUnderTransactions` and
 `BM_LookupsUnderTransactions` at this session count, `table_scale_bench`'s
 wildcard row at 10^6 rules for the per-packet cost, `update_scale_bench` E2 for
 the sharding decision at 10^7 keys, a WildcardMatch bytes-per-rule measurement
-to replace the one unmeasured cell above, the URR counter benchmark from wall 2,
-and `ci/bench-n4.sh` for the N4 rate that drives all of it.
+to replace the one unmeasured cell above, the URR counter benchmark wall 2 names
+(that plan's G5 row), and `ci/bench-n4.sh` for the N4 rate that drives all of it.
 
 ### The envelope, measured (2026-10-16)
 

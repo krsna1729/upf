@@ -120,13 +120,15 @@ type farReq struct {
 	peer     netip.Addr
 	hasOuter bool
 
-	// hasApply and hasFwd say the message carried the Apply Action and the
-	// forwarding parameters. An Update FAR carries what changes (7.5.4.3), so
-	// a field it leaves out keeps the value the session has: treating its zero
-	// as the new value would stop a forward (no Apply Action) or send an uplink
-	// forward back out of N3 (destination interface 0 is the access side).
-	hasApply bool
-	hasFwd   bool
+	// hasApply, hasDestIfc and hasInstance say which fields the message
+	// carried. An Update FAR carries what changes (7.5.4.3), so a field it
+	// leaves out keeps the value the session has: treating its zero as the new
+	// value would stop a forward (no Apply Action), send an uplink forward back
+	// out of N3 (destination interface 0 is the access side), or drop the
+	// instance the forward leaves by (an empty one falls back to the PDI's).
+	hasApply    bool
+	hasDestIfc  bool
+	hasInstance bool
 
 	// instance is the Network Instance inside the Forwarding Parameters
 	// (8.2.4): the interface this forward leaves by, empty when the SMF named
@@ -506,14 +508,19 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, qers []qerReq
 		} else {
 			// An Update FAR carries what changes (7.5.4.3): a field the message
 			// leaves out keeps the value the session has. The zero values are
-			// not neutral here -- no Apply Action stops the forward, and
+			// not neutral here -- no Apply Action stops the forward,
 			// destination interface 0 is the access side, which would send an
-			// uplink forward back out of N3.
+			// uplink forward back out of N3, and an empty instance falls back
+			// to the PDI's -- so each of the three is merged only where the
+			// message named it.
 			if f.hasApply {
 				entry.apply = f.apply
 			}
-			if f.hasFwd {
-				entry.destIfc, entry.instance = f.destIfc, f.instance
+			if f.hasDestIfc {
+				entry.destIfc = f.destIfc
+			}
+			if f.hasInstance {
+				entry.instance = f.instance
 			}
 		}
 		if f.hasOuter {
@@ -865,16 +872,6 @@ func writeCounter(p *pdr, dir Direction) []bess.Change {
 	}}
 }
 
-// dropRuleClaim gives up a rule key this session held: the transaction being
-// built erases that rule, so another session may claim the key. Only this
-// session's claim goes -- a key another session wrote is not this one's to
-// release. The caller holds the lock.
-func (c *Compiler) dropRuleClaim(s *Session, key string) {
-	if c.rules[key] == s.LocalSEID {
-		delete(c.rules, key)
-	}
-}
-
 // qerHoldsMeter reports whether the meter a removed PDR was policed by still
 // belongs to a QER the session holds. compile writes a meter for every QER with
 // a rate whether or not a PDR names it, so erasing one of those in the same
@@ -895,12 +892,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// The rule keys this compile claims, and whether it got as far as writing
-	// them: a compile that returns an error wrote nothing (its transaction never
-	// reached the dataplane), so the claims it made on the way are given back
-	// here rather than left refusing keys no session holds. A transaction the
-	// dataplane *refuses* is the caller's business, exactly as an allocated id
-	// is: what may have committed stays claimed.
+	// The rule keys this compile is the first to claim, and whether it got as
+	// far as writing them: a compile that returns an error wrote nothing (its
+	// transaction never reached the dataplane), so those claims are given back
+	// here rather than left refusing keys no session holds. Only the keys this
+	// compile took from nobody are in the list: a key the session already held
+	// has its rule in the dataplane, and giving that up would let another
+	// session take a rule that is still selecting this one's packets. A
+	// transaction the dataplane *refuses* is the caller's business, exactly as
+	// an allocated id is: what may have committed stays claimed.
 	claimed := make([]string, 0, len(s.PDRs))
 	committed := false
 	defer func() {
@@ -908,9 +908,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return
 		}
 		for _, key := range claimed {
-			if c.rules[key] == s.LocalSEID {
-				delete(c.rules, key)
-			}
+			delete(c.rules, key)
 		}
 	}()
 
@@ -973,7 +971,11 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	//   - a rule key another PDR compiles to is not erased (the write follows);
 	//   - a QER's meter is erased only when the QER went with the PDR, because
 	//     compile writes a meter for every QER the session still holds;
-	//   - the TEID rule only when no PDR of the session still shares the F-TEID.
+	//   - the TEID rule only when no PDR of the session still shares the F-TEID;
+	//   - the claim on an erased rule key goes in settle, not here: this is a
+	//     transaction that may still be refused, and a claim dropped while it is
+	//     being built would let another session write over the rule this one's
+	//     retry then erases.
 	//
 	// The action record and the tunnel keyed by it are per-PDR: those always go.
 	erased := map[string]bool{}
@@ -1006,7 +1008,6 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
 			erase(bess.Change{Resource: rulesRes(dir), Key: key})
-			c.dropRuleClaim(s, rulesRes(dir)+"\x00"+fmt.Sprint(key))
 		}
 		if p.actionID != 0 {
 			erase(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
@@ -1036,7 +1037,6 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
 			erase(bess.Change{Resource: rulesRes(dir), Key: key})
-			c.dropRuleClaim(s, rulesRes(dir)+"\x00"+fmt.Sprint(key))
 		}
 		if old.teid != 0 && !teidNamed(s, old.teid) {
 			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(old.teid)})
@@ -1085,8 +1085,13 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// tuple alone does, and this is where it says so.
 			return nil, nil, fmt.Errorf("%w: the rule is session %d's", errNotExpressible, owner)
 		}
+		if _, held := c.rules[rkey]; !held {
+			// This compile is the first to claim the key for the session. A key
+			// the session already holds stays this session's even if a later
+			// step of this compile fails: its rule is in the dataplane.
+			claimed = append(claimed, rkey)
+		}
 		c.rules[rkey] = s.LocalSEID
-		claimed = append(claimed, rkey)
 		if p.drop {
 			// A drop needs no action record: the rule's gate is the whole
 			// result, and the packet path pays for nothing else. The PDR may
@@ -1689,18 +1694,19 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 // bytes would turn every session from such an SMF into a refusal naming an
 // instance nobody configured, and the library's own heuristic would cut a plain
 // name at whatever its first byte happens to be, so the label form is used only
-// when its labels are exactly the payload: a name whose first byte cannot be a
-// label length (> 63, which every text byte is) is read whole.
+// when its labels are exactly the payload: a plain name is read whole unless
+// its bytes happen to parse as labels ("5gc" is a name; 0x35 is not a label
+// length). A trailing zero octet is the root label, which some stacks write,
+// and it is not part of the name.
 func networkInstanceName(payload []byte) string {
-	// A trailing zero octet is the root label, and some stacks write it.
-	trimmed := payload
-	if n := len(trimmed); n > 0 && trimmed[n-1] == 0 {
-		trimmed = trimmed[:n-1]
+	b := payload
+	if n := len(b); n > 0 && b[n-1] == 0 {
+		b = b[:n-1]
 	}
-	if name, ok := decodeDNSLabels(trimmed); ok {
+	if name, ok := decodeDNSLabels(b); ok {
 		return name
 	}
-	return string(payload)
+	return string(b)
 }
 
 // decodeDNSLabels reads the length-prefixed labels of a DNS name and reports
@@ -1753,7 +1759,6 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			if err != nil {
 				return farReq{}, fmt.Errorf("Forwarding Parameters: %w", err)
 			}
-			f.hasFwd = true
 			if err := parseForwardingParameters(&f, fwd); err != nil {
 				return farReq{}, err
 			}
@@ -1767,7 +1772,6 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			if err != nil {
 				return farReq{}, fmt.Errorf("Update Forwarding Parameters: %w", err)
 			}
-			f.hasFwd = true
 			if err := parseForwardingParameters(&f, fwd); err != nil {
 				return farReq{}, err
 			}
@@ -1787,7 +1791,7 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 		switch fp.Type {
 		case ie.DestinationInterface:
 			if v, err := fp.DestinationInterface(); err == nil {
-				f.destIfc = v
+				f.destIfc, f.hasDestIfc = v, true
 			}
 		case ie.NetworkInstance:
 			// The forward's own Network Instance (TS 29.244 8.2.4 inside the
@@ -1795,7 +1799,7 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 			// is what N9's peer UPF is named with. A PDI's instance says where
 			// the flow came from; this one says where it goes, and an SMF may
 			// name either or both.
-			f.instance = networkInstanceName(fp.Payload)
+			f.instance, f.hasInstance = networkInstanceName(fp.Payload), true
 		case ie.OuterHeaderCreation:
 			fields, err := fp.OuterHeaderCreation()
 			if err != nil {
