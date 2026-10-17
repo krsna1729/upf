@@ -11,10 +11,15 @@
 // that fired therefore does not fire again on the traffic it already reported,
 // and a quota that stopped the traffic re-opens it only when the SMF
 // provisions a new quota or threshold (an Update URR clears the flag, the same
-// lever 5.2.2.2.1 gives it). The alternative reading -- accumulate from
-// provisioning and compare the running total -- needs a second base per URR to
-// keep the report's own window apart from the limit's, and this one gives the
-// SMF the same control with the one base the model already has.
+// lever 5.2.2.2.1 gives it). The window's base is taken from the counters as
+// they are read: the first reading of a URR *is* its baseline, because the
+// module's cells outlive an erased entry and the pool reissues action ids --
+// the totals a fresh rule's ActionId holds may be the previous rule's, and a
+// quota must not be spent by traffic that is not this URR's. The alternative
+// reading -- accumulate from provisioning and compare the running total --
+// needs a second base per URR to keep the report's own window apart from the
+// limit's, and this one gives the SMF the same control with the one base the
+// model already has.
 package session
 
 import (
@@ -197,6 +202,18 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]Usage, now ti
 	for _, uid := range urrIDsInOrder(s) {
 		u := s.URRs[uid]
 		up, down := c.countsOf(s, uid, counts)
+		// The first reading of a URR is its baseline, not its usage. The
+		// counting module's cells outlive an erased entry and the action pool
+		// reissues ids, so a fresh rule's ActionId can still hold the totals of
+		// the rule that had it before -- and a quota must not be spent by
+		// traffic that is not this URR's. What this costs is the usage between
+		// the URR's provisioning and the first reading: one evaluation
+		// interval, under-counted rather than invented.
+		if !u.baselined {
+			u.baselined = true
+			u.reported, u.lastUp, u.lastDown = now, up, down
+			continue
+		}
 		if !u.hasSeen && (up.Packets > 0 || down.Packets > 0) {
 			// The measurement starts with the first packet that arrives: the
 			// duration of a URR that measures time is the time its traffic has
@@ -208,15 +225,17 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]Usage, now ti
 			window = 0
 		}
 		upWindow, downWindow := up.since(u.lastUp), down.since(u.lastDown)
+		// A limit that is reached stops the traffic whether or not it is the
+		// reason this report is going: a period that ends in the same window as
+		// a quota must not swallow the enforcement, and the window the report
+		// opens would otherwise put the quota out of reach of the next one.
+		if u.quotaReached(upWindow, downWindow, window) && !u.enforcing {
+			u.enforcing = true
+			stopped = true
+		}
 		trigger, due := u.due(upWindow, downWindow, window)
 		if !due {
 			continue
-		}
-		if trigger == TriggerVolumeQuota || trigger == TriggerTimeQuota {
-			if !u.enforcing {
-				u.enforcing = true
-				stopped = true
-			}
 		}
 		reports = append(reports, Report{
 			SEID: s.LocalSEID, CPSEID: s.CPSEID, URRID: uid,
@@ -253,6 +272,16 @@ func (c *Compiler) countsOf(s *Session, uid uint32, counts map[string]map[uint32
 		}
 	}
 	return up, down
+}
+
+// quotaReached reports whether a quota this URR measures is used up: the
+// enforcement is the UPF's own doing (5.2.2.2.1), so the traffic stops whether
+// or not the SMF asked for a report of it.
+func (u *urr) quotaReached(up, down Usage, window time.Duration) bool {
+	if u.onVolQuota && u.volume && u.volQuota.reached(up.Octets, down.Octets) {
+		return true
+	}
+	return u.onTimeQuota && u.duration && u.hasTimeQuota && window >= u.timeQuota
 }
 
 // due is the reason this URR owes a report now, if it owes one: its period has

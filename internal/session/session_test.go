@@ -31,15 +31,45 @@ type recorder struct {
 	// RuleCounts answers, and the failure it answers with when readFail is set.
 	counts   map[string][]bess.RuleCount
 	readFail error
+	// entries is the fake's own state for the counting modules: what Apply has
+	// written and not erased (see Apply).
+	entries map[string]bool
 }
 
 func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 	if r.fail != nil {
 		return r.fail
 	}
+	// The counting modules are modelled, because their entries are the one
+	// resource family where a transaction can erase something that is not
+	// there: the engine refuses that outright (bess's erase_missing), and a
+	// fake that accepts it cannot see the bug that leaves a session neither
+	// modifiable nor deletable.
+	if r.entries == nil {
+		r.entries = map[string]bool{}
+	}
+	for i, ch := range changes {
+		if !strings.HasSuffix(ch.Resource, "/counters") {
+			continue
+		}
+		key := ch.Resource + "\x00" + fmt.Sprint(ch.Key)
+		if ch.Value == nil {
+			if !r.entries[key] {
+				return fmt.Errorf("change %d erases %s, which is not there: %w",
+					i, key, errEraseMissing)
+			}
+			delete(r.entries, key)
+			continue
+		}
+		r.entries[key] = true
+	}
 	r.txns = append(r.txns, changes)
 	return nil
 }
+
+// errEraseMissing is what the fake dataplane answers for an erase of a key it
+// does not hold: bess refuses the whole transaction, exactly as this does.
+var errEraseMissing = errors.New("the key is not there to erase")
 
 // RuleCounts answers the rules asked for; a rule the fake does not hold reads
 // zero, which is what a module with no traffic says.
@@ -783,6 +813,76 @@ func chidEstablishment(cpSEID uint64, ueIP string, first, second uint8) *message
 			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
 			ie.NewMBR(1000, 2000)),
 	)
+}
+
+// TestARefusedModificationKeepsTheCHIDItAllocated is the refusal case of the
+// CHOOSE ID path, where merge allocates the F-TEID and writes s.chids *before*
+// Apply and a refused transaction runs no settle (compile.go:341-356). Two
+// things are claimed here, and they are what makes the reservation safe rather
+// than a leak: the pool does not hand the value to another session, and the
+// model keeps the CHOOSE ID's F-TEID, so the SMF's retry -- the next message,
+// which is what a refusal invites -- names the value it was already given
+// instead of allocating a second one.
+func TestARefusedModificationKeepsTheCHIDItAllocated(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(chidEstablishment(0x9993, "10.45.0.6", 5, 5)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	// A third uplink PDI on a CHOOSE ID the session does not have yet.
+	addPDR := func() *message.SessionModificationRequest {
+		return message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+			ie.NewCreatePDR(ie.NewPDRID(3), ie.NewPrecedence(30),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+					ie.NewFTEID(0x0d, 0, nil, nil, 9),
+					ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+					ie.NewSDFFilter("permit out udp from any 3000 to any", "", "", "", 0)),
+				ie.NewFARID(1), ie.NewQERID(1)),
+		)
+	}
+
+	rec.fail = &bess.RejectedError{}
+	if got := cause(t, c.Modify(addPDR())); got == ie.CauseRequestAccepted {
+		t.Fatalf("the dataplane refused the modification and the SMF was told cause %d", got)
+	}
+	c.mu.Lock()
+	held, has := c.sessions[resp.Header.SEID].chids[9]
+	queued := len(c.teids.freed)
+	c.mu.Unlock()
+	if !has {
+		t.Error("the refused modification left CHOOSE ID 9 with no F-TEID: the retry would ask the pool again")
+	}
+	if queued != 0 {
+		t.Errorf("a refused modification put %d F-TEIDs back in the pool: another session could take a value this one holds", queued)
+	}
+
+	// The retry is the message a refusal invites, and it must hand the SMF the
+	// value the session already holds -- one F-TEID per CHOOSE ID, not a second
+	// one for the same ID.
+	rec.fail = nil
+	retry := c.Modify(addPDR()).(*message.SessionModificationResponse)
+	if got := cause(t, retry); got != ie.CauseRequestAccepted {
+		t.Fatalf("the retry answered cause %d", got)
+	}
+	if got := createdTEID(t, retry.CreatedPDR, 3); got != held {
+		t.Errorf("the retry answered TEID %#x for PDR 3, want the %#x the refused request reserved", got, held)
+	}
+
+	// And the reservation ends with the session, not with the process.
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 3, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	c.mu.Lock()
+	_, mapped := c.byTEID[held]
+	queued = len(c.teids.freed)
+	c.mu.Unlock()
+	if mapped {
+		t.Error("the deleted session left its F-TEID mapping behind")
+	}
+	if queued == 0 {
+		t.Error("the deleted session's F-TEIDs did not go back to the pool")
+	}
 }
 
 func TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID(t *testing.T) {
@@ -2257,6 +2357,18 @@ func TestAnUpdateThatKeepsTheURRMovesTheCounterOnce(t *testing.T) {
 	assertNoRepeat(t, rec.last())
 }
 
+// evaluate is Evaluate with the failure the tests do not expect folded away, so
+// a test reads as the sequence of readings it sets up and the reports each
+// earns.
+func evaluate(t *testing.T, c *Compiler, seid uint64) []Report {
+	t.Helper()
+	reports, err := c.Evaluate(context.Background(), seid, time.Now())
+	if err != nil {
+		t.Fatalf("evaluating: %v", err)
+	}
+	return reports
+}
+
 // quotaURR is a URR that measures volume and stops the traffic when the quota
 // is reached: the shape a quota test needs, without the threshold and period
 // triggers of fullURR firing first.
@@ -2279,14 +2391,16 @@ func TestEvaluateReportsAUsedUpQuotaAndStopsTheTraffic(t *testing.T) {
 	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
 	// The dataplane has counted 1500 octets of 10 packets for that rule, over
 	// the 1000 the SMF provisioned.
+	// The dataplane's first reading is the window's base and reports nothing;
+	// the traffic after it is what spends the quota.
+	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+		t.Fatalf("the baseline reading reported %+v, want none", reports)
+	}
 	rec.counts = map[string][]bess.RuleCount{
 		testConfig().Up.Counters: {{ActionID: rule.actionID(), Packets: 10, Octets: 1500}},
 	}
 
-	reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now())
-	if err != nil {
-		t.Fatalf("evaluating the usage: %v", err)
-	}
+	reports := evaluate(t, c, resp.Header.SEID)
 	if len(reports) != 1 {
 		t.Fatalf("evaluation returned %d reports, want one for the used-up quota", len(reports))
 	}
@@ -2337,44 +2451,39 @@ func TestEvaluateReportsTheWindowItMeasured(t *testing.T) {
 	module := testConfig().Up.Counters
 
 	// The volume threshold in fullURR is 1MiB: below it, and before the 30s
-	// period, the URR owes nothing.
+	// period, the URR owes nothing. This first reading is also the window's
+	// baseline, so the 400 octets in it are not usage.
 	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 4, Octets: 400}}}
-	if reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now()); err != nil || len(reports) != 0 {
-		t.Fatalf("a URR under its threshold and inside its period returned %v (%v)", reports, err)
+	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+		t.Fatalf("the baseline reading returned %v, want none", reports)
 	}
 
 	// The threshold is reached: the report says which one and carries the
 	// window, and the next one starts where this report ended -- the counter is
-	// cumulative, so 900 octets more is what the following report covers.
+	// cumulative, so what arrives after it is what the following report covers.
 	const threshold = 1 << 20
-	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 9, Octets: threshold + 1}}}
-	reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now())
-	if err != nil {
-		t.Fatalf("evaluating: %v", err)
-	}
+	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 9, Octets: threshold + 1000}}}
+	reports := evaluate(t, c, resp.Header.SEID)
 	if len(reports) != 1 || reports[0].Trigger != TriggerVolumeThreshold {
 		t.Fatalf("evaluation returned %+v, want one volume-threshold report", reports)
 	}
-	if got := reports[0].Up; got != (Usage{Packets: 9, Octets: threshold + 1}) {
+	if got := reports[0].Up; got != (Usage{Packets: 5, Octets: threshold + 600}) {
 		t.Errorf("the first report carries %+v, want the whole window", got)
 	}
 
 	// Another window: only what arrives after the first report counts, so the
 	// threshold needs another 1MiB -- the 900 octets short of it earn nothing.
-	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 10, Octets: threshold + 901}}}
-	if reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now()); err != nil || len(reports) != 0 {
-		t.Fatalf("a window under the threshold returned %v (%v)", reports, err)
+	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 10, Octets: threshold + 1900}}}
+	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+		t.Fatalf("a window under the threshold returned %v, want none", reports)
 	}
 
-	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 11, Octets: 2*threshold + 901}}}
-	reports, err = c.Evaluate(context.Background(), resp.Header.SEID, time.Now())
-	if err != nil {
-		t.Fatalf("evaluating again: %v", err)
-	}
+	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 11, Octets: 2*threshold + 2900}}}
+	reports = evaluate(t, c, resp.Header.SEID)
 	if len(reports) != 1 {
-		t.Fatalf("evaluation returned %d reports, want the one the new 900 octets earned", len(reports))
+		t.Fatalf("evaluation returned %d reports, want the one the new window earned", len(reports))
 	}
-	if got := reports[0].Up; got != (Usage{Packets: 2, Octets: threshold + 900}) {
+	if got := reports[0].Up; got != (Usage{Packets: 2, Octets: threshold + 1900}) {
 		t.Errorf("the second report carries %+v, want only what arrived since the first", got)
 	}
 	if reports[0].Seqn != 1 {
@@ -2398,7 +2507,12 @@ func TestEvaluateReportsThePeriodEvenWithNoTraffic(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	// The URR's window starts when it is provisioned, so a moment later the
+	// The first reading is the window's base (and no report), so the period
+	// below is measured from it: the same instant, a moment later.
+	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+		t.Fatalf("the baseline reading returned %v, want none", reports)
+	}
+	// The URR's window starts when it is first read, so a moment later the
 	// period has passed with nothing counted.
 	reports, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now().Add(2*time.Second))
 	if err != nil {
@@ -2431,6 +2545,123 @@ func TestEvaluateWithoutCountersInTheDataplaneSaysSo(t *testing.T) {
 	c.counters = nil
 	if _, err := c.Evaluate(context.Background(), resp.Header.SEID, time.Now()); err == nil {
 		t.Error("evaluating against a dataplane with no counters returned no error")
+	}
+}
+
+// TestAMeasuredPDRThatDropsKeepsItsCounterEntry is the invariant behind the
+// counting module: a counter entry exists exactly while the PDR is measured
+// (the direction has counters, the PDR names a URR, and it has an ActionId),
+// whatever the rule does. `!p.drop` in the entry's bookkeeping is the tempting
+// version, and it breaks a session: the entry is written once, erased by the
+// first modification that replaces the PDR, and a second modification or the
+// deletion then erases a key that is already gone -- which the engine refuses,
+// and the session can be neither modified nor deleted afterwards. The fake
+// dataplane here refuses an erase-missing exactly as bess does.
+func TestAMeasuredPDRThatDropsKeepsItsCounterEntry(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	// A PDR a URR measures that also names a QER, so the SMF can close the
+	// gate on it (urrEstablishment has no QER, and a gate no PDR names is not
+	// a gate this PDR's rule sees).
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x3040, 1, 0,
+		ie.NewFSEID(0x3040, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x2000, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+			ie.NewFARID(1), ie.NewQERID(1), ie.NewURRID(7)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		ie.NewCreateQER(ie.NewQERID(1), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen)),
+		fullURR(7),
+	)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	if n := len(rec.entries); n != 1 {
+		t.Fatalf("the establishment wrote %d counter entries, want the one its URR measures", n)
+	}
+
+	// The SMF closes the gate: the PDR's rule becomes a drop, and the entry it
+	// still needs must not be erased (nothing would put it back, and the
+	// deletion would then fail -- below).
+	closeGr := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 2, 0,
+		ie.NewUpdateQER(ie.NewQERID(1), ie.NewGateStatus(ie.GateStatusClosed, ie.GateStatusClosed)),
+	)
+	if got := cause(t, c.Modify(closeGr)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification that closes the gate answered cause %d", got)
+	}
+	if n := len(rec.entries); n != 1 {
+		t.Errorf("the drop left %d counter entries, want the one the URR still measures", n)
+	}
+	if got := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2}).gate(); got != dropGate {
+		t.Fatalf("the closed gate's rule gates %d, want the drop gate %d", got, dropGate)
+	}
+
+	// A second modification, and then the deletion: both must reach the
+	// dataplane (each erases the entry once, and the erase finds it).
+	rename := message.NewSessionModificationRequest(0, 0, resp.Header.SEID, 3, 0,
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Modify(rename)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the second modification answered cause %d", got)
+	}
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, resp.Header.SEID, 4, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	if n := len(rec.entries); n != 0 {
+		t.Errorf("%d counter entries outlived the session", n)
+	}
+}
+
+func TestEvaluateTakesTheFirstReadingAsItsBaseline(t *testing.T) {
+	// The counting module keeps a rule's cells after its entry is erased (the
+	// id pool reissues ActionIds, and a session's deletion erases the entry),
+	// so a fresh rule's first reading can hold the totals of the rule that had
+	// that id before. A quota spent by another rule's traffic would stop this
+	// session's traffic for good, so the first reading is the window's base.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3041, 7, quotaURR(7, 1000))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	module := testConfig().Up.Counters
+	// A million octets the previous holder of this ActionId counted.
+	const inherited = 1 << 20
+	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 27100, Octets: inherited}}}
+
+	if reports := evaluate(t, c, resp.Header.SEID); len(reports) != 0 {
+		t.Fatalf("the first reading reported %+v: the inherited totals are not this URR's usage", reports)
+	}
+	c.mu.Lock()
+	enforcing := c.findByCP(0x3041).URRs[7].enforcing
+	c.mu.Unlock()
+	if enforcing {
+		t.Error("the inherited totals exhausted the quota: the window must start at the first reading")
+	}
+	if gate := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2}).gate(); gate == dropGate {
+		t.Error("the inherited totals dropped the traffic")
+	}
+
+	// What arrives after the baseline is this URR's usage, and the quota is
+	// spent by that alone -- the inherited million is not in the window.
+	rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: 27110, Octets: inherited + 1000}}}
+	reports := evaluate(t, c, resp.Header.SEID)
+	if len(reports) != 1 || reports[0].Trigger != TriggerVolumeQuota {
+		t.Fatalf("evaluation returned %+v, want one volume-quota report for the 1000 octets measured", reports)
+	}
+	if got := reports[0].Up; got != (Usage{Packets: 10, Octets: 1000}) {
+		t.Errorf("the report carries %+v, want only the 1000 octets since the baseline", got)
+	}
+	if !reports[0].Enforcing {
+		t.Error("the quota the report says is spent did not stop the traffic")
+	}
+	if gate := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2}).gate(); gate != dropGate {
+		t.Errorf("after the quota was spent the rule gates %d, want the drop gate %d", gate, dropGate)
 	}
 }
 

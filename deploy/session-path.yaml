@@ -4,11 +4,11 @@
 # as deploy/session-live.yaml (the module names internal/session's Config
 # names) plus what it takes to put packets through it and see them.
 #
-#   uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> rt -> sink_n6
-#   downlink  src_dn -> rewrite_dn -> pdr_dl -> at_dl -> mt_dl -> enc -> sink_n3
+#   uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> sink_n6
+#   downlink  src_dn -> rewrite_dn -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> enc -> sink_n3
 #
 # Nothing here is a session: the Go controller writes every rule, action,
-# meter, tunnel and TEID rule, and `ci/session-path.sh` proves a session
+# meter, counter, tunnel and TEID rule, and `ci/session-path.sh` proves a session
 # programmed over the control plane carries packets both ways -- the uplink's
 # count needs the TEID rule, the decap and the PDR rule; the downlink's needs
 # the PDR rule, its action, its meter and the tunnel record the encap reads.

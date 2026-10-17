@@ -705,6 +705,21 @@ func teidNamed(s *Session, teid uint32) bool {
 	return false
 }
 
+// writeCounter writes the counting module's entry for a PDR a URR measures: the
+// entry is the whole test, keyed by the ActionId the rule carries, and its
+// existence follows the PDR -- a rule that drops keeps it too, so that an erase
+// always finds it (the engine refuses an erase of a key that is not there).
+func writeCounter(p *pdr, dir Direction) []bess.Change {
+	if dir.Counters == "" || len(p.urrIDs) == 0 || p.actionID == 0 {
+		return nil
+	}
+	return []bess.Change{{
+		Resource: countersRes(dir),
+		Key:      map[string]any{"action_id": p.actionID},
+		Value:    map[string]any{},
+	}}
+}
+
 // qerHoldsMeter reports whether the meter a removed PDR was policed by still
 // belongs to a QER the session holds. compile writes a meter for every QER with
 // a rate whether or not a PDR names it, so erasing one of those in the same
@@ -763,7 +778,14 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	liveCounters := map[string]bool{}
 	for _, p := range s.PDRs {
 		dir := c.direction(p.srcIfc)
-		if dir.Counters != "" && len(p.urrIDs) > 0 && !p.drop && p.actionID != 0 {
+		// A dropped rule keeps its entry: the entry's existence follows the
+		// PDR (a URR still measures it, and the id is still its own), not the
+		// rule's effect. Excluding the dropped ones here is what made a second
+		// modification erase an entry that was already gone -- which the engine
+		// refuses, and which then left the session neither modifiable nor
+		// deletable (the drop branch below writes the entry for the same
+		// reason).
+		if dir.Counters != "" && len(p.urrIDs) > 0 && p.actionID != 0 {
 			liveCounters[countersRes(dir)+"\x00"+strconv.FormatUint(uint64(p.actionID), 10)] = true
 		}
 	}
@@ -894,6 +916,12 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 					"action_id": uint32(0),
 				},
 			})
+			// A URR that measures this PDR still holds its counter entry: the
+			// entry says the rule is measured (the reporting side reads it), and
+			// its existence must follow the PDR rather than the rule's effect,
+			// so that a later erase has something to erase. The counter counts
+			// nothing while the rule drops: no packet reaches the action.
+			changes = append(changes, writeCounter(p, dir)...)
 			continue
 		}
 		if p.actionID == 0 {
@@ -914,13 +942,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// ActionId: the module counts what the chain forwards for that rule,
 		// and the reporting side sums the entries of the URR's PDRs. The entry
 		// is what keeps a session without a URR off the counting module's cost.
-		if dir.Counters != "" && len(p.urrIDs) > 0 {
-			changes = append(changes, bess.Change{
-				Resource: countersRes(dir),
-				Key:      map[string]any{"action_id": p.actionID},
-				Value:    map[string]any{},
-			})
-		}
+		changes = append(changes, writeCounter(p, dir)...)
 
 		// A downlink PDR's FAR names the tunnel this session's packets leave
 		// by: the record is keyed by the same action id the rule carries.

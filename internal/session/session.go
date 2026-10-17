@@ -377,7 +377,7 @@ func (v volumeLimit) reached(ul, dl uint64) bool {
 // thresholds and quotas that make it report or stop the traffic.
 //
 // Everything here is control-side state, read by the reporting task
-// (docs/design.md, "Usage"): the packet path counts per rule and knows nothing
+// (docs/design.md, the mapping table's URR row): the packet path counts per rule and knows nothing
 // of thresholds. The reporting bookkeeping lives here too, under the compiler's
 // lock -- the session model is the one place that knows a URR's lifetime, and a
 // map of its own would have to chase session deletion, modification and the
@@ -433,8 +433,12 @@ type urr struct {
 
 	// lastUp and lastDown are the counters these PDRs had counted when the last
 	// report was made, so that report's successor covers the usage after it
-	// rather than the session's lifetime (report.go, "the window").
+	// rather than the session's lifetime (report.go, "the window"), and
+	// baselined says whether that base has been taken from a reading yet: the
+	// first reading is the baseline, because the cells of a reused ActionId are
+	// another rule's totals.
 	lastUp, lastDown Usage
+	baselined        bool
 }
 
 // AssociationEnded implements n4.SessionHandler: no session of the association
