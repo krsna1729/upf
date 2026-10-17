@@ -161,4 +161,11 @@ message TunnelEntry {
 
   // The outer Ethernet destination (the peer's address), 6 bytes.
   bytes ether_dst = 4;
+
+  // The QoS Flow Identifier (TS 29.244 8.2.89) this session's downlink G-PDUs
+  // carry in their PDU Session Container: the GTP-U extension header of type
+  // 0x85 (TS 29.281 5.2.2.7, content TS 38.415 5.5.2). 0 means write no
+  // container, so the G-PDU is the 8-octet header and the T-PDU and nothing
+  // else.
+  uint32 qfi = 5;
 }
