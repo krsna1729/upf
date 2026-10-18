@@ -276,10 +276,9 @@ func TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession(t *testing.T) 
 }
 
 // TestAnUpdateBARForABARTheSessionDoesNotHoldIsIgnored is the stray-response
-// case: the SMF names a BAR the session does not have. It must not create one
-// or overwrite something else -- it is a no-op, the way a report response with
-// no report waiting for it is ignored (internal/n4.onReportResponse) -- and a
-// response that carries no Update BAR at all changes nothing either.
+// case: the SMF names a BAR the session does not have. It must not create one or
+// overwrite something else -- it is a no-op, the way a report response with no
+// report waiting for it is ignored (internal/n4.onReportResponse).
 func TestAnUpdateBARForABARTheSessionDoesNotHoldIsIgnored(t *testing.T) {
 	rec := &recorder{}
 	c := New(bufferingConfig(), rec, quietLogger())
@@ -296,7 +295,6 @@ func TestAnUpdateBARForABARTheSessionDoesNotHoldIsIgnored(t *testing.T) {
 		ie.NewDLBufferingDuration(10*time.Second),
 		ie.NewDLBufferingSuggestedPacketCount(64),
 	))
-	c.ApplyUpdateBAR(context.Background(), seid, nil)
 
 	if len(c.sessions[seid].BARs) != 1 {
 		t.Errorf("the session holds %d BARs after an Update BAR for BAR 2, want the one it had",
@@ -307,6 +305,32 @@ func TestAnUpdateBARForABARTheSessionDoesNotHoldIsIgnored(t *testing.T) {
 	}
 	if len(rec.txns) != txns {
 		t.Errorf("an Update BAR the session cannot place wrote %d transactions, want none", len(rec.txns)-txns)
+	}
+}
+
+// TestASessionReportResponseWithNoUpdateBARChangesNothing: 5.2.4.1 makes the
+// Update BAR optional in the answer, so a response that carries none is the
+// common case and must leave the session's BARs exactly as a modification set
+// them.
+func TestASessionReportResponseWithNoUpdateBARChangesNothing(t *testing.T) {
+	rec := &recorder{}
+	c := New(bufferingConfig(), rec, quietLogger())
+
+	resp := c.Establish(buffEstablishment(0x710c, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	txns := len(rec.txns)
+
+	c.ApplyUpdateBAR(context.Background(), seid, nil)
+
+	if entry := c.sessions[seid].BARs[1]; entry == nil ||
+		entry.duration != 30*time.Second || entry.count != 16 {
+		t.Errorf("the BAR is %+v after a response with no Update BAR, want the establishment's 30s/16", entry)
+	}
+	if len(rec.txns) != txns {
+		t.Errorf("a response with no Update BAR wrote %d transactions, want none", len(rec.txns)-txns)
 	}
 }
 
