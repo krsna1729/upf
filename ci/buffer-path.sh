@@ -188,6 +188,7 @@ check "the store released the flow on the SMF's instruction" "forwarded after th
 # absence, which is all a silent free can leave.
 check "the store freed the flow at the BAR's own duration" "forwarded after the wait:" "$WORK/session-test.log"
 
+check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "buffer-path: ok (a BUFF FAR's packets were held, reported to the SMF over N4, released when the SMF moved the path, and freed by the store's own timeout when the BAR's duration ran out)"
 fi

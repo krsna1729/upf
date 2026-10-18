@@ -108,6 +108,7 @@ check "the controller sent a usage report" "usage report acknowledged"
 check "the report said the quota is spent" "quota spent: the session's traffic is stopped"
 check "the session's report named the URR" "urr=7"
 
+check_clean_shutdown "$DAEMON_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "session-report: ok (the usage report left the node and the SMF acknowledged it)"
 fi

@@ -26,7 +26,15 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
+# PROFILE=custom runs the same lane against the keyed per-session matcher (upfd
+# -profile custom, over the lab graph that has it): the lane is the profile
+# mechanism's end-to-end proof, restart and checkpoint phases included.
+PROFILE=${PROFILE:-generic}
+case "$PROFILE" in
+  generic) GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}; PROFILE_ARGS=() ;;
+  custom)  GRAPH=${GRAPH:-$ROOT/deploy/pdrmatch-path.yaml}; PROFILE_ARGS=(-profile custom) ;;
+  *) echo "n4-path: PROFILE is generic or custom, not $PROFILE" >&2; exit 2 ;;
+esac
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
 BESSD=$STAGE/bin/bessd
@@ -99,7 +107,7 @@ fi
 
 # The node a real SMF talks to, with the graph's shape (its flags' defaults are
 # deploy/upf.yaml's module names; the N3 address and both next hops match).
-"$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
+"$WORK/upfd" "${PROFILE_ARGS[@]}" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
   -n3-addr "$N3" -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do
@@ -154,7 +162,7 @@ if [ "$FAIL" = 0 ]; then
   kill "$UPFD_PID" 2>/dev/null || true
   wait "$UPFD_PID" 2>/dev/null || true
   : >"$UPFD_LOG"
-  "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
+  "$WORK/upfd" "${PROFILE_ARGS[@]}" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
     -n3-addr "$N3" -log-level info >>"$UPFD_LOG" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
@@ -201,7 +209,7 @@ if [ "$FAIL" = 0 ]; then
   # processes, so it starts from nothing.
   kill "$UPFD_PID" 2>/dev/null || true
   wait "$UPFD_PID" 2>/dev/null || true
-  "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
+  "$WORK/upfd" "${PROFILE_ARGS[@]}" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
     -n3-addr "$N3" -log-level info -checkpoint "$CP" >>"$CP1" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
@@ -228,7 +236,7 @@ if [ "$FAIL" = 0 ]; then
 
   kill "$UPFD_PID" 2>/dev/null || true
   wait "$UPFD_PID" 2>/dev/null || true
-  "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
+  "$WORK/upfd" "${PROFILE_ARGS[@]}" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
     -n3-addr "$N3" -log-level info -checkpoint "$CP" >>"$CP2" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
@@ -270,8 +278,9 @@ if [ "$FAIL" = 0 ]; then
   wait "$UPFD_PID" 2>/dev/null || true
 fi
 
+check_clean_shutdown "$DAEMON_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
-  echo "n4-path: ok (PFCP -> session -> packets, both ways, and across a restart)"
+  echo "n4-path: ok (PFCP -> session -> packets, both ways, and across a restart; profile $PROFILE)"
   # The work directory is the run's, not a result: a failed run keeps it (the
   # message above says where), a green one leaves nothing behind.
   rm -rf "$WORK"

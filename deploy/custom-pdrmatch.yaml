@@ -1,56 +1,94 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
-# The custom profile's graph (docs/design.md, "Profiles: one compiler, two
-# dataplane strategies"): the uplink's PDR rules live in this tree's keyed
-# per-session matcher instead of a WildcardMatch table every session shares --
-# one map key per session, keyed by the F-TEID the decap wrote, whose value is
-# that session's rules in SMF precedence order. Selecting the profile and
-# applying this graph are the same decision seen from the two sides:
+# The custom profile's graph (docs/design.md, "Profiles"): deploy/upf.yaml with
+# the uplink's PDR table replaced by this tree's keyed per-session matcher
+# (`PdrMatch`): one map key per session, keyed by the F-TEID the decap wrote,
+# whose value is that session's rules in SMF precedence order. Everything else
+# is upf.yaml's -- the ports, the TEID table and the echo behind its default
+# gate, the downlink's shared table, the chains, the encap, the End Marker's
+# socket -- so the two graphs differ by exactly two things:
+#
+#   - `pdr_ul` (a WildcardMatch every session shares) is `pdr_match_ul`;
+#   - `mt_ul_read` is gone. It existed only to give the decap's `upf_teid` an
+#     offset (a write-only attribute gets none, core/metadata.cc); the matcher
+#     reads `upf_teid` itself as its key, which does the same.
+#
+# Selecting the profile and applying this graph are the same decision seen from
+# the two sides:
 #
 #   upfd -profile custom -bess <bessd> -n3-addr <addr> ...
 #   bessctl apply deploy/custom-pdrmatch.yaml
 #
-# Everything else is deploy/session-live.yaml's composition and the module names
-# internal/session's Config names (the same tables, meters, counters, router and
-# encap a deployment has): this graph differs from that one by one module, which
-# is what the profile is. The downlink is unchanged -- `pdr_dl` is still the
-# shared table -- because a downlink packet carries no tunnel to name its
-# session with: the selector that will name one (a longest-prefix match on the
-# UE prefix) is the next step (docs/scorecard.md, "The custom profile, row by
-# row").
+# The downlink is unchanged -- `pdr_dl` is still the shared table -- because a
+# downlink packet carries no tunnel to name its session with: the selector that
+# will name one (a longest-prefix match on the UE prefix) is the next step
+# (docs/scorecard.md, "The custom profile, row by row").
 #
 # What this path refuses, as compiled today: a BUFF FAR (no buffering verdict in
-# this module, docs/compliance.md's 7.5.2.6 row), a PDI naming a QFI (its rules
-# are the 5-tuple), and the IPv6 UE address and F-TEID (the key is IPv4-only).
-# Its rules do carry port ranges and SDF prefixes of both families, which the
-# wildcard table cannot.
+# this module), a PDI naming a QFI (its rules are the 5-tuple), and the IPv6 UE
+# address and F-TEID (the key is IPv4-only). Its rules do carry port ranges and
+# SDF prefixes of both families, which the wildcard table cannot.
+#
+# Three values here are the deployment's and must match upfd's flags, exactly
+# as in upf.yaml: enc's src_ip = -n3-addr, and rt/next_hops' ids 1 and 2 are the
+# uplink's and downlink's next hops (their egress_gates are this file's
+# connections: 0 toward n6_out, 1 toward enc).
+
+ports:
+  # Two DPDK ports, bound before bessd starts (docs/ports.md).
+  - name: n3
+    driver: PMDPort
+    arg: {port_id: 0}
+    num_rx_queues: 1
+  - name: n6
+    driver: PMDPort
+    arg: {port_id: 1}
+    num_rx_queues: 1
+  # The control plane's End Marker socket (TS 29.244 5.3.2): no PMD, so a
+  # deployment binds it without a NIC. The path is what upfd's -end-marker names.
+  - name: cp_marker
+    driver: UnixSocketPort
+    arg: {path: /tmp/upf-end-marker.sock}
+
 modules:
+  # The decap declares "upf_teid" and is listed before its reader: attributes
+  # are laid out in registration order.
   - name: decap0
     mclass: GtpuDecap
+
+  - name: n3_in
+    mclass: PortInc
+    arg: {port: n3}
+  - name: n6_in
+    mclass: PortInc
+    arg: {port: n6}
+  - name: cp_in
+    mclass: PortInc
+    arg: {port: cp_marker}
+
+  # -- ingress -----------------------------------------------------------------
+  # The F-TEID match, one rule per session, whose default gate is the echo
+  # module (the only message that reaches a UPF on a TEID no session names is an
+  # Echo Request, TS 29.281 7.2); a G-PDU no session names is still dropped.
   - name: teid
     mclass: WildcardMatch
     arg:
       fields:
-        # The G-PDU's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's
-        # flags, type and length (4). One rule per session; a TEID no rule
-        # names is dropped by the default gate.
         - {offset: 46, num_bytes: 4}
+      default_gate: 1
+  - name: echo0
+    mclass: GtpuEcho
+
+  # -- the uplink's matcher ----------------------------------------------------
+  # The session is the metadata the decap wrote, not a field of the packet: the
+  # F-TEID this session's PDU Session Container arrived on. A packet whose key
+  # the map does not hold is dropped. max_sessions sizes the map, allocated once
+  # (upfd's -capacity is the id space the compiler allocates in).
   - name: pdr_match_ul
     mclass: PdrMatch
-    arg:
-      # The session is the metadata the decap wrote, not a field of the packet:
-      # the F-TEID this session's PDU Session Container arrived on. A packet
-      # whose key the map does not hold is dropped.
-      key_attr: upf_teid
-      # One map slot per session: the compiler's id space is this number
-      # (upfd's -capacity), and the map is allocated once, at creation.
-      max_sessions: 65536
-  - name: at_ul
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
-  - name: mt_ul
-    mclass: Meter
-    arg: {capacity: 65536}
+    arg: {key_attr: upf_teid, max_sessions: 65536}
+
+  # The downlink's table, as in upf.yaml.
   - name: pdr_dl
     mclass: WildcardMatch
     arg:
@@ -60,53 +98,71 @@ modules:
         - {offset: 23, num_bytes: 1}
         - {offset: 34, num_bytes: 2}
         - {offset: 36, num_bytes: 2}
-      # Distinct masks in use at once: a session's shapes are its filters' --
-      # exact addresses, prefixes, ports -- and each is one hash lookup per
-      # batch. Declared rather than defaulted: it is a UPF decision.
       max_tuples: 8
       action_resource: at_dl/actions
+
+  # -- the two chains ----------------------------------------------------------
+  # The matcher writes the matched rule's ActionId into the packet's "action_id"
+  # metadata and passes it on: the ActionTable downstream selects the action,
+  # exactly as the wildcard table's rules do (D-141). The capacities are the id
+  # spaces upfd's -capacity names.
+  - name: at_ul
+    mclass: ActionTable
+    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
+  - name: mt_ul
+    mclass: Meter
+    arg: {capacity: 65536}
+  - name: cnt_ul
+    mclass: UrrCount
+    arg: {capacity: 65536}
   - name: at_dl
     mclass: ActionTable
     arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
   - name: mt_dl
     mclass: Meter
     arg: {capacity: 65536}
-  - name: cnt_ul
-    mclass: UrrCount
-    arg: {capacity: 65536}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
+
   - name: rt
     mclass: Router
   - name: enc
     mclass: GtpuEncap
     arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
-  - name: sink
-    mclass: Sink
+
+  # -- egress ------------------------------------------------------------------
+  - name: n6_out
+    mclass: PortOut
+    arg: {port: n6}
+  - name: n3_out
+    mclass: PortOut
+    arg: {port: n3}
 
 connections:
+  - {upstream: n3_in, downstream: teid}
   - {upstream: teid, downstream: decap0}
+  - {upstream: teid, downstream: echo0, ogate: 1}
+  - {upstream: echo0, downstream: n3_out}
   - {upstream: decap0, downstream: pdr_match_ul}
-  # The module writes the matched rule's ActionId into the packet's "action_id"
-  # metadata and passes it on: the ActionTable downstream selects the action,
-  # exactly as the wildcard table's rules do (D-141).
   - {upstream: pdr_match_ul, downstream: at_ul}
   - {upstream: at_ul, downstream: mt_ul}
   - {upstream: mt_ul, downstream: cnt_ul}
   - {upstream: cnt_ul, downstream: rt}
+  - {upstream: rt, downstream: n6_out}
+
+  - {upstream: n6_in, downstream: pdr_dl}
   - {upstream: pdr_dl, downstream: at_dl}
   - {upstream: at_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: cnt_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
-  - {upstream: enc, downstream: sink}
+  - {upstream: enc, downstream: n3_out}
+  - {upstream: cp_in, downstream: n3_out}
 
 resources:
-  # The actions' next hops: the deployment's, not a session's (a session's
-  # action names them by id). Both directions' actions name one, because both
-  # chains hold an ActionTable and the module fails closed when the id it writes
-  # has no reader.
+  # The actions' next hops: the deployment's, not a session's. One hop per
+  # direction's egress, as in upf.yaml.
   rt/next_hops:
     - key: {id: 1}
       value: {egress_gate: 0}
