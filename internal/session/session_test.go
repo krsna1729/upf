@@ -3804,6 +3804,35 @@ func TestEvaluateReportsThePeriodEvenWithNoTraffic(t *testing.T) {
 	}
 }
 
+func TestAMeasurementPeriodWithoutThePeriodicTriggerIsInert(t *testing.T) {
+	// 7.5.2.4 makes the period conditional on PERIO and forbids nothing else:
+	// OMEC's pfcpsim sends one on a volume-threshold URR. It is accepted, and
+	// the window it would have set never reports on its own.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	threshold := ie.NewCreateURR(
+		ie.NewURRID(7),
+		ie.NewMeasurementMethod(0, 1, 0),    // VOLUM
+		ie.NewReportingTriggers(0x02, 0x00), // VOLTH, no PERIO
+		ie.NewMeasurementPeriod(time.Second),
+		ie.NewVolumeThreshold(0x07, 1<<40, 1<<40, 1<<40),
+	)
+	resp := c.Establish(urrEstablishment(0x3033, 7, threshold)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d, want it accepted", got)
+	}
+	if reports := evaluate(t, c, upFSEID(t, resp)); len(reports) != 0 {
+		t.Fatalf("the baseline reading returned %v, want none", reports)
+	}
+	reports, err := c.Evaluate(context.Background(), upFSEID(t, resp), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("evaluating: %v", err)
+	}
+	if len(reports) != 0 {
+		t.Errorf("a period with no periodic trigger reported %+v, want none", reports)
+	}
+}
+
 func TestEvaluateWithoutCountersInTheDataplaneSaysSo(t *testing.T) {
 	// The graph answers no counters (the Applier has no CounterReader): a URR
 	// whose every report would say zero is refused when it is established, and
@@ -4262,9 +4291,6 @@ func TestAURRWithAnUnimplementedFieldIsRefused(t *testing.T) {
 			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00, 0x00, 0x80))},
 		{"no trigger at all", ie.NewCreateURR(
 			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x00, 0x00))},
-		{"a period with no periodic trigger", ie.NewCreateURR(
-			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00),
-			ie.NewMeasurementPeriod(30*time.Second))},
 		{"no measurement method", ie.NewCreateURR(
 			ie.NewURRID(7), ie.NewReportingTriggers(0x02, 0x00))},
 		{"a monitoring time", ie.NewCreateURR(

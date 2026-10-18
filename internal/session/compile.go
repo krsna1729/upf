@@ -3392,12 +3392,10 @@ func parseURR(i *ie.IE) (urrReq, error) {
 		return urrReq{}, fmt.Errorf("%w: a Create URR needs a Measurement Method and Reporting Triggers",
 			errNotExpressible)
 	}
-	if u.hasPeriod && !u.periodic {
-		// The period is what the periodic trigger fires on; without the trigger
-		// it is a value the SMF would never see acted on.
-		return urrReq{}, fmt.Errorf("%w: a Measurement Period without the periodic trigger",
-			errNotExpressible)
-	}
+	// A Measurement Period with no periodic trigger is accepted and never acted
+	// on: 7.5.2.4 makes the period conditional on PERIO, and says nothing
+	// against one without it (OMEC's pfcpsim sends a period on a volume-
+	// threshold URR). The report only fires on u.periodic.
 	return u, nil
 }
 
