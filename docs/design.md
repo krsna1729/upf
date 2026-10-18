@@ -435,14 +435,20 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   an occupied id replaces it: a rule that outlives its controller can come to
   name another session's action, and on the downlink another session's tunnel.
   There is no checkpoint and no replay path yet, so a restart is followed by
-  emptying the session tables -- the controller does it itself, in one
-  transaction and before its PFCP socket opens (`session.Compiler.Sweep`: it
-  reads the session resources back with `bess.Client.Contents`, erases exactly
-  the entries it found, and leaves the graph's own resources alone) -- or by a
-  `bessd` restart, and by the SMF re-establishing, which its own path
-  management forces once the Recovery Time Stamp changes. What is still
-  missing is the replay path that would keep the sessions across a restart
-  instead of emptying them: Wall 4 below is that work.
+  emptying the session tables — the controller does it itself, **in chunks**,
+  before its PFCP socket opens (`session.Compiler.Sweep`: it reads the session
+  resources back with `bess.Client.Contents`, erases exactly the entries it
+  found, and leaves the graph's own resources alone) — or by a `bessd` restart,
+  and by the SMF re-establishing, which its own path management forces once the
+  Recovery Time Stamp changes. The chunking is a requirement, not an
+  implementation detail: today's `Sweep` reads every table back in one
+  `Contents` call and erases what it read in **one** transaction, which is fine
+  at lab size and cannot be at the 1M-session target — millions of entries meet
+  gRPC's message size limit, and millions of Changes meet the daemon's
+  transaction memory ("Session scale" below, item 1 of the control plane's
+  O(total sessions) operations). What is still missing is the replay path that
+  would keep the sessions across a restart instead of emptying them: Wall 4
+  below is that work.
 - Either restart must be a *reapply*, never a trust fall: the controller
   verifies by reading back what it wrote (the SDK's readback and
   `ReadBackDiffers`-style comparison exist for this).
@@ -628,6 +634,120 @@ dataplane's (a G-PDU's peer-speaks-GTP-U half, and the TS 29.281 packet that
 tells a gNB to switch paths), DDN/BAR is the buffering OMEC never had, and the
 checkpoint is the restart wall below.
 
+### Which session a packet belongs to, and which of its rules matches it
+
+Every packet forces two questions, and they are answered differently in each
+direction.
+
+1. **Which session does this packet belong to?** On N3 the packet is inside a
+   GTP-U tunnel and the **TEID names the session exactly** — the SMF gave that
+   TEID to the gNB for that one session — so this lookup is exact, and no prefix
+   structure is involved on the uplink, ever. On N6 the packet is bare: no
+   tunnel, no TEID, and the only thing in it that names a session is the **UE's
+   own IP address**, which the SMF assigned to the session and sent in the PDI's
+   UE IP Address IE (TS 29.244 8.2.62). Because the SMF may name a *prefix*
+   rather than a single address — a framed route, or a /64 for prefix delegation
+   — that lookup is a longest-prefix match, which is what the LPM is for, and it
+   is **downlink-only for exactly this reason**.
+2. **Which of that session's rules matches it, and what does that rule say to
+   do?** That is the PDR stage, in both directions.
+
+**Today's chain has no session selector and needs none.** The shared PDR
+table's own key carries the masked UE address (or prefix), so the prefix
+matching happens where the SMF's PDI puts it: inside the PDR table, in both
+directions (`deploy/upf.yaml`, `deploy/session-path.yaml`). A dedicated
+downlink LPM exists only so that a session can be named *before* a 2–4 rule
+scan — i.e. so each session can own its rules — so it is **not needed, it is
+enabled**, and it is written only if the measurement below asks for it. Under
+that design the shared table does **not** disappear either: an SDF-only
+downlink PDR has no UE address for a prefix search to find, so it stays in the
+shared per-domain table, and the compiler chooses per PDR which structure a
+rule goes in.
+
+**The decision is a break-even line, not a threshold:**
+
+```
+churn_break_even (sessions/s) = (per-packet LPM+scan cost × downlink packets/s)
+                                ÷ shard rebuild cost
+```
+
+with its two halves labelled by whose measurement they are. The per-packet cost
+is an LPM lookup plus a 2–4 rule scan **in our graph** — ours to measure. The
+table end — `LookupBatch` at 2, 3 and 4 rules, the fixed overhead, and the
+per-rule and per-group memory that is also the per-session footprint budget —
+is **BESS's published rows** (Main's), and the denominator is BESS's own
+rebuild row, "about 50 µs at 1K rules and about 1 ms at 10,000"
+(`bess/docs/dataplane-tables.md`, `benchmarking.md`; Main's later sample reads
+44 µs). What the line means in words: the rebuild is a **spike** (one session
+change) against a **steady tax** (per downlink packet), so a deployment that
+churns rarely and forwards heavily sits far below the line and keeps the shared
+table, while a lab or a small network sits below it by orders of magnitude —
+which is why the expected outcome below that line is that the LPM is never
+written. The x-axis ceiling comes from our own measured establishment envelope
+(`ci/bench-n4.sh`), so it is a measured bound rather than an assumed one. **The
+number is still owed**: this is the decision *rule*, and no decision is taken.
+
+**The capacity target is what makes the selector required rather than
+optional.** At O(10^6) sessions the shared table's rebuild stops being a spike a
+deployment can absorb: 1M sessions at 2–4 PDRs is 100k–1M rules per shard, which
+extrapolates BESS's rebuild row above to tens of milliseconds per session
+change, so even 0.1 %/min of churn — about 17 establishments a second — is 17 ×
+tens of milliseconds, i.e. a core spent on rebuilds. Per-session programming is
+therefore required at the target, and with it the downlink longest-prefix
+selector — **v4 and v6**, because a 1M-session deployment has v6 UEs and prefix
+delegation is exactly the case an exact lookup cannot serve. The break-even line
+then says *where the crossover sits for deployments below the target*, not
+whether the LPM is written at all.
+
+**What 10^6 multiplies is not only rule sets.** The target multiplies **1M LPM
+entries, 1M TEID entries and 1M meters** too — four structures that all grow
+with the session count — so the per-session footprint budget is what holds
+*every* one of them to account, not just the rules. It is a measured budget we
+owe, with BESS's per-rule, per-group and LPM-per-entry rows as its inputs, and
+nothing about it is assumed; the target size and the arithmetic are in "Session
+scale" below. The control plane's unit is the per-session transaction for the
+same reason: 1M small transactions, each O(that session's rules), never 1M
+rebuilds of a shared structure — which is also why any resource whose value is
+"every session's rules" is the shape to look for in a new table (the three
+O(total sessions) operations in "Session scale" are what that shape costs).
+
+**One downlink LPM, not one per session — and how many is bounded by the domain
+count.** `rte_lpm`'s `tbl24` is `RTE_LPM_TBL24_NUM_ENTRIES` = `1 << 24` entries
+of a 4-byte `struct rte_lpm_tbl_entry` (a union over a `uint32_t`), i.e. **64
+MiB fixed per table, whatever it holds**, plus `tbl8` groups of
+`RTE_LPM_TBL8_GROUP_NUM_ENTRIES` = 256 entries × 4 B = **1 KiB each**, allocated
+per table (`number_tbl8s`, 256 groups by default) and used for the prefixes
+longer than /24 that fall in a /24's entry. A per-session LPM is therefore
+impossible at 1M sessions (64 MiB each); a single table holding every session's
+prefixes is not, which is what this design already assumes. But the fixed cost
+means our *per-domain* tables multiply it — three route domains is three tables,
+~192 MiB before any group — so the number of LPM instances has to stay a
+handful, which is an argument for domains being few and long-lived rather than
+per-tenant. The group memory depends on *clustering* rather than on the entry
+count: 1M /32s spread over 1M distinct /24s is ~1M groups (~1 GB by the same
+1 KiB-per-group arithmetic), while the same 1M inside a few shared /24s is a
+handful of groups — so the deployment's address plan matters as much as the
+session count. v6 is the same shape, not a cheaper one: `rte_lpm6`'s `tbl24` is
+also `1 << 24` entries of a 4-byte `struct rte_lpm6_tbl_entry`
+(`lib/lpm/rte_lpm6.c`), its `tbl8` groups are the same 1 KiB each, and it adds a
+`rules_tbl` hash over the rules. None of these numbers is settled: Main is
+measuring the fixed allocation and a realistic v4 distribution, and v6's group
+count.
+
+**The three pieces have one owner each.** The keyed write is ours to write —
+the map-resource module above, `PdrMatch`-shaped, one key per session,
+`ExactMatch`'s shape rather than the firewall module's whole-policy singleton.
+The small-policy matcher is BESS's — the `firewall` module's classifier-side
+table (`core/modules/firewall.cc`, the D-147 work), which the compiler can opt
+into today (`upfd -firewall-ul`/`-firewall-dl`) and no deployment configures.
+And the selector that *names the session* on the downlink is the LPM: a
+different structure, with a different cost (a lookup per packet, inside the
+break-even line above) and a different limit (the domain count, and the
+deployment's address plan). Keeping the three apart is what lets each be
+measured and replaced on its own — and conflating them is how a whole-policy
+write came to look like the right shape for per-session state in the first
+place.
+
 ## Where a table lives: shared, per-worker, or behind a ring
 
 The default is **shared**: a table a controller writes and workers read (the
@@ -688,6 +808,79 @@ structure this design uses, so the arithmetic below is that table at this shape
 | 2 URR | `CounterSet` block | 4 KiB for three counters (each slot per worker: 64 slots) | the wall: 8 GB if each URR owns a full per-worker block |
 | 1 MAR (ATSSS, P1) | per-session record | not measured, small | about 64 MB |
 | 1 F-TEID | the decap's tunnel table | 64 B/object | 64 MB |
+
+The table is not the whole footprint, and the per-session budget is what holds
+all of it: 10^6 sessions multiply **1M LPM entries, 1M TEID entries and 1M
+meters** as well as the rules, and each of those is a structure of its own. The
+target for all four is the low hundreds of bytes per session -- a kilobyte per
+session is a gigabyte, which is the difference between deployable and not -- and
+it is a *measured* budget we owe, with BESS's per-rule, per-group and
+LPM-per-entry rows as its inputs. Nothing about it is assumed, and the LPM side
+of it is not a per-session table: there is **one downlink LPM, not one per
+session**, because `rte_lpm`'s `tbl24` costs 64 MiB fixed per table (the
+arithmetic is in "N3, N6, N9"), so the LPM instances are bounded by the domain
+count and the domains have to stay few. That fixed cost and a realistic prefix
+distribution are Main's measurements to make; what is settled is the shape.
+
+**The control plane has three O(total sessions) operations**, and they fail
+before the dataplane footprint above becomes the limit. They are all ours, and
+the 1M target is a claim about the whole system, so all three have to be
+addressed:
+
+1. **`Compiler.Sweep`.** It reads every session table's full contents back in
+   one `Contents` call and erases what it read **key by key in one
+   transaction** -- its own doc comment says so ("erases exactly what it read,
+   key by key"; "empties the session tables in one transaction"). At 1M sessions
+   that is a readback of millions of entries, which meets gRPC's message size
+   limit, and a transaction carrying millions of Changes, which meets the
+   daemon's transaction memory. The fix is a paged or streamed readback with a
+   chunked erase, or a table-level clear if the daemon grows one. The design
+   sentence that *prescribes* it is part of the defect, not only the code:
+   "emptying the session tables" is written below as one transaction, and that
+   sentence was written for a lab-sized session count, so it now says chunked
+   and why.
+2. **The firewall policy is a whole-policy singleton, so every session change
+   rewrites every session's rules.** `compile.go`'s `firewallChanges` builds
+   "the whole policy of every configured firewall module ... every live
+   session's rules", because BESS's `Firewall` exposes `rules` as a singleton
+   (`ResourceTable::Singleton<FirewallArg>("rules", false)`, D-147) that takes
+   the policy, not a rule. That is O(all rules) per change -- the shared-table
+   scaling problem, in the control plane -- and it would bite precisely the
+   deployment that needs that path (ranges and IPv6 at scale). It is a
+   *deliberate* property of that module (one table, replaced whole, published by
+   RCU, workers never paused: right for a firewall, wrong for per-session
+   programming), and it is opt-in today (a no-op for a deployment that
+   configures no firewall module, which is every deployment today), so it is a
+   trap for the future rather than a present defect. **The keyed write is
+   already a resource kind, so the fix is ours to write rather than an ask:**
+   `ResourceTable::Map<Key, Value>` is how `ExactMatch` exposes its `rules`
+   (with `settings` as the singleton beside it, `exact_match.cc`), and the
+   transaction engine applies map operations per key. A module that exposes
+   **one session's rule lists as one key's value** -- a `PdrMatch`-shaped
+   module, keyed by session or by (domain, session), singleton for its own
+   settings -- makes a session change one upsert, O(that session's rules), which
+   is the transaction unit the rest of this design assumes. Until it exists the
+   firewall path stays a lab-scale path. The general lesson is worth keeping:
+   a whole-policy write is O(all rules) whatever the structure behind it, so any
+   resource whose value is "every session's rules" has this problem -- the
+   firewall path is just the one that got written first, and it is why to check
+   every new resource for the shape.
+3. **The URR report loop's read path.** `upfd` calls `Compiler.EvaluateAll` once
+   per `-urr-interval` tick (`cmd/upfd/main.go`), which walks every session, and
+   each session's `Evaluate` makes its **own** `reader.RuleCounts` RPC per
+   counter module (`internal/session/report.go`). At 1M sessions that is one to
+   two million gRPC round trips per tick, one after another, so a tick lasts
+   minutes -- longer than any sensible interval. The cost is the read path, not
+   the loop, and the fix is **one bulk, paged read per counter module per tick**
+   covering all sessions, evaluated in memory afterwards: one or two round trips
+   instead of one to two million. This tree needs that. Beside it, as the
+   design-level improvement that removes the per-tick O(all sessions) read
+   entirely, the counter module could report threshold crossings itself (a
+   dataplane that flags "this rule crossed X"), and the tick would read only what
+   was flagged. "Incremental evaluation" is not that fix and does not fit the
+   code: a session cannot be skipped for a volume threshold or a quota without
+   reading its counters first, so the information that would justify skipping
+   arrives only after the read.
 
 Time is measured at scale where memory is not: the masked table looks up 32
 keys in 556 ns at 10^6 rules with one mask tuple, 1,716 ns with four and
