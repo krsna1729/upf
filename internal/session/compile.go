@@ -2595,18 +2595,21 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 }
 
 // qfiIE reads a QFI IE (TS 29.244 8.2.89): the six-bit QoS Flow Identifier a
-// PDI or a QER names, one of 1..63. 0 is not a QFI, and the IE's spare bits
-// make any byte above 63 a flow no packet carries -- a rule keyed on one would
-// match nothing at all, and the session would stand while its uplink
-// blackholed -- so both are refused with the cause the SMF can fix rather than
-// carried into a key.
+// PDI or a QER names. The spec's value range is 0..63 (TS 38.415 5.5.3.3, to
+// which 8.2.89 refers); this UP takes 1..63, because the decap writes 0 into
+// the `qfi` attribute for a packet with no PDU Session Container, so a rule
+// keyed on 0 could not be told from "no container" -- a limit of this
+// implementation, not of the spec. A byte above 63 is a flow no packet
+// carries: a rule keyed on one would match nothing, and the session would
+// stand while its uplink blackholed. Both are refused with the cause the SMF
+// can fix rather than carried into a key.
 func qfiIE(c *ie.IE, what string) (uint8, error) {
 	v, err := c.QFI()
 	if err != nil {
 		return 0, fmt.Errorf("QFI: %w", err)
 	}
 	if v == 0 || v > 63 {
-		return 0, fmt.Errorf("%w: %s QFI is %d, and a QFI is one of 1..63 (8.2.89)",
+		return 0, fmt.Errorf("%w: %s QFI is %d; this UP takes 1..63 (the spec's range is 0..63, and 0 is the decap's \"no container\")",
 			errNotExpressible, what, v)
 	}
 	return v, nil
