@@ -48,6 +48,11 @@ const (
 	// 5.3.2 and 8.2.25: octet 6, bit 1 of the UP Function Features), set only
 	// where the graph carries one out (upfd -end-marker).
 	EMPU = 0x01
+	// MNOP is measurement of the number of packets (TS 29.244 8.2.25: octet 7,
+	// bit 5), advertised where the session layer runs: every usage report
+	// carries the packet counts, and a URR's Measurement Information MNOP flag
+	// asks for what the counters already hold.
+	MNOP = 0x10
 )
 
 // Liveness parameters, as in common PFCP practice: ask after 10 s of silence,

@@ -305,6 +305,9 @@ func run() error {
 		// association answer promising an F-TEID it cannot allocate would be a
 		// claim nothing behind it honours.
 		cfg.UPFunctionFeatures[0] = n4.FTUP
+		// MNOP (8.2.25 octet 7, bit 5): the session layer's reports carry the
+		// packet counts, so the feature is as real as the layer itself.
+		cfg.UPFunctionFeatures[2] |= n4.MNOP
 		if graph.EndMarker != "" {
 			// EMPU (TS 29.244 5.3.2, 8.2.25 octet 6 bit 1): this UPF
 			// constructs End Marker packets, and says so only where the graph

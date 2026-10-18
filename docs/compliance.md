@@ -131,7 +131,7 @@ whose bit is on with nothing behind it is the kind of claim
 |---|---|
 | our own stand-in SMF (`cmd/n4bench` + `internal/n4sim`) | in: `ci/n4-path.sh` (a session carries packets), `ci/bench-n4.sh` (the envelope) |
 | open5gs SMF | not run |
-| free5GC SMF | not run |
+| free5GC SMF v4.3.0 (published images, `ci/interop/run.sh`) | **N4 in, no traffic**: on `ccf667c` the association, a PDU session establishment, its modification and its deletion are all accepted, and the deletion response carries one TERMR usage report per URR (capture `n4.txt`, label `fixes-ccf667c`; the volume and duration measurements are zero because no packet crossed the dataplane). No Session Report Request arrived in the 15 s hold, so a periodic or threshold report is still not seen by a real SMF. One run, one SMF configuration (`docs/interop.md`) |
 | open5gs/free5GC gNB + UE (PacketRusher) | not run (needs the bound N3/N6 ports and a NIC) |
 
 Every row above that says "not implemented" or "not read" is a *deployment*
@@ -298,8 +298,10 @@ fine" where the custom path simply cannot take the rule.
 
 (Gap 1 — URR — is closed on our side as of 2026-10-17: the counters, the
 decision and the report are in and tested, and gap 2 below is what the SMF
-sees next. Its interop half is not: no real SMF has accepted a report yet —
-see "Interop".)
+sees next. Its interop half is partly in: free5GC completed the release that
+answered with termination reports in the Session Deletion Response (2026-10-18,
+`ci/interop/run.sh`; that it read them is not shown); a periodic or threshold
+Session Report Request has not been seen by a real SMF — see "Interop".)
 
 (Gap 7 — FTUP's CHID — closed on 2026-10-17: the compiler reads the F-TEID's
 CH and CHID flags, the session keeps one F-TEID per CHOOSE ID, and `upfd`
@@ -346,7 +348,7 @@ run against the compiler; not kept, since each one would fail).
 | DDN is a poll at `-urr-interval` | NOCP: notify on "the first downlink packet being buffered"; no latency bound in 5GC (the DDN Delay is EPC-only, 5.2.4.2) | a design deviation, bounded by the interval, not a clause violation |
 | echo untested in the custom graph | echo is TEID 0 behind the TEID table's default gate, upstream of the matcher (`deploy/custom-pdrmatch.yaml`) | profile-independent by construction; no custom arm shows it |
 | QER MBR "works" | MBR "shall be enforced" | the counters show enforcement (the router saw 6,377 of 13.3M packets the module emitted) but **no test asserts a rate**, so row 5 stays partial |
-| Measurement Information flags refused | 8.2.68: MBQE (measure before QoS enforcement), INAM (inactive: pause measuring), RADI (reduced application detection info), ISTM (start time metering immediately), MNOP (measure number of packets) | per flag: **MBQE** needs a counter before the meter, which no graph has -- refusal is right; **RADI** is application detection, not built -- refusal is right; **MNOP** (the counters already hold packets; Open5GS declares it) and **ISTM** (control-side) could be honoured cheaply; **INAM** needs the evaluator to skip a paused URR. Refusing all five is conservative, not required |
+| Measurement Information flags | 8.2.68: MBQE (measure before QoS enforcement), INAM (inactive: pause measuring), RADI (reduced application detection info), ISTM (start time metering immediately), MNOP (measure number of packets) | per flag, as `parseURR` has it since `ccf667c`: **MNOP** and **ISTM** accepted (the counters already hold packets and the report always carries them; ISTM is control-side), and MNOP is advertised in the UP Function Features (octet 7, bit 5); **MBQE accepted as a stated deviation**: the volume counter sits after the meter, so for a flow the meter throttles the reported usage is below what arrived -- an SMF that asked for "before QoS enforcement" is told yes and gets the after-enforcement figure. It is accepted because free5GC v4.3.0 sends MBQE and MNOP together (`0x11`, capture `n4.txt`) and refusing it refused every session; **INAM** (needs the evaluator to skip a paused URR) and **RADI** (application detection, not built) stay refused with cause 73 |
 | the QFI arm cannot tell a fall-through from a match | | stands (the QFI 5 rule and the QFI-less rule share a FAR) |
 | `ci/session-report.sh` "a real SMF" | | it is a Go stand-in; wording corrected in the URR row |
 

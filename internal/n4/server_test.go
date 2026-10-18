@@ -262,6 +262,21 @@ func TestAConfiguredFeatureIsAdvertised(t *testing.T) {
 	}
 }
 
+func TestTheMeasurementOfPacketsFeatureIsAdvertisedAtItsBit(t *testing.T) {
+	// MNOP is octet 7, bit 5 (8.2.25): the library's reader proves the
+	// position, and the neighbouring bits of the octet stay clear.
+	_, addr := startServer(t, n4.Config{UPFunctionFeatures: [4]uint8{0, 0, n4.MNOP}})
+	conn := connect(t, addr)
+	setup := associate(t, conn, 5)
+
+	if !setup.UPFunctionFeatures.HasMNOP() {
+		t.Error("a node configured with MNOP does not advertise it")
+	}
+	if setup.UPFunctionFeatures.HasUEIP() || setup.UPFunctionFeatures.HasSSET() {
+		t.Error("a neighbouring bit of octet 7 is advertised too")
+	}
+}
+
 func TestTheEndMarkerFeatureIsAdvertisedWhereTheGraphTakesOne(t *testing.T) {
 	// EMPU (5.3.2, 8.2.25) is set only where the graph carries an End Marker
 	// out: cmd/upfd sets it with -end-marker. The library's reader is what
