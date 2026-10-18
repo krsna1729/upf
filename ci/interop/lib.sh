@@ -40,6 +40,45 @@ CERT_URL=https://raw.githubusercontent.com/free5gc/free5gc-compose/master/cert
 IMSI=${IMSI:-imsi-208930000000001}
 PLMN=${PLMN:-20893}
 
+# DATAPLANE=1: real packets through bessd. Everything below is fixed -- names,
+# addresses, MACs -- so a run is the same run every time, and every piece is a
+# namespace or a container this environment creates and removes:
+#
+#   gNB container  10.77.88.140 (MAC fixed)  --docker bridge-->  veth upfi-n3b | upfi-n3 = bessd's N3 port
+#   bessd (host)   N3 10.77.88.2, N6 port upfi-n6  <--veth-->  eth0 in netns upf-interop-dn = the data network 10.99.0.1
+#
+# The UPF's N3 address is not the bridge's (.1: that is the host's, and N4's):
+# it is .2, answered by no kernel, which is why the gNB container carries a
+# permanent neighbour entry for it. The data network answers the UE's pool
+# (10.60.0.0/16) through a gateway whose MAC is the UPF's N6 port.
+DATAPLANE=${DATAPLANE:-}
+N3_IP=$SUBNET_PREFIX.2
+GNB_IP=$SUBNET_PREFIX.20
+GNB_MAC=02:42:0a:4d:58:14
+N3_MAC=02:7f:00:00:03:01
+N6_MAC=02:7f:00:00:06:01
+DN_MAC=02:7f:00:00:06:02
+DN_IP=10.99.0.1
+DN_NET=10.99.0.0/24
+DN_GW=10.99.0.254
+UE_POOL=10.60.0.0/16
+DN_NS=$PREFIX-dn
+IF_N3=upfi-n3    # bessd's N3 port (host side of the veth)
+IF_N3B=upfi-n3b  # its peer, a port of the docker bridge
+IF_N6=upfi-n6    # bessd's N6 port; its peer is eth0 inside $DN_NS
+
+BESSCTL=$STAGE/bin/bessctl
+export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+
+# dp_pkts <module>: packets the module sent out, from the daemon's own metrics.
+# The graph's counting modules (cnt_ul, cnt_dl) are what a URR report is built
+# from, so their movement is the dataplane proof the traffic stage reads.
+dp_pkts() {
+  "$BESSCTL" -s "127.0.0.1:$(cat "$STATE/bess_port")" metrics 2>/dev/null |
+    grep bess_gate_packets_total | grep "module=\"$1\"" | grep 'direction="out"' |
+    awk '{s += $NF} END {print s + 0}'
+}
+
 # Go: the mise toolchain the repo is built with, unless GO says otherwise.
 for d in "$HOME"/.local/share/mise/installs/go/1.27.2/bin; do [ -d "$d" ] && PATH=$d:$PATH; done
 GO=${GO:-go}

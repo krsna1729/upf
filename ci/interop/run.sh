@@ -66,6 +66,31 @@ STAGE_REACHED=b
 log "the PDU session is established; waiting 15 s (SMF follow-up, usage reports)"
 sleep 15
 
+# --- b2: packets through the dataplane (DATAPLANE=1) -----------------------
+# The session is up and the SMF's URRs are live (period 10 s, threshold 1000
+# bytes by default): ICMP echo from the UE's tunnel interface to the data
+# network crosses N3 (GTP-U, decap), the uplink rule, the counters and N6, and
+# the reply crosses the same chain the other way. What is checked: the echo
+# comes back, and the UPF's own counting modules saw the packets -- the counters
+# a URR report is built from.
+if [ -n "$DATAPLANE" ]; then
+  log "stage b2: packets through bessd (UE -> data network)"
+  ul0=$(dp_pkts cnt_ul); dl0=$(dp_pkts cnt_dl)
+  "$D/ue.sh" traffic 20 >"$LOGS/ping.out" 2>&1 || true
+  ul1=$(dp_pkts cnt_ul); dl1=$(dp_pkts cnt_dl)
+  loss=$(grep -o '[0-9]*% packet loss' "$LOGS/ping.out" | tail -1 | tr -dc '0-9')
+  log "ping: loss=${loss:-?}%, cnt_ul +$((ul1 - ul0)) packets, cnt_dl +$((dl1 - dl0)) packets"
+  if [ "${loss:-100}" != 0 ]; then
+    log "stage b2 FAILED: the echo did not come back ($(tail -3 "$LOGS/ping.out" | tr '\n' ' '))"
+    RC=1; finish
+  fi
+  if [ $((ul1 - ul0)) -le 0 ] || [ $((dl1 - dl0)) -le 0 ]; then
+    log "stage b2 FAILED: the UPF's counters did not move (uplink $((ul1 - ul0)), downlink $((dl1 - dl0)))"
+    RC=1; finish
+  fi
+  STAGE_REACHED=b2
+fi
+
 # --- c: release -----------------------------------------------------------
 log "stage c: PDU session release"
 "$D/ue.sh" release || true

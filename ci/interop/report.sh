@@ -26,6 +26,17 @@ if [ -s "$IX/n4-upfd.pcap" ]; then   # SHIM=1: upfd's own side, before the repai
   (cd "$ROOT" && $GO run ./ci/interop/pfcpdump -port 0 "$OUT/n4-upfd.pcap" >"$OUT/n4-upfd.txt")
 fi
 cp "$LOGS/n4shim.log" "$OUT/n4shim.log" 2>/dev/null || true
+# The dataplane arm's own evidence: every module's gate counters as they stand
+# (the counting modules are what a URR report is built from), the active
+# pipeline, and the UE's echo output.
+if [ -s "$STATE/bess_port" ]; then
+  "$BESSCTL" -s "127.0.0.1:$(cat "$STATE/bess_port")" metrics 2>/dev/null >"$OUT/bessd.metrics" || true
+  "$BESSCTL" -s "127.0.0.1:$(cat "$STATE/bess_port")" get 2>/dev/null >"$OUT/bessd.pipeline" || true
+fi
+cp "$LOGS/ping.out" "$OUT/ping.out" 2>/dev/null || true
+if ip netns list 2>/dev/null | grep -q "^$DN_NS\b"; then
+  sudo -n ip netns exec "$DN_NS" ip -s link show eth0 >"$OUT/dn-eth0.txt" 2>/dev/null || true
+fi
 # The one-line-per-message view of the PFCP exchange, in order.
 [ -s "$OUT/n4.txt" ] && grep -E '^#[0-9]+ |^  [A-Z][A-Za-z ]+ seq=|^    Cause' "$OUT/n4.txt" >"$OUT/n4.summary" || true
 log "evidence in $OUT"

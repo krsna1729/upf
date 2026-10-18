@@ -60,8 +60,12 @@ SMF_NODE_ID=$SMF_IP
 # Measurement Information; URR_PERIOD=0 URR_THRESHOLD=0 makes it create none.
 URR_PERIOD=${URR_PERIOD:-10}
 URR_THRESHOLD=${URR_THRESHOLD:-1000}
+# The N3 address the SMF hands the gNB: the UPF's own, which with real packets
+# is the N3 port's address (.2), not the bridge's (.1, the host's, and N4's).
+UPF_N3=$UPF_IP
+[ -n "$DATAPLANE" ] && UPF_N3=$N3_IP
 for f in "$ROOT"/deploy/interop/free5gc/*.yaml; do
-  sed -e "s|@SMF_IP@|$SMF_IP|g" -e "s|@UPF_IP@|$UPF_IP|g" -e "s|@SMF_NODE_ID@|$SMF_NODE_ID|g" \
+  sed -e "s|@SMF_IP@|$SMF_IP|g" -e "s|@UPF_IP@|$UPF_IP|g" -e "s|@UPF_N3_IP@|$UPF_N3|g" -e "s|@SMF_NODE_ID@|$SMF_NODE_ID|g" \
     -e "s|@URR_PERIOD@|$URR_PERIOD|g" -e "s|@URR_THRESHOLD@|$URR_THRESHOLD|g" "$f" >"$CONF/$(basename "$f")"
 done
 
@@ -86,7 +90,22 @@ if alive "$STATE/bessd.pid"; then
 else
   : >"$LOGS/bessd.log"
   echo "$BESS_PORT" >"$STATE/bess_port"
-  detach bessd "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$STATE/bessd-own.pid" -modules="$PLUG" -f
+  if [ -n "$DATAPLANE" ]; then
+    # Real ports: the veths, the graph wired to them, and bessd as root (an
+    # AF_PACKET socket needs it; the packets and the N4 side stay the same).
+    "$(dirname "${BASH_SOURCE[0]}")/net.sh" up
+    case "${PROFILE:-generic}" in
+      custom) DEPLOYED=$ROOT/deploy/custom-pdrmatch.yaml ;;
+      *)      DEPLOYED=$ROOT/deploy/upf.yaml ;;
+    esac
+    python3 "$(dirname "${BASH_SOURCE[0]}")/graph.py" "$DEPLOYED" "$STATE/graph.yaml" "$IF_N3" "$IF_N6" \
+      "$N3_IP" "$N6_MAC" "$DN_MAC" "$STATE/end-marker.sock" || die "building the dataplane graph failed"
+    GRAPH=$STATE/graph.yaml
+    detach bessd sudo -n -E env "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
+      "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$STATE/bessd-own.pid" -modules="$PLUG" -f
+  else
+    detach bessd "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$STATE/bessd-own.pid" -modules="$PLUG" -f
+  fi
   for _ in $(seq 1 60); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 0.5; done
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 || { cat "$LOGS/bessd.log" >&2; die "bessd did not come up"; }
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null
@@ -113,8 +132,19 @@ else
   fi
   : >"$LOGS/upfd.log"
   echo "${N4_UPFD##*:}" >"$STATE/n4_backend_port"
-  detach upfd "$BIN/upfd" -n4 "$N4_UPFD" -node-id "$UPF_IP" -bess "127.0.0.1:$BESS_PORT" \
-    -n3-addr "$UPF_IP" -log-level "${UPFD_LOG_LEVEL:-debug}"
+  UPFD_ARGS=(-n4 "$N4_UPFD" -node-id "$UPF_IP" -bess "127.0.0.1:$BESS_PORT" -n3-addr "$UPF_N3"
+    -log-level "${UPFD_LOG_LEVEL:-debug}")
+  # The evaluation loop: without it no URR is ever read, so a real SMF's URRs
+  # (the stock config's period 10 s and volume threshold 1000 bytes) are never
+  # reported on, and even the Session Deletion Response's termination reports
+  # carry zero -- the first reading of a URR is its baseline, not its usage
+  # (report.go). One second is well inside the SMF's own 10 s period.
+  UPFD_ARGS+=(-urr-interval "${URR_INTERVAL:-1s}")
+  # With real packets the downlink's outer Ethernet header is the N3 port's MAC
+  # to the gNB container's (the one next hop upfd knows); both are fixed.
+  [ -n "$DATAPLANE" ] && UPFD_ARGS+=(-n3-mac "$N3_MAC" -peer-mac "$GNB_MAC")
+  [ -n "${PROFILE:-}" ] && UPFD_ARGS+=(-profile "$PROFILE")
+  detach upfd "$BIN/upfd" "${UPFD_ARGS[@]}"
   wait_log "$LOGS/upfd.log" "n4 listening" 10 || { cat "$LOGS/upfd.log" >&2; die "upfd did not start"; }
   log "upfd up: N4 $N4_UPFD, node-id $UPF_IP, bess 127.0.0.1:$BESS_PORT"
 fi

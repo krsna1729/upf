@@ -15,6 +15,8 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 FAIL=0
+BESSCTL=$STAGE/bin/bessctl
+export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
 for cap in n4 n4-upfd; do
   if [ -s "$STATE/$cap.pid" ]; then
@@ -55,6 +57,12 @@ fi
 
 if [ -s "$STATE/bessd.pid" ]; then
   pid=$(cat "$STATE/bessd.pid")
+  # A bessd started as root (DATAPLANE) cannot be signalled through its sudo
+  # wrapper; its own shutdown command ends it, and the wrapper's status is the
+  # daemon's.
+  if [ -s "$STATE/graph.yaml" ] && [ -s "$STATE/bess_port" ]; then
+    "$BESSCTL" -s "127.0.0.1:$(cat "$STATE/bess_port")" shutdown >/dev/null 2>&1 || true
+  fi
   rc=$(stop_detached bessd)
   if [ "$rc" = 0 ]; then
     log "ok: bessd shut down cleanly"
@@ -64,7 +72,11 @@ if [ -s "$STATE/bessd.pid" ]; then
   fi
   rm -f "$STATE/bess_port" "$STATE/bessd-own.pid"
 fi
-rm -f "$STATE/n4_backend_port"
+rm -f "$STATE/n4_backend_port" "$STATE/graph.yaml" "$STATE/end-marker.sock"
+# The veths and the data network's namespace (a no-op when DATAPLANE never ran).
+if [ -n "$DATAPLANE" ] || ip netns list 2>/dev/null | grep -q "^$DN_NS\b"; then
+  "$(dirname "${BASH_SOURCE[0]}")/net.sh" down && log "net: removed $IF_N3, $IF_N6 and $DN_NS"
+fi
 
 [ "$FAIL" = 0 ] && log "down"
 exit "$FAIL"
