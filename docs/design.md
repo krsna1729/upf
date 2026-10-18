@@ -440,13 +440,21 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   resources back with `bess.Client.Contents`, erases exactly the entries it
   found, and leaves the graph's own resources alone) — or by a `bessd` restart,
   and by the SMF re-establishing, which its own path management forces once the
-  Recovery Time Stamp changes. The chunking is a requirement, not an
-  implementation detail: today's `Sweep` reads every table back in one
-  `Contents` call and erases what it read in **one** transaction, which is fine
-  at lab size and cannot be at the 1M-session target — millions of entries meet
-  gRPC's message size limit, and millions of Changes meet the daemon's
-  transaction memory ("Session scale" below, item 1 of the control plane's
-  O(total sessions) operations). What is still missing is the replay path that
+  Recovery Time Stamp changes. The chunking is implemented, and the readback is
+  not: `Sweep` erases in transactions of at most 1000 changes each
+  (`sweepBatch`), in sequence, and stops at the first the daemon refuses -- a
+  partial sweep leaves the tables half-empty, so `upfd` treats any sweep error
+  as fatal rather than serving PFCP beside one (a few hundred entries are still
+  one transaction). The readback stays one `Contents` call, because the daemon
+  exposes no paged or streamed read of a table's contents: its
+  `GetPipelineRequest` carries a resource list and no cursor, offset or chunk
+  size, and a response above the 64 MiB message limit is `RESOURCE_EXHAUSTED`
+  with "name fewer resources" -- naming fewer resources pages *between* tables,
+  which cannot split the one table that holds a session each way. So a sweep at
+  1M sessions reads millions of entries in one message and meets that limit; the
+  erase is bounded regardless, and the paged read is the daemon's to grow
+  ("Session scale" below, item 1 of the control plane's O(total sessions)
+  operations). What is still missing is the replay path that
   would keep the sessions across a restart instead of emptying them: Wall 4
   below is that work.
 - Either restart must be a *reapply*, never a trust fall: the controller
@@ -720,19 +728,20 @@ per table (`number_tbl8s`, 256 groups by default) and used for the prefixes
 longer than /24 that fall in a /24's entry. A per-session LPM is therefore
 impossible at 1M sessions (64 MiB each); a single table holding every session's
 prefixes is not, which is what this design already assumes. But the fixed cost
-means our *per-domain* tables multiply it — three route domains is three tables,
-~192 MiB before any group — so the number of LPM instances has to stay a
-handful, which is an argument for domains being few and long-lived rather than
-per-tenant. The group memory depends on *clustering* rather than on the entry
-count: 1M /32s spread over 1M distinct /24s is ~1M groups (~1 GB by the same
-1 KiB-per-group arithmetic), while the same 1M inside a few shared /24s is a
-handful of groups — so the deployment's address plan matters as much as the
-session count. v6 is the same shape, not a cheaper one: `rte_lpm6`'s `tbl24` is
-also `1 << 24` entries of a 4-byte `struct rte_lpm6_tbl_entry`
-(`lib/lpm/rte_lpm6.c`), its `tbl8` groups are the same 1 KiB each, and it adds a
-`rules_tbl` hash over the rules. None of these numbers is settled: Main is
-measuring the fixed allocation and a realistic v4 distribution, and v6's group
-count.
+means our *per-domain* tables multiply it, and **both families pay it**: a
+dual-stack domain is two tables, so three such domains are ~384 MiB before a
+single group (`rte_lpm` and `rte_lpm6` each costing 64 MiB fixed per table) —
+which is why the number of LPM instances has to stay a handful, and why domains
+want to be few and long-lived rather than per-tenant. The group memory depends
+on *clustering* rather than on the entry count: 1M /32s spread over 1M distinct
+/24s is ~1M groups (~1 GB by the same 1 KiB-per-group arithmetic), while the
+same 1M inside a few shared /24s is a handful of groups — so the deployment's
+address plan matters as much as the session count. v6 is the same shape, not a
+cheaper one: `rte_lpm6`'s `tbl24` is also `1 << 24` entries of a 4-byte
+`struct rte_lpm6_tbl_entry` (`lib/lpm/rte_lpm6.c`), its `tbl8` groups are the
+same 1 KiB each, and it adds a `rules_tbl` hash over the rules. None of these
+numbers is settled: Main is measuring the fixed allocation and a realistic v4
+distribution, and v6's group count.
 
 **The three pieces have one owner each.** The keyed write is ours to write —
 the map-resource module above, `PdrMatch`-shaped, one key per session,

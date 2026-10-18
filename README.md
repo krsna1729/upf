@@ -156,11 +156,13 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   packet store holds the packets keyed by the rule's ActionId, the first one is
   reported to the SMF as a Downlink Data Report on the reporting tick, and the
   instruction that moves the path releases what was held into the action path.
-  What is not per-BAR yet is the SMF's own numbers (8.2.29's duration, 8.2.30's
-  count): they are read and modelled, and the store's caps and timeout are the
-  graph's until BESS's per-flow `flows` resource lands. The DDN trigger is a
-  poll of the branch's counters at `-urr-interval`, so its latency is up to one
-  tick and a deployment that wants DDN must set that interval. `ci/buffer-path.sh`
+  The SMF's own numbers are the flow's, not the graph's: 8.2.29's duration and
+  8.2.30's count reach the store's live per-flow `flows` entry, so a buffering
+  flow's cap and its expiry are per-BAR; both are measured — the scorecard's
+  block-7 rows and compliance's BUFF row carry the evidence, including the arm's
+  default-stage negative. The DDN trigger is a poll of the branch's counters at
+  `-urr-interval`, so its latency is up to one tick and a deployment that wants
+  DDN must set that interval. `ci/buffer-path.sh`
   proves the whole path against a live daemon (it needs a `bessd` built with
   BESS's `packet_store` key_attrs change, which is why its graph is
   `deploy/buffer-path.yaml` rather than the shared one).
