@@ -193,6 +193,16 @@ survey found no absence.
 **Sub-features.** establishment; modification; deletion.
 
 **Ours.** `ci/session-live.sh`; `TestEstablishCompilesTheSessionIntoOneTransaction`.
+Since 2026-10-18 (commit after `e04ab62`): the Session Deletion Response carries
+each URR's last window as a Usage Report, trigger TERMR (TS 29.244 5.2.2.3.1;
+`TestTheDeletionResponseCarriesTheLastWindowOfEachURR`, and the live
+`TestLiveUsageReportReachesTheSMF`, which deletes its session and reads the
+report over PFCP); Query URR, QAURR and Remove URR answer in the Modification
+Response (`TestQueryURRReportsTheUsageSinceTheLastReportAndOpensTheNextWindow`,
+`TestTheQAURRFlagQueriesEveryURR`,
+`TestRemovingAURRReportsItsLastWindowAsATerminationReport`); a modification the
+merge refuses leaves the session as it was
+(`TestARefusedModificationLeavesTheSessionAsItWas`).
 
 **Field.** in every project.
 
@@ -226,7 +236,15 @@ port ranges; Network Instance and QFI.
 `TestAPDINamingAQFIKeysTheRuleOnIt`, `TestAQERsQFIReachesTheTunnelRecord`,
 `TestPortRangeIsRefusedNotMatchedTooWidely`, `TestANonIPv4PDIIsRefusedNotWidened`,
 `ci/smoke-gtpu.sh` (a G-PDU carrying a PDU Session Container, decap reading QFI 5
-into metadata).
+into metadata). Since 2026-10-18: the uplink PDR reads the SDF filter swapped, as
+5.2.1A.2A has it (`TestAnUplinkPDRReadsTheDownlinkFormFilterSwapped`); several
+SDF filters and several QFIs in one PDI are several rules
+(`TestSeveralSDFFiltersAreSeveralRules`, `TestSeveralQFIsAreSeveralRules`,
+`TestFiltersAndQFIsMultiplyAndModificationErasesWhatItDrops`); a bidirectional
+filter named by SDF Filter ID resolves (`TestAnUplinkPDRThatNamesABidirectionalFilterByIDGetsItsFlowDescription`);
+match IEs this UP does not carry are refused, not dropped
+(`TestAMatchTheUPDoesNotImplementIsRefusedNotDropped`). These are unit-level;
+the PdrMatch arm exercises the swapped uplink filter live.
 
 **Why 80 and not 100.** The uncredited sub-feature is the "SDF + ranges" pair:
 the SDF half is in (prefixes and single ports, with the live arm), the **range**

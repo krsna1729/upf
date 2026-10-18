@@ -3957,12 +3957,13 @@ func TestAReportIsAUsageReportTheSMFCanRead(t *testing.T) {
 	if seqn, err := byType[ie.URSEQN].URSEQN(); err != nil || seqn != 3 {
 		t.Errorf("the usage report carries UR-SEQN %d (%v), want 3", seqn, err)
 	}
-	// The trigger is the bit the SMF asked for (8.2.19, octet 6 bit 1). The
-	// IE's own payload is read, as the compiler reads a URR's triggers: the
-	// library's accessor wants two octets, and a quota's trigger is one.
-	flags := byType[ie.UsageReportTrigger].Payload
-	if len(flags) != 1 || flags[0]&trigVolQuota == 0 {
-		t.Errorf("the usage report's trigger is %#v, want VOLQU in the first octet", flags)
+	// The trigger is the report's own bit (8.2.41, Figure 8.2.41-1): VOLQU is
+	// octet 6 bit 1, and octet 5 -- where PERIO, VOLTH and the rest sit --
+	// stays empty rather than being left out, which would put VOLQU in PERIO's
+	// place. The library's accessor reads the IE, as an SMF built on it does.
+	flags, err := byType[ie.UsageReportTrigger].UsageReportTrigger()
+	if err != nil || len(flags) < 2 || flags[0] != 0 || flags[1]&0x01 == 0 || flags[1]&^0x01 != 0 {
+		t.Errorf("the usage report's trigger is %#v (%v), want only VOLQU: octet 5 empty, octet 6 bit 1", flags, err)
 	}
 	vol, err := byType[ie.VolumeMeasurement].VolumeMeasurement()
 	if err != nil {

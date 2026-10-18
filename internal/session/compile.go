@@ -285,6 +285,13 @@ const (
 	trigLiusa     = 0x80 // LIUSA (octet 5 bit 8)
 	trigVolQuota  = 0x01 // VOLQU (octet 6 bit 1)
 	trigTimeQuota = 0x02 // TIMQU (octet 6 bit 2)
+	// trigTermination is TERMR in the Usage Report Trigger (8.2.41, octet 6
+	// bit 4). It is a *report's* trigger, not one an SMF can ask for, so
+	// triggersImplemented does not carry it.
+	trigTermination = 0x08
+	// trigImmediate is IMMER in the Usage Report Trigger (octet 5 bit 8): a
+	// report the CP function asked for with a Query URR.
+	trigImmediate = 0x80
 )
 
 // triggerName names a bit the UP function does not implement, for the refusal.
@@ -477,6 +484,22 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	}
 	removePDRs, removeFARs, removeBARs, removeURRs := parseRemovals(ies)
 
+	// The usage reports this request owes (TS 29.244 5.2.2.3, 7.5.5.2): what a
+	// Query URR or the QAURR flag asks for -- trigger IMMER -- and what a URR
+	// the request removes measured since its last report -- TERMR. Both are
+	// read before the merge, while the rules that count them still exist. A
+	// replayed journal reports nothing: the counters it would read are not the
+	// ones the original request saw.
+	var queried, removed []urrWindow
+	reportAt := time.Now()
+	if !c.restoring {
+		var err error
+		if queried, removed, err = c.requestedWindows(context.Background(), req, s, removeURRs, reportAt); err != nil {
+			c.log.Warn("session: cannot report the usage the modification asked for", "seid", seid, "error", err)
+			return modifyResponse(req, hdr, ie.CauseRuleCreationModificationFailure, nil)
+		}
+	}
+
 	// TS 29.244 5.3.2: a modification that carries FAR(s) with a new
 	// downstream F-TEID and the SNDEM flag asks this UPF to construct and send
 	// End Marker packets on the tunnels it is leaving. The old tunnels are
@@ -507,8 +530,16 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		}
 	}
 
-	// merge takes the lock itself.
+	// merge takes the lock itself. A merge that fails validation goes back to
+	// the model it started from: left half-applied, it would fail every later
+	// message of the session the same way.
+	c.mu.Lock()
+	before := s.snapshot()
+	c.mu.Unlock()
 	if err := c.merge(s, pdrs, fars, bars, qers, urrs, removePDRs, removeFARs, removeBARs, removeURRs); err != nil {
+		c.mu.Lock()
+		c.rollback(s, before)
+		c.mu.Unlock()
 		c.log.Warn("session: cannot carry the modification request", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
@@ -594,7 +625,13 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 
 	c.log.Info("session: modified", "seid", seid, "pdrs", len(s.PDRs), "changes", len(changes))
 	c.checkpoint(kindModify, s.LocalSEID, req)
-	return modifyResponse(req, hdr, ie.CauseRequestAccepted, created)
+	// The queried URRs' next window opens now that the SMF has what this one
+	// held; a request that failed above leaves it open, so the usage is
+	// reported by the next one.
+	c.advanceAfter(s, queried, reportAt)
+	usage := usageReports(ie.UsageReportWithinSessionModificationResponse, TriggerImmediate, queried)
+	usage = append(usage, usageReports(ie.UsageReportWithinSessionModificationResponse, TriggerTermination, removed)...)
+	return modifyResponse(req, hdr, ie.CauseRequestAccepted, created, usage...)
 }
 
 // Delete implements n4.SessionHandler.
@@ -633,6 +670,9 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	c.mu.Lock()
 	held := heldFlows(s)
 	c.mu.Unlock()
+	// What each URR measured since its last report goes in the answer
+	// (5.2.2.3.1): read now, while the rules that count it still exist.
+	usage := c.terminationReports(context.Background(), s, time.Now())
 	if err := c.remove(context.Background(), s); err != nil {
 		c.log.Warn("session: the dataplane refused the deletion", "seid", seid, "error", err)
 		return deleteResponse(req, hdr, causeOf(err))
@@ -642,7 +682,7 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	}
 	c.log.Info("session: deleted", "seid", seid)
 	c.checkpoint(kindDelete, seid, req)
-	return deleteResponse(req, hdr, ie.CauseRequestAccepted)
+	return deleteResponse(req, hdr, ie.CauseRequestAccepted, usage...)
 }
 
 // mergeBars folds a message's Create BAR / Update BAR parameters into the
@@ -804,26 +844,6 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			entry.enforcing = false
 		}
 	}
-	for _, id := range removeURRs {
-		if urrHeldByAPDR(s, id) {
-			// The URR measures the traffic of the PDRs that name it, and a
-			// report for a URR whose PDRs are still programmed would name a
-			// URR the SMF has removed. The CP function disassociates the PDRs
-			// first (an Update PDR that does not name the URR), which is the
-			// order a modification takes.
-			return fmt.Errorf("%w: the URR %d is still named by a PDR of the session",
-				errNotExpressible, id)
-		}
-		if urrLinkedByAnotherURR(s, id) {
-			// Another URR of the session still links to this one (8.2.55):
-			// removing it would leave that link dangling and the group's report
-			// short a URR. The SMF updates the linking URR first, the way it
-			// disassociates a PDR before removing the URR the PDR names.
-			return fmt.Errorf("%w: the URR %d is still linked by another URR of the session",
-				errNotExpressible, id)
-		}
-		delete(s.URRs, id)
-	}
 	for _, id := range removePDRs {
 		if old := s.PDRs[id]; old != nil {
 			// The records stay in the dataplane until the next compile erases
@@ -941,6 +961,26 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			s.stale = append(s.stale, old)
 		}
 		s.PDRs[p.id] = pdr
+	}
+	for _, id := range removeURRs {
+		if urrHeldByAPDR(s, id) {
+			// The URR measures the traffic of the PDRs that name it, and a
+			// report for a URR whose PDRs are still programmed would name a
+			// URR the SMF has removed. The CP function disassociates the PDRs
+			// first (an Update PDR that does not name the URR), which is the
+			// order a modification takes.
+			return fmt.Errorf("%w: the URR %d is still named by a PDR of the session",
+				errNotExpressible, id)
+		}
+		if urrLinkedByAnotherURR(s, id) {
+			// Another URR of the session still links to this one (8.2.55):
+			// removing it would leave that link dangling and the group's report
+			// short a URR. The SMF updates the linking URR first, the way it
+			// disassociates a PDR before removing the URR the PDR names.
+			return fmt.Errorf("%w: the URR %d is still linked by another URR of the session",
+				errNotExpressible, id)
+		}
+		delete(s.URRs, id)
 	}
 	if err := resolveSDFIDs(s); err != nil {
 		return err
@@ -2581,6 +2621,66 @@ func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []barReq, []qerReq, []urrReq
 }
 
 // parseRemovals reads the PDR, FAR, BAR and URR ids a modification removes.
+// requestedWindows is the windows of the URRs a modification asks the usage of:
+// the ones a Query URR IE names, or all of them for the QAURR flag, and the
+// ones the request removes (a URR "removed" that the session never held is the
+// merge's to refuse, not a report). A queried URR the session does not hold is
+// refused: an SMF that asks for the usage of a URR this UP lacks has the
+// wrong picture of the session. A URR both queried and removed is reported
+// once, as removed.
+func (c *Compiler) requestedWindows(ctx context.Context, req *message.SessionModificationRequest, s *Session,
+	removeURRs []uint32, now time.Time) (queried, removed []urrWindow, err error) {
+	var ask []uint32
+	for _, f := range modificationFlags(req) {
+		if f != nil && f.HasQAURR() {
+			ask = urrIDsInOrder(s)
+			break
+		}
+	}
+	if ask == nil {
+		for _, q := range req.QueryURR {
+			children, err := q.QueryURR()
+			if err != nil {
+				return nil, nil, fmt.Errorf("%w: Query URR: %v", errNotExpressible, err)
+			}
+			for _, child := range children {
+				if child.Type != ie.URRID {
+					continue
+				}
+				id, err := child.URRID()
+				if err != nil {
+					return nil, nil, fmt.Errorf("%w: Query URR: %v", errNotExpressible, err)
+				}
+				if s.URRs[id] == nil {
+					return nil, nil, fmt.Errorf("%w: Query URR names URR %d, which the session does not hold", errNotExpressible, id)
+				}
+				ask = append(ask, id)
+			}
+		}
+	}
+	ask = slices.DeleteFunc(ask, func(id uint32) bool { return slices.Contains(removeURRs, id) })
+	if len(ask) > 0 {
+		if queried, err = c.windowsOf(ctx, s, ask, now); err != nil {
+			return nil, nil, err
+		}
+	}
+	held := make([]uint32, 0, len(removeURRs))
+	for _, id := range removeURRs {
+		if s.URRs[id] != nil {
+			held = append(held, id)
+		}
+	}
+	if len(held) > 0 {
+		// The removal goes ahead whatever the counters say: the URR is going,
+		// and an unreadable one leaves the response without its report.
+		if removed, err = c.windowsOf(ctx, s, held, now); err != nil {
+			c.log.Warn("session: no termination usage report for a removed URR", "seid", s.LocalSEID, "error", err)
+			removed, err = nil, nil
+		}
+	}
+	return queried, removed, nil
+}
+
 func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint8, []uint32) {
 	var pdrs []uint16
 	var fars []uint32
@@ -3586,18 +3686,24 @@ func establishResponse(req *message.SessionEstablishmentRequest, cpSEID, local u
 // the SEID the request itself carried when there is no session any more (a
 // Session Context Not Found has nowhere else to read it from).
 func modifyResponse(req *message.SessionModificationRequest, cpSEID uint64,
-	cause uint8, created []*ie.IE) message.Message {
+	cause uint8, created []*ie.IE, usage ...*ie.IE) message.Message {
 	ies := []*ie.IE{ie.NewCause(cause)}
 	if cause == ie.CauseRequestAccepted {
 		ies = append(ies, created...)
+		ies = append(ies, usage...)
 	}
 	return message.NewSessionModificationResponse(0, 0, cpSEID, req.Sequence(), 0, ies...)
 }
 
 // deleteResponse answers a deletion, with the same rule for its SEID.
-func deleteResponse(req *message.SessionDeletionRequest, cpSEID uint64, cause uint8) message.Message {
-	return message.NewSessionDeletionResponse(0, 0, cpSEID, req.Sequence(), 0,
-		ie.NewCause(cause))
+//
+// The Usage Reports are the session's last window, one per URR (TS 29.244
+// 7.5.7.2): an answer that refuses the deletion carries none.
+func deleteResponse(req *message.SessionDeletionRequest, cpSEID uint64, cause uint8, usage ...*ie.IE) message.Message {
+	ies := make([]*ie.IE, 0, 1+len(usage))
+	ies = append(ies, ie.NewCause(cause))
+	ies = append(ies, usage...)
+	return message.NewSessionDeletionResponse(0, 0, cpSEID, req.Sequence(), 0, ies...)
 }
 
 // parseCause maps a request-reading failure to the cause the SMF sees: a

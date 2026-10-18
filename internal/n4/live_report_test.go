@@ -134,9 +134,9 @@ func TestLiveUsageReportReachesTheSMF(t *testing.T) {
 		t.Errorf("the report carries UR-SEQN %d (%v), want 0 for a URR's first report", seqn, err)
 	}
 	// The trigger is VOLQU: the reason this report exists is the quota.
-	flags := byType[ie.UsageReportTrigger].Payload
-	if len(flags) != 1 || flags[0]&0x01 == 0 {
-		t.Errorf("the report's trigger is %#v, want VOLQU (octet 6 bit 1)", flags)
+	flags, err := byType[ie.UsageReportTrigger].UsageReportTrigger()
+	if err != nil || len(flags) < 2 || flags[0] != 0 || flags[1] != 0x01 {
+		t.Errorf("the report's trigger is %#v (%v), want only VOLQU (octet 6 bit 1; Figure 8.2.41-1)", flags, err)
 	}
 	vol, err := byType[ie.VolumeMeasurement].VolumeMeasurement()
 	if err != nil {
@@ -154,4 +154,45 @@ func TestLiveUsageReportReachesTheSMF(t *testing.T) {
 	}
 	t.Logf("the report: URR %d, UR-SEQN 0, VOLQU, %d packets, %d octets (UL %d, DL %d)",
 		reportURRID, vol.TotalNumberOfPackets, vol.TotalVolume, vol.UplinkVolume, vol.DownlinkVolume)
+
+	// The session's end: the deletion's answer carries the URR's last window
+	// (TS 29.244 5.2.2.3.1), TERMR, under the next UR-SEQN. The quota stopped
+	// the traffic, so the window after the quota's report is empty -- what is
+	// checked is that the SMF is told, and which report it is.
+	up, err := resp.UPFSEID.FSEID()
+	if err != nil {
+		t.Fatalf("the response's UP F-SEID: %v", err)
+	}
+	sendMsg(t, conn, message.NewSessionDeletionRequest(0, 0, up.SEID, 3, 0))
+	del, ok := recvMsg(t, conn, 5*time.Second).(*message.SessionDeletionResponse)
+	if !ok {
+		t.Fatal("the deletion was not answered")
+	}
+	if cause, err := del.Cause.Cause(); err != nil || cause != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion was not accepted: cause=%d err=%v", cause, err)
+	}
+	if len(del.UsageReport) != 1 {
+		t.Fatalf("the deletion response carries %d usage reports, want one for URR %d", len(del.UsageReport), reportURRID)
+	}
+	if !del.UsageReport[0].HasTERMR() {
+		t.Error("the deletion's usage report is not a termination report")
+	}
+	last, err := del.UsageReport[0].UsageReport()
+	if err != nil {
+		t.Fatalf("the termination report's IEs: %v", err)
+	}
+	var termSeqn uint32 = 99
+	for _, child := range last {
+		switch child.Type {
+		case ie.URRID:
+			if id, _ := child.URRID(); id != reportURRID {
+				t.Errorf("the termination report names URR %d, want %d", id, reportURRID)
+			}
+		case ie.URSEQN:
+			termSeqn, _ = child.URSEQN()
+		}
+	}
+	if termSeqn != 1 {
+		t.Errorf("the termination report carries UR-SEQN %d, want 1 (the quota's report was 0)", termSeqn)
+	}
 }

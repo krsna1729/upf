@@ -87,6 +87,11 @@ const (
 	TriggerTimeThreshold
 	TriggerVolumeQuota
 	TriggerTimeQuota
+	// TriggerTermination is the report a deletion carries (TERMR, 8.2.41): the
+	// usage a URR measured since its last report, given with the session's end.
+	TriggerTermination
+	// TriggerImmediate is the report a Query URR or QAURR asks for (IMMER).
+	TriggerImmediate
 )
 
 // String names the trigger as a log line and a failure message do.
@@ -102,6 +107,10 @@ func (t Trigger) String() string {
 		return "volume quota"
 	case TriggerTimeQuota:
 		return "time quota"
+	case TriggerTermination:
+		return "termination"
+	case TriggerImmediate:
+		return "immediate"
 	}
 	return "unknown trigger"
 }
@@ -188,6 +197,10 @@ func (t Trigger) flags() (octet5, octet6 uint8) {
 		return 0, trigVolQuota
 	case TriggerTimeQuota:
 		return 0, trigTimeQuota
+	case TriggerTermination:
+		return 0, trigTermination
+	case TriggerImmediate:
+		return trigImmediate, 0
 	}
 	return 0, 0
 }
@@ -201,12 +214,12 @@ func (r Report) IEs() []*ie.IE {
 	// A usage report for the URR this report leads with, not an event report
 	// and not a downlink-data report: what the counters measured (8.2.18).
 	ies := []*ie.IE{ie.NewReportType(0, 0, 1, 0)}
-	ies = append(ies, usageReportIE(r.URRID, r.Seqn, r.Trigger, r.Up, r.Down, r.Duration, r.First, r.Last))
+	ies = append(ies, usageReportIE(ie.UsageReportWithinSessionReportRequest, r.URRID, r.Seqn, r.Trigger, r.Up, r.Down, r.Duration, r.First, r.Last))
 	// A linked group is reported whole: each of the rest is its own Usage
 	// Report IE, and every one of them carries this report's UR-SEQN -- the one
 	// sequence the group shares (8.2.71).
 	for _, g := range r.Linked {
-		ies = append(ies, usageReportIE(g.URRID, r.Seqn, r.Trigger, g.Up, g.Down, g.Duration, g.First, g.Last))
+		ies = append(ies, usageReportIE(ie.UsageReportWithinSessionReportRequest, g.URRID, r.Seqn, r.Trigger, g.Up, g.Down, g.Duration, g.First, g.Last))
 	}
 	return ies
 }
@@ -215,21 +228,16 @@ func (r Report) IEs() []*ie.IE {
 // the URR, the UR-SEQN it is reported under, the trigger, and the volume and
 // duration its window measured. Every Usage Report of one report shares that
 // report's UR-SEQN, which is what links a group's URRs to the SMF.
-func usageReportIE(urrID, seqn uint32, trigger Trigger, up, down Usage, duration time.Duration, first, last time.Time) *ie.IE {
+func usageReportIE(typ uint16, urrID, seqn uint32, trigger Trigger, up, down Usage, duration time.Duration, first, last time.Time) *ie.IE {
 	total := up.add(down)
 	octet5, octet6 := trigger.flags()
-	// The IE holds the octets it needs: a quota's trigger is in octet 6, and
-	// leading with an empty octet 5 would be a bit the SMF did not ask for.
-	bits := []uint8{octet5}
-	if octet5 == 0 {
-		bits = []uint8{octet6}
-	} else if octet6 != 0 {
-		bits = append(bits, octet6)
-	}
 	usage := []*ie.IE{
 		ie.NewURRID(urrID),
 		ie.NewURSEQN(seqn),
-		ie.NewUsageReportTrigger(bits...),
+		// Octets 5 to 7 of Figure 8.2.41-1, all three: a quota's or a
+		// termination's bit is in octet 6, and an IE that left octet 5 out for
+		// being empty would put that bit where PERIO is.
+		ie.NewUsageReportTrigger(octet5, octet6, 0),
 		// All six counts: the SMF may bill either the total or the
 		// directions, and the UPF knows all of them (8.2.44).
 		ie.NewVolumeMeasurement(0x3f,
@@ -246,7 +254,7 @@ func usageReportIE(urrID, seqn uint32, trigger Trigger, up, down Usage, duration
 	if !last.IsZero() {
 		usage = append(usage, ie.NewTimeOfLastPacket(last))
 	}
-	return ie.NewUsageReportWithinSessionReportRequest(usage...)
+	return ie.NewUsageReport(typ, usage...)
 }
 
 // EvaluateAll is Evaluate for every session the compiler holds, low SEID first,
@@ -770,4 +778,135 @@ func urrIDsInOrder(s *Session) []uint32 {
 	}
 	slices.Sort(ids)
 	return ids
+}
+
+// urrWindow is one URR's window as of a reading: the usage since its last
+// report, and the cumulative reading the next window would start from.
+type urrWindow struct {
+	uid         uint32
+	seqn        uint32 // the UR-SEQN the report carries: the group's
+	up, down    Usage
+	rawUp       Usage // the cumulative reading, the next window's base
+	rawDown     Usage
+	duration    time.Duration
+	first, last time.Time
+	groupLeader uint32
+}
+
+// windowsOf reads the counters of the URRs a session holds and returns the
+// requested ones' windows, in id order (nil asks for every URR). It is what a
+// report the CP function asked for -- or the session's end -- is made of: the
+// usage since the URR's last report, under the group's UR-SEQN (8.2.71).
+//
+// A URR that never had a reading has no base, and its first reading is not
+// usage (the cells of a reused ActionId are another rule's totals), so its
+// window is empty: usage under-reported, never invented, as everywhere in
+// this file. Counters that cannot be read are an error and the caller sends no
+// report: one built from nothing would be a figure the SMF bills.
+//
+// It changes nothing in the model: a window the SMF is told about opens the
+// next one only when the message that carried it has been answered
+// (advanceAfter).
+func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now time.Time) ([]urrWindow, error) {
+	c.mu.Lock()
+	ids := c.measuredRules(s)
+	c.mu.Unlock()
+	counts := make(map[string]map[uint32]reading, len(ids))
+	if len(ids) > 0 {
+		if c.counters == nil {
+			return nil, errNoCounters
+		}
+		for module, rules := range ids {
+			read, err := c.counters.RuleCounts(ctx, module, rules...)
+			if err != nil {
+				return nil, fmt.Errorf("reading %s: %w", module, err)
+			}
+			counts[module] = readingsOf(read)
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []urrWindow
+	for _, members := range linkedGroups(s) {
+		seqn := s.URRs[members[0]].seqn
+		for _, uid := range members {
+			if uids != nil && !slices.Contains(uids, uid) {
+				continue
+			}
+			u := s.URRs[uid]
+			nowUp, nowDown, f, l := c.countsOf(s, uid, counts)
+			w := urrWindow{
+				uid: uid, seqn: seqn, rawUp: nowUp, rawDown: nowDown,
+				duration: max(now.Sub(u.reported), 0), groupLeader: members[0],
+			}
+			if u.baselined {
+				w.up, w.down = nowUp.since(u.lastUp), nowDown.since(u.lastDown)
+				first, last := u.windowFirst, u.windowLast
+				if !f.IsZero() && !l.Before(f) {
+					if first.IsZero() {
+						first = f
+					}
+					last = l
+				}
+				w.first, w.last = windowTimes(first, last, w.up, w.down)
+			}
+			out = append(out, w)
+		}
+	}
+	slices.SortFunc(out, func(a, b urrWindow) int { return cmp.Compare(a.uid, b.uid) })
+	return out, nil
+}
+
+// usageReports is the windows as Usage Report IEs of the message type typ,
+// under one trigger.
+func usageReports(typ uint16, trigger Trigger, windows []urrWindow) []*ie.IE {
+	out := make([]*ie.IE, 0, len(windows))
+	for _, w := range windows {
+		out = append(out, usageReportIE(typ, w.uid, w.seqn, trigger, w.up, w.down, w.duration, w.first, w.last))
+	}
+	return out
+}
+
+// advanceAfter opens the next window of every URR a report was sent for: the
+// report carried the usage since the base, so the base moves to the reading
+// the report was made from, and the group's UR-SEQN moves on once (the same
+// rule decide applies to a report of its own). It is called after the message
+// that carried the report was accepted, so a refused modification leaves the
+// SMF's next report covering the usage this one did not deliver.
+func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	bumped := map[uint32]bool{}
+	for _, w := range windows {
+		u := s.URRs[w.uid]
+		if u == nil {
+			continue
+		}
+		u.baselined = true
+		u.reported, u.lastUp, u.lastDown = now, w.rawUp, w.rawDown
+		u.windowFirst, u.windowLast = time.Time{}, time.Time{}
+		if !bumped[w.groupLeader] {
+			bumped[w.groupLeader] = true
+			s.URRs[w.groupLeader].seqn++
+		}
+	}
+}
+
+// terminationReports is the Usage Report IE of every URR of a session that is
+// ending, for the Session Deletion Response: "the UP function shall report the
+// usage of each URR to the CP function in the Session Deletion Response"
+// (TS 29.244 5.2.2.3.1, Table 7.5.7.2-1), trigger TERMR. It is what an SMF
+// bills a session's last window from -- nothing else carries it, because the
+// URR goes with the session. The reading happens before the dataplane erases
+// the session's rules; the caller sends the answer only if the erase succeeds.
+func (c *Compiler) terminationReports(ctx context.Context, s *Session, now time.Time) []*ie.IE {
+	if len(s.URRs) == 0 {
+		return nil
+	}
+	windows, err := c.windowsOf(ctx, s, nil, now)
+	if err != nil {
+		c.log.Warn("session: no termination usage report", "seid", s.LocalSEID, "error", err)
+		return nil
+	}
+	return usageReports(ie.UsageReportWithinSessionDeletionResponse, TriggerTermination, windows)
 }

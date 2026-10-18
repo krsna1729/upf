@@ -29,6 +29,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -473,6 +474,94 @@ type Session struct {
 	// lock. compile adds a key when it is the first to claim it, settle removes
 	// the ones a transaction gave up, and releaseSession frees what is left.
 	ruleKeys []string
+}
+
+// modelSnapshot is a session's model as it stood before a modification was
+// merged: the maps by copy of each entry (merge updates a FAR, a QER, a URR or
+// a BAR in place), and the lists the merge appends to. It is what a merge that
+// fails validation goes back to, so that a refused modification leaves the
+// session as the SMF last saw it rather than half-changed -- a half-changed
+// model fails every later message the same way, the SMF's retry included.
+type modelSnapshot struct {
+	ueIP netip.Addr
+	pdrs map[uint16]*pdr
+	fars map[uint32]*far
+	qers map[uint32]*qer
+	urrs map[uint32]*urr
+	bars map[uint8]*bar
+
+	removed, stale []*pdr
+	ending         []uint32
+}
+
+func cloneEntries[K comparable, V any](m map[K]*V) map[K]*V {
+	out := make(map[K]*V, len(m))
+	for k, v := range m {
+		cp := *v
+		out[k] = &cp
+	}
+	return out
+}
+
+// snapshot copies the model. The caller holds the lock.
+func (s *Session) snapshot() modelSnapshot {
+	return modelSnapshot{
+		ueIP: s.UEIP,
+		pdrs: cloneEntries(s.PDRs), fars: cloneEntries(s.FARs), qers: cloneEntries(s.QERs),
+		urrs: cloneEntries(s.URRs), bars: cloneEntries(s.BARs),
+		removed: slices.Clone(s.removed), stale: slices.Clone(s.stale), ending: slices.Clone(s.ending),
+	}
+}
+
+// rollback puts the model back and gives back the ids the failed merge took:
+// the F-TEIDs of PDRs that exist only in the failed state, and the meters of
+// QERs that do. An F-TEID the session allocated per CHOOSE ID stays (the map
+// is not restored): it is what a retry of the same request is handed again,
+// and settle drops it once no PDR names it. The caller holds the lock.
+func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
+	failedPDRs := pdrsInOrder(s)
+	failedPDRs = append(failedPDRs, s.removed...)
+	failedPDRs = append(failedPDRs, s.stale...)
+	failedQERs := qersInOrder(s)
+
+	s.UEIP = snap.ueIP
+	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars
+	s.removed, s.stale, s.ending = snap.removed, snap.stale, snap.ending
+
+	held := map[uint32]bool{}
+	for _, teid := range s.chids {
+		held[teid] = true
+	}
+	for _, p := range pdrsInOrder(s) {
+		held[p.teid] = true
+	}
+	for _, p := range s.removed {
+		held[p.teid] = true
+	}
+	for _, p := range s.stale {
+		held[p.teid] = true
+	}
+	for _, p := range failedPDRs {
+		if p.teid != 0 && !held[p.teid] {
+			held[p.teid] = true
+			if c.byTEID[p.teid] == s {
+				delete(c.byTEID, p.teid)
+			}
+			c.teids.release(p.teid)
+		}
+	}
+	meters := map[uint32]bool{}
+	for _, q := range qersInOrder(s) {
+		meters[q.meterUL], meters[q.meterDL] = true, true
+	}
+	for _, q := range failedQERs {
+		for _, m := range []uint32{q.meterUL, q.meterDL} {
+			if m != 0 && !meters[m] {
+				meters[m] = true
+				c.meters.release(m)
+			}
+		}
+	}
 }
 
 // holdsRuleKey reports whether the session already lists a rule key. The list
