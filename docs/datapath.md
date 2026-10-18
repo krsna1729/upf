@@ -229,14 +229,25 @@ effort) and recomputing lengths and checksums. One record per downlink rule: the
 controller resolves the FAR once, at programming time, so the packet path does
 one indexed load and chases no control-plane relation.
 
-When the record names a Transport Level Marking (TS 29.244 8.2.42, from the
-FAR's forwarding parameters), the SMF's DSCP wins over the inner packet's: the
-marking's high octet is the ToS/Traffic Class the outer header carries and its
-low octet is the mask naming which of the inner header's own class bits survive
-— the ECN bits, with the spec's 0xFC, which applying the marking must not change
-(the NOTE under 8.2.42). `marking == 0` means the SMF asked for none and the
-inner TOS is copied byte for byte, which is what a record written before the
-field existed reads as.
+When the record names a Transport Level Marking (TS 29.244 8.2.12, procedure
+5.4.13, from the FAR's forwarding parameters), the SMF's DSCP wins over the
+inner packet's: the marking's high octet is the ToS/Traffic Class the outer
+header carries and its low octet is the mask naming which of the inner header's
+own class bits survive — the ECN bits, with the spec's 0xFC, which applying the
+marking must not change (8.2.12's NOTE: "The original ECN bits in the IP header
+of user plane packets are not changed after applying transport level marking").
+`marking == 0` means the SMF asked for none and the inner TOS is copied byte for
+byte, which is what a record written before the field existed reads as.
+
+The clause marks the *transport* header, and that is why this is the encap's
+job: TS 23.501 5.8.2.7 — the clause the FAR table (7.5.2.3-2) cites for the
+value — defines the transport level packet marking value as "the DSCP in the
+outer IP header", and the encap is the only module here that writes one (the N3
+exit; a deployment with an N9 exit uses the same record, since the record's
+`marking` comes from the FAR wherever a direction names a tunnel resource). A
+packet that leaves with no outer header — an uplink FAR to N6, where the packet
+is the UE's own — has nothing for the clause to mark, and rewriting the
+subscriber's DSCP there would be a defect rather than a missing feature.
 
 A record naming a QFI also gets a PDU Session Container after the GTP-U header
 (TS 29.281 5.2.2.7; the content is TS 38.415's): the E flag set, the 4-octet

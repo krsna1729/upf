@@ -105,7 +105,8 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   the `upf_teid` attribute, that a G-PDU whose TEID no session names is
   dropped, the outer header, the UDP/GTP-U header with the session's TEID, the
   inner packet, the PDU Session Container a record's QFI adds, the outer TOS
-  and checksum a record's Transport Level Marking (TS 29.244 8.2.42) produces,
+  and checksum a record's Transport Level Marking (TS 29.244 8.2.12, the
+  transport header's DSCP) produces,
   and the four fields of an Echo Response (`gtpu_echo`: the swapped
   addresses, the lengths and checksum, the sequence number and the Recovery
   IE). Its first run found a real bug (an uninitialized UDP source port), which
