@@ -942,6 +942,9 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 		s.PDRs[p.id] = pdr
 	}
+	if err := resolveSDFIDs(s); err != nil {
+		return err
+	}
 	// What the request's objects mean for each PDR (resolve): a modification
 	// that leaves the model unfaithful to itself is refused before the compile
 	// that would write it.
@@ -2829,11 +2832,38 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if err != nil {
 				return fmt.Errorf("SDF filter: %w", err)
 			}
-			filter, err := parseFlowDescription(fields.FlowDescription)
-			if err != nil {
-				return fmt.Errorf("SDF filter: %w", err)
+			if fields.HasTTC() || fields.HasSPI() || fields.HasFL() {
+				// The ToS/Traffic Class, the SPI and the flow label are parts
+				// of the filter the matchers carry no field for. Reading the
+				// filter without them is a rule wider than the SMF asked.
+				return fmt.Errorf("%w: the SDF filter carries a ToS/Traffic Class, SPI or flow label, which no matcher here constrains", errNotExpressible)
+			}
+			var filter *sdfFilter
+			switch {
+			case fields.HasFD():
+				if filter, err = parseFlowDescription(fields.FlowDescription); err != nil {
+					return fmt.Errorf("SDF filter: %w", err)
+				}
+			case fields.HasBID():
+				// A bidirectional SDF filter's later PDRs name the ID alone
+				// (TS 29.244 5.2.1A.3); resolveSDFIDs fills the filter in once
+				// the whole session is read.
+				filter = &sdfFilter{bare: true}
+			default:
+				return fmt.Errorf("%w: the SDF filter carries neither a flow description nor an SDF Filter ID", errNotExpressible)
+			}
+			if fields.HasBID() {
+				filter.id, filter.hasID = fields.SDFFilterID, true
 			}
 			p.sdfs = append(p.sdfs, filter)
+		case ie.ApplicationID, ie.TrafficEndpointID, ie.EthernetPacketFilter,
+			ie.EthernetPDUSessionInformation, ie.FramedRoute, ie.FramedRouting,
+			ie.FramedIPv6Route, ie.IPMulticastAddressingInfo:
+			// A PDI match this UP does not implement. Dropping it would make
+			// the rule match what the IE was there to exclude, so it is
+			// refused; the IEs that merely inform (the PDI's other optional
+			// parts) still pass.
+			return fmt.Errorf("%w: the PDI carries IE type %d, which this UP does not match on", errNotExpressible, c.Type)
 		}
 	}
 	return nil
@@ -3309,6 +3339,59 @@ type sdfFilter struct {
 	sportOK          bool
 	dportLo, dportHi uint16
 	dportOK          bool
+
+	// id and hasID are the SDF Filter ID of a bidirectional filter (TS 29.244
+	// 5.2.1A.3, 8.2.5): one PDR carries the flow description and the ID, the
+	// other PDRs of the flow name the ID alone. bare is such a reference, until
+	// resolveSDFIDs has copied the definition into it; via marks the copy, so
+	// that only a PDR's own flow description is a definition.
+	id    uint32
+	hasID bool
+	bare  bool
+	via   bool
+}
+
+// resolveSDFIDs fills in the PDRs that name a bidirectional SDF filter by its
+// ID alone (TS 29.244 5.2.1A.3: "the SDF Filter ID ... shall be provided in
+// the PDI of the PDR(s) that use the same filter"). Open5GS provisions every
+// bidirectional flow this way: the downlink PDR carries the flow description
+// and the ID, the uplink PDR carries the ID. The copy is the filter as
+// written; the PDR's own orientation (oriented) then reads it the way it
+// reads any other. A reference resolves once, when its PDR is created or
+// updated: a later change to the definition in another PDR is not carried
+// into a PDR the message does not touch (the spec's "apply to all PDRs that
+// use it"), and a definition that goes with its PDR leaves the copies as
+// they are.
+func resolveSDFIDs(s *Session) error {
+	defs := map[uint32]*sdfFilter{}
+	for _, p := range pdrsInOrder(s) {
+		for _, f := range p.sdfs {
+			if !f.hasID || f.bare || f.via {
+				continue
+			}
+			if d, ok := defs[f.id]; ok && *d != *f {
+				return fmt.Errorf("%w: SDF Filter ID %d is defined by two different flow descriptions",
+					errNotExpressible, f.id)
+			}
+			defs[f.id] = f
+		}
+	}
+	for _, p := range pdrsInOrder(s) {
+		for i, f := range p.sdfs {
+			if !f.bare {
+				continue
+			}
+			d, ok := defs[f.id]
+			if !ok {
+				return fmt.Errorf("%w: PDR %d names SDF Filter ID %d, which no PDR of the session defines",
+					errNotExpressible, p.id, f.id)
+			}
+			c := *d
+			c.via = true
+			p.sdfs[i] = &c
+		}
+	}
+	return nil
 }
 
 // oriented is the PDR's SDF filter as the packets it selects carry it. The CP
