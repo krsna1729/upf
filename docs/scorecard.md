@@ -110,6 +110,57 @@ each block below.
 
 ---
 
+## The custom profile, row by row
+
+The keyed per-session matcher (`PdrMatch`) is a second dataplane strategy, and
+the score above is the *generic* profile's. This is the same ground walked
+against the custom path, so "the full feature list on the custom profile" has a
+definition instead of an impression. Three states: **works** (the control plane
+writes it and the dataplane carries it), **refused** (the compiler refuses the
+rule, deliberately), **untested** (the code path exists and nothing has run a
+packet through it).
+
+| block | on the custom path | why |
+|---|---|---|
+| 1 association, heartbeat, restart | works | the N4 layer is profile-independent |
+| 2 establishment, modification, deletion | **works, tested** | one key per session, keyed by the F-TEID, in SMF precedence order — committed with its seven tests (`8d94d84`) |
+| 3 Session Report: USAR / DLDR | USAR works / DLDR refused | the report path is control-side; DLDR needs a buffering flow, and a BUFF PDR is refused on this path |
+| 4 PDI: precedence / F-TEID+CHID / UE IP / SDF+ranges / NI+QFI | precedence, F-TEID, UE IP, ranges work; QFI refused; domain untested | the key *is* the F-TEID, so a PDR is chosen by its tunnel and the UE address is not needed; the rule shape is the firewall's, so inclusive port ranges and both families compile; a QFI-naming PDI is refused (the rules are the 5-tuple) |
+| 5 QER: gate, MBR, GBR | works, untested | the meter and the action are per-PDR and the keyed path writes the same action ids |
+| 6 URR: volume, time, thresholds, quota, linked | works, untested | counters are per rule (per ActionId), which the keyed path writes |
+| 7 BAR + DDN: buffering, DDN, duration, drop | **refused** | a BUFF PDR is refused on this path — the largest gap between the two profiles |
+| 8 GTP-U: decap, encap, echo, end marker, DSCP | works, untested | the tunnel modules are unchanged by the profile |
+| 9 IPv6 | SDF prefixes work; UE address and F-TEID refused | the module's rules carry both families (the firewall rule shape), which is *better* than the generic wildcard path; the F-TEID key is IPv4-only, so an IPv6 session is still refused |
+| 10 MAR / ATSSS-LL | not implemented | phased in both profiles; needs a dual-3GPP deployment |
+| 11 ULCL / N9 route domains | partly | the routing model is control-side; the module is uplink-only, so N9 and the downlink need the selector below |
+| 12 real-SMF interop | not run | in both profiles |
+
+**The checklist that closes the goal**, in order, each item with its own proof:
+
+1. **The uplink arm** — a packet on N3, decapped, matched *by the module*, the
+   right `action_id`, egress on N6. In flight (`Upf.PdrMatchArm`), and it is
+   what commits the module.
+2. **The profile mechanism** — `-profile generic|custom`, resolved at startup,
+   with the default's no-regression shown by the existing arms. In flight
+   (`Upf.ProfileMechanism`).
+3. **Buffering on the custom path** — the module must carry a verdict for a BUFF
+   PDR (a gate or a store key), so the largest gap above closes. Module change.
+4. **QFI on the custom path** — the rule's key must carry the QFI, or the map
+   must be keyed per QFI. Module change.
+5. **The downlink selector** — `LpmRouteTable` keyed on (route domain, UE
+   prefix), so a session is named on N6. Module change, and the reason the
+   module is uplink-only today.
+6. **A custom arm carrying QER + meters + URR counters** — the per-PDR action
+   ids and counters are already written; nothing has measured them through this
+   path.
+7. **A custom arm carrying the tunnel path messages** — echo, end marker, DSCP
+   marking — unchanged modules, unproven in this graph.
+8. **An IPv6 SDF prefix through the module** — the capability the custom path
+   has and the generic wildcard path does not; needs a v6 key form or a second
+   map.
+9. **Route domains on the custom path** — one module per domain, or the domain
+   in the key; unproven either way.
+
 ## The blocks, audited
 
 One section per block: what it scores, where our credit comes from, and what the
