@@ -239,7 +239,14 @@ the BAR's duration ran out)`. The two live cases' own lines are
 source is still running) and `held: 6560 packets counted on the branch under the
 BAR's timeout_ns 2s, freed by the store's own sweep; forwarded after the wait:
 5712 -> 5712` (the expiry case's absence; both counts are packets a run's own
-timing decides, and what the case asserts is that the two are equal).
+timing decides, and what the case asserts is that the two are equal). **Which
+daemon:** the fourth check needs BESS `0bfd2783` — before that amendment the
+store freed an aged flow only at its global `max_packets`, so the held packets
+outlive the 3 s wait, the instruction releases the sixteen they cap at, and the
+case fails (`the encap carried 16 packets after the instruction (was 6480)`)
+while the three checks before it pass — and until the main checkout's
+`build/stage-fast` (still `487dc0c9`) is refreshed the arm is run with
+`STAGE=/home/krsna1729/Projects/bess/.scratch/wt/codecs/build/stage-fast/usr/local`.
 
 **Why 100.** All four sub-features are shown live. Buffering, the DDN and the
 release are the arm's first three checks; the **duration** is the fourth, and it
