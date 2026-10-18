@@ -146,6 +146,14 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
               return std::unexpected("invalid 'qfi' field");
             }
             tunnel.qfi = static_cast<uint8_t>(value.qfi());
+            // The Transport Level Marking (8.2.42) is the IE's two octets, so
+            // anything wider than them is a record no message could have
+            // produced. 0 -- absent, or the SMF asking for none -- means the
+            // inner TOS is copied.
+            if (value.marking() > 0xffff) {
+              return std::unexpected("invalid 'marking' field");
+            }
+            tunnel.marking = static_cast<uint16_t>(value.marking());
             return std::any(tunnel);
           },
           // Every live tunnel, as its value names it.
@@ -168,6 +176,7 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
                   reinterpret_cast<const char *>(tunnel->ether_dst.bytes),
                   sizeof(tunnel->ether_dst.bytes)));
               value.set_qfi(tunnel->qfi);
+              value.set_marking(tunnel->marking);
               visit(key, value);
             }
           }));
@@ -254,6 +263,21 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     const uint8_t inner_tos =
         pkt.head_data<const bess::utils::Ipv4 *>()->type_of_service;
 
+    // When the session's record names a Transport Level Marking (TS 29.244
+    // 8.2.42), the SMF's DSCP wins over the inner packet's: the marking's high
+    // octet is the ToS/Traffic Class the outer header carries and its low
+    // octet is the mask naming which bits of the inner header's own class
+    // survive -- the ECN bits with the spec's 0xFC, which applying the marking
+    // must not change (the NOTE under 8.2.42). Without a marking the inner TOS
+    // is copied, byte for byte as before.
+    uint8_t outer_tos = inner_tos;
+    if (tunnel->marking != 0) {
+      const uint8_t mask = static_cast<uint8_t>(tunnel->marking & 0xff);
+      const uint8_t marked = static_cast<uint8_t>(tunnel->marking >> 8);
+      outer_tos = static_cast<uint8_t>((marked & mask) |
+                                       (inner_tos & static_cast<uint8_t>(~mask)));
+    }
+
     // The session's QoS flow (TS 29.244 8.2.89): 0 means this session's
     // G-PDUs carry no PDU Session Container, and every byte below is then
     // exactly what it was before the tunnel record had a QFI. The extra bytes
@@ -277,7 +301,7 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
                             static_cast<uint16_t>(bess::tunnel::kUdpBytes +
                                                   bess::tunnel::kGtpuBaseBytes +
                                                   ext_bytes + inner_len),
-                            /*ttl=*/64, /*tos=*/inner_tos);
+                            /*ttl=*/64, /*tos=*/outer_tos);
     bess::tunnel::WriteUdp(outer + bess::tunnel::kEthernetBytes + bess::tunnel::kIpv4Bytes,
                            src_port, dst_port_,
                            static_cast<uint16_t>(bess::tunnel::kGtpuBaseBytes + ext_bytes +

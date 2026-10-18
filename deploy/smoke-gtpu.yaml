@@ -171,6 +171,34 @@ modules:
   - name: sink_down_qfi
     mclass: Sink
 
+  - name: src_down_mark
+    mclass: Source
+    arg: {pkt_size: 51, burst: 1}
+  - name: rewrite_down_mark
+    mclass: Rewrite
+    arg:
+      templates:
+        # The plain downlink chain's inner frame with one difference: its IPv4
+        # TOS is 0x02 (the ECN bits, DSCP 0), so an outer header still carrying
+        # "45 02" would be the encap copying the inner class rather than
+        # applying the session's Transport Level Marking (TS 29.244 8.2.42).
+        - "AgAAAAAEAgAAAAADCABFAgAlAAFAAEARILUKAAABCAgICATSADUAEQAAaGVsbG8tdXBm"
+  - name: setattr_down_mark
+    mclass: SetMetadata
+    arg:
+      attrs:
+        # 3: the ActionId of a session whose FAR names a Transport Level
+        # Marking of DSCP EF.
+        - {name: "action_id", size: "4", value_int: "3"}
+  - name: encap_mark
+    mclass: GtpuEncap
+    arg: {src_ip: "10.20.30.1"}
+  - name: dump_down_mark
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_down_mark
+    mclass: Sink
+
 connections:
   - {upstream: src_up, downstream: rewrite_up}
   - {upstream: rewrite_up, downstream: teid}
@@ -200,6 +228,11 @@ connections:
   - {upstream: setattr_down_qfi, downstream: encap_qfi}
   - {upstream: encap_qfi, downstream: dump_down_qfi}
   - {upstream: dump_down_qfi, downstream: sink_down_qfi}
+  - {upstream: src_down_mark, downstream: rewrite_down_mark}
+  - {upstream: rewrite_down_mark, downstream: setattr_down_mark}
+  - {upstream: setattr_down_mark, downstream: encap_mark}
+  - {upstream: encap_mark, downstream: dump_down_mark}
+  - {upstream: dump_down_mark, downstream: sink_down_mark}
 
 workers:
   - {wid: 0, core: 0}
@@ -233,3 +266,16 @@ resources:
         ether_src: "AgAAAAAB"
         ether_dst: "AgAAAAAC"
         qfi: 5
+  # A session whose FAR carries a Transport Level Marking (TS 29.244 8.2.42):
+  # the outer IPv4 header's ToS/Traffic Class is the marking's DSCP (0xb8, EF)
+  # over the inner packet's ECN bits, the 0xfc mask naming the bits the inner
+  # header keeps. 47356 is 0xb8fc: the ToS octet in the high byte and the mask
+  # in the low one, as the IE's two octets encode them.
+  encap_mark/tunnels:
+    - key: {action_id: 3}
+      value:
+        teid: 287454020
+        gnb_ip: "10.20.30.2"
+        ether_src: "AgAAAAAB"
+        ether_dst: "AgAAAAAC"
+        marking: 47356

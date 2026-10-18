@@ -111,7 +111,7 @@ downstream is keyed by.
                         +------------------+                     |
                         | enc  GtpuEncap   |                     |
                         |  outer headers,  |                     |
-                        |  DSCP copy       |                     |
+                        |  DSCP copy/mark  |                     |
                         +--------+---------+                     |
                                  | 0                             |
                                  v                               |
@@ -206,11 +206,20 @@ table: `pdr_ul`'s match `fields` name the attribute, and a rule's mask is
 
 Writes the outer Eth/IPv4/UDP/GTP-U around a downlink packet from the tunnel
 record the packet's ActionId names — `{teid, gnb_ip, ether_src, ether_dst,
-qfi}` — copying the inner TOS onto the outer header (the RAN's transport is
-DSCP-marked; dropping it would send every downlink packet as best effort) and
-recomputing lengths and checksums. One record per downlink rule: the controller
-resolves the FAR once, at programming time, so the packet path does one indexed
-load and chases no control-plane relation.
+qfi, marking}` — copying the inner TOS onto the outer header (the RAN's
+transport is DSCP-marked; dropping it would send every downlink packet as best
+effort) and recomputing lengths and checksums. One record per downlink rule: the
+controller resolves the FAR once, at programming time, so the packet path does
+one indexed load and chases no control-plane relation.
+
+When the record names a Transport Level Marking (TS 29.244 8.2.42, from the
+FAR's forwarding parameters), the SMF's DSCP wins over the inner packet's: the
+marking's high octet is the ToS/Traffic Class the outer header carries and its
+low octet is the mask naming which of the inner header's own class bits survive
+— the ECN bits, with the spec's 0xFC, which applying the marking must not change
+(the NOTE under 8.2.42). `marking == 0` means the SMF asked for none and the
+inner TOS is copied byte for byte, which is what a record written before the
+field existed reads as.
 
 A record naming a QFI also gets a PDU Session Container after the GTP-U header
 (TS 29.281 5.2.2.7; the content is TS 38.415's): the E flag set, the 4-octet

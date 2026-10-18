@@ -33,7 +33,14 @@
 // dropped: a packet that cannot be tunnelled must not leave unencapsulated.
 // The outer IPv4 source address and the UDP ports are the graph's -- arguments
 // of the module, not session state -- while the TEID, the gNB's address, the
-// two Ethernet addresses and the QFI are the session's.
+// two Ethernet addresses, the QFI and the Transport Level Marking are the
+// session's.
+//
+// The outer IPv4 header's ToS/Traffic Class is the inner packet's own unless
+// the session's record names a Transport Level Marking (TS 29.244 8.2.42), in
+// which case the marking's DSCP wins and the mask names which of the inner
+// header's class bits survive (the ECN bits, with the spec's 0xFC). Either way
+// the class the RAN's transport is marked by reaches the outer header.
 //
 // A session whose record names a QFI gets a PDU Session Container after the
 // GTP-U header (TS 29.281 5.2.2.7; the content is TS 38.415's): the E flag
@@ -54,6 +61,11 @@ class GtpuEncap final : public Module {
     bess::utils::Ethernet::Address ether_src;
     bess::utils::Ethernet::Address ether_dst;
     uint8_t qfi;      // 0: write no PDU Session Container
+    // The SMF's Transport Level Marking (TS 29.244 8.2.42): the ToS/Traffic
+    // Class the outer IPv4 header is marked with, the DSCP in the high byte
+    // and the mask in the low one (the bits the inner header keeps, the ECN
+    // bits with the spec's 0xFC). 0: no marking, copy the inner TOS.
+    uint16_t marking;
   };
 
   // "<module>/tunnels": TunnelKey -> TunnelEntry.

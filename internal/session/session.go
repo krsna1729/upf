@@ -555,6 +555,15 @@ type far struct {
 	// provisioned would hold packets under numbers nobody sent.
 	hasBAR bool
 	barID  uint8
+
+	// hasMarking and marking are the FAR's Transport Level Marking
+	// (TS 29.244 8.2.42, inside the Forwarding Parameters): the two octets the
+	// SMF asks this FAR's outer headers to be marked with, the DSCP in the
+	// high octet and the mask in the low one. It reaches the tunnel record a
+	// downlink PDR's FAR writes, where the encap applies it over the inner
+	// packet's own class (the TunnelEntry's "marking" field).
+	hasMarking bool
+	marking    uint16
 }
 
 // Buffering is the deployment's buffering branch: the store a BUFF FAR's

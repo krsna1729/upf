@@ -146,6 +146,20 @@ check "the QFI's outer header grew by the container" \
 check "the container carries the QFI and the downlink PDU type" \
       "33 44 00 00 00 85 01 00 05 00"
 
+# Downlink with a Transport Level Marking: the third chain's session FAR names
+# the marking 0xb8fc (TS 29.244 8.2.42: the DSCP EF in the ToS octet and the
+# spec's 0xfc mask), while the inner frame's own TOS is 0x02. An outer header
+# still reading "45 02" would be the encap copying the inner class; the outer
+# TOS 0xba is the marking's EF 0xb8 over the inner packet's ECN bits 0x02,
+# which the mask keeps (the NOTE under 8.2.42), and e9 bf is the IPv4 checksum
+# that header recomputes to -- a marking applied to the ToS alone would leave
+# the copy's ea 79 here and be a header no receiver accepts. Each check stays
+# inside one 16-byte dump line.
+check "the session's marking won over the inner DSCP" \
+      "08 00 45 ba"
+check "the marked outer header's checksum is over the marking" \
+      "40 11 e9 bf 0a 14 1e 01"
+
 # Echo: TEID 0 is no session's rule, so the request took the table's default
 # gate -- the plugin's echo module -- which answered it in place. The request
 # was a conformant one (flags 0x32: S set, as 5.1 requires of an echo; sequence

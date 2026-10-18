@@ -1822,6 +1822,55 @@ func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 	}
 }
 
+// TestAFARsTransportLevelMarkingReachesTheTunnelRecord: the ToS/Traffic Class
+// the SMF asks this session's outer headers to carry (TS 29.244 8.2.42, in the
+// FAR's forwarding parameters) reaches the dataplane through the tunnel record
+// the FAR's outer header creation writes -- the record whose "marking" the
+// encap reads to mark the outer IPv4 header instead of copying the inner TOS.
+// A FAR that names no marking leaves the field out of the record: the encap
+// then copies the inner TOS, the behaviour the session had before the field
+// existed, and 0 is never a marking the SMF asked for.
+func TestAFARsTransportLevelMarkingReachesTheTunnelRecord(t *testing.T) {
+	tunnelOf := func(t *testing.T, rec *recorder, ue string) bess.Change {
+		t.Helper()
+		dl := ruleCarrying(t, rec.last(), fieldDstIP, netip.MustParseAddr(ue).AsSlice())
+		return find(t, rec.last(), testConfig().Down.Tunnels+"/tunnels", "action_id", dl.actionID())
+	}
+
+	// The SMF's marking as the IE encodes it: the DSCP of EF (46) in the ToS
+	// octet, 46<<2 = 0xb8, and the spec's 0xFC mask (8.2.42).
+	const ef = 0xb8fc
+
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	marked := establishment(0x9204, "10.46.0.2")
+	marked.CreateFAR[1] = ie.NewCreateFAR(
+		ie.NewFARID(2),
+		ie.NewApplyAction(applyForw),
+		ie.NewForwardingParameters(
+			ie.NewDestinationInterface(ie.DstInterfaceAccess),
+			ie.NewOuterHeaderCreation(0x0100, 0x11223344, "10.20.30.2", "", 0, 0, 0),
+			ie.NewTransportLevelMarking(ef),
+		),
+	)
+	if got := cause(t, c.Establish(marked)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a FAR naming a Transport Level Marking answered cause %d, want accepted", got)
+	}
+	if got := tunnelOf(t, rec, "10.46.0.2").Value["marking"]; got != uint32(ef) {
+		t.Errorf("the tunnel record carries marking %v (%T), want the FAR's %#x", got, got, ef)
+	}
+
+	// A second session whose FAR names none: the field is absent from its
+	// record, so the encap copies the inner TOS rather than marking a zero.
+	plain := establishment(0x9205, "10.46.0.3")
+	if got := cause(t, c.Establish(plain)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a FAR with no marking answered cause %d, want accepted", got)
+	}
+	if got, ok := tunnelOf(t, rec, "10.46.0.3").Value["marking"]; ok {
+		t.Errorf("the tunnel record of a FAR with no marking carries %v, want no field", got)
+	}
+}
+
 // graphMaxTuples is what a deploy graph declares for one module's max_tuples:
 // the number of distinct masks that table may hold at once (WildcardMatch
 // refuses a new one beyond it with ENOSPC; module_msg.proto's WildcardMatchArg).

@@ -163,6 +163,14 @@ type farReq struct {
 	// instruction this FAR's held packets live under.
 	hasBAR bool
 	barID  uint8
+
+	// hasMarking and marking are the FAR's Transport Level Marking
+	// (8.2.42, inside the Forwarding Parameters): what the SMF asks the outer
+	// header's ToS/Traffic Class to carry, the DSCP in the high octet and the
+	// mask in the low one. An Update FAR's omission keeps the value the
+	// session has, the way the instance's does.
+	hasMarking bool
+	marking    uint16
 }
 
 // barReq is a Create BAR or Update BAR as the message carried it (TS 29.244
@@ -726,6 +734,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 		if f.hasBAR {
 			entry.hasBAR, entry.barID = true, f.barID
+		}
+		if f.hasMarking {
+			// The Transport Level Marking (8.2.42) merges like the instance: an
+			// Update FAR that names none keeps the value the session has.
+			entry.hasMarking, entry.marking = true, f.marking
 		}
 	}
 	mergeBars(s, bars)
@@ -1594,6 +1607,17 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				// without the field says the session has no flow of its own.
 				value["qfi"] = uint32(p.encapQFI)
 			}
+			if far.hasMarking {
+				// The FAR's Transport Level Marking (8.2.42): the ToS/Traffic
+				// Class the SMF asked this session's outer IPv4 headers to
+				// carry -- the DSCP in the high octet, the mask in the low one
+				// -- which the encap applies over the inner packet's own class
+				// (the mask keeps the bits it names, the ECN bits with the
+				// spec's 0xFC). Written only where the SMF named one: without
+				// the field the encap copies the inner TOS, the behaviour the
+				// session had before this field existed.
+				value["marking"] = uint32(far.marking)
+			}
 			changes = append(changes, bess.Change{
 				Resource: resource,
 				Key:      map[string]any{"action_id": p.actionID},
@@ -2393,8 +2417,9 @@ func parseFAR(i *ie.IE) (farReq, error) {
 }
 
 // parseForwardingParameters reads the forwarding parameters of a Create FAR or
-// an Update FAR: where the forward goes, the instance it goes by, and the outer
-// header creation of the tunnel it leaves through.
+// an Update FAR: where the forward goes, the instance it goes by, the outer
+// header creation of the tunnel it leaves through, and the Transport Level
+// Marking the outer headers of that tunnel carry.
 func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 	for _, fp := range fwd {
 		switch fp.Type {
@@ -2422,6 +2447,18 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 				return errors.New("Outer Header Creation without an IPv4 address")
 			}
 			f.hasOuter, f.teid, f.peer = true, fields.TEID, peer.Unmap()
+		case ie.TransportLevelMarking:
+			// The FAR's Transport Level Marking (8.2.42): the SMF asking this
+			// FAR's outer headers to bear a ToS/Traffic Class of its choosing
+			// rather than the inner packet's. The IE is the two octets as an
+			// OctetString -- the DSCP in the first, the mask in the second --
+			// which is the uint16 the library reads, and whose mask says which
+			// bits of the inner packet's own class survive the marking.
+			marking, err := fp.TransportLevelMarking()
+			if err != nil {
+				return fmt.Errorf("Transport Level Marking: %w", err)
+			}
+			f.hasMarking, f.marking = true, marking
 		}
 	}
 	return nil
