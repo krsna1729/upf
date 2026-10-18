@@ -510,10 +510,14 @@ written. That arm belongs in the same request as the fused pair.
 
 A downlink selector in front of `PdrMatch` (stock `ExactMatch` on the destination
 address, its `action_resource` naming the session, then `PdrMatch` with
-`key_attr: action_id`, which it accepts since `a17b623`) is probed on a live
-throwaway graph but not wired into the compiler. With one network instance and
-IPv4 only, `pdr_dl` already finds the session and the PDR in one lookup. Revisit
-it with IPv6 UEs or more than one instance.
+`key_attr: action_id`, which it accepts since `a17b623`) is now wired into the
+compiler as the custom profile's downlink (`internal/session/selector.go`,
+`deploy/custom-pdrmatch.yaml`, live in `ci/pdrmatch-path.sh`). The graph's
+`ExactMatch` is what a packet from N6 is named by; a deployment with one network
+instance and IPv4 keys on the address alone (`-select-fields-dl dst_ip`), and
+one with several instances adds `route_domain`, which the graph's interface
+writes. The LPM the earlier design expected is needed only for an IPv6 UE
+*prefix* or a framed route (8.2.62), neither of which this UP serves yet.
 
 ## Building and loading it
 

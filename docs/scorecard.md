@@ -156,9 +156,18 @@ packet through it).
 4. **QFI on the custom path** — **Done**: the rule carries an optional `qfi`;
    the module builds one matcher per QFI the rules name and picks it by the
    decap's attribute. Live in `ci/pdrmatch-path.sh`.
-5. **The downlink selector** — `LpmRouteTable` keyed on (route domain, UE
-   prefix), so a session is named on N6. Module change, and the reason the
-   module is uplink-only today. Open.
+5. **The downlink selector** — **Done**, as stock modules rather than an
+   `LpmRouteTable`: `sel_dl` (BESS's `ExactMatch`) is keyed on (route domain,
+   UE IPv4 address) and writes the session id into the packet's `action_id`
+   metadata, which is the key the downlink `PdrMatch` (`key_attr: action_id`,
+   accepted since `a17b623`) reads; `sel_at` holds the action record each rule
+   references. The compiler writes one rule per (domain, address) the session's
+   downlink PDRs name, claims it, and erases it before its action record
+   (`selector.go`); the custom profile and `deploy/custom-pdrmatch.yaml` wire
+   it. Live in `ci/pdrmatch-path.sh` (the selector named 4.7e7 packets, the
+   matcher matched them, the encap's dump carries the data network's reply in a
+   G-PDU for the session's TEID). An LPM is owed only for an IPv6 UE *prefix*
+   or a framed route, neither of which this UP serves (IPv6 is refused).
 6. **A custom arm carrying QER + meters + URR counters** — **Done**:
    `PROFILE=custom ci/session-path.sh` (see rows 5 and 6 for what it covers
    and what it does not).

@@ -586,6 +586,14 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 	// The source's packets and this reading are not ordered: wait for the
 	// counter to move. A run that never does is the module not counting, which
 	// is what this test exists to notice.
+	//
+	// The pair is read until it agrees with itself: the module adds a packet's
+	// count and its octets in two steps (urr_count.cc), so a reading taken
+	// between them carries a packet whose octets are not in yet -- a torn pair
+	// that the next reading resolves, not a counter that lost a packet. The
+	// product below is what this test asserts, and it is only meaningful for a
+	// reading that is not torn.
+	const innerOctets = 37
 	var packets, octets uint64
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -597,12 +605,13 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 		for _, count := range counts {
 			packets, octets = count[0], count[1]
 		}
-		if packets != 0 {
+		if packets != 0 && octets == innerOctets*packets {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the uplink chain carried no packet the URR measures within 10s; "+
-				"output counters: %v", chainCounters(t, ctx, client))
+			t.Fatalf("the uplink chain carried no packet the URR measures within 10s "+
+				"(or its octets never matched its packets: %d octets for %d packets); "+
+				"output counters: %v", octets, packets, chainCounters(t, ctx, client))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -612,7 +621,6 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 	// product is asserted, not a per-packet average: an integer division would
 	// hide a mixed run and an off-by-a-header remainder, and this test exists
 	// to say the 14-byte Ethernet header is not data volume.
-	const innerOctets = 37
 	if octets != innerOctets*packets {
 		t.Errorf("the counter reports %d octets for %d packets, want %d -- the inner IP packet "+
 			"of each 51-byte frame: the frame's Ethernet header is not data volume",

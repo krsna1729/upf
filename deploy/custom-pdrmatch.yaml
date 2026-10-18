@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 # The custom profile's graph (docs/design.md, "Profiles"): deploy/upf.yaml with
-# the uplink's PDR table replaced by this tree's keyed per-session matcher
-# (`PdrMatch`): one map key per session, keyed by the F-TEID the decap wrote,
-# whose value is that session's rules in SMF precedence order. Everything else
+# both PDR tables replaced by this tree's keyed per-session matcher (`PdrMatch`):
+# one map key per session, whose value is that session's rules in SMF precedence
+# order. The uplink's key is the F-TEID the decap wrote; the downlink's is the
+# session id the selector in front of the matcher writes, because a packet from
+# the data network carries no tunnel to name its session with. Everything else
 # is upf.yaml's -- the ports, the TEID table and the echo behind its default
-# gate, the downlink's shared table, the chains, the encap, the End Marker's
-# socket -- so the two graphs differ by exactly two things:
+# gate, the chains, the encap, the End Marker's socket -- so the two graphs
+# differ by exactly three things:
 #
 #   - `pdr_ul` (a WildcardMatch every session shares) is `pdr_match_ul`;
+#   - `pdr_dl` is `sel_dl` -> `pdr_match_dl`: the selector names the session by
+#     the UE address the packet is addressed to, and the matcher holds that
+#     session's own rules;
 #   - `mt_ul_read` is gone. It existed only to give the decap's `upf_teid` an
 #     offset (a write-only attribute gets none, core/metadata.cc); the matcher
 #     reads `upf_teid` itself as its key, which does the same.
@@ -19,15 +24,18 @@
 #   upfd -profile custom -bess <bessd> -n3-addr <addr> ...
 #   bessctl apply deploy/custom-pdrmatch.yaml
 #
-# The downlink is unchanged -- `pdr_dl` is still the shared table -- because a
-# downlink packet carries no tunnel to name its session with: the selector that
-# will name one (a longest-prefix match on the UE prefix) is the next step
-# (docs/scorecard.md, "The custom profile, row by row").
+# The downlink's selector is an exact match on (route domain, UE IPv4 address),
+# which is what the spec asks the session look-up to be (TS 29.244 5.2.1 with
+# 8.2.62's exact address): this graph is a one-instance deployment, so its key
+# is the address alone (`-select-fields-dl dst_ip`). A longest-prefix match is
+# the structure for an IPv6 UE *prefix* or a framed route, neither of which this
+# UP serves yet (docs/compliance.md).
 #
 # What this path refuses, as compiled today: a BUFF FAR (no buffering verdict in
-# this module), a PDI naming a QFI (its rules are the 5-tuple), and the IPv6 UE
-# address and F-TEID (the key is IPv4-only). Its rules do carry port ranges and
-# SDF prefixes of both families, which the wildcard table cannot.
+# this module), a PDI naming a QFI (its rules are the 5-tuple), the IPv6 UE
+# address and F-TEID (the keys are IPv4-only), and a second session whose PDRs
+# name one UE address (the selector's key is the session's). Its rules do carry
+# port ranges and SDF prefixes of both families, which the wildcard table cannot.
 #
 # Three values here are the deployment's and must match upfd's flags, exactly
 # as in upf.yaml: enc's src_ip = -n3-addr, and rt/next_hops' ids 1 and 2 are the

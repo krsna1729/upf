@@ -38,12 +38,19 @@ func liveConfig() Config {
 		NextHop:   2,
 		Tunnels:   "enc",
 	}
-	// UPF_PROFILE=custom is the keyed per-session matcher on the uplink
+	// UPF_PROFILE=custom is the keyed per-session matcher on both directions
 	// (deploy/pdrmatch-path.yaml): the same lab, the same module names, the
-	// uplink's rules in `pdr_match_ul` instead of the wildcard table.
+	// uplink's rules in `pdr_match_ul` instead of the wildcard table, and the
+	// downlink's in `pdr_match_dl`, whose session `sel_dl` names by the UE
+	// address the packet is addressed to.
 	if os.Getenv("UPF_PROFILE") == CustomProfile {
 		cfg.Up.PDRTable, cfg.Up.PDRFields = "", nil
 		cfg.Up.PdrMatch = "pdr_match_ul"
+		cfg.Down.PDRTable, cfg.Down.PDRFields = "", nil
+		cfg.Down.PdrMatch = "pdr_match_dl"
+		cfg.Down.Selector = "sel_dl"
+		cfg.Down.SelectorActions = "sel_at"
+		cfg.Down.SelectorFields = []Field{DstIP}
 	}
 	// UPF_FIREWALL=1 is the generic profile's other strategy on both
 	// directions (deploy/firewall-path.yaml): the stock firewall module holds
