@@ -508,6 +508,13 @@ all) and how much is the dispatch the fusion removes. If `ExactMatch` closes mos
 of the gap, the fusion is not worth losing the tap and the module is never
 written. That arm belongs in the same request as the fused pair.
 
+A downlink selector in front of `PdrMatch` (stock `ExactMatch` on the destination
+address, its `action_resource` naming the session, then `PdrMatch` with
+`key_attr: action_id`, which it accepts since `a17b623`) is probed on a live
+throwaway graph but not wired into the compiler. With one network instance and
+IPv4 only, `pdr_dl` already finds the session and the PDR in one lookup. Revisit
+it with IPv6 UEs or more than one instance.
+
 ## Building and loading it
 
 ```sh
