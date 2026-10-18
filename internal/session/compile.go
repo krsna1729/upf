@@ -113,7 +113,7 @@ type pdrReq struct {
 	precedence uint32
 	srcIfc     uint8
 	ueIP       netip.Addr
-	sdf        *sdfFilter
+	sdfs       []*sdfFilter // the PDI's SDF filters, any of which matches
 	farID      uint32
 	qerIDs     []uint32
 	urrIDs     []uint32
@@ -122,12 +122,12 @@ type pdrReq struct {
 	// interface this rule belongs to, empty when the SMF named none.
 	instance string
 
-	// hasQFI and qfi are the PDI's QFI (TS 29.244 8.2.89): the QoS flow this
-	// rule selects, one of 1..63. A PDI that names none is the session's
-	// general rule for the flow, and the uplink table's qfi field is masked out
-	// of its key -- so it keeps matching where a QFI-specific rule does not.
-	hasQFI bool
-	qfi    uint8
+	// qfis are the PDI's QFIs (TS 29.244 8.2.89): the QoS flows this rule
+	// selects, each one of 1..63, any of which matches. A PDI that names none
+	// is the session's general rule for the flow, and the uplink table's qfi
+	// field is masked out of its key -- so it keeps matching where a
+	// QFI-specific rule does not.
+	qfis []uint8
 
 	// An uplink PDR's PDI names an F-TEID: the TEID the SMF expects us to
 	// use (0: ours to choose) and, for the address, usually 0.
@@ -857,9 +857,9 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		s.forgetRemoval(p.id)
 		pdr := &pdr{
 			id: p.id, precedence: p.precedence, srcIfc: p.srcIfc,
-			ueIP: p.ueIP, sdf: p.sdf, farID: p.farID,
+			ueIP: p.ueIP, sdfs: p.sdfs, farID: p.farID,
 			qerIDs: p.qerIDs, urrIDs: p.urrIDs,
-			instance: p.instance, hasQFI: p.hasQFI, qfi: p.qfi,
+			instance: p.instance, qfis: p.qfis,
 		}
 		if old != nil {
 			// An update keeps the dataplane identity: the rule that already
@@ -1378,8 +1378,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// alive by the PDRs that name its F-TEID rather than by a rule key.
 			continue
 		}
-		if key, err := p.ruleKey(dir.PDRFields); err == nil {
-			live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
+		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
+			for _, key := range keys {
+				live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
+			}
 		}
 	}
 	// The opt-in map keys the session still holds, as the transaction will write
@@ -1498,12 +1500,14 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// policy is rewritten whole from the live model at the end of this
 		// function, and a PDR that is gone is simply not in it.
 		if dir.Firewall == "" && dir.PdrMatch == "" {
-			key, err := p.ruleKey(dir.PDRFields)
+			keys, err := p.ruleKeys(dir.PDRFields)
 			if err != nil {
 				return nil, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
 			}
-			if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
-				erase(bess.Change{Resource: rulesRes(dir), Key: key})
+			for _, key := range keys {
+				if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
+					erase(bess.Change{Resource: rulesRes(dir), Key: key})
+				}
 			}
 		}
 		if dir.PdrMatch != "" && p.teid != 0 && !livePdrMatch[pdrMatchClaim(dir, p.teid)] {
@@ -1558,12 +1562,14 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// As above: on the firewall path the old form is not a key to erase,
 		// it is a rule the policy this compile writes no longer holds.
 		if dir.Firewall == "" && dir.PdrMatch == "" {
-			key, err := old.ruleKey(dir.PDRFields)
+			keys, err := old.ruleKeys(dir.PDRFields)
 			if err != nil {
 				return nil, nil, fmt.Errorf("PDR %d: %w", old.id, err)
 			}
-			if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
-				erase(bess.Change{Resource: rulesRes(dir), Key: key})
+			for _, key := range keys {
+				if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
+					erase(bess.Change{Resource: rulesRes(dir), Key: key})
+				}
 			}
 		}
 		if dir.PdrMatch != "" && old.teid != 0 && !livePdrMatch[pdrMatchClaim(dir, old.teid)] {
@@ -1606,15 +1612,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// session could take: the policy is the union of every live session's
 		// rules, so two sessions matching the same packets produce two rules
 		// rather than one shared one.
-		var key map[string]any
+		var keys []map[string]any
 		if dir.Firewall == "" && dir.PdrMatch == "" {
 			var err error
-			if key, err = p.ruleKey(dir.PDRFields); err != nil {
+			if keys, err = p.ruleKeys(dir.PDRFields); err != nil {
 				return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
 			}
 		}
-		rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
-		if dir.Firewall == "" && dir.PdrMatch == "" {
+		for _, key := range keys {
+			rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
 			if writtenRules[rkey] {
 				// The rule table knows PDR ids no better than the SMF's filters do:
 				// one key is one rule, and the engine would reject the second
@@ -1728,15 +1734,17 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				})
 			}
 			if dir.Firewall == "" && dir.PdrMatch == "" {
-				changes = append(changes, bess.Change{
-					Resource: rulesRes(dir),
-					Key:      key,
-					Value: map[string]any{
-						"priority":  rulePriority(p.precedence),
-						"gate":      gate,
-						"action_id": action,
-					},
-				})
+				for _, key := range keys {
+					changes = append(changes, bess.Change{
+						Resource: rulesRes(dir),
+						Key:      key,
+						Value: map[string]any{
+							"priority":  rulePriority(p.precedence),
+							"gate":      gate,
+							"action_id": action,
+						},
+					})
+				}
 			}
 			// A URR that measures this PDR still holds its counter entry: the
 			// entry says the rule is measured (the reporting side reads it), and
@@ -1807,24 +1815,29 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 
 		if dir.Firewall == "" && dir.PdrMatch == "" {
-			changes = append(changes, bess.Change{
-				Resource: rulesRes(dir),
-				Key:      key,
-				Value: map[string]any{
-					// The table's own output gate: one chain per direction.
-					//
-					// The priority is the PDR's Precedence (8.2.11) inverted into
-					// the classifier's own ordering (rulePriority), QFI or not: a
-					// session's general rule (the QFI field masked out) and its
-					// flow's rule (the field required) both match a packet of that
-					// flow, and which PDR serves it stays the SMF's decision --
-					// the more specific rule is not raised above the one the SMF
-					// gave the higher Precedence.
-					"priority":  rulePriority(p.precedence),
-					"gate":      uint64(0),
-					"action_id": p.actionID,
-				},
-			})
+			// One rule per (SDF filter, QFI) the PDI names -- TS 29.244 7.5.2.2
+			// NOTE 4: several of either match any -- all with this PDR's
+			// Precedence and its one action.
+			for _, key := range keys {
+				changes = append(changes, bess.Change{
+					Resource: rulesRes(dir),
+					Key:      key,
+					Value: map[string]any{
+						// The table's own output gate: one chain per direction.
+						//
+						// The priority is the PDR's Precedence (8.2.11) inverted into
+						// the classifier's own ordering (rulePriority), QFI or not: a
+						// session's general rule (the QFI field masked out) and its
+						// flow's rule (the field required) both match a packet of that
+						// flow, and which PDR serves it stays the SMF's decision --
+						// the more specific rule is not raised above the one the SMF
+						// gave the higher Precedence.
+						"priority":  rulePriority(p.precedence),
+						"gate":      uint64(0),
+						"action_id": p.actionID,
+					},
+				})
+			}
 		}
 
 		// An uplink PDR's F-TEID is what makes the TEID ours: a rule of the
@@ -1919,6 +1932,57 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 		masks = append(masks, map[string]any{"value_bin": mask})
 	}
 	return map[string]any{"values": values, "masks": masks}, nil
+}
+
+// variants is the PDR as one match per (SDF filter, QFI) its PDI names. A PDI
+// may carry several SDF Filter IEs and several QFI IEs, and "match any" is the
+// rule for each (TS 29.244 7.5.2.2-2, NOTE 4): the PDR matches a packet that
+// any filter and any QFI of it matches. A matcher holds one filter and one QFI
+// per rule, so the PDR is a set of rules that share its Precedence and its one
+// action. Each variant is a copy whose sdf, hasQFI and qfi are the one it
+// stands for; a PDI that names neither is the single variant that constrains
+// nothing, which is what a PDR always was.
+func (p *pdr) variants() []*pdr {
+	sdfs := p.sdfs
+	if len(sdfs) == 0 {
+		sdfs = []*sdfFilter{nil}
+	}
+	qfis := max(len(p.qfis), 1)
+	out := make([]*pdr, 0, len(sdfs)*qfis)
+	for _, sd := range sdfs {
+		for i := range qfis {
+			v := *p
+			v.sdf = sd
+			v.hasQFI = len(p.qfis) > 0
+			v.qfi = 0
+			if v.hasQFI {
+				v.qfi = p.qfis[i]
+			}
+			out = append(out, &v)
+		}
+	}
+	return out
+}
+
+// ruleKeys is the WildcardMatch rule key of each variant, without the repeats:
+// two identical filters in one PDI are one rule, not a key written twice.
+func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
+	variants := p.variants()
+	keys := make([]map[string]any, 0, len(variants))
+	seen := make(map[string]bool, len(variants))
+	for _, v := range variants {
+		key, err := v.ruleKey(fields)
+		if err != nil {
+			return nil, err
+		}
+		id := fmt.Sprint(key)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		keys = append(keys, key)
+	}
+	return keys, nil
 }
 
 // match is one field's constraint: the bits a PDI fixes, and the mask that says
@@ -2303,17 +2367,27 @@ func (c *Compiler) firewallPolicies(extra, except *Session) (map[string][]map[st
 			if dir.Firewall == "" {
 				continue
 			}
-			rule, err := firewallRule(p)
-			if err != nil {
-				return fmt.Errorf("PDR %d: %w", p.id, err)
-			}
 			resource := firewallRes(dir)
-			entries[resource] = append(entries[resource], firewallRuleEntry{
-				precedence: p.precedence,
-				seid:       s.LocalSEID,
-				pdr:        p.id,
-				rule:       rule,
-			})
+			if len(p.qfis) > 0 {
+				// The firewall's table is the 5-tuple: a rule has no field for
+				// the QoS flow, so a PDR that names one would match every flow
+				// of the tunnel -- wider than the SMF asked.
+				return fmt.Errorf("PDR %d: %w: the PDI names a QFI, and a firewall rule has no QFI field",
+					p.id, errNotExpressible)
+			}
+			// One rule per SDF filter of the PDI: several match any.
+			for _, v := range p.variants() {
+				rule, err := firewallRule(v)
+				if err != nil {
+					return fmt.Errorf("PDR %d: %w", p.id, err)
+				}
+				entries[resource] = append(entries[resource], firewallRuleEntry{
+					precedence: p.precedence,
+					seid:       s.LocalSEID,
+					pdr:        p.id,
+					rule:       rule,
+				})
+			}
 		}
 		return nil
 	}
@@ -2334,7 +2408,7 @@ func (c *Compiler) firewallPolicies(extra, except *Session) (map[string][]map[st
 	}
 	out := make(map[string][]map[string]any, len(entries))
 	for resource, list := range entries {
-		slices.SortFunc(list, func(a, b firewallRuleEntry) int {
+		slices.SortStableFunc(list, func(a, b firewallRuleEntry) int {
 			if d := cmp.Compare(a.precedence, b.precedence); d != 0 {
 				return d
 			}
@@ -2667,7 +2741,11 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if err != nil {
 				return err
 			}
-			p.hasQFI, p.qfi = true, qfi
+			// Several QFI IEs are several QoS flows, any of which matches
+			// (7.5.2.2-2 NOTE 4): all are kept, once each.
+			if !slices.Contains(p.qfis, qfi) {
+				p.qfis = append(p.qfis, qfi)
+			}
 		case ie.FTEID:
 			fields, err := c.FTEID()
 			if err != nil {
@@ -2755,7 +2833,7 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if err != nil {
 				return fmt.Errorf("SDF filter: %w", err)
 			}
-			p.sdf = filter
+			p.sdfs = append(p.sdfs, filter)
 		}
 	}
 	return nil
@@ -3611,19 +3689,21 @@ func (c *Compiler) pdrMatchChanges(s *Session) ([]bess.Change, error) {
 					"%w: PDR %d buffers, which is the buffering branch's gate and not this module's",
 					errNotExpressible, p.id)
 			}
-			rule, err := pdrMatchRule(p)
-			if err != nil {
-				return nil, fmt.Errorf("PDR %d: %w", p.id, err)
-			}
 			if _, seen := rules[p.teid]; !seen {
 				order = append(order, p.teid)
 			}
-			rules[p.teid] = append(rules[p.teid], pdrMatchEntry{
-				precedence: p.precedence, pdr: p.id, rule: rule})
+			for _, v := range p.variants() {
+				rule, err := pdrMatchRule(v)
+				if err != nil {
+					return nil, fmt.Errorf("PDR %d: %w", p.id, err)
+				}
+				rules[p.teid] = append(rules[p.teid], pdrMatchEntry{
+					precedence: p.precedence, pdr: p.id, rule: rule})
+			}
 		}
 		for _, teid := range order {
 			list := rules[teid]
-			slices.SortFunc(list, func(a, b pdrMatchEntry) int {
+			slices.SortStableFunc(list, func(a, b pdrMatchEntry) int {
 				if d := cmp.Compare(a.precedence, b.precedence); d != 0 {
 					return d
 				}

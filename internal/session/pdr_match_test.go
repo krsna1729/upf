@@ -226,7 +226,7 @@ func TestTheSessionsRulesAreInPrecedenceOrder(t *testing.T) {
 		t.Fatalf("the entry holds %d rules, want the session's three", len(list))
 	}
 	wantPorts := []uint32{80, 5060, 53} // Precedence 100, 200, 300
-	wantProto := []uint32{6, 17, 17}   // tcp, udp, udp
+	wantProto := []uint32{6, 17, 17}    // tcp, udp, udp
 	for i, want := range wantPorts {
 		if got := list[i]["dst_port_low"]; got != want {
 			t.Errorf("rule %d's dst_port_low is %v, want %d (the Precedence order)", i, got, want)

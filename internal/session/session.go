@@ -515,7 +515,6 @@ type pdr struct {
 	precedence uint32
 	srcIfc     uint8
 	ueIP       netip.Addr
-	sdf        *sdfFilter
 	farID      uint32
 	qerIDs     []uint32
 	urrIDs     []uint32
@@ -527,10 +526,17 @@ type pdr struct {
 	instance string
 	domain   uint32
 
-	// hasQFI and qfi are the QFI the PDI named (TS 29.244 8.2.89): the QoS flow
-	// this rule selects, and the last field of the uplink table's key. A PDI
-	// that names none leaves the field open -- the session's general rule for
-	// the flow -- and the rule then matches every QFI of it.
+	// sdfs and qfis are what the PDI named (TS 29.244 8.2.89 and the SDF
+	// Filter IE): the SDF filters and QoS flows this rule selects, any of
+	// which matches. A PDI that names no QFI leaves the uplink table's qfi
+	// field open -- the session's general rule for the flow -- and the rule
+	// then matches every QFI of it.
+	sdfs []*sdfFilter
+	qfis []uint8
+	// sdf, hasQFI and qfi are one combination of the two lists, and are set
+	// only on the copies variants() makes: the matchers read one filter and
+	// one QFI per rule.
+	sdf    *sdfFilter
 	hasQFI bool
 	qfi    uint8
 	// encapQFI is the QFI of the QER this PDR's downlink record carries
@@ -1064,14 +1070,16 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			}
 			continue
 		}
-		key, err := p.ruleKey(dir.PDRFields)
+		keys, err := p.ruleKeys(dir.PDRFields)
 		if err != nil {
 			// The session's rules were written with these keys, so this is a
 			// PDI that changed under a live session: fail the deletion rather
 			// than leave the rule behind.
 			return fmt.Errorf("PDR %d: %w", p.id, err)
 		}
-		add(bess.Change{Resource: rulesRes(dir), Key: key})
+		for _, key := range keys {
+			add(bess.Change{Resource: rulesRes(dir), Key: key})
+		}
 	}
 	for _, p := range all {
 		dir := c.direction(p.srcIfc)
@@ -1198,8 +1206,10 @@ func (c *Compiler) settle(s *Session) {
 			}
 			continue
 		}
-		if key, err := p.ruleKey(dir.PDRFields); err == nil {
-			live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
+		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
+			for _, key := range keys {
+				live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
+			}
 		}
 	}
 	for _, p := range gones {
@@ -1218,14 +1228,16 @@ func (c *Compiler) settle(s *Session) {
 			}
 			continue
 		}
-		key, err := p.ruleKey(dir.PDRFields)
+		keys, err := p.ruleKeys(dir.PDRFields)
 		if err != nil {
 			continue
 		}
-		rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
-		if !live[rkey] && c.rules[rkey] == s.LocalSEID {
-			delete(c.rules, rkey)
-			s.forgetRuleKey(rkey)
+		for _, key := range keys {
+			rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
+			if !live[rkey] && c.rules[rkey] == s.LocalSEID {
+				delete(c.rules, rkey)
+				s.forgetRuleKey(rkey)
+			}
 		}
 	}
 	s.removed, s.stale, s.ending = nil, nil, nil
