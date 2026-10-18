@@ -3188,10 +3188,20 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 			if err != nil {
 				return fmt.Errorf("Outer Header Creation: %w", err)
 			}
+			peer, ok := netip.AddrFromSlice(fields.IPv4Address)
 			if fields.TEID == 0 {
+				if ok && peer.Unmap().IsUnspecified() {
+					// A zero TEID with the unspecified address is no tunnel:
+					// the SMF has not learned the gNB's yet (OMEC's pfcpsim
+					// creates a dropping downlink FAR this way, and a
+					// modification names the real one). It reads as a FAR
+					// with no Outer Header Creation, which is what the
+					// compile already carries as "no tunnel known" -- and
+					// an Update FAR's placeholder leaves the tunnel it had.
+					continue
+				}
 				return errors.New("Outer Header Creation without a TEID")
 			}
-			peer, ok := netip.AddrFromSlice(fields.IPv4Address)
 			if !ok {
 				return errors.New("Outer Header Creation without an IPv4 address")
 			}
