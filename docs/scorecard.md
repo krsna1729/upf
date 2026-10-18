@@ -123,7 +123,7 @@ packet through it).
 | block | on the custom path | why |
 |---|---|---|
 | 1 association, heartbeat, restart | works | the N4 layer is profile-independent |
-| 2 establishment, modification, deletion | **works, tested** | one key per session, keyed by the F-TEID, in SMF precedence order — committed with its seven tests (`8d94d84`) |
+| 2 establishment, modification, deletion | **works, tested** | one key per session, keyed by the F-TEID, in SMF precedence order — committed with its seven tests (`3508638`) |
 | 3 Session Report: USAR / DLDR | USAR works / DLDR refused | the report path is control-side; DLDR needs a buffering flow, and a BUFF PDR is refused on this path |
 | 4 PDI: precedence / F-TEID+CHID / UE IP / SDF+ranges / NI+QFI | precedence, F-TEID, UE IP, ranges work; QFI refused; domain untested | the key *is* the F-TEID, so a PDR is chosen by its tunnel and the UE address is not needed; the rule shape is the firewall's, so inclusive port ranges and both families compile; a QFI-naming PDI is refused (the rules are the 5-tuple) |
 | 5 QER: gate, MBR, GBR | untested | the meter and the action are per-PDR and the keyed path writes the same action ids |
@@ -295,9 +295,14 @@ daemon:** the fourth check needs BESS `0bfd2783` — before that amendment the
 store freed an aged flow only at its global `max_packets`, so the held packets
 outlive the 3 s wait, the instruction releases the sixteen they cap at, and the
 case fails (`the encap carried 16 packets after the instruction (was 6480)`)
-while the three checks before it pass — and until the main checkout's
-`build/stage-fast` (still `487dc0c9`) is refreshed the arm is run with
-`STAGE=/home/krsna1729/Projects/bess/.scratch/wt/codecs/build/stage-fast/usr/local`.
+while the three checks before it pass — and the stage this repo carries
+(`build/bess/stage`, BESS `54fbf982`) has it, so the arm runs on its own
+default; the lines above were recorded against BESS `a464f230`, whose
+stage is not carried. Re-run 2026-10-18 against
+`build/bess/stage`, the four checks pass (`held: 864 packets counted on the
+branch; forwarded after the instruction: 0 -> 5456` and `held: 1216 packets
+counted on the branch under the BAR's timeout_ns 2s … forwarded after the wait:
+5936 -> 5936`).
 
 **Why 100.** All four sub-features are shown live. Buffering, the DDN and the
 release are the arm's first three checks; the **duration** is the fourth, and it
@@ -346,17 +351,17 @@ deliberately under that 5 s so that only the per-flow number can have freed them
 at its own first test: the daemon refused the session transaction, `#3 references
 missing at_dl/actions/10b10000`, and the cause was ours. A **buffering** rule
 names an ActionId the compiler allocates as the flow's store key and, until
-`2c1acc2`, deliberately wrote no action record for (`compile.go`'s comment said
+`4dcd338`, deliberately wrote no action record for (`compile.go`'s comment said
 so in as many words), while the engine's reference check — as old as the engine,
 D-021 — validates a rule's `action_id` as a reference whatever gate the rule
-takes. `2c1acc2` writes the record, after the id is allocated, with the flow's
+takes. `4dcd338` writes the record, after the id is allocated, with the flow's
 own meter and next hop, and the release path reads it.
 
 The next failure was not test isolation: the deletion really did not erase the
 buffering counter's entry. `remove()` — the path a deletion takes — erased the
 direction's counter, the actions, the tunnels, the TEIDs and the meters, but
 never the BUFF branch's entry, so it outlived the session and the next test in
-the daemon read a table that was not empty (`ec9946d`;
+the daemon read a table that was not empty (`b9e6941`;
 `TestDeletingABufferingSessionErasesItsBufferCounter` was written first and
 failed against the unfixed tree). The arm's third check was then found to be
 reading the wrong place: it grepped upfd's log for a metric upfd serves over

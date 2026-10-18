@@ -24,11 +24,9 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STAGE=${STAGE:-/home/krsna1729/Projects/bess/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/deps/dpdk-25.11.3/install/lib}
+. "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
-SERVER=${SERVER:-127.0.0.1:10514}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 SECONDS_RUN=${SECONDS_RUN:-3}
 
@@ -46,7 +44,7 @@ PIDFILE=$(mktemp /tmp/upf-path-XXXXXX.pid)
 
 export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-"$BESSD" -m 0 -skip_root_check -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
+"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
 DAEMON=$!
 cleanup() {
   kill "$DAEMON" 2>/dev/null || true
@@ -55,16 +53,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 30); do "$BESSCTL" status >/dev/null 2>&1 && break; sleep 1; done
-if ! "$BESSCTL" status >/dev/null 2>&1; then
+for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 1; done
+if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
   echo "path: the daemon did not come up; log follows" >&2
   cat "$LOG" >&2
   exit 1
 fi
 
-"$BESSCTL" validate "$GRAPH" >/dev/null
-"$BESSCTL" apply "$GRAPH" >/dev/null
-"$BESSCTL" resume >/dev/null
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$GRAPH" >/dev/null
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
 
 # The Go half: the control arm (counters zero), the session, then the counters
 # again. Run from the repository root so the module and its workspace resolve.
@@ -126,6 +124,7 @@ else
   FAIL=1
 fi
 
+check_clean_shutdown "$DAEMON" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "session-path: ok (uplink and downlink both carried the session's packets)"
   # The log and the pidfile are the run's, not a result: a failed run keeps both

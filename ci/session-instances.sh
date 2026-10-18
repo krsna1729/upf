@@ -24,11 +24,9 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STAGE=${STAGE:-/home/krsna1729/Projects/bess/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/deps/dpdk-25.11.3/install/lib}
+. "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=${GRAPH:-$ROOT/deploy/session-instances.yaml}
-SERVER=${SERVER:-127.0.0.1:10514}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 SECONDS_RUN=${SECONDS_RUN:-3}
 
@@ -46,7 +44,7 @@ PIDFILE=$(mktemp /tmp/upf-instances-XXXXXX.pid)
 
 export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-"$BESSD" -m 0 -skip_root_check -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
+"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
 DAEMON=$!
 cleanup() {
   kill "$DAEMON" 2>/dev/null || true
@@ -57,16 +55,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 30); do "$BESSCTL" status >/dev/null 2>&1 && break; sleep 1; done
-if ! "$BESSCTL" status >/dev/null 2>&1; then
+for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 1; done
+if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
   echo "instances: the daemon never came up; log follows" >&2
   cat "$LOG" >&2
   exit 1
 fi
 
-"$BESSCTL" validate "$GRAPH" >/dev/null
-"$BESSCTL" apply "$GRAPH" >/dev/null
-"$BESSCTL" resume >/dev/null
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$GRAPH" >/dev/null
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
 
 # The Go half: two sessions for 10.45.0.2, one per instance, and the router's
 # two exits counted. Run from the repository root so the module and its
@@ -97,6 +95,7 @@ check() { # check <description> <the dump's hex> <fixed string it must contain>
 check "the internet stream's G-PDU carries its tunnel" "$TEID_HEX" "11 22 33 44"
 check "the ims stream's G-PDU carries its tunnel" "$TEID_HEX" "11 22 33 45"
 
+check_clean_shutdown "$DAEMON" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "instances: both tunnels are on the wire (the exits' counters are the Go half's)"
 fi

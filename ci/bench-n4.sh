@@ -24,13 +24,11 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BESS=${BESS:-$HOME/Projects/bess}
-WT=${WT:-$BESS}
-STAGE=${STAGE:-$BESS/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-$BESS/deps/dpdk-25.11.3/install/lib}
+. "$ROOT/ci/bess-env.sh"
+WT=${WT:-$BESS}                             # the tree whose fast/ build holds live_perf
 PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=${GRAPH:-$ROOT/deploy/session-live.yaml}
-LIVE_BENCH=${LIVE_BENCH:-$WT/build/fast/tests/perf/live_transaction_bench}
+LIVE_BENCH=${LIVE_BENCH:-$WT/fast/tests/perf/live_transaction_bench}
 
 MODE=${MODE:-full}                     # full | n4
 SESSIONS=${SESSIONS:-512}
@@ -50,8 +48,6 @@ WORKERS=${WORKERS:-1}
 # interleaved across the workers), bulk the same three phases each at full
 # rate. Run the script again with MODES=bulk for the other number.
 MODES=${MODES:-cycle}
-N4_PORT=${N4_PORT:-8805}
-BESS_PORT=${BESS_PORT:-10514}
 N3_ADDR=${N3_ADDR:-192.0.2.1}
 
 case "$MODES" in
@@ -93,7 +89,7 @@ trap 'cleanup $?' EXIT
 echo "== environment"
 echo "upf:    $ROOT ($(env git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo untracked))"
 echo "stage:  $STAGE"
-[ -x "$BESSD" ] && echo "bessd:  $("$BESSD" --version 2>/dev/null | head -1 || echo unknown) (bess $(env git -C "$WT" rev-parse --short HEAD 2>/dev/null || echo untracked))"
+[ -x "$BESSD" ] && echo "bessd:  bess $(grep -o '"commit": "[0-9a-f]\{8\}' "$STAGE/share/bess/build-info.json" 2>/dev/null | grep -o '[0-9a-f]\{8\}$' || echo unknown) (the stage's share/bess/build-info.json)"
 echo "n4:     $MODE, sessions $SESSIONS, workers $WORKERS, mode: $MODES"
 echo "uptime: $(uptime | sed 's/.*load average/load average/')"
 

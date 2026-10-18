@@ -5,3 +5,10 @@
 *.so
 go.work
 go.work.sum
+# compiled artifacts of any kind never belong in history
+*.test
+*.a
+*.out
+*.pid
+/n4bench
+/pdrmatch

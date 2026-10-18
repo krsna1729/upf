@@ -18,10 +18,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STAGE=${STAGE:-/home/krsna1729/Projects/bess/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/deps/dpdk-25.11.3/install/lib}
+. "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-SERVER=${SERVER:-127.0.0.1:10514}
 GO=${GO:-mise exec -- go}
 
 BESSD=$STAGE/bin/bessd
@@ -37,7 +35,7 @@ PIDFILE=$(mktemp /tmp/upf-live-XXXXXX.pid)
 
 export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-"$BESSD" -m 0 -skip_root_check -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
+"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
 DAEMON=$!
 cleanup() {
   kill "$DAEMON" 2>/dev/null || true
@@ -46,15 +44,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 30); do "$BESSCTL" status >/dev/null 2>&1 && break; sleep 1; done
-if ! "$BESSCTL" status >/dev/null 2>&1; then
+for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 1; done
+if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
   echo "live: the daemon did not come up; log follows" >&2
   cat "$LOG" >&2
   exit 1
 fi
 
-"$BESSCTL" validate "$ROOT/deploy/session-live.yaml" >/dev/null
-"$BESSCTL" apply "$ROOT/deploy/session-live.yaml" >/dev/null
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$ROOT/deploy/session-live.yaml" >/dev/null
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$ROOT/deploy/session-live.yaml" >/dev/null
 
 # The test needs the Go toolchain CI pins; run it from the repository root so
 # the module and its workspace resolve.

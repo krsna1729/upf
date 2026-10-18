@@ -24,14 +24,11 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STAGE=${STAGE:-/home/krsna1729/Projects/bess/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/deps/dpdk-25.11.3/install/lib}
+. "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
-BESS_PORT=${BESS_PORT:-10516}
-N4_PORT=${N4_PORT:-18805}
 BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
 

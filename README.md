@@ -65,23 +65,55 @@ cd datapath
 # bess-dev.pc (pkg-config's ordinary, correct behaviour -- the file is not
 # relocatable), so --define-prefix is what derives the stage's own include
 # paths from where the .pc file lives. PKG_CONFIG passes that through to meson.
-PKG_CONFIG="pkg-config --define-prefix" PKG_CONFIG_PATH=<stage>/lib/pkgconfig \
+PKG_CONFIG="pkg-config --define-prefix" \
+PKG_CONFIG_PATH=../build/bess/stage/lib/pkgconfig \
   meson setup build && ninja -C build
 
 # the proof it works: bessd loads the plugin, applies the smoke graph, and the
 # script checks one decapsulated and one encapsulated packet byte for byte
-STAGE=<stage> ../ci/smoke-gtpu.sh
+../ci/smoke-gtpu.sh
 ```
 
 The stage must be a BESS install whose `bess-dev.pc` carries the stage's own
 paths — i.e. BESS configured with `-Dprefix=<stage>`. An install made with
 `meson install --destdir=...` keeps `/usr/local` inside the `.pc`, which is why
 the build above puts `pkg-config --define-prefix` in `PKG_CONFIG`; a stage
-configured with `-Dprefix=<stage>` needs neither. The smoke's `STAGE` default is
-the main checkout's `build/stage-fast`, which is such a destdir install.
+configured with `-Dprefix=<stage>` needs neither.
 
-Driving BESS needs the fork's Go SDK, the nested module `sdk/go`; until those
-commits are published, `go.mod` documents the local `replace` to use.
+### The BESS build this repo carries
+
+Every build and run lane uses `build/bess/` (untracked, like every other build
+output), never a sibling BESS checkout. `ci/bess-env.sh` is the one place the
+lanes read it from, and `ci/vendor-bess.sh [<bess checkout>]` is how it is
+made and refreshed:
+
+| path | what | used by |
+|---|---|---|
+| `build/bess/stage/` | the installed `bess-dev` stage: `bessd`, `bessctl`, headers, `bess-dev.pc` | the plugin build, every arm |
+| `build/bess/dpdk/` | the DPDK `bessd` loads at run time | every arm (`LD_LIBRARY_PATH`) |
+| `build/bess/fast/` | the perf tree: `core/bessd`, `tests/perf/live_perf` | `ci/bench-modules.sh`, `ci/bench-n4.sh` |
+| `build/bess/sdk/go` | the fork's Go SDK | `ci/work.sh` only |
+
+`BESS=`, `STAGE=` and `DPDK_LIB=` override each default. Things to know:
+
+- The copy names nothing outside itself where it matters. The script rewrites
+  the DPDK paths in `bess-dev.pc` and DPDK's own `.pc` files, and patches the
+  PMD driver directory compiled into `librte_eal` (`RTE_EAL_PMD_PATH`; `bessd`
+  has no flag for it, and without the patch every NIC driver loads from the
+  checkout). `LD_DEBUG=libs ci/smoke-gtpu.sh` loads no library from the
+  checkout.
+- `fast/core/bessd` still carries an absolute RUNPATH into the checkout it was
+  built in; the lanes put `build/bess/dpdk` first on `LD_LIBRARY_PATH`, which
+  the loader searches before RUNPATH. Rebuilding BESS happens in a BESS
+  checkout, then refresh; `fast/` is not rebuilt in place.
+- Go builds use the SDK `go.mod` pins (`GOWORK=off`, which the env file
+  exports). `build/bess/sdk/go` is a *newer* SDK than that pin; `ci/work.sh`
+  makes a workspace of it for developing against it, and the arms do not use it.
+- The lanes pick free ports for `bessd` and N4 at start (`BESS_PORT`,
+  `N4_PORT`, `SERVER` override), because another daemon on the host may hold
+  the defaults. `bessd` itself always writes its crash report to
+  `/tmp/bessd_crash.log`, shared by every daemon on the host: read it with its
+  pid in hand.
 
 ## Run
 
@@ -91,8 +123,9 @@ commits are published, `go.mod` documents the local `replace` to use.
 
 # the datapath: bessd with the plugin, then apply the graph (the daemon starts
 # empty; -f is foreground mode, and the manifest is applied over control_v2)
-build/stage/bin/bessd -m 4096 -modules=<plugin dir> -f &
-build/stage/bin/bessctl apply deploy/upf.yaml
+export LD_LIBRARY_PATH=$PWD/build/bess/stage/lib:$PWD/build/bess/dpdk/install/lib
+build/bess/stage/bin/bessd -m 4096 -modules=<plugin dir> -f &
+build/bess/stage/bin/bessctl apply deploy/upf.yaml
 ./upfd -bess localhost:10514 -n4 0.0.0.0:8805 -node-id 10.0.0.1
 ```
 

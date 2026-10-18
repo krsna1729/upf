@@ -17,12 +17,12 @@ profile" is the same ground over the compliance rows.
 
 | commit | what it lands | what proves it |
 |---|---|---|
-| `8d94d84` | the compiler's keyed write: one map key per session, keyed by the F-TEID, value in SMF precedence order | seven tests in `internal/session/pdr_match_test.go`, read through the compiler's own encoder |
-| `921ba6b` | `-profile generic\|custom`, resolved once at startup | `profile_test.go`: the strategies, the refusal of an unknown name, an unset direction still reading as the wildcard table |
-| `37d0c8c` | the two graphs, and a test that each profile's graph exists on disk | `TestAProfilesGraphIsInTheTree` — an **existence check, not a tracking check**: `os.Stat` passes on an untracked file, so it would not have caught the graph's untracked state. The fresh-checkout guarantee comes from verifying the suite on a `git archive` export (`git archive HEAD \| tar -x -C /tmp/verify && go test ./...`), which is the practice this repo already uses |
-| `5b0a4fa` | the startup sweep: chunked erase (bound derived from the engine's retire budget), one `Contents` call per resource, fatal on a partial sweep | `sweep_test.go`, failing-first against the single-transaction shape |
-| `1793a34` | the usage tick reads each counter module **once** per tick, not once per session | `report_test.go`; 27.0 B per counted rule measured |
-| `bb7bbc3`, `7a92eb5`, `7d9ec80`, `52daa6e` | the design's profiles section, the scorecard matrix and checklist, the per-profile compliance and performance tables, and their accuracy fixes | docs only |
+| `3508638` | the compiler's keyed write: one map key per session, keyed by the F-TEID, value in SMF precedence order | seven tests in `internal/session/pdr_match_test.go`, read through the compiler's own encoder |
+| `e1672ff` | `-profile generic\|custom`, resolved once at startup | `profile_test.go`: the strategies, the refusal of an unknown name, an unset direction still reading as the wildcard table |
+| `266fc30` | the two graphs, and a test that each profile's graph exists on disk | `TestAProfilesGraphIsInTheTree` — an **existence check, not a tracking check**: `os.Stat` passes on an untracked file, so it would not have caught the graph's untracked state. The fresh-checkout guarantee comes from verifying the suite on a `git archive` export (`git archive HEAD \| tar -x -C /tmp/verify && go test ./...`), which is the practice this repo already uses |
+| `768d353` | the startup sweep: chunked erase (bound derived from the engine's retire budget), one `Contents` call per resource, fatal on a partial sweep | `sweep_test.go`, failing-first against the single-transaction shape |
+| `645488a` | the usage tick reads each counter module **once** per tick, not once per session | `report_test.go`; 27.0 B per counted rule measured |
+| `43b4971`, `00244b7`, `a685069`, `140a704` | the design's profiles section, the scorecard matrix and checklist, the per-profile compliance and performance tables, and their accuracy fixes | docs only |
 
 Full suite green at every one of those commits, with **`GOWORK=off`**.
 

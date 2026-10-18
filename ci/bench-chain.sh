@@ -24,8 +24,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STAGE=${STAGE:-/home/krsna1729/Projects/bess/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-/home/krsna1729/Projects/bess/deps/dpdk-25.11.3/install/lib}
+. "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
 CORES=${CORES:-2-3}
 ROUNDS=${ROUNDS:-3}
@@ -156,7 +155,7 @@ counter_module() { # counter_module <variant>
 }
 
 counter() { # counter <module> -- packets on that module's output gate
-  "$BESSCTL" metrics 2>/dev/null |
+  "$BESSCTL" -s "127.0.0.1:$BESS_PORT" metrics 2>/dev/null |
     awk -v m="$1" '$1 ~ ("module=\"" m "\"") && $1 ~ /direction="out"/ {print $2; exit}'
 }
 
@@ -166,13 +165,13 @@ measure() { # measure <variant>
   local v=$1 mod best=0
   mod=$(counter_module "$v")
   for _ in $(seq "$ROUNDS"); do
-    "$BESSCTL" pause >/dev/null
+    "$BESSCTL" -s "127.0.0.1:$BESS_PORT" pause >/dev/null
     write_manifest "$v"
-    if ! out=$("$BESSCTL" apply "$MANIFEST" 2>&1); then
+    if ! out=$("$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$MANIFEST" 2>&1); then
       echo "bench: apply failed for variant $v: $out" >&2
       exit 1
     fi
-    "$BESSCTL" resume >/dev/null
+    "$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
     local t0 c0 t1 c1
     t0=$(date +%s.%N); c0=$(counter "$mod"); sleep "$SECONDS_RUN"
     c1=$(counter "$mod"); t1=$(date +%s.%N)
@@ -191,9 +190,9 @@ measure() { # measure <variant>
 trap 'kill "$DAEMON" 2>/dev/null; rm -f "$MANIFEST" "$PIDFILE"' EXIT
 
 echo "bench: cores $CORES, $ROUNDS rounds of ${SECONDS_RUN}s each, worker core ${CORES%%-*}"
-taskset -c "$CORES" "$BESSD" -m 0 -skip_root_check -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
+taskset -c "$CORES" "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
 DAEMON=$!
-for _ in $(seq 1 30); do "$BESSCTL" status >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 1; done
 
 # Every variant follows the same path (pause, apply, resume, count); the order
 # below is only the order the numbers are printed in.

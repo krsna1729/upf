@@ -6,11 +6,13 @@
 # commits are published, that module exists only on a local checkout, and a
 # workspace file is how the Go toolchain is told where it is.
 #
-#   BESS_SRC=/home/you/Projects/bess ci/work.sh
+#   ci/work.sh                              # the copy under build/bess
+#   BESS_SRC=<tree with sdk/go> ci/work.sh  # another tree's SDK
 #
 set -eu
 
-: "${BESS_SRC:?set BESS_SRC to a BESS checkout that has sdk/go}"
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+BESS_SRC=${BESS_SRC:-$ROOT/build/bess}
 
 if [ ! -f "$BESS_SRC/sdk/go/go.mod" ]; then
     echo "no Go SDK at $BESS_SRC/sdk/go" >&2
@@ -19,7 +21,7 @@ fi
 
 cd "$(dirname "$0")/.."
 cat > go.work <<EOF
-go 1.24
+go 1.26.0
 
 use (
 	.

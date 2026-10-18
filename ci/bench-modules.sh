@@ -10,7 +10,7 @@
 # frames are deploy/smoke-gtpu.yaml's own bytes.
 #
 #   ci/bench-modules.sh                 # defaults below
-#   BESS=<checkout> ROUNDS=8 ci/bench-modules.sh
+#   BESS=<tree with the build/bess layout> ROUNDS=8 ci/bench-modules.sh
 #
 # A perf run holds the machine: it waits for builds, and nothing else should be
 # running. When the host has a perf slot (a lock builds and perf runs share),
@@ -30,14 +30,12 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BESS=${BESS:-$HOME/Projects/bess}
-WT=${WT:-$BESS}                             # the checkout whose build holds live_perf
-BUILD=${BUILD:-$WT/build/fast}              # the daemon and the tools; the benchmarks build moves to build/bench
+. "$ROOT/ci/bess-env.sh"
+WT=${WT:-$BESS}                             # the tree whose fast/ build holds live_perf
+BUILD=${BUILD:-$WT/fast}              # the daemon and the tools; the benchmarks build moves to build/bench
 DAEMON=${DAEMON:-$BUILD/core/bessd}
 LIVE_PERF=${LIVE_PERF:-$BUILD/tests/perf/live_perf}
 PLUG=${PLUG:-$ROOT/datapath/build}
-STAGE=${STAGE:-$BESS/build/stage-fast/usr/local}
-DPDK_LIB=${DPDK_LIB:-$BESS/deps/dpdk-25.11.3/install/lib}
 ROUNDS=${ROUNDS:-4}
 CPU=${CPU:-4}
 CONTROL_CPU=${CONTROL_CPU:-2}
