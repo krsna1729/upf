@@ -379,6 +379,44 @@ func TestARefusedReportIsNotRetried(t *testing.T) {
 	}
 }
 
+// TestAReportForASessionTheSMFDeletedIsNotSent is finding 20's other half: a
+// report that waited in the queue while the SMF deleted the session is usage
+// the deletion's termination report already carried, so it is cancelled rather
+// than sent -- an SMF mid-release may take it and count that usage twice (seen
+// on free5GC: it accepted one 2 ms after the deletion).
+func TestAReportForASessionTheSMFDeletedIsNotSent(t *testing.T) {
+	sender := &queueSender{unanswered: 1}
+	compiler := loopSession(t, periodicEstablishment(1, 0x9001, time.Second))
+	logs := &logCapture{}
+	stats := &reportStats{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reportLoop(ctx, compiler, sender, 20*time.Millisecond, stats,
+		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	waitFor(t, 5*time.Second, func() bool { return len(sender.snapshot()) >= 1 },
+		"the loop sent its first report", logs.log)
+	before := len(sender.snapshot())
+
+	// The SMF deletes the session: the report it never answered is now usage
+	// the termination report has carried.
+	resp := compiler.Delete(message.NewSessionDeletionRequest(0, 0, 1, 2, 0))
+	if cause, _ := resp.(*message.SessionDeletionResponse).Cause.Cause(); cause != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d, want accepted", cause)
+	}
+	waitFor(t, 5*time.Second, func() bool { return logs.contains("usage reports cancelled") },
+		"the loop cancelled the queued report", logs.log)
+
+	// Five ticks with nothing more for that session: the queue is empty.
+	time.Sleep(100 * time.Millisecond)
+	if got := len(sender.snapshot()); got != before {
+		t.Errorf("the loop sent %d reports after the deletion, want the %d it had already sent", got, before)
+	}
+	if got := stats.cancelled.Load(); got == 0 {
+		t.Error("the cancelled report was not counted")
+	}
+}
+
 // TestAHeldReportIsRetriedWithBackoff: a CP function that has stopped answering
 // must not be sent to at the tick's rate -- every attempt costs the n4 layer's
 // retry budget, and the tick also carries the evaluation that enforces every

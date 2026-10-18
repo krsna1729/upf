@@ -893,6 +893,18 @@ type urr struct {
 	// another rule's totals.
 	lastUp, lastDown Usage
 	baselined        bool
+
+	// deliveredUp, deliveredDown and deliveredAt are the reading the SMF was
+	// last *told* up to, and when that window opened. lastUp/lastDown move as
+	// soon as a report is decided, because the queue holds that report and the
+	// next tick must not report the same usage twice; this trio moves only when
+	// the message carrying it is accepted (Compiler.ConfirmReport,
+	// Compiler.advanceAfter). A session that ends while a report is still in
+	// the queue is reported from this trio, so the usage that report held
+	// reaches the SMF in the termination report instead of going with it
+	// (docs/compliance.md, finding 20).
+	deliveredUp, deliveredDown Usage
+	deliveredAt                time.Time
 }
 
 // AssociationEnded implements n4.SessionHandler: no session of the association

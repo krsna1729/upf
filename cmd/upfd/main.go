@@ -522,6 +522,15 @@ func (q *reportQueue) done(seid uint64) {
 	q.held[seid] = queue[1:]
 }
 
+// cancel drops every report a session still holds, and returns how many: the
+// session layer no longer has the session, so its termination report carries
+// that usage instead (finding 20).
+func (q *reportQueue) cancel(seid uint64) int {
+	held := len(q.held[seid])
+	delete(q.held, seid)
+	return held
+}
+
 // sent records that the session's oldest report went out once more without an
 // answer: it stays where it is, and it is tried again after the backoff.
 func (q *reportQueue) sent(seid uint64, now time.Time, backoff time.Duration) {
@@ -598,6 +607,18 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 		// and enforces quotas -- a CP function that has stopped answering must
 		// not hold it. What is not sent now keeps its place (and its backoff).
 		for _, seid := range queue.seids() {
+			if !sessions.Holds(seid) {
+				// The session ended while these reports waited: the deletion's
+				// termination report carried their usage (finding 20), so they
+				// are not sent -- an SMF mid-release may take one and count the
+				// usage twice, and one that is already gone answers cause 65.
+				if held := queue.cancel(seid); held > 0 {
+					reports.cancelled.Add(uint64(held))
+					log.Info("usage reports cancelled: the session ended while they waited",
+						"seid", seid, "reports", held)
+				}
+				continue
+			}
 			r, ok := queue.head(seid)
 			if !ok || r.next.After(now) {
 				continue
@@ -625,6 +646,9 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 					"urr", r.report.URRID, "trigger", r.report.Trigger.String(), "cause", answer.Cause)
 			} else {
 				reports.sent.Add(1)
+				// The SMF has the usage this report carried: the URRs' base
+				// for the termination report moves up to it (finding 20).
+				sessions.ConfirmReport(ctx, r.report)
 				acknowledge(r.report, "acknowledged", "attempts", r.attempts+1)
 			}
 			// An answer may carry an Update BAR whatever it reports (5.2.4.1's

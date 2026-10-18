@@ -410,10 +410,10 @@ an IE it does not support is the URR refusal.
 
 Open: Open5GS (no official image), free5GC's own UPF (not relevant), a second
 UE/session, N9, the SMF-initiated release/modify paths (T3591/T3592 timers),
-and finding 20 (a usage report's window opens when the tick decides it, so a
-report the session's end overtakes takes its usage with it). `ci/interop/run.sh`
-is the regression entry point: it ends with `stage reached: c` and `upfd` and
-`bessd` shutting down cleanly.
+and finding 20's narrow residue (a report already in flight when the deletion
+arrives can be counted twice -- 5 packets, once, on `runs/dp-fix`).
+`ci/interop/run.sh` is the regression entry point: it ends with
+`stage reached: c` and `upfd` and `bessd` shutting down cleanly.
 
 ## The dataplane arm (`DATAPLANE=1`): real packets through `bessd`
 
@@ -440,8 +440,8 @@ Measured (`runs/dp4`, `runs/dp5`, generic; `runs/dp-custom`, custom):
 |---|---|
 | the echo | 20 packets, **0% loss**, each way: `cnt_ul +20`, `cnt_dl +20` packets (the graph's own counting modules) |
 | the URRs at a real SMF | PERIO reports before the traffic, then VOLTH reports with real volume: 2052 octets / 9 packets each way, accepted (`Session Report Response`, cause 1) |
-| the whole traffic accounted | URR 1's windows sum to 20 packets / 4560 octets each way, exactly what crossed |
-| URR 2 (the same triggers) | 9 + 2 = 11 packets: finding 20, the usage a decided-but-undelivered report held was refused with cause 65 after the deletion |
+| the whole traffic accounted | both URRs' windows plus the deletion's termination report sum to 20 packets / 4560 octets each way, exactly what crossed (`runs/dp-fix`; before the fix `runs/dp5` delivered 20 for URR 1 and 11 for URR 2 -- finding 20) |
+| a report the session's end overtook | the queued report is cancelled, not sent (`upf_usage_reports_total{outcome="cancelled"}`), and its usage goes in the termination report instead |
 
 Two gaps this arm exposed, neither of them the rig's:
 

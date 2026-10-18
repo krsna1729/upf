@@ -156,6 +156,14 @@ type Report struct {
 	// up, and the PDRs that name the URR now compile to a drop.
 	Enforcing bool
 
+	// RawUp, RawDown and DecidedAt are the reading this window was made from
+	// and when it was decided: the base and the time the next window starts at.
+	// They travel with the report because the base moves at decision time while
+	// the message is delivered later, and the layer that delivers it is the one
+	// that moves the *delivered* base (Compiler.ConfirmReport).
+	RawUp, RawDown Usage
+	DecidedAt      time.Time
+
 	// Linked is the rest of a linked group, when this report is the group's:
 	// each is its own Usage Report IE, and every one of them -- this report's
 	// URR included -- carries this report's UR-SEQN, which is what 8.2.71 means
@@ -180,6 +188,11 @@ type LinkedUsage struct {
 	// Enforcing says this URR's own quota brought the traffic down, so the SMF
 	// knows which member of the group spent its quota.
 	Enforcing bool
+
+	// RawUp and RawDown are this member's own reading, as Report's are: the
+	// group's report opens every member's next window, so the delivered base
+	// moves for each of them.
+	RawUp, RawDown Usage
 }
 
 // flags is the Reporting Trigger this report carries (8.2.19), as the two
@@ -539,6 +552,7 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 				// carried with a zero window.
 				u.baselined = true
 				u.reported, u.lastUp, u.lastDown = now, up, down
+				u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, now
 				states = append(states, st)
 				continue
 			}
@@ -614,6 +628,7 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 			Trigger: l.trigger, Seqn: seqn,
 			Up: l.up, Down: l.down,
 			Duration: l.window, First: l.first, Last: l.last, Enforcing: s.URRs[l.uid].enforcing,
+			RawUp: l.rawUp, RawDown: l.rawDown, DecidedAt: now,
 		}
 		for i, st := range states {
 			if i == lead {
@@ -623,6 +638,7 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 				URRID: st.uid, Up: st.up, Down: st.down,
 				Duration: st.window, First: st.first, Last: st.last,
 				Enforcing: s.URRs[st.uid].enforcing,
+				RawUp:     st.rawUp, RawDown: st.rawDown,
 			})
 			if s.URRs[st.uid].enforcing {
 				r.Enforcing = true
@@ -780,6 +796,15 @@ func urrIDsInOrder(s *Session) []uint32 {
 	return ids
 }
 
+// windowBase is which reading a window opens from (windowsOf): the base of the
+// last report, delivered or not, or the last reading the SMF was told up to.
+type windowBase int
+
+const (
+	sinceReport windowBase = iota
+	sinceDelivery
+)
+
 // urrWindow is one URR's window as of a reading: the usage since its last
 // report, and the cumulative reading the next window would start from.
 type urrWindow struct {
@@ -808,7 +833,13 @@ type urrWindow struct {
 // It changes nothing in the model: a window the SMF is told about opens the
 // next one only when the message that carried it has been answered
 // (advanceAfter).
-func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now time.Time) ([]urrWindow, error) {
+//
+// base says which reading a window opens from: sinceReport for a window the
+// caller is about to send (the last report's base, whether or not that report
+// has been delivered yet), sinceDelivery for the session's last window, which
+// must carry what the SMF has not been told rather than what the queue already
+// holds (finding 20).
+func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now time.Time, base windowBase) ([]urrWindow, error) {
 	c.mu.Lock()
 	ids := c.measuredRules(s)
 	c.mu.Unlock()
@@ -836,12 +867,18 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 			}
 			u := s.URRs[uid]
 			nowUp, nowDown, f, l := c.countsOf(s, uid, counts)
+			fromUp, fromDown, fromAt := u.lastUp, u.lastDown, u.reported
+			if base == sinceDelivery {
+				// The session is ending: what the SMF has not been told is the
+				// window, whatever the queue still holds (finding 20).
+				fromUp, fromDown, fromAt = u.deliveredUp, u.deliveredDown, u.deliveredAt
+			}
 			w := urrWindow{
 				uid: uid, seqn: seqn, rawUp: nowUp, rawDown: nowDown,
-				duration: max(now.Sub(u.reported), 0), groupLeader: members[0], reportedAt: u.reported,
+				duration: max(now.Sub(fromAt), 0), groupLeader: members[0], reportedAt: u.reported,
 			}
 			if u.baselined {
-				w.up, w.down = nowUp.since(u.lastUp), nowDown.since(u.lastDown)
+				w.up, w.down = nowUp.since(fromUp), nowDown.since(fromDown)
 				first, last := u.windowFirst, u.windowLast
 				if !f.IsZero() && !l.Before(f) {
 					if first.IsZero() {
@@ -887,11 +924,44 @@ func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) 
 		}
 		u.baselined = true
 		u.reported, u.lastUp, u.lastDown = now, w.rawUp, w.rawDown
+		u.deliveredUp, u.deliveredDown, u.deliveredAt = w.rawUp, w.rawDown, now
 		u.windowFirst, u.windowLast = time.Time{}, time.Time{}
 		if lead := s.URRs[w.groupLeader]; lead != nil && !bumped[w.groupLeader] {
 			bumped[w.groupLeader] = true
 			lead.seqn++
 		}
+	}
+}
+
+// ConfirmReport moves the delivered base of the URRs a report carried: the
+// message that carried them was accepted, so the SMF has now been told that
+// usage. decide moves lastUp/lastDown when a report is *decided*, because the
+// queue holds it and the next tick must not report the same usage twice; this
+// pair moves only here (and in advanceAfter, for a report a modification
+// carried), so a session that ends while a report is still queued is reported
+// from the last delivered reading and the usage that report held is not lost
+// (docs/compliance.md, finding 20).
+//
+// A session's reports are delivered in order -- the loop sends the head of the
+// session's queue and holds the rest behind it -- so a delivery never moves the
+// base back; a report whose URR is gone (the SMF removed it) moves nothing.
+func (c *Compiler) ConfirmReport(ctx context.Context, r Report) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.sessions[r.SEID]
+	if s == nil {
+		return
+	}
+	delivered := func(uid uint32, up, down Usage) {
+		u := s.URRs[uid]
+		if u == nil {
+			return
+		}
+		u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, r.DecidedAt
+	}
+	delivered(r.URRID, r.RawUp, r.RawDown)
+	for _, l := range r.Linked {
+		delivered(l.URRID, l.RawUp, l.RawDown)
 	}
 }
 
@@ -906,7 +976,7 @@ func (c *Compiler) terminationReports(ctx context.Context, s *Session, now time.
 	if len(s.URRs) == 0 {
 		return nil
 	}
-	windows, err := c.windowsOf(ctx, s, nil, now)
+	windows, err := c.windowsOf(ctx, s, nil, now, sinceDelivery)
 	if err != nil {
 		c.log.Warn("session: no termination usage report", "seid", s.LocalSEID, "error", err)
 		return nil

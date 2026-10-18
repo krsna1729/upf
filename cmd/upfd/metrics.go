@@ -16,12 +16,15 @@ import (
 // reportStats is what the reporting loop counts: the reports it sent and what
 // became of them. A report the SMF answers is sent; one it refuses is refused
 // (a decision, so the loop does not try it again); one it leaves unanswered is
-// held for a later attempt; and one the queue has no room for is dropped.
+// held for a later attempt; one the queue has no room for is dropped; and one
+// whose session ended while it waited is cancelled (its usage went in the
+// session's termination report instead).
 type reportStats struct {
-	sent    atomic.Uint64
-	refused atomic.Uint64
-	held    atomic.Uint64
-	dropped atomic.Uint64
+	sent      atomic.Uint64
+	refused   atomic.Uint64
+	held      atomic.Uint64
+	dropped   atomic.Uint64
+	cancelled atomic.Uint64
 	// The downlink half: the reports that told the SMF about packets being
 	// held, and the ones it would not take (offered again on the next tick).
 	ddnSent   atomic.Uint64
@@ -43,7 +46,7 @@ type peerState interface {
 //	upf_sessions_refused_total         requests answered with a cause but accepted
 //	upf_end_markers_total{outcome}     End Markers sent, or failed (the graph's port took none)
 //	upf_buffer_flows_total{outcome}    release/drop commands accepted, or refused (accepted, not completed)
-//	upf_usage_reports_total{outcome}   sent, refused, held (no answer yet), dropped
+//	upf_usage_reports_total{outcome}   sent, refused, held (no answer yet), dropped, cancelled (the session ended first)
 //	upf_pfcp_associated                a CP function is associated (1) or not (0)
 //	upf_pfcp_peer_info{node_id,address}  the associated CP function, if any
 //
@@ -86,6 +89,7 @@ func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportS
 		fmt.Fprintf(&b, "upf_usage_reports_total{outcome=\"refused\"} %d\n", reports.refused.Load())
 		fmt.Fprintf(&b, "upf_usage_reports_total{outcome=\"held\"} %d\n", reports.held.Load())
 		fmt.Fprintf(&b, "upf_usage_reports_total{outcome=\"dropped\"} %d\n", reports.dropped.Load())
+		fmt.Fprintf(&b, "upf_usage_reports_total{outcome=\"cancelled\"} %d\n", reports.cancelled.Load())
 		fmt.Fprintf(&b, "# HELP upf_downlink_reports_total Downlink Data Reports by outcome: delivered, or not taken (retried next tick).\n")
 		fmt.Fprintf(&b, "# TYPE upf_downlink_reports_total counter\n")
 		fmt.Fprintf(&b, "upf_downlink_reports_total{outcome=\"sent\"} %d\n", reports.ddnSent.Load())
