@@ -69,6 +69,21 @@ func idsOf[K ~uint16 | ~uint32, V any](m map[K]V) []K {
 	return out
 }
 
+// heldFlows is what a session's buffering holds right now: the ActionIds of the
+// PDRs whose FAR asks for the packets to be held (p.buffer), plus the flows a
+// modification already took off the graph whose records the dataplane still
+// holds. It is the set a deletion and a DROBU modification both discard. The
+// caller holds the lock.
+func heldFlows(s *Session) []uint32 {
+	var out []uint32
+	for _, p := range s.PDRs {
+		if p.buffer && p.actionID != 0 {
+			out = append(out, p.actionID)
+		}
+	}
+	return append(out, removedFlows(s)...)
+}
+
 // pdrsInOrder and qersInOrder are the session's objects in id order.
 func pdrsInOrder(s *Session) []*pdr {
 	out := make([]*pdr, 0, len(s.PDRs))
@@ -450,6 +465,24 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		leaving = s.leavingTunnels(fars)
 	}
 
+	// TS 29.244 8.2.31: DROBU asks this UPF to discard every packet the
+	// session buffers, "prior to further applying the action specified in the
+	// Apply Action value of the FARs". The flows are read out of the session
+	// before the merge folds the new instruction in -- they are what is held
+	// now, not what the request leaves buffering -- and are dropped once the
+	// transaction has landed, the way a deletion's are (5.2.4.1 gives drop and
+	// forward as the two ends of an instruction that stops buffering).
+	var dropBuffered bool
+	var buffered []uint32
+	if drobu(modificationFlags(req)) {
+		dropBuffered = true
+		if c.BufferingConfigured() {
+			c.mu.Lock()
+			buffered = heldFlows(s)
+			c.mu.Unlock()
+		}
+	}
+
 	// merge takes the lock itself.
 	if err := c.merge(s, pdrs, fars, bars, qers, urrs, removePDRs, removeFARs, removeBARs, removeURRs); err != nil {
 		c.log.Warn("session: cannot carry the modification request", "seid", seid, "error", err)
@@ -513,11 +546,18 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	// contents died with the daemon that held them, and the flows it names may
 	// since have been handed to another subscriber.
 	if !c.restoring {
-		c.releaseFlows(context.Background(), seid, ending)
-		// A PDR the request removed leaves nothing to forward to, so what it
-		// held is dropped rather than released (5.2.4.1 gives the two as the
-		// alternatives).
-		c.dropFlows(context.Background(), seid, discarded)
+		if dropBuffered {
+			// DROBU is the discard 8.2.31 asks for, and it covers the flows
+			// this very request takes out of buffering too: the flag sends a
+			// drop, so none of what was held is released.
+			c.dropFlows(context.Background(), seid, buffered)
+		} else {
+			c.releaseFlows(context.Background(), seid, ending)
+			// A PDR the request removed leaves nothing to forward to, so what
+			// it held is dropped rather than released (5.2.4.1 gives the two
+			// as the alternatives).
+			c.dropFlows(context.Background(), seid, discarded)
+		}
 	}
 
 	c.mu.Lock()
@@ -567,13 +607,7 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	// forwarded", and a session that no longer exists has no path to forward
 	// them over. Read before remove erases the model.
 	c.mu.Lock()
-	var held []uint32
-	for _, p := range s.PDRs {
-		if p.buffer && p.actionID != 0 {
-			held = append(held, p.actionID)
-		}
-	}
-	held = append(held, removedFlows(s)...)
+	held := heldFlows(s)
 	c.mu.Unlock()
 	if err := c.remove(context.Background(), s); err != nil {
 		c.log.Warn("session: the dataplane refused the deletion", "seid", seid, "error", err)

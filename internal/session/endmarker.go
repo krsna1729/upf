@@ -140,10 +140,25 @@ func (c *Compiler) sendEndMarker(frame []byte) error {
 // Create FAR's or Update FAR's forwarding parameters, which is where some CP
 // functions put it.
 func sndem(ies []*ie.IE) bool {
-	return sndemDepth(ies, 0)
+	return smReqFlags(ies, (*ie.IE).HasSNDEM)
 }
 
-func sndemDepth(ies []*ie.IE, depth int) bool {
+// drobu reports whether a Session Modification Request's IEs carry the DROBU
+// flag (TS 29.244 8.2.31): the sibling bit in the same octet as SNDEM -- the
+// drop-buffered instruction of 7.5.4.1, which 8.2.31 says the CP function may
+// carry on the message or inside a FAR's forwarding parameters.
+func drobu(ies []*ie.IE) bool {
+	return smReqFlags(ies, (*ie.IE).HasDROBU)
+}
+
+// smReqFlags finds a PFCPSMReq-Flags IE wherever a Session Modification Request
+// can carry one -- the message's own, or one inside a Create FAR's or Update
+// FAR's forwarding parameters -- and asks has whether its bit is set.
+func smReqFlags(ies []*ie.IE, has func(*ie.IE) bool) bool {
+	return smReqFlagsDepth(ies, 0, has)
+}
+
+func smReqFlagsDepth(ies []*ie.IE, depth int, has func(*ie.IE) bool) bool {
 	if depth > 4 { // FAR -> forwarding parameters -> the flag: no deeper
 		return false
 	}
@@ -151,7 +166,7 @@ func sndemDepth(ies []*ie.IE, depth int) bool {
 		if i == nil {
 			continue
 		}
-		if i.Type == ie.PFCPSMReqFlags && i.HasSNDEM() {
+		if i.Type == ie.PFCPSMReqFlags && has(i) {
 			return true
 		}
 		var children []*ie.IE
@@ -168,7 +183,7 @@ func sndemDepth(ies []*ie.IE, depth int) bool {
 		default:
 			continue
 		}
-		if err == nil && sndemDepth(children, depth+1) {
+		if err == nil && smReqFlagsDepth(children, depth+1, has) {
 			return true
 		}
 	}
