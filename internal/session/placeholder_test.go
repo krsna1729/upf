@@ -82,3 +82,22 @@ func TestATunnelWithAZeroTEIDButARealPeerIsStillRefused(t *testing.T) {
 		t.Fatal("a zero TEID beside a real peer address was accepted")
 	}
 }
+
+func TestAQERWithIDZeroIsAValidQER(t *testing.T) {
+	// 8.2.75 reserves no QER ID: pfcpsim numbers its session-level QER 0 and
+	// links it to every PDR beside the per-flow QER. A zero is not an absent
+	// QER ID, and refusing it refused every session of that simulator.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	est := pfcpsimEstablishment(0x9a03, "10.45.0.5", ie.NewOuterHeaderCreation(0x0100, 0, "0.0.0.0", "", 0, 0, 0))
+	est.CreateQER = append(est.CreateQER, ie.NewCreateQER(
+		ie.NewQERID(0),
+		ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+		ie.NewMBR(8000000, 8000000)))
+	est.CreatePDR[0].Add(ie.NewQERID(0))
+
+	resp := c.Establish(est).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("a session with a QER numbered 0 answered cause %d, want it accepted", got)
+	}
+}

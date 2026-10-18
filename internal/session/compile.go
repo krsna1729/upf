@@ -3412,11 +3412,15 @@ func parseQER(i *ie.IE) (qerReq, error) {
 		return qerReq{}, fmt.Errorf("%s: %w", what, err)
 	}
 	q := qerReq{gateUL: ie.GateStatusOpen, gateDL: ie.GateStatusOpen}
+	// QER ID 0 is a value like any other (8.2.75 reserves none; OMEC's pfcpsim
+	// numbers its session-level QER 0), so absence is tracked, not inferred
+	// from a zero.
+	seenID := false
 	for _, c := range children {
 		switch c.Type {
 		case ie.QERID:
 			if id, err := c.QERID(); err == nil {
-				q.id = id
+				q.id, seenID = id, true
 			}
 		case ie.GateStatus:
 			if ul, err := c.GateStatusUL(); err == nil {
@@ -3451,7 +3455,7 @@ func parseQER(i *ie.IE) (qerReq, error) {
 			q.hasRate = true
 		}
 	}
-	if q.id == 0 {
+	if !seenID {
 		return qerReq{}, errors.New("QER without a QER ID")
 	}
 	return q, nil
