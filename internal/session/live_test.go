@@ -45,6 +45,13 @@ func liveConfig() Config {
 		cfg.Up.PDRTable, cfg.Up.PDRFields = "", nil
 		cfg.Up.PdrMatch = "pdr_match_ul"
 	}
+	// UPF_FIREWALL=1 is the generic profile's other strategy on both
+	// directions (deploy/firewall-path.yaml): the stock firewall module holds
+	// each direction's PDRs as one ordered policy, behind the same ActionTables.
+	if os.Getenv("UPF_FIREWALL") == "1" {
+		cfg.Up.PDRTable, cfg.Up.PDRFields, cfg.Up.Firewall = "", nil, "fw_ul"
+		cfg.Down.PDRTable, cfg.Down.PDRFields, cfg.Down.Firewall = "", nil, "fw_dl"
+	}
 	cfg.N3Addr = netip.MustParseAddr("192.0.2.1")
 	cfg.N3MAC = [6]byte{2, 0, 0, 0, 0, 1}
 	cfg.PeerMAC = [6]byte{2, 0, 0, 0, 0, 2}

@@ -31,8 +31,17 @@ PLUG=${PLUG:-$ROOT/datapath/build}
 # it): the counters, the quota, the frames and the End Marker, through the
 # module.
 PROFILE=${PROFILE:-generic}
+# FIREWALL=1 (generic only) runs it on BESS's own `firewall` module, the generic
+# profile's other matching strategy, in both directions
+# (deploy/firewall-path.yaml).
+FIREWALL=${FIREWALL:-0}
 case "$PROFILE" in
-  generic) GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml} ;;
+  generic)
+    if [ "$FIREWALL" = 1 ]; then
+      GRAPH=${GRAPH:-$ROOT/deploy/firewall-path.yaml}
+    else
+      GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
+    fi ;;
   custom)  GRAPH=${GRAPH:-$ROOT/deploy/pdrmatch-path.yaml} ;;
   *) echo "path: PROFILE is generic or custom, not $PROFILE" >&2; exit 2 ;;
 esac
@@ -84,7 +93,7 @@ sed "s|/tmp/upf-end-marker.sock|$MARKER_SOCK|" "$GRAPH" >"$RENDERED"
 # The Go half: the control arm (counters zero), the session, then the counters
 # again. Run from the repository root so the module and its workspace resolve.
 cd "$ROOT"
-MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_PROFILE=$PROFILE \
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_PROFILE=$PROFILE UPF_FIREWALL=$FIREWALL \
   $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveSessionSendsTheEndMarkerOnSNDEM' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log, per dump (the helper

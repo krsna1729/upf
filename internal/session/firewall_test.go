@@ -213,6 +213,47 @@ func TestAFirewallRuleCarriesThePDRAVerdict(t *testing.T) {
 	}
 }
 
+func TestAForwardingFirewallRuleNamesItsAction(t *testing.T) {
+	// The stock module writes a rule's action_id into the packet's metadata
+	// (BESS D-141), so an ActionTable behind it can resolve the PDR's meter and
+	// next hop. Each PDR has its own id, so the policy -- one resource for
+	// every session -- carries many ids, one per rule. The rule must name the
+	// id of the record the same transaction writes (the engine refuses a rule
+	// whose action it cannot find), and a rule that drops names none (the
+	// module refuses a drop with one).
+	rec := &recorder{}
+	c := New(firewallConfig("", "fw_dl"), rec, quietLogger())
+	req := firewallEstablishment(0x5f06, "10.45.0.9", 10, "permit out udp from any to assigned 53")
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	policy := firewallPolicy(t, rec.last(), "fw_dl/rules")
+	id, ok := policy[0]["action_id"].(uint32)
+	if !ok || id == 0 {
+		t.Fatalf("a forwarding rule carries action_id %v, want a non-zero id", policy[0]["action_id"])
+	}
+	var found bool
+	for _, ch := range changesFor(rec.last(), "at_dl/actions") {
+		if ch.Key["id"] == id && ch.Value != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the rule names action %d, which the transaction does not write", id)
+	}
+
+	rec = &recorder{}
+	c = New(firewallConfig("", "fw_dl"), rec, quietLogger())
+	req = firewallEstablishment(0x5f07, "10.45.0.10", 10, "permit out udp from any to assigned 53")
+	req.CreateFAR[0] = ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyDrop))
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a DROP FAR answered cause %d", got)
+	}
+	if got, ok := firewallPolicy(t, rec.last(), "fw_dl/rules")[0]["action_id"]; ok {
+		t.Errorf("a dropping rule names the action %v", got)
+	}
+}
+
 func TestTheFirewallPathIsOptIn(t *testing.T) {
 	// No firewall module configured: nothing changes. The two shapes the
 	// firewall path lifts are refused as they always were, the WildcardMatch

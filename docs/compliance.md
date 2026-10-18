@@ -284,11 +284,14 @@ fine" where the custom path simply cannot take the rule.
    deployment can run today; the PDI's own IPv6 *UE address* is still refused,
    because the F-TEID key, the tunnel record and the WildcardMatch key's
    address fields are IPv4-only, so an IPv6 prefix in a filter is not an IPv6
-   session; and the path is **unarmed** — no `deploy/*.yaml` graph names a
-   `firewall` module and no arm has run a packet through one of its rules. (The
-   stage built from this repo's BESS copy does load `Firewall`: a graph naming
-   it applies, observed once; an earlier note that the stage carried no such
-   module is stale.) The rest of this gap
+   session; and the path is **armed only through the session lane**: the rule
+   now names its PDR's ActionId, and `FIREWALL=1 ci/session-path.sh` runs the
+   whole lane (counters, quota, DSCP, End Marker) through the stock `firewall`
+   module on `deploy/firewall-path.yaml` -- with the compiler before that
+   change the four traffic tests fail, after it they pass. It is the
+   5-tuple and the ActionId that are shown; no arm yet sends a port range or an
+   IPv6 packet through it. (The stage built from this repo's BESS copy does
+   load `Firewall`; the earlier note that it did not is stale.) The rest of this gap
    therefore stands as it was: the dataplane's tables, the two address fields
    and the TEID rule key would all need a second form, and this is what "IPv6
    not implemented" means here.

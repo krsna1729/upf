@@ -2113,11 +2113,17 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 // none, by the UE's own ("assigned" included).
 //
 // What the rule cannot carry is what a packet's 5-tuple does not have: the
-// PDR's ActionId and next hop (the message has no field for either -- a
-// firewall rule's own words are drop and pass, and the module writes no
-// packet metadata), the PDI's QFI, the resolved route domain and the tunnel.
-// Those stay fields of the WildcardMatch path's key; docs/compliance.md
-// records what that means for a firewall deployment.
+// PDI's QFI (the PdrMatch path's rule can, and takes it), the resolved route
+// domain and the tunnel. Those stay fields of the WildcardMatch path's key;
+// docs/compliance.md records what that means for a firewall deployment.
+//
+// A forwarding rule names its PDR's ActionId (the message's "action_id", BESS
+// D-141): the module writes it into the packet's metadata, and the
+// ActionTable behind it resolves the PDR's meter, next hop and tunnel from it
+// -- so a rule of the policy reaches its own next hop, as a WildcardMatch
+// rule does. Each PDR has its own id, so the policy, one resource for every
+// session, holds one id per rule. A rule that drops names none (the module
+// refuses a drop with one).
 func firewallRule(p *pdr) (map[string]any, error) {
 	var src, dst netip.Prefix
 	if p.srcIfc == ie.SrcInterfaceAccess {
@@ -2184,6 +2190,16 @@ func firewallRule(p *pdr) (map[string]any, error) {
 			rule["dst_port_high"] = uint32(p.sdf.dportHi)
 		}
 	}
+	if p.drop {
+		return rule, nil
+	}
+	if p.actionID == 0 {
+		// compile allocates one for every forwarding PDR before the policy is
+		// written; a rule the packet path could match but not resolve would be
+		// a rule that drops its action silently.
+		return nil, fmt.Errorf("%w: PDR %d forwards and has no action id", errNotExpressible, p.id)
+	}
+	rule["action_id"] = p.actionID
 	return rule, nil
 }
 
@@ -3442,12 +3458,10 @@ func createdFTEID(teid uint32, addr netip.Addr) *ie.IE {
 
 // pdrMatchRule is one PDR as a rule of its session's list: the fields of the
 // plugin's PdrMatchRule (datapath/upf_datapath.proto), whose shape is BESS's
-// FirewallArg.Rule with the ActionId a matching packet carries added. The match
-// fields are the firewall path's own derivation (firewallRule), because the two
-// opt-in paths carry the same fields and must select the same packets; what
-// this path adds is the ActionId, which a rule of the firewall *policy* cannot
-// carry usefully (the policy is one resource for every session, so an id in it
-// would be one id).
+// FirewallArg.Rule with the QFI added. The match fields and the ActionId are
+// the firewall path's own derivation (firewallRule), because the two opt-in
+// paths carry the same fields and must select the same packets and resolve the
+// same action.
 //
 // A PDI's QFI (TS 29.244 8.2.89) is the rule's own: the module matches it
 // against the QoS flow the decap read out of the PDU Session Container, so two
@@ -3463,19 +3477,6 @@ func pdrMatchRule(p *pdr) (map[string]any, error) {
 	if p.hasQFI {
 		rule["qfi"] = uint32(p.qfi)
 	}
-	if p.drop {
-		// A drop needs no action record and names none: the id the PDR may
-		// still hold is the form being replaced's (compile writes 0 for a
-		// dropping rule on the WildcardMatch path for the same reason).
-		return rule, nil
-	}
-	if p.actionID == 0 {
-		// compile allocates one for every forwarding PDR before the map is
-		// written; a rule the packet path could match but not resolve would be
-		// a rule that drops its action silently.
-		return nil, fmt.Errorf("%w: PDR %d forwards and has no action id", errNotExpressible, p.id)
-	}
-	rule["action_id"] = p.actionID
 	return rule, nil
 }
 

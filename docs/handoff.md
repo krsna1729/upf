@@ -43,15 +43,15 @@ that was the only binary ever tracked) was removed from history.
 
 `GOWORK=off go test ./...` passes. One `PROFILE=custom ci/session-path.sh` run
 failed once and its output was lost; 21 later runs (both profiles) passed, so
-it is **unexplained, not fixed**.
+it is **unexplained, not fixed** (the log was not kept; keep logs with `tee` next time).
 
 ## Left, in order
 
-1. **The firewall's `action_id`** — the stock module writes a per-rule id and an
-   `ActionTable` resolves it (D-141); `firewallRule` in `compile.go` does not
-   emit it, so our opt-in firewall path cannot carry a range or IPv6 PDR to its
-   own next hop. The stage **does** load `Firewall` (a graph naming it applied),
-   so this is armable.
+1. **Firewall arm for ranges and IPv6** -- `firewallRule` now emits the PDR's
+   `action_id` (unit test `TestAForwardingFirewallRuleNamesItsAction`;
+   `FIREWALL=1 ci/session-path.sh` on `deploy/firewall-path.yaml`, failing with
+   the old compiler and passing with the new). What is not yet sent through it:
+   a port-range PDR and an IPv6 packet.
 2. **BUFF on the custom path** — the action names a **Router next hop**, not a
    gate: `PdrMatch (rule, action_id) → ActionTable (next_hop_id metadata) →
    Router → gate`, so the store's input gate must be reachable as a next hop of
@@ -64,10 +64,16 @@ it is **unexplained, not fixed**.
    prefix), which is why the module is uplink-only today. Needs a design call.
 4. **IPv6 through the module** and **route domains on the custom path** — the
    key is IPv4-only; one module per domain or the domain in the key.
-5. **Not done anywhere**: gate/GBR, time and threshold URRs on the custom path
+5. **Known limits of the QFI arm**: the QFI 5 phase proves the flow is
+   forwarded and the QFI 9 phase proves it is dropped, but QFI 5's rule and the
+   plain rule share a FAR, so a lookup that wrongly fell through to the
+   QFI-less rules would still pass; a per-ActionId counter (a URR per PDR)
+   would tell them apart. A session whose rules *all* name a QFI (an empty
+   QFI-less list) is accepted by the daemon (probed once, not an arm).
+6. **Not done anywhere**: gate/GBR, time and threshold URRs on the custom path
    (live), the echo responder in the custom lab graph, an ASan build of the
    plugin, a benchmark of the custom path, a real SMF, a NIC.
-6. **The force-push**: the rewritten history is local; the GitHub remote still
+7. **The force-push**: the rewritten history is local; the GitHub remote still
    has `n4.test` until the owner force-pushes.
 
 ## Traps worth not rediscovering
