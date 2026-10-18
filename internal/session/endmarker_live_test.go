@@ -16,8 +16,15 @@ import (
 
 // endMarkerSocket is the graph's unix_port (deploy/session-path.yaml): the
 // socket an End Marker packet is written to, and the same path a deployment
-// gives upfd -end-marker.
-const endMarkerSocket = "/tmp/upf-end-marker.sock"
+// gives upfd -end-marker. A lane that renders its own path (ci/session-path.sh
+// does, so two daemons on one host do not take the socket from each other --
+// BESS unlinks a path when it binds) names it in UPF_END_MARKER_SOCK.
+func endMarkerSocket() string {
+	if p := os.Getenv("UPF_END_MARKER_SOCK"); p != "" {
+		return p
+	}
+	return "/tmp/upf-end-marker.sock"
+}
 
 // TestLiveSessionSendsTheEndMarkerOnSNDEM drives a handover against a real
 // bessd: the SMF moves the downlink FAR's F-TEID with the SNDEM flag, and the
@@ -44,7 +51,7 @@ func TestLiveSessionSendsTheEndMarkerOnSNDEM(t *testing.T) {
 	}
 
 	cfg := liveConfig()
-	cfg.EndMarker = endMarkerSocket
+	cfg.EndMarker = endMarkerSocket()
 	c := New(cfg, client, slog.New(slog.NewTextHandler(os.Stderr,
 		&slog.HandlerOptions{Level: slog.LevelWarn})))
 

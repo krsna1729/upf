@@ -40,9 +40,15 @@
 # modules that read it. A write-only attribute no module reads gets no offset
 # (core/metadata.cc), and the module drops a packet whose key has none.
 
-# No port: the uplink and downlink frames come from the graph's own Sources,
-# and this arm sends no End Marker (that port belongs to session-path.yaml).
-ports: []
+# The uplink and downlink frames come from the graph's own Sources. The one
+# port is the control plane's End Marker socket, as in deploy/session-path.yaml
+# (this graph is that one with the uplink's table replaced, so every lane that
+# runs on one runs on the other): a unix socket (SOCK_SEQPACKET) the controller
+# writes whole End Marker frames to. BESS unlinks the path when it binds.
+ports:
+  - name: cp_marker
+    driver: UnixSocketPort
+    arg: {path: /tmp/upf-end-marker.sock}
 
 modules:
   - name: decap0
@@ -128,6 +134,17 @@ modules:
   - name: sink_n3
     mclass: Sink
 
+  # The End Marker's path (TS 29.244 5.3.2): idle but for the marker, which a
+  # Dump shows in the daemon's log.
+  - name: cp_in
+    mclass: PortInc
+    arg: {port: cp_marker}
+  - name: dump_m
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_m
+    mclass: Sink
+
 connections:
   - {upstream: src_up, downstream: rewrite_up}
   - {upstream: rewrite_up, downstream: teid}
@@ -150,6 +167,9 @@ connections:
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: dump_d}
   - {upstream: dump_d, downstream: sink_n3}
+
+  - {upstream: cp_in, downstream: dump_m}
+  - {upstream: dump_m, downstream: sink_m}
 
 workers:
   - {wid: 0, core: 0}

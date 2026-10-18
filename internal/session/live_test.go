@@ -38,6 +38,13 @@ func liveConfig() Config {
 		NextHop:   2,
 		Tunnels:   "enc",
 	}
+	// UPF_PROFILE=custom is the keyed per-session matcher on the uplink
+	// (deploy/pdrmatch-path.yaml): the same lab, the same module names, the
+	// uplink's rules in `pdr_match_ul` instead of the wildcard table.
+	if os.Getenv("UPF_PROFILE") == CustomProfile {
+		cfg.Up.PDRTable, cfg.Up.PDRFields = "", nil
+		cfg.Up.PdrMatch = "pdr_match_ul"
+	}
 	cfg.N3Addr = netip.MustParseAddr("192.0.2.1")
 	cfg.N3MAC = [6]byte{2, 0, 0, 0, 0, 1}
 	cfg.PeerMAC = [6]byte{2, 0, 0, 0, 0, 2}

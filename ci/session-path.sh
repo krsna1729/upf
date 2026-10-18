@@ -26,7 +26,16 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
+# PROFILE=custom runs the same lane on the keyed per-session matcher
+# (deploy/pdrmatch-path.yaml is this graph with the uplink's table replaced by
+# it): the counters, the quota, the frames and the End Marker, through the
+# module.
+PROFILE=${PROFILE:-generic}
+case "$PROFILE" in
+  generic) GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml} ;;
+  custom)  GRAPH=${GRAPH:-$ROOT/deploy/pdrmatch-path.yaml} ;;
+  *) echo "path: PROFILE is generic or custom, not $PROFILE" >&2; exit 2 ;;
+esac
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 SECONDS_RUN=${SECONDS_RUN:-3}
 
@@ -47,6 +56,7 @@ export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
 DAEMON=$!
 cleanup() {
+  rm -f "${RENDERED:-}" "${MARKER_SOCK:-}"  # rendered per run, not left behind
   kill "$DAEMON" 2>/dev/null || true
   for _ in 1 2 3 4 5; do kill -0 "$DAEMON" 2>/dev/null || break; sleep 1; done
   kill -9 "$DAEMON" 2>/dev/null || true
@@ -60,14 +70,21 @@ if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
   exit 1
 fi
 
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$GRAPH" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null
+# The End Marker's socket is rendered per run: BESS unlinks a path when it
+# binds, so a second daemon on the host using the graph's own path would take
+# this run's socket.
+MARKER_SOCK=$ROOT/build/run/end-marker-$BESS_PORT.sock
+mkdir -p "$ROOT/build/run"
+RENDERED=$ROOT/build/run/$(basename "$GRAPH" .yaml)-$BESS_PORT.yaml
+sed "s|/tmp/upf-end-marker.sock|$MARKER_SOCK|" "$GRAPH" >"$RENDERED"
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$RENDERED" >/dev/null
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$RENDERED" >/dev/null
 "$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
 
 # The Go half: the control arm (counters zero), the session, then the counters
 # again. Run from the repository root so the module and its workspace resolve.
 cd "$ROOT"
-MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_PROFILE=$PROFILE \
   $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveSessionSendsTheEndMarkerOnSNDEM' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log, per dump (the helper
