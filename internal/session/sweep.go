@@ -57,6 +57,14 @@ func (c *Compiler) resources() []string {
 		if d.Firewall != "" {
 			add(firewallRes(d))
 		}
+		if d.PdrMatch != "" {
+			// The opt-in map is the session layer's like the rest: an earlier
+			// run's key is a session this process does not know, and the sweep
+			// erases exactly the keys it read back (the resource is a map, so
+			// this is the generic path below, not the firewall's whole-policy
+			// one).
+			add(pdrMatchRes(d))
+		}
 		if d.Actions != "" {
 			add(actionsRes(d))
 		}

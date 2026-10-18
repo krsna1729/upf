@@ -184,6 +184,22 @@ type Direction struct {
 	// the installed graph carries no firewall module yet, so no deployment
 	// names one (docs/compliance.md).
 	Firewall string
+	// PdrMatch is the per-session matcher ("pdr_match_ul") whose
+	// "<name>/rules" *map* holds this direction's PDRs with one key per
+	// session -- that session's rules as the value -- instead of one key per
+	// PDR of one table every session shares (docs/design.md, "the keyed
+	// write"). It replaces PDRTable for this direction. A session change is
+	// then one upsert of O(that session's rules) rather than a write against a
+	// table holding every session's, which is what the shared table costs at
+	// the counts a UPF is asked for. The session is the id the module reads
+	// from its own key attribute: the uplink's F-TEID, which is what names a
+	// session on N3. The module's rules carry the 5-tuple with prefixes and
+	// port *ranges*; the PDI's QFI and the downlink's own selector (the LPM on
+	// the UE's address, for a packet that carries no tunnel) are the next step,
+	// and a PDR naming a QFI is refused rather than matched more widely.
+	// Empty, the default, is the WildcardMatch path with its refusals, and no
+	// deployment names a PdrMatch module yet (docs/compliance.md).
+	PdrMatch string
 	// Actions is the ActionTable module the direction's action records live
 	// in ("at_ul", "at_dl").
 	Actions string
@@ -979,6 +995,7 @@ func (p *idPool) release(id uint32) {
 // resource names, as the deployed graph spells them.
 func rulesRes(d Direction) string    { return d.PDRTable + "/rules" }
 func firewallRes(d Direction) string { return d.Firewall + "/rules" }
+func pdrMatchRes(d Direction) string { return d.PdrMatch + "/rules" }
 func (c *Compiler) teidRes() string  { return c.cfg.TEIDTable + "/rules" }
 func actionsRes(d Direction) string  { return d.Actions + "/actions" }
 func metersRes(d Direction) string   { return d.Meters + "/meters" }
@@ -1035,6 +1052,16 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			// WildcardMatch key would not even be built: a PDR the firewall
 			// path carries may name a port range or an IPv6 prefix, which that
 			// key refuses.
+			continue
+		}
+		if dir.PdrMatch != "" {
+			// The match is this session's own key of the direction's map, so
+			// the deletion erases exactly it -- one key, whatever the session's
+			// rules were (docs/design.md, "the keyed write"). The `seen` set
+			// above is what keeps two PDRs of one F-TEID from naming it twice.
+			if p.teid != 0 {
+				add(bess.Change{Resource: pdrMatchRes(dir), Key: map[string]any{"session": p.teid}})
+			}
 			continue
 		}
 		key, err := p.ruleKey(dir.PDRFields)
@@ -1163,6 +1190,14 @@ func (c *Compiler) settle(s *Session) {
 			// direction's policy, which no session claims (compile).
 			continue
 		}
+		if dir.PdrMatch != "" {
+			// The opt-in path claims the session's own map key, keyed by its
+			// F-TEID; it is given up with the same rule as a rule key.
+			if p.teid != 0 {
+				live[pdrMatchClaim(dir, p.teid)] = true
+			}
+			continue
+		}
 		if key, err := p.ruleKey(dir.PDRFields); err == nil {
 			live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
 		}
@@ -1170,6 +1205,17 @@ func (c *Compiler) settle(s *Session) {
 	for _, p := range gones {
 		dir := c.direction(p.srcIfc)
 		if dir.Firewall != "" {
+			continue
+		}
+		if dir.PdrMatch != "" {
+			if p.teid == 0 {
+				continue
+			}
+			claim := pdrMatchClaim(dir, p.teid)
+			if !live[claim] && c.rules[claim] == s.LocalSEID {
+				delete(c.rules, claim)
+				s.forgetRuleKey(claim)
+			}
 			continue
 		}
 		key, err := p.ruleKey(dir.PDRFields)
