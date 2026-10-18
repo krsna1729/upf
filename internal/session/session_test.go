@@ -35,6 +35,10 @@ type recorder struct {
 	// RuleCounts answers, and the failure it answers with when readFail is set.
 	counts   map[string][]bess.RuleCount
 	readFail error
+	// calls is every counter reading the compiler made, in order: what the
+	// usage-report tick's cost is measured by (one read per module rather than
+	// one per session, report_test.go).
+	calls []readCall
 	// entries is the fake's own state for the counting modules: what Apply has
 	// written and not erased (see Apply).
 	entries map[string]bool
@@ -127,11 +131,29 @@ var errEraseMissing = errors.New("the key is not there to erase")
 // to avoid it).
 var errRepeatedOperation = errors.New("one key touched twice in one transaction")
 
+// readCall is one counter reading the compiler made: the module it named and
+// how many of that module's rules it named. A reading that names no rule is the
+// module's own bulk read -- every rule it holds, in one round trip -- which is
+// what the usage-report tick makes (report.go's EvaluateAll).
+type readCall struct {
+	module string
+	rules  int
+}
+
 // RuleCounts answers the rules asked for; a rule the fake does not hold reads
-// zero, which is what a module with no traffic says.
+// zero, which is what a module with no traffic says. Naming no rule is the
+// module's own reading of **every rule it holds**, which is what the daemon's
+// get_counts answers for an empty action_ids (urr_count.cc) and what the tick
+// reads. The call is recorded either way, so a test can count them.
 func (r *recorder) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
+	r.calls = append(r.calls, readCall{module: module, rules: len(actionIDs)})
 	if r.readFail != nil {
 		return nil, r.readFail
+	}
+	if len(actionIDs) == 0 {
+		out := make([]bess.RuleCount, 0, len(r.counts[module]))
+		out = append(out, r.counts[module]...)
+		return out, nil
 	}
 	held := map[uint32]bess.RuleCount{}
 	for _, count := range r.counts[module] {

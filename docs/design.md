@@ -35,7 +35,7 @@ to race.
 | F-TEID the CP function asks the UP function to choose (8.2.3: the CH flag, and CHID for a group the CP function names) | one TEID rule in front of the decap per F-TEID we allocate; the PDIs of a session that carry one CHOOSE ID share the F-TEID the session gave that group, so an SMF's several filters on one tunnel are one rule and one Created PDR value |
 | FAR (Apply Action, Forwarding Parameters: Destination Interface, Network Instance, Outer Header Creation) | a *treatment* resource the action references (forward / drop / buffer / notify) plus the next hop and GTP-U encap parameters |
 | QER (Gate Status, MBR, QFI) | a meter resource per QER, referenced from the action; its QFI goes into the tunnel record, where the encap writes the downlink packet's PDU Session Container from |
-| URR (Measurement Method, Reporting Triggers, thresholds, period) | per-rule counters in the `UrrCount` module, one entry per rule a URR's PDRs name, keyed by the rule's ActionId, plus the decision in `session.Evaluate`: it reads the module's counters, reports the period, a threshold or a quota, and stops the traffic of a spent quota. Every limit and the period are measured over the usage since the URR's last report (a report opens the next window), which is the window the report itself carries; the alternative -- accumulate from provisioning and compare the running total -- needs a second base per URR, and the SMF's lever (an Update URR that provisions a new quota, which clears the flag) is the same either way. Time is the dataplane's own fact: the counting module stamps a rule's first packet of a reading and the last one it counted (one stamp pair per rule, shared and stored once per counted batch -- a timestamp is the rule's, not a worker's), the reading carries the wall clock it took them at, and the controller places them on the clock an SMF reads; a reading the reporting side makes closes the window and the next packet opens the next one, while a diagnostic read of the same command leaves it alone. A time threshold and a time quota are then measured against the time the *window's* traffic ran -- the window's own first packet to the reading's last -- which is the base the volume limits use too, with the idle gaps taken out of it. A graph whose counters carry no stamps falls back to the window's length, the same number while the traffic is continuous. Sending the report as a PFCP Session Report Request is `internal/n4`'s `Report` (the one exchange this node initiates, with retries and the Session Report Response routed back to the caller), driven by `upfd -urr-interval`; a report the SMF does not answer is held by the loop (a bounded per-session queue, the oldest report first, so the UR-SEQNs the SMF reads stay in order, retried with a doubling backoff and at most one attempt per tick, since each attempt costs the n4 layer's whole retry budget) rather than dropped, because an unanswered send leaves the outcome unknown while a refusal is an answer. Two facts hold the counters together: a rule's entry exists exactly while a URR measures it (a rule that drops keeps it, so an erase always finds it), and the first reading of a URR is the window's baseline (the cells outlive an erased entry and the id pool reissues ActionIds, so a fresh rule's first reading may hold the previous holder's totals) |
+| URR (Measurement Method, Reporting Triggers, thresholds, period) | per-rule counters in the `UrrCount` module, one entry per rule a URR's PDRs name, keyed by the rule's ActionId, plus the decision in `session.EvaluateAll` -- one bulk reading per counter module per tick, every session judged in memory against it -- and `session.Evaluate`, the single-session reading that names its own rules: it reads the module's counters, reports the period, a threshold or a quota, and stops the traffic of a spent quota. Every limit and the period are measured over the usage since the URR's last report (a report opens the next window), which is the window the report itself carries; the alternative -- accumulate from provisioning and compare the running total -- needs a second base per URR, and the SMF's lever (an Update URR that provisions a new quota, which clears the flag) is the same either way. Time is the dataplane's own fact: the counting module stamps a rule's first packet of a reading and the last one it counted (one stamp pair per rule, shared and stored once per counted batch -- a timestamp is the rule's, not a worker's), the reading carries the wall clock it took them at, and the controller places them on the clock an SMF reads; a reading the reporting side makes closes the window and the next packet opens the next one, while a diagnostic read of the same command leaves it alone. A time threshold and a time quota are then measured against the time the *window's* traffic ran -- the window's own first packet to the reading's last -- which is the base the volume limits use too, with the idle gaps taken out of it. A graph whose counters carry no stamps falls back to the window's length, the same number while the traffic is continuous. Sending the report as a PFCP Session Report Request is `internal/n4`'s `Report` (the one exchange this node initiates, with retries and the Session Report Response routed back to the caller), driven by `upfd -urr-interval`; a report the SMF does not answer is held by the loop (a bounded per-session queue, the oldest report first, so the UR-SEQNs the SMF reads stay in order, retried with a doubling backoff and at most one attempt per tick, since each attempt costs the n4 layer's whole retry budget) rather than dropped, because an unanswered send leaves the outcome unknown while a refusal is an answer. Two facts hold the counters together: a rule's entry exists exactly while a URR measures it (a rule that drops keeps it, so an erase always finds it), and the first reading of a URR is the window's baseline (the cells outlive an erased entry and the id pool reissues ActionIds, so a fresh rule's first reading may hold the previous holder's totals) |
 | Session (CP F-SEID, UP F-SEID) | one transaction's worth of resources, all named `<session-id>/…` |
 | Network Instance (N3/N6/N9) | a route domain; overlapping subscriber prefixes never collide because each domain has its own table |
 | Outer Header Creation (TEID, peer address) | the tunnel encap parameters of the treatment |
@@ -922,19 +922,58 @@ addressed:
 3. **The URR report loop's read path.** `upfd` calls `Compiler.EvaluateAll` once
    per `-urr-interval` tick (`cmd/upfd/main.go`), which walks every session, and
    each session's `Evaluate` makes its **own** `reader.RuleCounts` RPC per
-   counter module (`internal/session/report.go`). At 1M sessions that is one to
+   counter module (`internal/session/report.go`) -- at 1M sessions that is one to
    two million gRPC round trips per tick, one after another, so a tick lasts
-   minutes -- longer than any sensible interval. The cost is the read path, not
-   the loop, and the fix is **one bulk, paged read per counter module per tick**
+   minutes, longer than any sensible interval. The cost was the read path, not
+   the loop, and the fix is **one bulk read per counter module per tick**
    covering all sessions, evaluated in memory afterwards: one or two round trips
-   instead of one to two million. This tree needs that. Beside it, as the
-   design-level improvement that removes the per-tick O(all sessions) read
-   entirely, the counter module could report threshold crossings itself (a
-   dataplane that flags "this rule crossed X"), and the tick would read only what
-   was flagged. "Incremental evaluation" is not that fix and does not fit the
-   code: a session cannot be skipped for a volume threshold or a quota without
-   reading its counters first, so the information that would justify skipping
-   arrives only after the read.
+   instead of one to two million. **This tree does that now** (`EvaluateAll`
+   reads each counter module once, with no rules named, and judges every session
+   against what was read; `Evaluate` stays as the single-session reading, which
+   names its own rules. `internal/session/report_test.go`'s
+   `TestATickReadsEachCounterModuleOnce` pins the call count: one read per
+   module, never one per session, and the reports it decides are compared
+   element by element against the per-session path's). The reading itself is the
+   module's `get_counts`, one call per counter module -- the counter *resource*
+   (`<module>/counters`) is an entry's existence, keyed by ActionId, with an
+   empty value, so a resource readback names the measured rules and carries no
+   counts at all (90 B an entry: two `Any` envelopes, the key and the empty
+   value, each with its own type URL); the numbers are the module's per-worker
+   planes, read through its own command (`datapath/urr_count.cc`). At the
+   interval an operator sets (`-urr-interval` has no default; the flag is what
+   turns reporting on at all) the cost of one tick is **one call per counter
+   module, and 27 B per counted rule** -- measured by marshalling the module's
+   own response with its descriptor (`datapath/upf_datapath.desc`): an ActionId
+   up to 1M, a thousand-odd packets, a megabyte-odd of octets and two
+   ~10^12 ns stamps encode to 27.0 B per rule, 34.0 B with a 4M-wide ActionId
+   space, 4 GiB counts and day-old stamps. So 1M sessions at one counted PDR per
+   module is 1M rules, 25.7 MiB in one response (32.4 MiB at the widest
+   encoding), and two of them -- uplink and downlink -- are ~52 MiB per tick,
+   some 1.8 MB/s at a 30 s interval and 0.9 MB/s at 60 s. The daemon refuses
+   any response over 64 MiB (`kMaxMessageBytes`), which at the measured 27 B
+   lands on **~2.5M rules in one module** (1.97M at the widest encoding): 1M
+   sessions at one counted PDR per module fit, and a deployment that measures
+   2-4 PDRs per session crosses it at ~620K-1.2M sessions (earlier with the
+   widest encoding). There the read has to be split -- the module's
+   `get_counts` takes an explicit ActionId list, so a shard is a slice of the
+   ids, not a resource name (naming fewer *resources* splits between tables and
+   cannot split the one table that holds a rule each way: `Sweep`'s item 1
+   above). A paged read would carry the same path to 1M at the single-digit
+   MB/s above, so that ceiling is the read's shape, not the pull model's, and
+   nothing about the loop is O(sessions) in round trips any more. The remaining O(all sessions) is the bytes: every
+   tick still reads every counted rule (the restart wall's sweep has the same
+   read, once). Beside it, as the design-level improvement that removes the
+   per-tick O(all sessions) read entirely, the counter module could report
+   threshold crossings itself (a dataplane that flags "this rule crossed X"),
+   and the tick would read only what was flagged; that is BESS's
+   dataplane->control event channel (its G1.4,
+   `WatchEvents`), recorded here and not available, and the reason it is the
+   target is *latency*: a pulled quota or threshold is enforced no sooner than
+   the tick, so a 60 s interval lets a quota overrun for up to 60 s, while a
+   pushed crossing is enforced when it happens. "Incremental evaluation" is not
+   that fix and does not fit the code: a session cannot be skipped for a volume
+   threshold or a quota without reading its counters first, so the information
+   that would justify skipping arrives only after the read.
 
 Time is measured at scale where memory is not: the masked table looks up 32
 keys in 556 ns at 10^6 rules with one mask tuple, 1,716 ns with four and

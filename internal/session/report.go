@@ -40,6 +40,8 @@ import (
 	"time"
 
 	"github.com/wmnsk/go-pfcp/ie"
+
+	"github.com/krsna1729/upf/internal/bess"
 )
 
 // Usage is what crossed the rules a URR measures: the packets and the octets of
@@ -68,6 +70,12 @@ func (u Usage) since(prev Usage) Usage {
 // which a caller that walks every session (EvaluateAll) meets as a race rather
 // than as a failure.
 var errNoSession = errors.New("no such session")
+
+// errNoCounters marks a graph with no counting module this control plane can
+// read: a URR of such a session would report nothing, and saying so is better
+// than reporting zero forever (the compiler refuses such a session when it is
+// established; an evaluation is the same fact found later).
+var errNoCounters = errors.New("the dataplane of this graph holds no usage counters")
 
 // Trigger is why a report is on its way: the reporting trigger that fired
 // (TS 29.244 8.2.19).
@@ -243,29 +251,102 @@ func usageReportIE(urrID, seqn uint32, trigger Trigger, up, down Usage, duration
 
 // EvaluateAll is Evaluate for every session the compiler holds, low SEID first,
 // so one tick of a caller that owns the clock (upfd's reporting loop) is one
-// call. A session the SMF deleted while the counters were being read is skipped
+// call.
+//
+// It is not Evaluate in a loop, and that is the point: the counters are read
+// **once per counter module** before any session is judged -- the module's own
+// reading of every rule it holds, one round trip -- and each session is then
+// decided in memory against what was read. A tick at the 1M-session target is
+// therefore one call per counter module rather than one or two million (the
+// per-session read this replaced), which is docs/design.md's control-plane
+// O(total sessions) item 3; what is read is still every counted rule of every
+// session, so the tick's read is O(all sessions) in bytes, not in round trips.
+//
+// A module whose reading fails costs the sessions that measure through it and
+// nothing else, the way a per-session read that failed cost its own session,
+// and a session the SMF deleted while the counters were being read is skipped
 // rather than failed: the usage belongs to a session nobody has.
 func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	c.mu.Lock()
 	seids := make([]uint64, 0, len(c.sessions))
-	for seid := range c.sessions {
+	modules := map[string]bool{}
+	for seid, s := range c.sessions {
 		seids = append(seids, seid)
+		c.measuredModules(s, modules)
 	}
 	c.mu.Unlock()
 	slices.Sort(seids)
 
+	if len(modules) == 0 {
+		// No session measures anything: nothing to read, and nothing owed --
+		// the per-session path returns before its own read on exactly this
+		// fact.
+		return nil
+	}
+	reader := c.counters
+	if reader == nil {
+		// The graph has no counting module this control plane can read, and
+		// every session's URRs would report nothing: the caller's log is where
+		// an operator sees it.
+		for _, seid := range seids {
+			c.log.Warn("session: usage evaluation", "seid", seid, "error", errNoCounters)
+		}
+		return nil
+	}
+	// One read per module, in a fixed order, each naming no rule: the modules
+	// are separate reads because the daemon bounds one message (64 MiB), and
+	// the reading is the module's own enumeration of the rules it holds.
+	names := make([]string, 0, len(modules))
+	for module := range modules {
+		names = append(names, module)
+	}
+	slices.Sort(names)
+	counts := make(map[string]map[uint32]reading, len(names))
+	failed := make([]string, 0, len(names))
+	failures := make(map[string]error, len(names))
+	for _, module := range names {
+		read, err := reader.RuleCounts(ctx, module)
+		if err != nil {
+			failed = append(failed, module)
+			failures[module] = fmt.Errorf("reading %s: %w", module, err)
+			continue
+		}
+		counts[module] = readingsOf(read)
+	}
+
 	var out []Report
 	for _, seid := range seids {
-		reports, err := c.Evaluate(ctx, seid, now)
-		if err != nil {
-			if errors.Is(err, errNoSession) {
-				// The SMF deleted it between the list above and this call: the
-				// usage belongs to a session nobody has.
-				continue
+		c.mu.Lock()
+		s := c.sessions[seid]
+		if s == nil {
+			// The SMF deleted it between the list above and this call: the
+			// usage belongs to a session nobody has.
+			c.mu.Unlock()
+			continue
+		}
+		var unread error
+		if len(failed) > 0 {
+			// Only a session whose own rules are counted by a module whose
+			// reading failed is skipped; the rest of the tick is unaffected.
+			measured := map[string]bool{}
+			c.measuredModules(s, measured)
+			for _, module := range failed {
+				if measured[module] {
+					unread = failures[module]
+					break
+				}
 			}
-			// The counters could not be read, or the dataplane refused the
-			// enforcement: the caller's log is where an operator sees it, and
-			// the reports decided before the failure are still owed.
+		}
+		c.mu.Unlock()
+		if unread != nil {
+			c.log.Warn("session: usage evaluation", "seid", seid, "error", unread)
+			continue
+		}
+		reports, err := c.judge(ctx, seid, s, counts, now)
+		if err != nil {
+			// The dataplane refused the enforcement: the caller's log is where
+			// an operator sees it, and the reports decided before the failure
+			// are still owed.
 			c.log.Warn("session: usage evaluation", "seid", seid, "error", err)
 		}
 		out = append(out, reports...)
@@ -277,6 +358,12 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 // each URR whose period has passed or whose threshold or quota is reached gets
 // a Report, and a URR whose quota is used up stops the traffic of its PDRs --
 // one transaction, the same way a modification writes them.
+//
+// This is the single-session reading: it asks the counting modules for exactly
+// the rules this session measures, so it is the call a caller that has one
+// session to judge makes. A caller that owns the clock judges every session
+// with EvaluateAll, which reads each counter module once for the whole tick
+// instead of once per session.
 //
 // The counters are read before the model is judged, so a session the SMF
 // modified or deleted while the reading was on the wire is checked again after
@@ -294,15 +381,7 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 	// The rules to read, by the module that counts them: one per PDR a URR
 	// measures. A PDR a used-up quota already stopped has no counter of its
 	// own and nothing to report.
-	ids := map[string][]uint32{}
-	for _, p := range pdrsInOrder(s) {
-		if len(p.urrIDs) == 0 || p.actionID == 0 || p.drop {
-			continue
-		}
-		if dir := c.direction(p.srcIfc); dir.Counters != "" {
-			ids[dir.Counters] = append(ids[dir.Counters], p.actionID)
-		}
-	}
+	ids := c.measuredRules(s)
 	c.mu.Unlock()
 
 	if len(ids) == 0 {
@@ -311,10 +390,8 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 	reader := c.counters
 	if reader == nil {
 		// The graph has no counting module this control plane can read, and the
-		// session's URRs would report nothing: saying so is better than
-		// reporting zero forever (the compiler refuses such a session when it
-		// is established; this is the same fact found later).
-		return nil, fmt.Errorf("the dataplane of this graph holds no usage counters")
+		// session's URRs would report nothing: an error, not zero forever.
+		return nil, errNoCounters
 	}
 	counts := make(map[string]map[uint32]reading, len(ids))
 	for module, rules := range ids {
@@ -322,16 +399,18 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", module, err)
 		}
-		cells := make(map[uint32]reading, len(read))
-		for _, rule := range read {
-			cells[rule.ActionID] = reading{
-				Usage: Usage{Packets: rule.Packets, Octets: rule.Octets},
-				First: rule.First, Last: rule.Last,
-			}
-		}
-		counts[module] = cells
+		counts[module] = readingsOf(read)
 	}
+	return c.judge(ctx, seid, s, counts, now)
+}
 
+// judge is the half of an evaluation that runs with the counters in hand:
+// decide what this session's URRs owe from them, and, when a quota is spent,
+// compile and apply the enforcement that stops its traffic -- one transaction,
+// the same way a modification writes them. The read is the caller's: Evaluate
+// reads one session's rules, EvaluateAll reads each counter module once for
+// every session of the tick.
+func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts map[string]map[uint32]reading, now time.Time) ([]Report, error) {
 	c.mu.Lock()
 	if c.sessions[seid] != s {
 		c.mu.Unlock()
@@ -359,6 +438,55 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 	}
 	c.settle(s)
 	return reports, nil
+}
+
+// readingsOf is one counting module's answer as the decision reads it: the
+// counters keyed by the ActionId of the rule each belongs to.
+func readingsOf(read []bess.RuleCount) map[uint32]reading {
+	cells := make(map[uint32]reading, len(read))
+	for _, rule := range read {
+		cells[rule.ActionID] = reading{
+			Usage: Usage{Packets: rule.Packets, Octets: rule.Octets},
+			First: rule.First, Last: rule.Last,
+		}
+	}
+	return cells
+}
+
+// countedModule is the counting module that holds this PDR's counters, when the
+// PDR has any: one entry per measured PDR is what compile.go writes, and a
+// PDR a used-up quota already stopped is compiled as a drop with nothing to
+// report. It is the one predicate measuredRules and measuredModules walk the
+// PDRs by, so a tick reads exactly the rules a per-session evaluation reads.
+func (c *Compiler) countedModule(p *pdr) (string, bool) {
+	if len(p.urrIDs) == 0 || p.actionID == 0 || p.drop {
+		return "", false
+	}
+	dir := c.direction(p.srcIfc)
+	return dir.Counters, dir.Counters != ""
+}
+
+// measuredRules is the rules a session's URRs measure, by the module that
+// counts them: one entry per PDR a URR measures. The caller holds the lock.
+func (c *Compiler) measuredRules(s *Session) map[string][]uint32 {
+	ids := map[string][]uint32{}
+	for _, p := range pdrsInOrder(s) {
+		if module, ok := c.countedModule(p); ok {
+			ids[module] = append(ids[module], p.actionID)
+		}
+	}
+	return ids
+}
+
+// measuredModules adds the counting modules a session's measured PDRs read
+// from to modules: the modules a tick has to read for it. The caller holds the
+// lock.
+func (c *Compiler) measuredModules(s *Session, modules map[string]bool) {
+	for _, p := range pdrsInOrder(s) {
+		if module, ok := c.countedModule(p); ok {
+			modules[module] = true
+		}
+	}
 }
 
 // decide updates every URR's bookkeeping and returns the reports they owe, and

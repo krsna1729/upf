@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,12 @@ type fakeDataplane struct {
 	octets uint64
 	txns   int
 	last   []bess.Change
+	// rules is the counting modules' own state, by module: the ActionId of
+	// every rule whose counter entry the compiler wrote and has not erased.
+	// The module holds one entry per measured rule, and a reading that names no
+	// rule -- the tick's bulk read -- answers with every one of them
+	// (urr_count.cc's get_counts).
+	rules map[string][]uint32
 }
 
 func (f *fakeDataplane) Apply(_ context.Context, changes ...bess.Change) error {
@@ -37,6 +44,28 @@ func (f *fakeDataplane) Apply(_ context.Context, changes ...bess.Change) error {
 	defer f.mu.Unlock()
 	f.txns++
 	f.last = changes
+	if f.rules == nil {
+		f.rules = map[string][]uint32{}
+	}
+	for _, ch := range changes {
+		if !strings.HasSuffix(ch.Resource, "/counters") {
+			continue
+		}
+		id, ok := ch.Key["action_id"].(uint32)
+		if !ok {
+			continue
+		}
+		// By module, the name a reading is addressed to, not the resource.
+		module := strings.TrimSuffix(ch.Resource, "/counters")
+		if ch.Value == nil {
+			f.rules[module] = slices.DeleteFunc(f.rules[module],
+				func(held uint32) bool { return held == id })
+			continue
+		}
+		if !slices.Contains(f.rules[module], id) {
+			f.rules[module] = append(f.rules[module], id)
+		}
+	}
 	return nil
 }
 
@@ -50,10 +79,15 @@ func (f *fakeDataplane) snapshot() (int, []bess.Change) {
 
 // RuleCounts answers every rule asked for with the same totals, whatever
 // ActionId the compiler allocated for it: the test's traffic is the traffic of
-// the one rule it measures.
-func (f *fakeDataplane) RuleCounts(_ context.Context, _ string, actionIDs ...uint32) ([]bess.RuleCount, error) {
+// the one rule it measures. Naming no rule is the module's own reading of every
+// rule it holds, which is the read the reporting tick makes (report.go's
+// EvaluateAll).
+func (f *fakeDataplane) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(actionIDs) == 0 {
+		actionIDs = f.rules[module]
+	}
 	out := make([]bess.RuleCount, 0, len(actionIDs))
 	for _, id := range actionIDs {
 		out = append(out, bess.RuleCount{ActionID: id, Packets: f.octets / 37, Octets: f.octets})
