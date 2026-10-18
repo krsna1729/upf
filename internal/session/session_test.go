@@ -1117,6 +1117,33 @@ func TestACHOOSEIDIsTheSessionsFTEIDForThatGroup(t *testing.T) {
 	assertNoRepeat(t, rec.last())
 }
 
+func TestAModificationThatAsksForNoFTEIDIsAnsweredWithNone(t *testing.T) {
+	// Table 7.5.5.1-1: a Created PDR is in a Modification Response only for a
+	// PDI that asked the UP function to choose its F-TEID. free5GC's second
+	// message of a session (Update FAR with the gNB's tunnel) asks for none,
+	// and used to be answered with the uplink tunnel the establishment had
+	// already reported.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(chidEstablishment(0x9995, "10.45.0.8", 7, 7)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	if len(resp.CreatedPDR) == 0 {
+		t.Fatal("the establishment, which asked for F-TEIDs, reported none")
+	}
+
+	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(0x02)))
+	modified := c.Modify(mod).(*message.SessionModificationResponse)
+	if got := cause(t, modified); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	if n := len(modified.CreatedPDR); n != 0 {
+		t.Errorf("a modification that asked for no F-TEID was answered with %d Created PDR(s)", n)
+	}
+}
+
 func TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI(t *testing.T) {
 	// The session holds an F-TEID per group while a PDR of that group is live.
 	// Once the last one is gone the TEID is back in the pool, and a PDI created

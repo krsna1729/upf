@@ -483,6 +483,18 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	}
 	removePDRs, removeFARs, removeBARs, removeURRs := parseRemovals(ies)
 
+	// Table 7.5.5.1-1: a Created PDR rides on a Modification Response only for
+	// a PDI that asked the UP function to choose its F-TEID. The compile
+	// re-states every PDR's tunnel, which is right for an establishment's
+	// answer and wrong here: a real SMF's modification (free5GC's downlink
+	// Update PDR) asked for none, and was answered with one.
+	asked := map[uint16]bool{}
+	for _, p := range pdrs {
+		if p.hasFTEID && p.srcIfc == ie.SrcInterfaceAccess && p.teid == 0 {
+			asked[p.id] = true
+		}
+	}
+
 	// The usage reports this request owes (TS 29.244 5.2.2.3, 7.5.5.2): what a
 	// Query URR or the QAURR flag asks for -- trigger IMMER -- and what a URR
 	// the request removes measured since its last report -- TERMR. Both are
@@ -543,7 +555,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
 
-	changes, created, err := c.compile(s)
+	changes, _, err := c.compile(s)
 	if err != nil {
 		c.log.Warn("session: cannot compile the modification request", "seid", seid, "error", err)
 		// What this compile allocated is not released: the session is live and
@@ -555,6 +567,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		// provenance-tracked release is the fix (docs/design.md).
 		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
+	created := s.createdPDRsFor(c.cfg, asked)
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
 		c.log.Warn("session: the dataplane refused the modification", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, causeOf(err), nil)
@@ -2504,6 +2517,20 @@ func (c *Compiler) firewallChanges(extra, except *Session) ([]bess.Change, error
 		})
 	}
 	return changes, nil
+}
+
+// createdPDRsFor is the Created PDRs of a Modification Response: the tunnel of
+// each PDR whose PDI asked the UP function to choose it in this request.
+func (s *Session) createdPDRsFor(cfg Config, asked map[uint16]bool) []*ie.IE {
+	var out []*ie.IE
+	for _, p := range pdrsInOrder(s) {
+		if p.teid != 0 && asked[p.id] {
+			out = append(out, ie.NewCreatedPDR(
+				ie.NewPDRID(p.id),
+				createdFTEID(p.teid, cfg.N3Addr)))
+		}
+	}
+	return out
 }
 
 // createdPDRs is what the response re-states on a retransmission.
