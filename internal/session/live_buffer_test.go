@@ -399,9 +399,29 @@ func TestLiveSessionHoldsNothingAfterTheBufferingDurationPasses(t *testing.T) {
 		t.Fatalf("the daemon refused the modification with cause %d", got)
 	}
 
-	// 5. Nothing moves. A release is accepted, not completed (the store applies
-	// the request on a later run), so this waits a second where the bound is
-	// the store's next run -- a second that no release is coming to fill.
+	// 5. Nothing moves, and that is the proof -- not a missing measurement. The
+	// expiry is a *silent* free: the sweep calls bess::PacketFree, emits nothing
+	// on a gate and no metric, and the module's GetDesc is not reachable from
+	// this controller, so there is no count of freed packets that could be read
+	// here. The only observable an expiry can leave is the absence of what the
+	// flow would otherwise have done later: the release this instruction issues
+	// (5.2.4.1) sending the packets it still held out of the store's gate 0 into
+	// the action path, which the sibling test sees as the encap moving. So the
+	// assertion is that the encap did not move, and the numbers on both sides of
+	// the arrow below being the same is the whole result.
+	//
+	// What isolates the entry: without the per-flow `timeout_ns` -- suppressed by
+	// hand from `writeFlowEntry` for the differential run -- the store's
+	// module-wide `timeout_ms` (5000 in deploy/buffer-path.yaml) is what this
+	// flow is held under, the same 3 s wait frees nothing (that daemon frees an
+	// aged flow only at its global max_packets, which this store never reaches),
+	// and the instruction then releases the packets it still holds: the run fails
+	// with "the encap carried 16 packets after the instruction (was 0)" -- one
+	// flow's cap, the BAR's Suggested Packet Count.
+	//
+	// A release is accepted, not completed (the store applies the request on a
+	// later run), so this waits a second where the bound is the store's next run
+	// -- a second that no release is coming to fill.
 	time.Sleep(time.Second)
 	forwarded := gatePackets(t, ctx, client, "enc")
 	if forwarded != forwardedBefore {
