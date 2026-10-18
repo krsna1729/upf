@@ -120,7 +120,7 @@ func TestTheUplinkOptInWritesOneKeyPerSession(t *testing.T) {
 	c := New(pdrMatchConfig("pdr_match_ul"), rec, quietLogger())
 	const teidA, teidB = 0x11, 0x22
 
-	if got := cause(t, c.Establish(pdrMatchEstablishment(0x6a01, "10.45.0.6", teidA, 100, "permit out udp from any to assigned 5060"))); got != ie.CauseRequestAccepted {
+	if got := cause(t, c.Establish(pdrMatchEstablishment(0x6a01, "10.45.0.6", teidA, 100, "permit out udp from any 5060 to assigned"))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	entry := oneMapChange(t, rec.last(), "pdr_match_ul/rules", teidA)
@@ -168,7 +168,7 @@ func TestTheUplinkOptInWritesOneKeyPerSession(t *testing.T) {
 	}
 
 	// A second session's establishment names its own key and no other's.
-	if got := cause(t, c.Establish(pdrMatchEstablishment(0x6a02, "10.45.0.7", teidB, 100, "permit out tcp from any to assigned 443"))); got != ie.CauseRequestAccepted {
+	if got := cause(t, c.Establish(pdrMatchEstablishment(0x6a02, "10.45.0.7", teidB, 100, "permit out tcp from any 443 to assigned"))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the second establishment answered cause %d", got)
 	}
 	second := oneMapChange(t, rec.last(), "pdr_match_ul/rules", teidB)
@@ -197,19 +197,19 @@ func TestTheSessionsRulesAreInPrecedenceOrder(t *testing.T) {
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewFTEID(0x01, teid, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any to assigned 5060", "", "", "", 0)),
+				ie.NewSDFFilter("permit out udp from any 5060 to assigned", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreatePDR(ie.NewPDRID(3), ie.NewPrecedence(300),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewFTEID(0x01, teid, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
+				ie.NewSDFFilter("permit out udp from any 53 to assigned", "", "", "", 0)),
 			ie.NewFARID(2)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewFTEID(0x01, teid, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter("permit out tcp from any to assigned 80", "", "", "", 0)),
+				ie.NewSDFFilter("permit out tcp from any 80 to assigned", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
 		// A FAR that neither forwards nor buffers: its PDR drops, and a
@@ -254,11 +254,11 @@ func TestAModificationRewritesOnlyItsOwnKey(t *testing.T) {
 	rec := &recorder{}
 	c := New(pdrMatchConfig("pdr_match_ul"), rec, quietLogger())
 	const teidA, teidB = 0x41, 0x42
-	respA := c.Establish(pdrMatchEstablishment(0x6c01, "10.45.0.6", teidA, 100, "permit out udp from any to assigned 5060")).(*message.SessionEstablishmentResponse)
+	respA := c.Establish(pdrMatchEstablishment(0x6c01, "10.45.0.6", teidA, 100, "permit out udp from any 5060 to assigned")).(*message.SessionEstablishmentResponse)
 	if got := cause(t, respA); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	if got := cause(t, c.Establish(pdrMatchEstablishment(0x6c02, "10.45.0.7", teidB, 100, "permit out udp from any to assigned 5060"))); got != ie.CauseRequestAccepted {
+	if got := cause(t, c.Establish(pdrMatchEstablishment(0x6c02, "10.45.0.7", teidB, 100, "permit out udp from any 5060 to assigned"))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the second establishment answered cause %d", got)
 	}
 
@@ -268,7 +268,7 @@ func TestAModificationRewritesOnlyItsOwnKey(t *testing.T) {
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter("permit out tcp from any to assigned 443", "", "", "", 0)),
+				ie.NewSDFFilter("permit out tcp from any 443 to assigned", "", "", "", 0)),
 			ie.NewFARID(1)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
@@ -301,11 +301,11 @@ func TestDeletingASessionErasesExactlyItsOwnKey(t *testing.T) {
 	rec := &recorder{}
 	c := New(pdrMatchConfig("pdr_match_ul"), rec, quietLogger())
 	const teidA, teidB = 0x51, 0x52
-	respA := c.Establish(pdrMatchEstablishment(0x6d01, "10.45.0.6", teidA, 100, "permit out udp from any to assigned 5060")).(*message.SessionEstablishmentResponse)
+	respA := c.Establish(pdrMatchEstablishment(0x6d01, "10.45.0.6", teidA, 100, "permit out udp from any 5060 to assigned")).(*message.SessionEstablishmentResponse)
 	if got := cause(t, respA); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	respB := c.Establish(pdrMatchEstablishment(0x6d02, "10.45.0.7", teidB, 100, "permit out udp from any to assigned 5060")).(*message.SessionEstablishmentResponse)
+	respB := c.Establish(pdrMatchEstablishment(0x6d02, "10.45.0.7", teidB, 100, "permit out udp from any 5060 to assigned")).(*message.SessionEstablishmentResponse)
 	if got := cause(t, respB); got != ie.CauseRequestAccepted {
 		t.Fatalf("the second establishment answered cause %d", got)
 	}
@@ -334,7 +334,7 @@ func TestThePdrMatchPathIsOptIn(t *testing.T) {
 	// "no change for the map" is not confused with "no rule anywhere".
 	rec := &recorder{}
 	c := New(pdrMatchConfig(""), rec, quietLogger())
-	if got := cause(t, c.Establish(pdrMatchEstablishment(0x6e01, "10.45.0.6", 0x61, 100, "permit out udp from any to assigned 5060"))); got != ie.CauseRequestAccepted {
+	if got := cause(t, c.Establish(pdrMatchEstablishment(0x6e01, "10.45.0.6", 0x61, 100, "permit out udp from any 5060 to assigned"))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	if n := len(changesFor(rec.last(), "pdr_match_ul/rules")); n != 0 {

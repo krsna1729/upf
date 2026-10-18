@@ -1997,67 +1997,81 @@ func pref(p netip.Prefix) (match, error) {
 // form a 4-byte mask cannot carry is a session the SMF is told to fix, not one
 // whose rule quietly matches everything.
 func (p *pdr) matchValue(f Field) (match, bool, error) {
+	// The filter as the packets this PDR selects carry it: the SMF provisions
+	// the downlink form on both PDRs, and an ACCESS PDR's is swapped (5.2.1A.2A).
+	sd := p.oriented()
 	switch f {
 	case SrcIP:
-		// The uplink's UE address is the source. A downlink PDR's SDF may name
-		// either side; when it names no source, the source stays unconstrained
-		// -- the peer on the data network is not the UE, so constraining this
-		// field to the SDF's *destination* would demand the UE's address on
-		// both sides and match no packet at all.
+		// The uplink's UE address is the source unless the (swapped) filter
+		// names another. A downlink PDR's SDF may name either side; when it
+		// names no source, the source stays unconstrained -- the peer on the
+		// data network is not the UE, so constraining this field to the SDF's
+		// *destination* would demand the UE's address on both sides and match
+		// no packet at all.
 		if p.srcIfc == ie.SrcInterfaceAccess {
-			if p.sdf != nil && p.sdf.srcOK {
-				m, err := pref(p.sdf.src)
+			if sd != nil && sd.srcOK && !sd.srcAssigned {
+				m, err := pref(sd.src)
 				return m, err == nil, err
 			}
 			return host(p.ueIP)
 		}
-		if p.sdf != nil && p.sdf.srcAssigned {
+		if sd != nil && sd.srcAssigned {
 			// "from assigned": the UE is the flow's source. On the uplink that
-			// is the fallback below; on the downlink it must be said here,
+			// is the fallback above; on the downlink it must be said here,
 			// because the SDF carries no address of its own for this side.
 			return host(p.ueIP)
 		}
-		if p.sdf != nil && p.sdf.srcOK {
-			m, err := pref(p.sdf.src)
+		if sd != nil && sd.srcOK {
+			m, err := pref(sd.src)
 			return m, err == nil, err
 		}
 		return match{}, false, nil
 	case DstIP:
 		if p.srcIfc == ie.SrcInterfaceAccess {
-			return match{}, false, nil // the uplink is chosen by its UE address
+			// The uplink is chosen by its UE address (the source); its
+			// destination is whatever the swapped filter names -- the peer on
+			// the data network -- or open.
+			if sd != nil && sd.dstAssigned {
+				return host(p.ueIP)
+			}
+			if sd != nil && sd.dstOK {
+				m, err := pref(sd.dst)
+				return m, err == nil, err
+			}
+			return match{}, false, nil
 		}
-		if p.sdf != nil && p.sdf.dstOK {
-			m, err := pref(p.sdf.dst)
+		if sd != nil && sd.dstOK {
+			m, err := pref(sd.dst)
 			return m, err == nil, err
 		}
 		return host(p.ueIP)
 	case Proto:
-		if p.sdf != nil && p.sdf.protoOK {
-			return match{value: []byte{p.sdf.proto}, mask: ones(1)}, true, nil
+		if sd != nil && sd.protoOK {
+			return match{value: []byte{sd.proto}, mask: ones(1)}, true, nil
 		}
 		return match{}, false, nil
 	case SrcPort:
-		if p.sdf != nil && p.sdf.sportOK {
+		if sd != nil && sd.sportOK {
 			// A mask can hold one port, not a range: the WildcardMatch path
 			// refuses a range here rather than matching more widely than the
 			// filter (the firewall path carries it, firewallRule).
-			if p.sdf.sportLo != p.sdf.sportHi {
+			if sd.sportLo != sd.sportHi {
 				return match{}, false, fmt.Errorf("%w: port range %d-%d",
-					errNotExpressible, p.sdf.sportLo, p.sdf.sportHi)
+					errNotExpressible, sd.sportLo, sd.sportHi)
 			}
 			b := make([]byte, 2)
-			binary.BigEndian.PutUint16(b, p.sdf.sportLo)
+			binary.BigEndian.PutUint16(b, sd.sportLo)
 			return match{value: b, mask: ones(2)}, true, nil
 		}
 		return match{}, false, nil
 	case DstPort:
-		if p.sdf != nil && p.sdf.dportOK {
-			if p.sdf.dportLo != p.sdf.dportHi {
+		if sd != nil && sd.dportOK {
+			if sd.dportLo != sd.dportHi {
 				return match{}, false, fmt.Errorf("%w: port range %d-%d",
-					errNotExpressible, p.sdf.dportLo, p.sdf.dportHi)
+					errNotExpressible, sd.dportLo, sd.dportHi)
 			}
 			b := make([]byte, 2)
-			binary.BigEndian.PutUint16(b, p.sdf.dportLo)
+			binary.BigEndian.PutUint16(b, sd.dportLo)
 			return match{value: b, mask: ones(2)}, true, nil
 		}
 		return match{}, false, nil
@@ -2126,21 +2140,33 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 // refuses a drop with one).
 func firewallRule(p *pdr) (map[string]any, error) {
 	var src, dst netip.Prefix
+	// The filter as the packets this PDR selects carry it (5.2.1A.2A): the
+	// downlink form as provisioned, swapped for an ACCESS PDR.
+	sd := p.oriented()
 	if p.srcIfc == ie.SrcInterfaceAccess {
-		// The uplink is selected by its UE address, and by the SDF's source
-		// where the filter names one. Its destination stays open: the peer on
-		// the data network is not what selects the flow.
-		if p.sdf != nil && p.sdf.srcOK {
-			src = p.sdf.src
+		// The uplink is selected by its UE address (the source), unless the
+		// swapped filter names another. Its destination is what the swapped
+		// filter names -- the peer on the data network -- or open.
+		if sd != nil && sd.srcOK && !sd.srcAssigned {
+			src = sd.src
 		} else {
 			var err error
 			if src, err = firewallHost(p.ueIP); err != nil {
 				return nil, err
 			}
 		}
+		switch {
+		case sd != nil && sd.dstAssigned:
+			var err error
+			if dst, err = firewallHost(p.ueIP); err != nil {
+				return nil, err
+			}
+		case sd != nil && sd.dstOK:
+			dst = sd.dst
+		}
 	} else {
 		switch {
-		case p.sdf != nil && p.sdf.srcAssigned:
+		case sd != nil && sd.srcAssigned:
 			// "from assigned": the UE is the flow's source, which an SDF
 			// filter can only say with that word -- it carries no address of
 			// its own for that side.
@@ -2148,11 +2174,11 @@ func firewallRule(p *pdr) (map[string]any, error) {
 			if src, err = firewallHost(p.ueIP); err != nil {
 				return nil, err
 			}
-		case p.sdf != nil && p.sdf.srcOK:
-			src = p.sdf.src
+		case sd != nil && sd.srcOK:
+			src = sd.src
 		}
-		if p.sdf != nil && p.sdf.dstOK {
-			dst = p.sdf.dst
+		if sd != nil && sd.dstOK {
+			dst = sd.dst
 		} else {
 			var err error
 			if dst, err = firewallHost(p.ueIP); err != nil {
@@ -2177,17 +2203,17 @@ func firewallRule(p *pdr) (map[string]any, error) {
 	if dst.IsValid() {
 		rule["dst_ip"] = firewallCIDR(dst)
 	}
-	if p.sdf != nil {
-		if p.sdf.protoOK {
-			rule["proto"] = uint32(p.sdf.proto)
+	if sd != nil {
+		if sd.protoOK {
+			rule["proto"] = uint32(sd.proto)
 		}
-		if p.sdf.sportOK {
-			rule["src_port_low"] = uint32(p.sdf.sportLo)
-			rule["src_port_high"] = uint32(p.sdf.sportHi)
+		if sd.sportOK {
+			rule["src_port_low"] = uint32(sd.sportLo)
+			rule["src_port_high"] = uint32(sd.sportHi)
 		}
-		if p.sdf.dportOK {
-			rule["dst_port_low"] = uint32(p.sdf.dportLo)
-			rule["dst_port_high"] = uint32(p.sdf.dportHi)
+		if sd.dportOK {
+			rule["dst_port_low"] = uint32(sd.dportLo)
+			rule["dst_port_high"] = uint32(sd.dportHi)
 		}
 	}
 	if p.drop {
@@ -3205,6 +3231,26 @@ type sdfFilter struct {
 	sportOK          bool
 	dportLo, dportHi uint16
 	dportOK          bool
+}
+
+// oriented is the PDR's SDF filter as the packets it selects carry it. The CP
+// function provisions the PCF's Flow Description -- always the downlink form,
+// "from the remote side to the UE" -- in the PDI of the uplink and the downlink
+// PDR alike, and the UP function applies it as is for a CORE PDR and with the
+// source and destination, address and port, swapped for an ACCESS one (TS
+// 29.244 5.2.1A.2A: "shall swap the source and destination address/port in the
+// Flow Description"). Open5GS's UPF does the same (lib/pfcp/handler.c,
+// ogs_ipfw_rule_swap, for a PDR whose source interface is ACCESS).
+func (p *pdr) oriented() *sdfFilter {
+	if p.sdf == nil || p.srcIfc != ie.SrcInterfaceAccess {
+		return p.sdf
+	}
+	f := *p.sdf
+	f.src, f.srcOK, f.srcAssigned = p.sdf.dst, p.sdf.dstOK, p.sdf.dstAssigned
+	f.dst, f.dstOK, f.dstAssigned = p.sdf.src, p.sdf.srcOK, p.sdf.srcAssigned
+	f.sportLo, f.sportHi, f.sportOK = p.sdf.dportLo, p.sdf.dportHi, p.sdf.dportOK
+	f.dportLo, f.dportHi, f.dportOK = p.sdf.sportLo, p.sdf.sportHi, p.sdf.sportOK
+	return &f
 }
 
 // parseFlowDescription reads the IPFilterRule form the SDF Filter IE carries

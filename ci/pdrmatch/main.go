@@ -54,11 +54,17 @@ import (
 // F-TEID of the uplink PDR (which is also the key of `pdr_match_ul/rules`) and
 // the gNB's TEID for the downlink outer header.
 const (
-	cpSEID     uint64 = 0x2222
-	ueIP              = "10.45.0.2"
-	upTEID     uint32 = 0x11223344
-	downTEID   uint32 = 0x55667788
-	uplinkRule        = "permit out udp from any to assigned 53"
+	cpSEID   uint64 = 0x2222
+	ueIP            = "10.45.0.2"
+	upTEID   uint32 = 0x11223344
+	downTEID uint32 = 0x55667788
+	// The PCF's Flow Description is the downlink form on both PDRs (TS 29.244
+	// 5.2.1A.2A): the UE answered by 8.8.8.8:5000 -> UE:53 is "to assigned 53",
+	// and the uplink PDR reads the same string swapped. The uplink frame is
+	// UE:5000 -> 8.8.8.8:53, so its filter is the form whose swap names port 53 at
+	// the far end.
+	uplinkRule   = "permit out udp from any 53 to assigned"
+	downlinkRule = "permit out udp from any to assigned 53"
 	// The modules the claim is read from, by the names the graph declares.
 	module     = "pdr_match_ul"
 	rulesRes   = module + "/rules"
@@ -272,7 +278,7 @@ func establishment() *message.SessionEstablishmentRequest {
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
-				ie.NewSDFFilter(uplinkRule, "", "", "", 0),
+				ie.NewSDFFilter(downlinkRule, "", "", "", 0),
 			),
 			ie.NewFARID(2),
 		),
