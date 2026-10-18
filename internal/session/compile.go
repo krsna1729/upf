@@ -1592,12 +1592,17 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		if k, ok := selectorKeyOf(p); ok && !liveSelector[selectorClaim(c.cfg.Down, k)] {
 			// The session's downlink no longer names this address: the rule
-			// goes, and with it the action record it referenced.
+			// goes. Its action record goes only with the last rule that
+			// references it -- a session whose other address is still live
+			// holds a rule naming the same record, and the engine refuses to
+			// remove an action a live rule names (D-021).
 			if key, err := selectorRuleKey(c.cfg.Down, k); err == nil {
 				erase(bess.Change{Resource: selectorRes(c.cfg.Down), Key: key})
 			}
-			if id, err := selectorID(s); err == nil && c.cfg.Down.SelectorActions != "" {
-				erase(bess.Change{Resource: selectorActionsRes(c.cfg.Down), Key: map[string]any{"id": id}})
+			if len(liveSelector) == 0 {
+				if id, err := selectorID(s); err == nil && c.cfg.Down.SelectorActions != "" {
+					erase(bess.Change{Resource: selectorActionsRes(c.cfg.Down), Key: map[string]any{"id": id}})
+				}
 			}
 		}
 		if p.actionID != 0 {
@@ -1665,12 +1670,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		if k, ok := selectorKeyOf(old); ok && !liveSelector[selectorClaim(c.cfg.Down, k)] {
 			// A replaced form whose UE address moved: its selector rule goes,
-			// and the action record it referenced with it.
+			// and the action record only with the last rule that names it --
+			// the same guard as the removed form above.
 			if key, err := selectorRuleKey(c.cfg.Down, k); err == nil {
 				erase(bess.Change{Resource: selectorRes(c.cfg.Down), Key: key})
 			}
-			if id, err := selectorID(s); err == nil && c.cfg.Down.SelectorActions != "" {
-				erase(bess.Change{Resource: selectorActionsRes(c.cfg.Down), Key: map[string]any{"id": id}})
+			if len(liveSelector) == 0 {
+				if id, err := selectorID(s); err == nil && c.cfg.Down.SelectorActions != "" {
+					erase(bess.Change{Resource: selectorActionsRes(c.cfg.Down), Key: map[string]any{"id": id}})
+				}
 			}
 		}
 		if old.teid != 0 && !teidNamed(s, old.teid) {

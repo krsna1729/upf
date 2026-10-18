@@ -232,6 +232,68 @@ func TestAModificationThatMovesTheUEAddressMovesTheSelectorsRule(t *testing.T) {
 	}
 }
 
+// A session with two downlink addresses has two selector rules and one action
+// record: the record is the session's, so it goes only when the last rule that
+// references it goes. Erasing it early would leave a live rule naming an action
+// the engine no longer holds -- which the engine refuses outright.
+func TestTheActionRecordGoesOnlyWithTheLastSelectorRule(t *testing.T) {
+	rec := &recorder{}
+	c := New(selectorConfig(DstIP), rec, quietLogger())
+	est := pdrMatchEstablishment(0x7601, "10.45.0.6", 0x81, 100, "")
+	est.CreatePDR = append(est.CreatePDR,
+		ie.NewCreatePDR(ie.NewPDRID(5), ie.NewPrecedence(100),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.9", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
+			ie.NewFARID(2)))
+	resp := c.Establish(est).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	if n := len(changesFor(rec.last(), "sel_dl/rules")); n != 2 {
+		t.Fatalf("the transaction wrote %d selector rules, want one per downlink address", n)
+	}
+
+	// One of the two goes: its rule is erased, the record stays -- the other
+	// address still names it.
+	remove := message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+		ie.NewRemovePDR(ie.NewPDRID(5)))
+	if got := cause(t, c.Modify(remove)); got != ie.CauseRequestAccepted {
+		t.Fatalf("removing one of the two downlink PDRs answered cause %d", got)
+	}
+	changes := rec.last()
+	// The transaction erases the address that went and upserts the one that
+	// stayed (a compile writes the session's keys as they are).
+	if erased, written := selectorOps(t, changes, "sel_dl/rules"); len(erased) != 1 || len(written) != 1 {
+		t.Errorf("the removal wrote %d erases and %d rules, want the removed address erased and the kept one written",
+			len(erased), len(written))
+	}
+	if erased, _ := selectorOps(t, changes, "sel_at/actions"); len(erased) != 0 {
+		t.Errorf("the removal erased the action record while a rule still names it")
+	}
+
+	// And the last one takes the record with it.
+	deleteAndParse(t, c, seid)
+	if erased, _ := selectorOps(t, rec.last(), "sel_at/actions"); len(erased) != 1 {
+		t.Errorf("the deletion wrote %d action-record erases, want the session's record erased", len(erased))
+	}
+}
+
+// selectorOps splits one resource's changes into the erases (a change with no
+// value) and the writes.
+func selectorOps(t *testing.T, changes []bess.Change, resource string) (erased, written []bess.Change) {
+	t.Helper()
+	for _, ch := range changesFor(changes, resource) {
+		if ch.Value == nil {
+			erased = append(erased, ch)
+			continue
+		}
+		written = append(written, ch)
+	}
+	return erased, written
+}
+
 // A session that ends takes its selector rule with it, and the rule goes before
 // the action record it references: the engine refuses to remove an action a
 // live rule names (D-021).
