@@ -754,24 +754,6 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	if err != nil {
 		return session.Config{}, fmt.Errorf("-pdr-fields-dl: %w", err)
 	}
-	// The selector's key is the session's, so only the fields a session has can
-	// be in it: the UE address, and the route domain the deployment classified
-	// the packet in. A field of one PDR would need one rule per PDR, and the
-	// selector would no longer name the session the matcher holds rules under.
-	var selectFields []session.Field
-	if a.selectDL != "" {
-		selectFields, err = parsePDRFields(a.selectFieldsDL)
-		if err != nil {
-			return session.Config{}, fmt.Errorf("-select-fields-dl: %w", err)
-		}
-		for _, f := range selectFields {
-			if f != session.DstIP && f != session.RouteDomain {
-				return session.Config{}, fmt.Errorf(
-					"-select-fields-dl: the %s is a field of one PDR, and the selector's key is the session's "+
-						"(dst_ip, and route_domain where the deployment has one)", f)
-			}
-		}
-	}
 	// One path or none: a selector writes the key a matcher reads, so a
 	// deployment that names one without the other would either select sessions
 	// nothing matches or match a key nothing writes.
@@ -789,6 +771,24 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		return session.Config{}, fmt.Errorf(
 			"the downlink has one rule home: -firewall-dl %q and -pdr-match-dl %q both name one",
 			a.firewallDL, a.pdrMatchDL)
+	}
+	// The selector's key is the session's, so only the fields a session has can
+	// be in it: the UE address, and the route domain the deployment classified
+	// the packet in. A field of one PDR would need one rule per PDR, and the
+	// selector would no longer name the session the matcher holds rules under.
+	var selectFields []session.Field
+	if a.selectDL != "" {
+		selectFields, err = parsePDRFields(a.selectFieldsDL)
+		if err != nil {
+			return session.Config{}, fmt.Errorf("-select-fields-dl: %w", err)
+		}
+		for _, f := range selectFields {
+			if f != session.DstIP && f != session.RouteDomain {
+				return session.Config{}, fmt.Errorf(
+					"-select-fields-dl: the %s is a field of one PDR, and the selector's key is the session's "+
+						"(dst_ip, and route_domain where the deployment has one)", f)
+			}
+		}
 	}
 	var domains *routing.Domains
 	if a.instances != "" {

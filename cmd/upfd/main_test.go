@@ -19,6 +19,7 @@ func validArgs() graphArgs {
 		n3NextHop:  2,
 		pdrTableUL: "pdr_ul", pdrTableDL: "pdr_dl",
 		pdrFieldsUL: "src,dst,proto,sport,dport,qfi", pdrFieldsDL: "src,dst,proto,sport,dport",
+		selectFieldsDL: "dst_ip",
 		teidTable: "teid", teidGate: 0,
 		actionsUL: "at_ul", metersUL: "mt_ul",
 		actionsDL: "at_dl", metersDL: "mt_dl",
@@ -109,6 +110,25 @@ func TestGraphConfigRefusesBadInput(t *testing.T) {
 		{"a port mac that is not hex", func(a *graphArgs) { a.n3MAC = "zz:00:00:00:00:01" }, "-n3-mac"},
 		{"a peer mac of the wrong length", func(a *graphArgs) { a.peerMAC = "02:00:00:00:00:00:02" }, "-peer-mac"},
 		{"a peer mac that is not a mac", func(a *graphArgs) { a.peerMAC = "enc" }, "-peer-mac"},
+		// The selector and the matcher are one path, and its key is the
+		// session's: a field of one PDR cannot be in it.
+		{"a selector with no matcher", func(a *graphArgs) { a.selectDL = "sel_dl" }, "-pdr-match-dl"},
+		{"a matcher with no selector", func(a *graphArgs) { a.pdrMatchDL = "pdr_match_dl" }, "-select-dl"},
+		{"a selector with no action table", func(a *graphArgs) {
+			a.pdrMatchDL, a.selectDL = "pdr_match_dl", "sel_dl"
+		}, "-select-actions-dl"},
+		{"a selector keyed by a PDR's port", func(a *graphArgs) {
+			a.pdrMatchDL, a.selectDL, a.selectActionsDL = "pdr_match_dl", "sel_dl", "sel_at"
+			a.selectFieldsDL = "dport"
+		}, "a field of one PDR"},
+		{"a selector keyed by a field the graph has no name for", func(a *graphArgs) {
+			a.pdrMatchDL, a.selectDL, a.selectActionsDL = "pdr_match_dl", "sel_dl", "sel_at"
+			a.selectFieldsDL = "udp"
+		}, "-select-fields-dl"},
+		{"two homes for the downlink", func(a *graphArgs) {
+			a.pdrMatchDL, a.selectDL, a.selectActionsDL = "pdr_match_dl", "sel_dl", "sel_at"
+			a.firewallDL = "fw_dl"
+		}, "one rule home"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
