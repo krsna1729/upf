@@ -194,10 +194,14 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   node's own counters -- sessions held, establishments, modifications,
   deletions, refusals, usage reports sent/refused/held/dropped, and whether a CP
   function is associated -- in the Prometheus text format.
+- The port split is in, on a veth: `deploy/veth-port.yaml` is one PMD port with
+  four queues split by a `Vif` into N3/N6/N9, each with its own address and
+  route domain, and `ci/veth-port.sh` proves the queues, the split and the
+  compiler's downlink rule selected by the domain the port wrote. What waits for
+  hardware is the placement measurement (per-pattern RSS and the line rate); a
+  veth advertises no RSS offload at all (`docs/ports.md`).
 - Next, in this order: a real SMF (open5gs or free5GC) against `upfd` for
-  interop and Causes, packets over the bound N3/N6 ports (the port split and
-  its placement measurement are the hardware items), the vif that writes a
-  packet's route domain so a downlink rule's key can carry it (`internal/routing`
-  and the Network Instance are in; the packet-side half is not), then the
-  classifier's explicit tuple budget (`max_tuples`). `docs/design.md` holds the
-  milestones and what each one must prove.
+  interop and Causes, packets over the bound N3/N6 ports (the placement
+  measurement is the hardware item), then the classifier's explicit tuple budget
+  (`max_tuples`). `docs/design.md` holds the milestones and what each one must
+  prove.

@@ -480,10 +480,12 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
    forward out by the FAR's instance (or the PDI's) rather than by the
    direction's. Port ranges stay refused rather than widened (see the
    classifier work below).
-   *Out:* the vif wiring (the section above: a real port's interface writes
-   `route_domain`, and until then only a graph with a writer declares the
-   domain field -- on the uplink a rule keys on the tunnel it arrived on, which
-   is what tells two instances' sessions with one UE address apart), and N9's
+   *Out:* the vif wiring's hardware half (the section above: a real port's
+   interface writes `route_domain`, and the software half of that is proven on
+   a veth by `ci/veth-port.sh` -- what is left is the packet-placement
+   measurement a NIC's RSS engine is needed for, and a graph whose key leaves
+   the domain out still keys the uplink on the tunnel it arrived on, which is
+   what tells two instances' sessions with one UE address apart), and N9's
    real peer UPF, which needs a deployment with a second UPF to name.
    *Proof:* `internal/session`'s TestTwoInstancesRouteIndependently (two
    sessions, one address, two instances, two rule keys and two next hops) and
@@ -521,24 +523,29 @@ three interfaces on one PMD port, each with its own address, its own ARP answers
 and its own routing domain; nothing in 3GPP requires a distinct MAC per reference
 point, and a shared MAC is fine where the segments are tagged apart.
 
-`route_domain` is written, not yet read: `core/route/route_domain.h` and `Router`
-(`core/route/router.h`) are domain-aware (`kMaxRouteDomains`, a `max_domains` per
-router, routes taken per domain) and `vif` writes the domain into packet
-metadata, but no module in the tree consumes that attribute today -- the
-vif-to-router link is work, not a given. What a *PDR* selects is not a vif but a
-**network instance** (TS 29.244 8.2.4), beside the **source interface** (8.2.2)
-which this repo does read (`internal/session/compile.go`). That link is in now:
+`route_domain` is written, and now read: `core/route/route_domain.h` and
+`Router` (`core/route/router.h`) are domain-aware (`kMaxRouteDomains`, a
+`max_domains` per router, routes taken per domain) and `vif` writes the domain
+into packet metadata; a match table that declares the attribute among its
+fields (`attr_name: route_domain`, as `deploy/veth-port.yaml`'s downlink table
+does) consumes it, so the domain a packet arrived with is what its PDR rule is
+keyed on. The Router's own per-domain *routes* are a separate path, and no graph
+here uses it: a session's action names its next hop by id, not by domain. What a
+*PDR* selects is not a vif but a **network instance** (TS 29.244 8.2.4), beside
+the **source interface** (8.2.2), which this repo does read
+(`internal/session/compile.go`). That link is in now:
 `internal/routing` is the deployment's interfaces (name, route domain, next hop,
 subscriber pool), the compiler resolves the Network Instance of a PDI and of a
 FAR's forwarding parameters against them -- refusing a name the deployment does
 not serve, and an address outside the interface's pool -- puts the interface's
 domain in the rule's key wherever the graph declares it (`domain` in
-`-pdr-fields-*`) and sends a forward out by the FAR's instance. What is still
-missing is the packet-side half: a rule's key can carry the domain only where
-something writes it into the packet, and on a real port that is the vif's
-`route_domain`, which is not wired. Until it is, a deployment can tell two
-instances' sessions apart by what the ingress *does* write: on the uplink the
-tunnel the G-PDU arrived on (`upf_teid`, the decap's own attribute), which is
+`-pdr-fields-*`) and sends a forward out by the FAR's instance. The packet-side
+half is the vif's `route_domain` -- a rule's key can carry the domain only where
+something writes it into the packet -- and it is in: `deploy/veth-port.yaml`
+declares the three interfaces on one port and the tables that read what they
+write. A deployment that has no vif still tells two instances apart by what the
+ingress writes on its own: on the uplink the tunnel the G-PDU arrived on
+(`upf_teid`, the decap's own attribute), which is
 what `deploy/session-instances.yaml` declares and `ci/session-instances.sh`
 drives -- its own manifest, so the shared graph's recorded figures stay the
 figures of the arm that produced them. That is a fact about the key, not luck:
@@ -569,6 +576,42 @@ GTP-U exists in both engines we build (mlx5's flow steering, and ice's
 `drivers/net/intel/ice/base/ice_flow.c`), which is what makes this worth
 measuring. Whether this box's NIC and DPDK can do it belongs on the hardware
 list, not in the basis of the placement policy.
+
+**What a veth proves, and what it cannot.** The port half of this section is
+measured on a software port, so that it does not wait for a NIC:
+`deploy/veth-port.yaml` declares one PMD port (the af_packet PMD over a kernel
+veth, `qpairs=4`) with four `QueueInc`s into a `Vif` whose three interfaces are
+N3, N6 and N9 -- each with its own MAC, its own address and its own route
+domain -- and the PDR tables whose keys carry what the Vif writes;
+`ci/veth-port.sh` deploys it and checks the result, and `docs/ports.md` holds
+the recipe. That is four things the port has to get right, proven here:
+
+- **the queue count**, from two independent views: BESS's (the runtime PortInfo
+  and the active pipeline, four receive and four transmit queues) and DPDK's own
+  device telemetry (four rx/tx queues, all of them started) -- and the PMD's
+  count comes from the vdev's `qpairs=`, not from the veth's `numrxqueues`, so
+  it is a real declaration that took effect rather than an echo;
+- **real L2**, in that a frame addressed to an interface's MAC crosses the veth,
+  is read by the port and lands on that interface's gate -- the three gates'
+  counts are exactly the frames sent, no more and no fewer;
+- **the vif split with its route domains**, end to end: the domain the port
+  wrote for a frame is what the compiler's downlink rule (`upfd`, over N4) is
+  keyed on, and that frame is selected by the rule and crosses the chain to the
+  encap, while the same frame before that rule existed is dropped;
+- **the per-queue spread**: the af_packet PMD's `fanout_mode=hash` places a flow
+  on a queue, and all four queues move under many flows.
+
+What the veth cannot do is the measurement this section is about. The af_packet
+PMD advertises no RSS offload at all -- the telemetry's `ethdev_rss_hf` is `0x0`,
+and there is no hash key, no RETA and no per-queue hash function to program -- so
+the Innermost/L3-only RSS pattern above cannot be configured on it, let alone
+measured at line rate: what spreads flows over the four queues above is the
+kernel's AF_PACKET fanout hash, not a NIC's. The knobs the measurement needs
+(`RTE_ETH_RSS_LEVEL_INNERMOST` with `L3_SRC_ONLY`/`L3_DST_ONLY` as a per-pattern
+`rte_flow` RSS action, on a driver with GTP-U flow steering) and the rate it is
+measured at therefore stay on the hardware list. Nothing above weakens that: the
+veth arm is why the *software* half of the port work is not blocked on hardware,
+and it is checked as a NIC-independent claim (`docs/ports.md` says which).
 
 What `upfd` owns, then: the ports and their vifs, the graph, the routes per
 instance (the UE pool's next hop out of N6, the peer UPF for N9, the data

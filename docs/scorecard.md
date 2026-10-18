@@ -337,13 +337,13 @@ close, on its own, against the current mean of 66:
 
 | close | block | block from → to | mean | cost |
 |---|---|---|---|---|
-| the vif that writes the route domain (gap 5's tail) | 11 | 50 → 100 | 66 → 71 | the port work in `design.md`; needs the placement measurement first |
+| the port work's placement measurement (the vif's write itself landed on 2026-10-18: `deploy/veth-port.yaml` splits one port into the three interfaces and `ci/veth-port.sh` shows the compiler's rule selected by the domain the port wrote) | 11 | 50 → 100 | 66 → 71 | `docs/design.md`'s port section and `docs/ports.md`; needs a NIC -- a veth advertises no RSS offload (`ethdev_rss_hf=0x0`) |
 | IPv6 | 9 | 0 → 100 | 66 → 75 | the dataplane's tables and the F-TEID key: a second form, not a patch. An SDF filter's IPv6 *prefix* is compiled on the opt-in firewall path since 2026-10-18, which is not a close: the module is not in the installed stage and no packet has crossed one of its rules (block 9's note) |
 | a real SMF (open5gs or free5GC) at the door | 12 | 0 → 100 | 66 → 75 | no code: an afternoon with a NIC and someone else's SMF |
 | all three | 9, 11, 12 | | **66 → 89** | |
 
 The single-close means are the arithmetic from the cells: adding a block's gain
-to the 725/11 = 66 base (the vif's 50, or IPv6's 100, or the SMF's 100, each
+to the 725/11 = 66 base (block 11's 50, or IPv6's 100, or the SMF's 100, each
 over 11), and the three together are (725 + 50 + 100 + 100) / 11 = 975 / 11 =
 88.6 → 89.
 
@@ -360,8 +360,8 @@ its own close if the survey ever scored the two halves apart.)
    which we score 0 on. What we lead is real but narrow — markers 100 against 80,
    URR 100 against 60, QER 100 against 67, the report path 100 against free5GC's
    50 and OMEC's 0 — and none of it is what a handover or a stalled UE notices.
-   One close still on the list, the vif that writes the route domain, would take
-   the mean to 71 without touching the dataplane's shape.
+   One close still on the list, block 11's port work, would take the mean to 71
+   without touching the dataplane's shape.
 2. **The mean is not a verdict on the dataplane.** No row here is a throughput
    claim: the same-harness measurement that would settle that (verification plan
    section 2) has not been run. The floors that do exist are per packet and

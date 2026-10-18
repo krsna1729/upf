@@ -1,0 +1,222 @@
+# SPDX-License-Identifier: BSD-3-Clause
+
+# The N3/N6/N9 port work without a NIC: one PMD port, four receive queues, and
+# a `Vif` splitting it into the three reference points, each with its own
+# address and its own route domain. `ci/veth-port.sh` deploys this graph on a
+# kernel veth (the af_packet PMD) and checks it; docs/design.md's port section
+# and docs/ports.md hold what that proves and what still waits for hardware.
+#
+# The port is declared here, in the manifest, because `bessd` has no DPDK-args
+# passthrough: it builds its own EAL argv (core/runtime/dpdk.cc) and hot-plugs
+# what a manifest declares with rte_dev_probe (core/drivers/pmd.cc). The vdev
+# string is the af_packet PMD's own, and `qpairs=4` sets the PMD's queue count
+# (drivers/net/af_packet's ETH_AF_PACKET_NUM_Q_ARG) -- which is why the four
+# QueueIncs below have four queues to read, whatever the veth's numrxqueues.
+#
+# The reference points are data, not code: an interface is an address, a MAC, a
+# route domain and an output gate, and the deployment's three of them live in
+# this file. The rule keys the compiler writes into the PDR tables below are
+# the other half (docs/design.md, "N3, N6, N9: one port, three interfaces").
+ports:
+  - name: upf_port
+    driver: PMDPort
+    num_rx_queues: 4
+    num_tx_queues: 4
+    arg: {vdev: "net_af_packet0,iface=upfv0,qpairs=4,fanout_mode=hash"}
+
+modules:
+  # One QueueInc per qid: the port's four queues, each its own task, all reading
+  # into the one Vif. That is what makes a per-queue spread observable under a
+  # flow fanout (af_packet's fanout_mode=hash places a flow on one queue), and
+  # it is the shape a deployment with more than one worker needs (D-097).
+  - name: inc0
+    mclass: QueueInc
+    arg: {port: upf_port, qid: 0}
+  - name: inc1
+    mclass: QueueInc
+    arg: {port: upf_port, qid: 1}
+  - name: inc2
+    mclass: QueueInc
+    arg: {port: upf_port, qid: 2}
+  - name: inc3
+    mclass: QueueInc
+    arg: {port: upf_port, qid: 3}
+
+  # The port split into the three reference points (docs/design.md, "N3, N6,
+  # N9: one port, three interfaces"): one interface per reference point, each
+  # with its own MAC, its own address (so the Vif answers ARP on its behalf),
+  # its own route domain, and its own output gate. Untagged (vlan: 0): nothing
+  # here needs them tagged apart. Gate 0 is the default: a frame whose
+  # destination MAC names no interface.
+  - name: vif
+    mclass: Vif
+    arg:
+      default_gate: 0
+      interfaces:
+        # N3, the access side: GTP-U toward the RAN.
+        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:01:01", ip_addr: "192.0.2.101", route_domain: 1, gate: 1}
+        # N9, a peer UPF: GTP-U, the same shape as N3.
+        - {id: 2, vlan: 0, mac_addr: "02:00:00:00:02:02", ip_addr: "192.0.2.102", route_domain: 2, gate: 2}
+        # N6, the data network: plain IP.
+        - {id: 3, vlan: 0, mac_addr: "02:00:00:00:03:03", ip_addr: "192.0.2.103", route_domain: 3, gate: 3}
+  - name: sink_other
+    mclass: Sink
+
+  # The reader that makes the Vif's writes real: a write-only metadata
+  # attribute no module reads gets no offset at all (core/metadata.cc,
+  # FillOffsetArrays), and the Vif writes `route_domain` only when both its
+  # attributes have one (vif.cc's write_metadata guard). It reads `vif_id` and
+  # `route_domain`, declares nothing of its own, and passes packets through.
+  - name: mt_vif
+    mclass: MetadataTest
+    arg: {read: {vif_id: 4, route_domain: 4}}
+
+  # -- the N3/N9 ingress: GTP-U -----------------------------------------------
+  # The F-TEID match, one rule per session, written by the controller. A TEID no
+  # rule names is dropped: this graph has no echo module (upf.yaml's has).
+  - name: teid
+    mclass: WildcardMatch
+    arg:
+      fields:
+        # Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's flags/type/length
+        # (4).
+        - {offset: 46, num_bytes: 4}
+  - name: decap0
+    mclass: GtpuDecap
+  - name: mt_md
+    mclass: MetadataTest
+    arg:
+      # The reader that makes the decap's writes real: `upf_teid`, the tunnel
+      # the G-PDU arrived on, and `qfi`.
+      read: {upf_teid: 4, qfi: 1}
+
+  # -- the PDR tables the compiler writes into --------------------------------
+  # The uplink table keys on the inner 5-tuple, the tunnel the packet arrived on
+  # and its QoS flow: the shape deploy/session-instances.yaml declares, and the
+  # one `upfd -pdr-fields-ul src,dst,proto,sport,dport,teid,qfi` names.
+  - name: pdr_ul
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 26, num_bytes: 4}  # source address
+        - {offset: 30, num_bytes: 4}  # destination address
+        - {offset: 23, num_bytes: 1}  # protocol
+        - {offset: 34, num_bytes: 2}  # source port
+        - {offset: 36, num_bytes: 2}  # destination port
+        - {attr_name: upf_teid, num_bytes: 4}
+        - {attr_name: qfi, num_bytes: 1}
+      # Distinct masks in use at once: a session's shapes are its filters', and
+      # each is one hash lookup per batch. Declared rather than defaulted: it is
+      # a UPF decision (D-141).
+      max_tuples: 16
+      action_resource: at_ul/actions
+  # The downlink table keys on the same 5-tuple and on the route domain the Vif
+  # wrote: this is the rule key that makes two network instances serving one
+  # subscriber prefix two rules rather than a collision, and it is the field
+  # `upfd -pdr-fields-dl src,dst,proto,sport,dport,domain` names -- the shape
+  # internal/session's instancedConfig mirrors. No module reads the domain
+  # before this table, which is why a *downlink* key is what the Vif completes:
+  # on the uplink the tunnel the G-PDU arrived on is the writer that exists
+  # without a port.
+  - name: pdr_dl
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 26, num_bytes: 4}
+        - {offset: 30, num_bytes: 4}
+        - {offset: 23, num_bytes: 1}
+        - {offset: 34, num_bytes: 2}
+        - {offset: 36, num_bytes: 2}
+        - {attr_name: route_domain, num_bytes: 4}
+      max_tuples: 8
+      action_resource: at_dl/actions
+
+  # -- the two chains the compiler writes into --------------------------------
+  - name: at_ul
+    mclass: ActionTable
+    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
+  - name: mt_ul
+    mclass: Meter
+    arg: {capacity: 65536}
+  - name: cnt_ul
+    mclass: UrrCount
+    arg: {capacity: 65536}
+  - name: at_dl
+    mclass: ActionTable
+    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+  - name: mt_dl
+    mclass: Meter
+    arg: {capacity: 65536}
+  - name: cnt_dl
+    mclass: UrrCount
+    arg: {capacity: 65536}
+
+  # A route domain per reference point, and the router bound to hold them. The
+  # bound is 4 and the domains are 1..3 because the Router creates every
+  # domain's FIB eagerly (router.cc's CreateDomain loop): a `max_domains` in the
+  # tens fails to build on this box, which is a fact about that module, not
+  # about the port. upfd's own `-max-domains` must agree with this number.
+  - name: rt
+    mclass: Router
+    arg: {max_domains: 4}
+  - name: enc
+    mclass: GtpuEncap
+    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
+  # The port's transmit side: one queue per direction, as the receive side has
+  # one per qid.
+  - name: n6_out
+    mclass: QueueOut
+    arg: {port: upf_port, qid: 0}
+  - name: n3_out
+    mclass: QueueOut
+    arg: {port: upf_port, qid: 1}
+
+connections:
+  - {upstream: inc0, downstream: vif}
+  - {upstream: inc1, downstream: vif}
+  - {upstream: inc2, downstream: vif}
+  - {upstream: inc3, downstream: vif}
+  # The Vif's default gate: a frame no interface's MAC names.
+  - {upstream: vif, downstream: sink_other}
+  # N3 and N9 are both GTP-U: they reach the same TEID table, and what tells
+  # two instances' sessions apart on the uplink is the tunnel (or, with the
+  # domain in the key, the interface's domain).
+  - {upstream: vif, downstream: teid, ogate: 1}
+  - {upstream: vif, downstream: teid, ogate: 2}
+  # N6 is plain IP: it reaches the downlink table directly, carrying the domain
+  # the Vif wrote. mt_vif sits here so the Vif's writes have a reader on the
+  # path, not only in the PDR key.
+  - {upstream: vif, downstream: mt_vif, ogate: 3}
+  - {upstream: mt_vif, downstream: pdr_dl}
+
+  - {upstream: teid, downstream: decap0}
+  - {upstream: decap0, downstream: mt_md}
+  - {upstream: mt_md, downstream: pdr_ul}
+  - {upstream: pdr_ul, downstream: at_ul}
+  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: mt_ul, downstream: cnt_ul}
+  - {upstream: cnt_ul, downstream: rt}
+
+  - {upstream: pdr_dl, downstream: at_dl}
+  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: mt_dl, downstream: cnt_dl}
+  - {upstream: cnt_dl, downstream: rt}
+
+  - {upstream: rt, downstream: n6_out}
+  - {upstream: rt, downstream: enc, ogate: 1}
+  - {upstream: enc, downstream: n3_out}
+
+workers:
+  - {wid: 0, core: 0}
+
+resources:
+  # The actions' next hops: the deployment's, not a session's (a session's
+  # action names them by id). Every chain with an ActionTable routes on the id
+  # it writes -- the module fails closed when the attribute has no reader -- so
+  # both directions have one: the uplink's leaves by gate 0 toward N6, the
+  # downlink's by gate 1 toward the encap.
+  rt/next_hops:
+    - key: {id: 1}
+      value: {egress_gate: 0}
+    - key: {id: 2}
+      value: {egress_gate: 1}
