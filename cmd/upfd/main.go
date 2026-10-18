@@ -72,6 +72,15 @@ func run() error {
 		"the WildcardMatch module holding the uplink PDR rules")
 	pdrTableDL := flag.String("pdr-table-dl", "pdr_dl",
 		"the WildcardMatch module holding the downlink PDR rules")
+	firewallUL := flag.String("firewall-ul", "",
+		"the uplink firewall module whose \"<name>/rules\" policy holds the uplink PDRs "+
+			"instead of -pdr-table-ul: BESS's `firewall` table, whose rules carry CIDR "+
+			"prefixes of either family, a protocol and port *ranges*. Empty (the default): "+
+			"the WildcardMatch path, where a port range and an IPv6 prefix are refused. No "+
+			"deployed graph carries that module yet, so naming one points at a module the "+
+			"daemon does not have (docs/compliance.md)")
+	firewallDL := flag.String("firewall-dl", "",
+		"the downlink firewall module, as -firewall-ul is the uplink one")
 	actionsUL := flag.String("actions-ul", "at_ul", "the uplink ActionTable module")
 	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
 	actionsDL := flag.String("actions-dl", "at_dl", "the downlink ActionTable module")
@@ -176,6 +185,7 @@ func run() error {
 			capacity:  uint32(*capacity),
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			pdrTableUL: *pdrTableUL, pdrTableDL: *pdrTableDL,
+			firewallUL: *firewallUL, firewallDL: *firewallDL,
 			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
@@ -566,6 +576,8 @@ type graphArgs struct {
 	maxDomains         uint32
 	pdrTableUL         string
 	pdrTableDL         string
+	firewallUL         string
+	firewallDL         string
 	pdrFieldsUL        string
 	pdrFieldsDL        string
 	teidTable          string
@@ -627,14 +639,19 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		Up: session.Direction{
 			PDRTable:  a.pdrTableUL,
 			PDRFields: upFields,
-			Actions:   a.actionsUL,
-			Meters:    a.metersUL,
-			Counters:  a.countersUL,
-			NextHop:   a.n6NextHop,
+			// The uplink's PDRs may live in a firewall module instead of the
+			// WildcardMatch table (BESS's `firewall`, whose rules carry port
+			// ranges and both address families); empty is the table.
+			Firewall: a.firewallUL,
+			Actions:  a.actionsUL,
+			Meters:   a.metersUL,
+			Counters: a.countersUL,
+			NextHop:  a.n6NextHop,
 		},
 		Down: session.Direction{
 			PDRTable:  a.pdrTableDL,
 			PDRFields: downFields,
+			Firewall:  a.firewallDL,
 			Actions:   a.actionsDL,
 			Meters:    a.metersDL,
 			Counters:  a.countersDL,

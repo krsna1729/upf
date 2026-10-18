@@ -31,7 +31,7 @@ to race.
 
 | PFCP | BESS |
 |---|---|
-| PDR (Precedence, PDI: Source Interface, F-TEID, Network Instance, UE IP, SDF filters, QFI) | one rule in the PDR table (WildcardMatch over masked keys) whose result is `{gate, ActionId}`; the rule's priority is the Precedence inverted (8.2.11's lower value is the higher precedence, the classifier applies the higher priority), and the QFI is the last key field where the graph declares it, so one session's several QoS flows are several rules; a port *range* is refused today — see the OMEC table below |
+| PDR (Precedence, PDI: Source Interface, F-TEID, Network Instance, UE IP, SDF filters, QFI) | one rule in the PDR table (WildcardMatch over masked keys) whose result is `{gate, ActionId}`; the rule's priority is the Precedence inverted (8.2.11's lower value is the higher precedence, the classifier applies the higher priority), and the QFI is the last key field where the graph declares it, so one session's several QoS flows are several rules; a port *range* is refused on this path — the opt-in firewall path below carries it, and see the OMEC table below |
 | F-TEID the CP function asks the UP function to choose (8.2.3: the CH flag, and CHID for a group the CP function names) | one TEID rule in front of the decap per F-TEID we allocate; the PDIs of a session that carry one CHOOSE ID share the F-TEID the session gave that group, so an SMF's several filters on one tunnel are one rule and one Created PDR value |
 | FAR (Apply Action, Forwarding Parameters: Destination Interface, Network Instance, Outer Header Creation) | a *treatment* resource the action references (forward / drop / buffer / notify) plus the next hop and GTP-U encap parameters |
 | QER (Gate Status, MBR, QFI) | a meter resource per QER, referenced from the action; its QFI goes into the tunnel record, where the encap writes the downlink packet's PDU Session Container from |
@@ -111,6 +111,49 @@ declaring its own chain's actions resource, so every rule's reference is exact.
 
 Both results — the gate and the ActionId — come from one lookup
 (`{gate, ActionId}`, the BESS-side item *Classifier result model*).
+
+**The firewall path (opt-in).** A direction may name a BESS `firewall` module
+instead of its WildcardMatch table (`session.Direction.Firewall`, `upfd
+-firewall-ul`/`-firewall-dl`). Its table is tuple space over the *masked fields
+alone* — one group per (family, protocol, source prefix length, destination
+prefix length) — and a rule's ports are checked after its group's key hits, so
+a port **range** costs it no group, no mask and no entry (BESS D-147); IPv4 and
+IPv6 rules live in one policy. Those are the two shapes a 4-byte mask cannot
+carry, and they are what the WildcardMatch path refuses rather than widening
+(`internal/session`: the SDF's port range, and a prefix that is not IPv4).
+
+Three things follow from the module's own shape, and they are what a deployment
+has to know before naming one:
+
+- **The policy is written whole.** `<module>/rules` is a *singleton* holding the
+  ordered policy, and the module builds the table whole and swaps it. So the
+  compiler writes every live session's rules of that module, not one session's:
+  a write of its own would erase the rules of the sessions already programmed,
+  and a packet no rule matches is *dropped*, not passed. The order is the
+  spec's own — TS 29.244 8.2.11 has the lower Precedence value win and a
+  firewall list applies its first matching rule, so the list is sorted by
+  Precedence ascending, with no inversion (unlike `rulePriority`, where the
+  classifier applies the *higher* priority).
+- **A rule is a match, not an action.** `FirewallArg.Rule` carries
+  `src_ip`/`dst_ip` (CIDR strings whose length is mandatory), `proto`, the four
+  port-range fields and `drop`; the module's only words are drop and pass, it
+  passes a matching packet on the gate it arrived on and writes no packet
+  metadata. So a firewall rule cannot name the ActionId or the next hop the
+  WildcardMatch path's rule names, nor the PDI's QFI, the route domain or the
+  tunnel: those stay fields of the WildcardMatch key, and a deployment that
+  wants meters, tunnels or per-rule counters behind the classifier needs BESS
+  to carry an action word in the rule first. A PDR that buffers is refused on
+  this path for the same reason (its packets are delivered on the store's gate,
+  and a firewall rule has only the one it arrived on). What the two paths do
+  share is the choice of sides: the uplink's rule is its UE address (or the
+  SDF's source), the downlink's is the SDF's destination or the UE's.
+- **No deployed graph names the module.** It is BESS's D-147 work and is not in
+  the stage the `ci/` arms run against, and a graph that names a module the
+  daemon does not have fails to load — so no `deploy/*.yaml` graph carries it,
+  and the flag is the only way to ask for the path. Nothing about this changes
+  a deployment that does not pass it: with no module named, both directions are
+  the WildcardMatch table with its refusals
+  (`TestTheFirewallPathIsOptIn`).
 
 **The action record** (one cache line, read once, never written by a worker):
 
@@ -285,7 +328,7 @@ that MBR allows for 51-byte packets plus a token bucket's slack.
 | OMEC pattern | Why it is unnecessary here | What this repo does instead |
 |---|---|---|
 | A goroutine and a `ModuleCommand` per PDR/FAR/QER, unordered; `SendMsgToUPFWithCompletion` per session | BESS's transaction engine orders, validates and rolls back server-side; a client that orders internals has to reimplement all of it | one `Transaction` per session change, `WithExpectedGeneration` when the caller has a generation in hand |
-| Cartesian expansion of port ranges into many rules | a range is a set of masked values **per field** (an n-bit field decomposes into at most 2n-2 masked entries), and a rule whose masks cover several fields matches the *product* of those per-field sets: a two-port range is up to 30x30 entries, a smaller product than OMEC's naive expansion but still a product. `max_tuples` is the budget that bounds it, and a rule whose masks cannot carry the constraint is refused rather than widened (docs/compliance.md) | one rule per PDR with a masked key; ranges wait for their milestone |
+| Cartesian expansion of port ranges into many rules | a range is a set of masked values **per field** (an n-bit field decomposes into at most 2n-2 masked entries), and a rule whose masks cover several fields matches the *product* of those per-field sets: a two-port range is up to 30x30 entries, a smaller product than OMEC's naive expansion but still a product. `max_tuples` is the budget that bounds it, and a rule whose masks cannot carry the constraint is refused rather than widened (docs/compliance.md) | one rule per PDR with a masked key, and the opt-in firewall path (above) for the ranges that key cannot carry: a range there costs no group, no mask and no entry |
 | Client-side establishment, then a second pass to modify | desired state is the model: `ApplyPipeline` diffs and plans, and resource contents ride along in the same call | `Pipeline` + `PlanPipeline` before a change, `ApplyPipeline` for topology |
 | Retries, idempotency and "did it apply?" reinvented in the client | the SDK owns it: one request id per logical transaction, `GetTransaction` after an unanswered send, `DaemonRestartedError` when the epoch moved | `internal/bess` wraps exactly that and nothing else |
 | State in the controller that the dataplane also holds (and they drift) | the dataplane is the state of record; sessions are reconstructible | the controller keeps only what PFCP needs (session ids, SEIDs, the last reported counters) |

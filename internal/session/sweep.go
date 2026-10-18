@@ -40,6 +40,9 @@ func (c *Compiler) resources() []string {
 		if d.PDRTable != "" {
 			add(rulesRes(d))
 		}
+		if d.Firewall != "" {
+			add(firewallRes(d))
+		}
 		if d.Actions != "" {
 			add(actionsRes(d))
 		}
@@ -100,8 +103,32 @@ func (c *Compiler) Sweep(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reading the session tables: %w", err)
 	}
+	// A firewall policy is a singleton ("<module>/rules" holds the whole
+	// policy, D-147): it has no key to erase, and the write is the whole
+	// policy. An earlier run's policy matches packets this process has no
+	// session for -- and *passes* them, a rule's verdict being pass or drop --
+	// so it is replaced by an empty one, which no rule matches. An empty policy
+	// is left alone: it is what this process would write anyway, and a
+	// transaction that changes nothing is not one the daemon needs.
+	firewalls := map[string]bool{}
+	for _, d := range []Direction{c.cfg.Up, c.cfg.Down} {
+		if d.Firewall != "" {
+			firewalls[firewallRes(d)] = true
+		}
+	}
 	changes := make([]bess.Change, 0, len(contents))
 	for name, entries := range contents {
+		if firewalls[name] {
+			for _, e := range entries {
+				if rules, _ := e.Value["rules"].([]any); len(rules) > 0 {
+					changes = append(changes, bess.Change{
+						Resource: name,
+						Value:    map[string]any{"rules": []map[string]any{}},
+					})
+				}
+			}
+			continue
+		}
 		for _, e := range entries {
 			changes = append(changes, bess.Change{Resource: name, Key: e.Key})
 		}

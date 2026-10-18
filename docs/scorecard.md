@@ -72,6 +72,21 @@ live `flows` entry, but the duration's expiry is BESS's own aging and is not
 observable through the control surface (block 7's text below), so its cell stays
 75 and the row still divides as written: 100+100+100+100+100+75+100+0+0+50+0 =
 725, and 725 / 11 = 65.9 → **66**.
+**2026-10-18 (the firewall path, blocks 4 and 9): no cell moves.** The compiler
+now has an opt-in path on which a port *range* and an IPv6 SDF prefix compile
+instead of being refused (`internal/session`, `upfd -firewall-ul`/`-firewall-dl`),
+which is what block 4's "SDF + ranges" and block 9's "PFCP UE IP and prefixes"
+are about — but the module it writes to is not in the stage the arms run
+against, no `deploy/*.yaml` graph names it (a graph naming a module the daemon
+does not have fails to load), and nothing has matched a packet through such a
+rule. Unit tests justify the *compile*, not the capability, and this file's own
+precedent is block 7: numbers written and read back are not credited without the
+effect being shown (block 7's "Why 75 and not 100"). So block 4 stays **80** and
+block 9 **0**, the mean is unchanged, and its arithmetic is the same row as
+above: 100+100+100+100+100+75+100+0+0+50+0 = **725**, 725 / 11 = 65.9 →
+**66**. What would move them is a graph in the installed stage and an arm like
+`ci/buffer-path.sh` that carries such a rule end to end — the work is named in
+each block below.
 
 ## What each number is made of
 
@@ -144,6 +159,20 @@ port ranges; Network Instance and QFI.
 `TestPortRangeIsRefusedNotMatchedTooWidely`, `TestANonIPv4PDIIsRefusedNotWidened`,
 `ci/smoke-gtpu.sh` (a G-PDU carrying a PDU Session Container, decap reading QFI 5
 into metadata).
+
+**Why 80 and not 100.** The uncredited sub-feature is the "SDF + ranges" pair:
+the SDF half is in (prefixes and single ports, with the live arm), the **range**
+half is refused rather than widened, because a WildcardMatch mask can only hold
+one port value. As of 2026-10-18 the compiler has an opt-in path that carries it
+— `upfd -firewall-ul`/`-firewall-dl` put a direction's PDRs into BESS's
+`firewall` table, whose rules carry inclusive port ranges and both address
+families (`TestAPortRangeCompilesToAFirewallRuleWithItsRange`,
+`TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly`) — but that table is not in
+the installed stage, no graph in `deploy/` declares the module, and no packet
+has crossed such a rule, so the sub-feature stays uncredited on the same rule
+block 7 uses below: a number written and read back is not the effect shown. The
+cell moves when an arm can carry a range through the module, not when the
+compiler can write one.
 
 **Field.** not examined per project: the survey scores rule types
 (PDR/FAR/QER/URR/BAR), not PDI sub-features. Only OAI's `ftup=1` is on record,
@@ -257,6 +286,17 @@ encapsulates; echo is not examined per project by the survey.
 **Ours.** refusal with cause 73: `TestANonIPv4PDIIsRefusedNotWidened`,
 `TestACHOOSEForIPv6IsRefused`.
 
+**Why 0 and not 33.** Since 2026-10-18 an SDF filter's IPv6 prefix compiles on
+the opt-in firewall path, whose table holds IPv4 and IPv6 rules in one policy
+(`TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly`) — but only the *prefix*
+half of the first sub-feature, only in the compiler: a PDI's IPv6 UE address is
+still refused (the F-TEID key, the tunnel record and the WildcardMatch key's
+address fields are IPv4-only), so this is not an IPv6 session; IPv6 inner and
+outer headers and IPv6 on N9 are untouched; and the path cannot be run at all
+(the module is not in the installed stage, no graph declares it, no packet has
+crossed one of its rules — `docs/compliance.md`, gap 6). Half of one sub-feature
+in the compiler, with nothing demonstrated, is not a third of the block.
+
 **Field.** UPG-VPP states IPv4/IPv6 inner + outer (33, one sub-feature of three);
 no other project claims any.
 
@@ -298,7 +338,7 @@ close, on its own, against the current mean of 66:
 | close | block | block from → to | mean | cost |
 |---|---|---|---|---|
 | the vif that writes the route domain (gap 5's tail) | 11 | 50 → 100 | 66 → 71 | the port work in `design.md`; needs the placement measurement first |
-| IPv6 | 9 | 0 → 100 | 66 → 75 | the dataplane's tables and the F-TEID key: a second form, not a patch |
+| IPv6 | 9 | 0 → 100 | 66 → 75 | the dataplane's tables and the F-TEID key: a second form, not a patch. An SDF filter's IPv6 *prefix* is compiled on the opt-in firewall path since 2026-10-18, which is not a close: the module is not in the installed stage and no packet has crossed one of its rules (block 9's note) |
 | a real SMF (open5gs or free5GC) at the door | 12 | 0 → 100 | 66 → 75 | no code: an afternoon with a NIC and someone else's SMF |
 | all three | 9, 11, 12 | | **66 → 89** | |
 

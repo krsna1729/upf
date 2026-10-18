@@ -7,11 +7,15 @@
 // whose rule value is {priority, gate, action_id} (BESS D-141), an ActionTable
 // whose action names a meter and a next hop, a Meter per policed direction, the
 // plugin's per-session tunnel record for the downlink, and its per-TEID session
-// entry for the uplink.
+// entry for the uplink. A direction may instead opt into BESS's firewall table
+// (docs/design.md, "The firewall path"): one ordered policy in a
+// "<module>/rules" singleton, whose rules carry prefix, protocol and port
+// *ranges* for both address families and a drop-or-pass verdict.
 
 package session
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -42,10 +46,12 @@ const (
 const dropGate = 8192 // DROP_GATE (core/gate.h)
 
 // errNotExpressible marks a well-formed rule the dataplane cannot carry: a port
-// range needs the range kernel of the roadmap's classifier work, and an address
-// or prefix that is not IPv4 has no four-byte form at all. The request is not
-// malformed, so the SMF is told the rule failed, not that the message was
-// wrong.
+// *range* has no mask in a WildcardMatch key (the firewall table's port check
+// carries one, which is what the firewall path is for), an address or prefix
+// that is not IPv4 has no four-byte form in that key at all, and a rule whose
+// two sides are of different families has no one family a firewall rule names.
+// The request is not malformed, so the SMF is told the rule failed, not that
+// the message was wrong.
 var errNotExpressible = errors.New("the rule cannot be expressed by a mask")
 
 // errNoResources marks a session the UPF cannot carry for want of a resource:
@@ -1358,6 +1364,13 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	live := map[string]bool{}
 	for _, p := range s.PDRs {
 		dir := c.direction(p.srcIfc)
+		if dir.Firewall != "" {
+			// The rule is a rule of the direction's firewall policy, which
+			// this compile writes whole at the end and which is keyed by
+			// nothing: there is no key to keep here (the firewall path,
+			// docs/design.md).
+			continue
+		}
 		if key, err := p.ruleKey(dir.PDRFields); err == nil {
 			live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
 		}
@@ -1462,12 +1475,17 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	}
 	for _, p := range s.removed {
 		dir := c.direction(p.srcIfc)
-		key, err := p.ruleKey(dir.PDRFields)
-		if err != nil {
-			return nil, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
-		}
-		if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
-			erase(bess.Change{Resource: rulesRes(dir), Key: key})
+		// A firewall-path PDR's rule is not a key of this transaction's: the
+		// policy is rewritten whole from the live model at the end of this
+		// function, and a PDR that is gone is simply not in it.
+		if dir.Firewall == "" {
+			key, err := p.ruleKey(dir.PDRFields)
+			if err != nil {
+				return nil, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
+			}
+			if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
+				erase(bess.Change{Resource: rulesRes(dir), Key: key})
+			}
 		}
 		if p.actionID != 0 {
 			erase(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
@@ -1511,12 +1529,16 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	}
 	for _, old := range s.stale {
 		dir := c.direction(old.srcIfc)
-		key, err := old.ruleKey(dir.PDRFields)
-		if err != nil {
-			return nil, nil, fmt.Errorf("PDR %d: %w", old.id, err)
-		}
-		if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
-			erase(bess.Change{Resource: rulesRes(dir), Key: key})
+		// As above: on the firewall path the old form is not a key to erase,
+		// it is a rule the policy this compile writes no longer holds.
+		if dir.Firewall == "" {
+			key, err := old.ruleKey(dir.PDRFields)
+			if err != nil {
+				return nil, nil, fmt.Errorf("PDR %d: %w", old.id, err)
+			}
+			if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
+				erase(bess.Change{Resource: rulesRes(dir), Key: key})
+			}
 		}
 		if old.teid != 0 && !teidNamed(s, old.teid) {
 			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(old.teid)})
@@ -1544,44 +1566,67 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 
 	for _, p := range pdrsInOrder(s) {
 		dir := c.direction(p.srcIfc)
-		key, err := p.ruleKey(dir.PDRFields)
-		if err != nil {
-			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
-		}
-		rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
-		if writtenRules[rkey] {
-			// The rule table knows PDR ids no better than the SMF's filters do:
-			// one key is one rule, and the engine would reject the second
-			// write. Saying so is better than handing the SMF a session whose
-			// second PDR silently has no rule of its own -- and the message
-			// names the two shapes that reach it, because the fix differs: an
-			// SMF that sent two identical PDRs, or a deployment whose uplink
-			// table carries no qfi field (see the note above).
-			return nil, nil, fmt.Errorf(
-				"%w: two PDRs compile to one rule key (the same filter and the same QFI, or a graph whose uplink table declares no qfi field)",
-				errNotExpressible)
-		}
-		writtenRules[rkey] = true
-		if owner, taken := c.rules[rkey]; taken && owner != s.LocalSEID {
-			// Another session holds this rule. Writing it would take that
-			// session's packets -- and, when this one went, erase the rule the
-			// other still holds -- so the SMF is told the rule failed rather
-			// than served a session that quietly shares another's. A graph
-			// whose key carries the tunnel or the domain does not collide here
-			// for sessions that share a UE address; one that classifies by the
-			// tuple alone does, and this is where it says so.
-			return nil, nil, fmt.Errorf("%w: the rule is session %d's", errNotExpressible, owner)
-		}
-		if _, held := c.rules[rkey]; !held {
-			// This compile is the first to claim the key for the session. A key
-			// the session already holds stays this session's even if a later
-			// step of this compile fails: its rule is in the dataplane.
-			claimed = append(claimed, rkey)
-			if !s.holdsRuleKey(rkey) {
-				s.ruleKeys = append(s.ruleKeys, rkey)
+		// The PDR's match: the direction's WildcardMatch key, or -- where the
+		// deployment opts into the firewall path -- a rule of the direction's
+		// firewall policy, which is written whole at the end of this function
+		// (the firewall's rules resource is a singleton: it takes the policy,
+		// not a rule). A firewall rule has no key to claim and no key a second
+		// session could take: the policy is the union of every live session's
+		// rules, so two sessions matching the same packets produce two rules
+		// rather than one shared one.
+		var key map[string]any
+		if dir.Firewall == "" {
+			var err error
+			if key, err = p.ruleKey(dir.PDRFields); err != nil {
+				return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
 			}
 		}
-		c.rules[rkey] = s.LocalSEID
+		rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
+		if dir.Firewall == "" {
+			if writtenRules[rkey] {
+				// The rule table knows PDR ids no better than the SMF's filters do:
+				// one key is one rule, and the engine would reject the second
+				// write. Saying so is better than handing the SMF a session whose
+				// second PDR silently has no rule of its own -- and the message
+				// names the two shapes that reach it, because the fix differs: an
+				// SMF that sent two identical PDRs, or a deployment whose uplink
+				// table carries no qfi field (see the note above).
+				return nil, nil, fmt.Errorf(
+					"%w: two PDRs compile to one rule key (the same filter and the same QFI, or a graph whose uplink table declares no qfi field)",
+					errNotExpressible)
+			}
+			writtenRules[rkey] = true
+			if owner, taken := c.rules[rkey]; taken && owner != s.LocalSEID {
+				// Another session holds this rule. Writing it would take that
+				// session's packets -- and, when this one went, erase the rule the
+				// other still holds -- so the SMF is told the rule failed rather
+				// than served a session that quietly shares another's. A graph
+				// whose key carries the tunnel or the domain does not collide here
+				// for sessions that share a UE address; one that classifies by the
+				// tuple alone does, and this is where it says so.
+				return nil, nil, fmt.Errorf("%w: the rule is session %d's", errNotExpressible, owner)
+			}
+			if _, held := c.rules[rkey]; !held {
+				// This compile is the first to claim the key for the session. A key
+				// the session already holds stays this session's even if a later
+				// step of this compile fails: its rule is in the dataplane.
+				claimed = append(claimed, rkey)
+				if !s.holdsRuleKey(rkey) {
+					s.ruleKeys = append(s.ruleKeys, rkey)
+				}
+			}
+			c.rules[rkey] = s.LocalSEID
+		}
+		if dir.Firewall != "" && p.buffer {
+			// A buffering PDR's packets are held by the store the rule
+			// delivers them to, and a firewall rule has no gate: its verdict
+			// is drop or pass on the output the packet arrived on. Serving
+			// the session would leave the SMF believing its downlink is held
+			// while nothing holds it, so the rule is refused instead.
+			return nil, nil, fmt.Errorf(
+				"%w: a BUFF PDR is delivered on the buffering branch's gate, and a firewall rule has only the input gate",
+				errNotExpressible)
+		}
 		if p.drop || p.buffer {
 			// A drop needs no action record: the rule's gate is the whole
 			// result, and the packet path pays for nothing else. The PDR may
@@ -1630,15 +1675,17 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 					Value:    map[string]any{"meter_id": p.meterID, "next_hop_id": p.nextHop},
 				})
 			}
-			changes = append(changes, bess.Change{
-				Resource: rulesRes(dir),
-				Key:      key,
-				Value: map[string]any{
-					"priority":  rulePriority(p.precedence),
-					"gate":      gate,
-					"action_id": action,
-				},
-			})
+			if dir.Firewall == "" {
+				changes = append(changes, bess.Change{
+					Resource: rulesRes(dir),
+					Key:      key,
+					Value: map[string]any{
+						"priority":  rulePriority(p.precedence),
+						"gate":      gate,
+						"action_id": action,
+					},
+				})
+			}
 			// A URR that measures this PDR still holds its counter entry: the
 			// entry says the rule is measured (the reporting side reads it), and
 			// its existence must follow the PDR rather than the rule's effect,
@@ -1707,24 +1754,26 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			})
 		}
 
-		changes = append(changes, bess.Change{
-			Resource: rulesRes(dir),
-			Key:      key,
-			Value: map[string]any{
-				// The table's own output gate: one chain per direction.
-				//
-				// The priority is the PDR's Precedence (8.2.11) inverted into
-				// the classifier's own ordering (rulePriority), QFI or not: a
-				// session's general rule (the QFI field masked out) and its
-				// flow's rule (the field required) both match a packet of that
-				// flow, and which PDR serves it stays the SMF's decision --
-				// the more specific rule is not raised above the one the SMF
-				// gave the higher Precedence.
-				"priority":  rulePriority(p.precedence),
-				"gate":      uint64(0),
-				"action_id": p.actionID,
-			},
-		})
+		if dir.Firewall == "" {
+			changes = append(changes, bess.Change{
+				Resource: rulesRes(dir),
+				Key:      key,
+				Value: map[string]any{
+					// The table's own output gate: one chain per direction.
+					//
+					// The priority is the PDR's Precedence (8.2.11) inverted into
+					// the classifier's own ordering (rulePriority), QFI or not: a
+					// session's general rule (the QFI field masked out) and its
+					// flow's rule (the field required) both match a packet of that
+					// flow, and which PDR serves it stays the SMF's decision --
+					// the more specific rule is not raised above the one the SMF
+					// gave the higher Precedence.
+					"priority":  rulePriority(p.precedence),
+					"gate":      uint64(0),
+					"action_id": p.actionID,
+				},
+			})
+		}
 
 		// An uplink PDR's F-TEID is what makes the TEID ours: a rule of the
 		// table in front of the decap, which delivers matching G-PDUs to it.
@@ -1747,6 +1796,17 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				createdFTEID(p.teid, c.cfg.N3Addr)))
 		}
 	}
+	// The firewall policies last: each is the whole policy of its module --
+	// this session's rules and every other live session's -- so it is built
+	// once, after the loop has put this session's PDRs where the model keeps
+	// them. Compiling into a policy is the only way the firewall path writes a
+	// PDR's match; it is a no-op for a deployment that configured no firewall
+	// module, which is every deployment today.
+	policies, err := c.firewallChanges(s, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	changes = append(changes, policies...)
 	committed = true
 	return changes, created, nil
 }
@@ -1916,15 +1976,26 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 		return match{}, false, nil
 	case SrcPort:
 		if p.sdf != nil && p.sdf.sportOK {
+			// A mask can hold one port, not a range: the WildcardMatch path
+			// refuses a range here rather than matching more widely than the
+			// filter (the firewall path carries it, firewallRule).
+			if p.sdf.sportLo != p.sdf.sportHi {
+				return match{}, false, fmt.Errorf("%w: port range %d-%d",
+					errNotExpressible, p.sdf.sportLo, p.sdf.sportHi)
+			}
 			b := make([]byte, 2)
-			binary.BigEndian.PutUint16(b, p.sdf.sport)
+			binary.BigEndian.PutUint16(b, p.sdf.sportLo)
 			return match{value: b, mask: ones(2)}, true, nil
 		}
 		return match{}, false, nil
 	case DstPort:
 		if p.sdf != nil && p.sdf.dportOK {
+			if p.sdf.dportLo != p.sdf.dportHi {
+				return match{}, false, fmt.Errorf("%w: port range %d-%d",
+					errNotExpressible, p.sdf.dportLo, p.sdf.dportHi)
+			}
 			b := make([]byte, 2)
-			binary.BigEndian.PutUint16(b, p.sdf.dport)
+			binary.BigEndian.PutUint16(b, p.sdf.dportLo)
 			return match{value: b, mask: ones(2)}, true, nil
 		}
 		return match{}, false, nil
@@ -1962,6 +2033,248 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 	default:
 		return match{}, false, nil
 	}
+}
+
+// -- the firewall path ---------------------------------------------------------
+
+// firewallRule is one PDR as a rule of its direction's firewall policy. Its
+// fields are BESS's FirewallArg.Rule (protobuf/module_msg.proto), so the
+// daemon's own schema reads it: "src_ip" and "dst_ip" are CIDR strings whose
+// length is mandatory ("" is any address of the rule's family), "proto" 0 is
+// any protocol, "src_port_low"/"src_port_high" and "dst_port_low"/
+// "dst_port_high" are inclusive port ranges (an absent high bound is the full
+// range), and "drop" is the verdict.
+//
+// The two sides are chosen the way the WildcardMatch key chooses them
+// (matchValue), so both paths select the same packets: the uplink by its UE
+// address, the downlink by the SDF's destination or, where the filter names
+// none, by the UE's own ("assigned" included).
+//
+// What the rule cannot carry is what a packet's 5-tuple does not have: the
+// PDR's ActionId and next hop (the message has no field for either -- a
+// firewall rule's own words are drop and pass, and the module writes no
+// packet metadata), the PDI's QFI, the resolved route domain and the tunnel.
+// Those stay fields of the WildcardMatch path's key; docs/compliance.md
+// records what that means for a firewall deployment.
+func firewallRule(p *pdr) (map[string]any, error) {
+	var src, dst netip.Prefix
+	if p.srcIfc == ie.SrcInterfaceAccess {
+		// The uplink is selected by its UE address, and by the SDF's source
+		// where the filter names one. Its destination stays open: the peer on
+		// the data network is not what selects the flow.
+		if p.sdf != nil && p.sdf.srcOK {
+			src = p.sdf.src
+		} else {
+			var err error
+			if src, err = firewallHost(p.ueIP); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		switch {
+		case p.sdf != nil && p.sdf.srcAssigned:
+			// "from assigned": the UE is the flow's source, which an SDF
+			// filter can only say with that word -- it carries no address of
+			// its own for that side.
+			var err error
+			if src, err = firewallHost(p.ueIP); err != nil {
+				return nil, err
+			}
+		case p.sdf != nil && p.sdf.srcOK:
+			src = p.sdf.src
+		}
+		if p.sdf != nil && p.sdf.dstOK {
+			dst = p.sdf.dst
+		} else {
+			var err error
+			if dst, err = firewallHost(p.ueIP); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// The rule's family comes from its prefixes: both IPv4, both IPv6, or one
+	// of each -- which a single rule cannot name, and the module's own parser
+	// refuses ("'%s' and '%s' are different families", firewall.cc). Refusing
+	// it here costs the session one answer rather than the whole policy: a
+	// refused rule refuses the policy it is a part of, and the policy holds
+	// every live session's rules.
+	if src.IsValid() && dst.IsValid() && firewallIs4(src) != firewallIs4(dst) {
+		return nil, fmt.Errorf("%w: the rule's source %s and destination %s are different families, and a firewall rule names one",
+			errNotExpressible, firewallCIDR(src), firewallCIDR(dst))
+	}
+	rule := map[string]any{"drop": p.drop}
+	if src.IsValid() {
+		rule["src_ip"] = firewallCIDR(src)
+	}
+	if dst.IsValid() {
+		rule["dst_ip"] = firewallCIDR(dst)
+	}
+	if p.sdf != nil {
+		if p.sdf.protoOK {
+			rule["proto"] = uint32(p.sdf.proto)
+		}
+		if p.sdf.sportOK {
+			rule["src_port_low"] = uint32(p.sdf.sportLo)
+			rule["src_port_high"] = uint32(p.sdf.sportHi)
+		}
+		if p.sdf.dportOK {
+			rule["dst_port_low"] = uint32(p.sdf.dportLo)
+			rule["dst_port_high"] = uint32(p.sdf.dportHi)
+		}
+	}
+	return rule, nil
+}
+
+// firewallHost is the UE address as a firewall rule names it: a host route
+// ("10.45.0.6/32"). An address the session has nowhere is refused, as the
+// WildcardMatch key refuses it (host): a rule with neither an address nor an
+// SDF prefix is a catch-all, and a catch-all passes every session's packets.
+func firewallHost(a netip.Addr) (netip.Prefix, error) {
+	if !a.IsValid() {
+		return netip.Prefix{}, fmt.Errorf("%w: no UE address for the rule's key", errNotExpressible)
+	}
+	a = a.Unmap()
+	return netip.PrefixFrom(a, a.BitLen()), nil
+}
+
+// firewallCIDR is a prefix as a firewall rule names it: the network address and
+// its length, both mandatory ("10.45.0.0/16", "2001:db8::/32"). A filter whose
+// address carries host bits means the network, as it does on the WildcardMatch
+// path ("10.10.1.5/16" is "10.10.0.0/16"), and an IPv4-mapped address is the
+// IPv4 address it maps.
+func firewallCIDR(p netip.Prefix) string {
+	a, bits := p.Addr(), p.Bits()
+	if a.Is4In6() {
+		a, bits = a.Unmap(), bits-96
+	}
+	return netip.PrefixFrom(a.Unmap(), bits).Masked().String()
+}
+
+// firewallIs4 is a prefix's family as a firewall rule reads it: the family the
+// rule's addresses must agree on.
+func firewallIs4(p netip.Prefix) bool { return p.Addr().Unmap().Is4() }
+
+// firewallRuleEntry is one rule of a policy with the order it takes: a session's
+// rules and another's are one list, ordered by the SMF's Precedence.
+type firewallRuleEntry struct {
+	precedence uint32
+	seid       uint64
+	pdr        uint16
+	rule       map[string]any
+}
+
+// firewallPolicies is the whole policy of every configured firewall module, as
+// each direction's live PDRs make it: the resource name, and its rules in
+// policy order.
+//
+// The resource is a singleton -- the module builds the table whole and swaps it
+// -- so a session's transaction carries the *policy*, not its own rules: a
+// write of one session's rules alone would drop every other session's, and a
+// packet no rule matches is dropped by the module rather than passed. `extra`
+// is the session being compiled (put into the model only once its transaction
+// has landed) and `except` one being deleted (still in the model until then).
+//
+// The order is the spec's own: TS 29.244 8.2.11 has the *lower* Precedence
+// value win, and a firewall's first matching rule wins, so the list is sorted
+// by Precedence ascending -- no inversion, unlike the WildcardMatch path, where
+// the classifier applies the higher priority (rulePriority). Sessions that
+// share a Precedence are ordered by their SEID and PDR id, so the same model
+// always yields the same policy.
+func (c *Compiler) firewallPolicies(extra, except *Session) (map[string][]map[string]any, error) {
+	if c.cfg.Up.Firewall == "" && c.cfg.Down.Firewall == "" {
+		return nil, nil
+	}
+	entries := map[string][]firewallRuleEntry{}
+	// A configured module gets an entry whatever its sessions hold: the empty
+	// policy is what a deletion writes when the last session using it goes,
+	// and it is not the same thing as no policy at all.
+	for _, d := range []Direction{c.cfg.Up, c.cfg.Down} {
+		if d.Firewall != "" {
+			entries[firewallRes(d)] = nil
+		}
+	}
+	add := func(s *Session) error {
+		for _, p := range pdrsInOrder(s) {
+			dir := c.direction(p.srcIfc)
+			if dir.Firewall == "" {
+				continue
+			}
+			rule, err := firewallRule(p)
+			if err != nil {
+				return fmt.Errorf("PDR %d: %w", p.id, err)
+			}
+			resource := firewallRes(dir)
+			entries[resource] = append(entries[resource], firewallRuleEntry{
+				precedence: p.precedence,
+				seid:       s.LocalSEID,
+				pdr:        p.id,
+				rule:       rule,
+			})
+		}
+		return nil
+	}
+	for _, s := range c.sessions {
+		// extra is named separately below: a session being *modified* is
+		// already in the map, and adding it twice would write its rules twice.
+		if s == except || s == extra {
+			continue
+		}
+		if err := add(s); err != nil {
+			return nil, err
+		}
+	}
+	if extra != nil && extra != except {
+		if err := add(extra); err != nil {
+			return nil, err
+		}
+	}
+	out := make(map[string][]map[string]any, len(entries))
+	for resource, list := range entries {
+		slices.SortFunc(list, func(a, b firewallRuleEntry) int {
+			if d := cmp.Compare(a.precedence, b.precedence); d != 0 {
+				return d
+			}
+			if d := cmp.Compare(a.seid, b.seid); d != 0 {
+				return d
+			}
+			return cmp.Compare(a.pdr, b.pdr)
+		})
+		rules := make([]map[string]any, 0, len(list))
+		for _, e := range list {
+			rules = append(rules, e.rule)
+		}
+		out[resource] = rules
+	}
+	return out, nil
+}
+
+// firewallChanges is every firewall policy a transaction must carry, as
+// changes: one set per configured resource, with the whole ordered policy --
+// an empty one where no session has a rule for it, since a policy left behind
+// matches packets no session owns.
+func (c *Compiler) firewallChanges(extra, except *Session) ([]bess.Change, error) {
+	policies, err := c.firewallPolicies(extra, except)
+	if err != nil {
+		return nil, err
+	}
+	if len(policies) == 0 {
+		return nil, nil
+	}
+	// The resources in a stable order, so a test and a log read the same
+	// transaction every time (the map's order is not one).
+	resources := make([]string, 0, len(policies))
+	for resource := range policies {
+		resources = append(resources, resource)
+	}
+	slices.Sort(resources)
+	changes := make([]bess.Change, 0, len(resources))
+	for _, resource := range resources {
+		changes = append(changes, bess.Change{
+			Resource: resource,
+			Value:    map[string]any{"rules": policies[resource]},
+		})
+	}
+	return changes, nil
 }
 
 // createdPDRs is what the response re-states on a retransmission.
@@ -2798,10 +3111,17 @@ type sdfFilter struct {
 	// runs once the whole session is read -- is where the address is filled in.
 	srcAssigned bool
 	dstAssigned bool
-	sport       uint16
-	sportOK     bool
-	dport       uint16
-	dportOK     bool
+	// sportLo/sportHi and dportLo/dportHi are the SDF filter's port *ranges*,
+	// inclusive, with sportOK/dportOK saying the filter named one at all
+	// (TS 29.244 8.2.5's IPFilterRule carries "port" or "port-port"). A range
+	// that is not one value has no mask to express it in the WildcardMatch key,
+	// so the key builder refuses it there (matchValue); the firewall path
+	// carries it as it is (firewallRule), which is the whole point of that
+	// table: a range costs it no group, no mask and no entry.
+	sportLo, sportHi uint16
+	sportOK          bool
+	dportLo, dportHi uint16
+	dportOK          bool
 }
 
 // parseFlowDescription reads the IPFilterRule form the SDF Filter IE carries
@@ -2809,9 +3129,9 @@ type sdfFilter struct {
 // [<port>]". "assigned" is the PDI's UE address, "any" leaves the field
 // unconstrained.
 //
-// A range that is not one value cannot be expressed by a mask, so it is
-// refused here rather than silently matched too widely: the dataplane needs the
-// range kernel of the roadmap's classifier work for that.
+// A port the filter names is kept as a range here, whether it is one value or
+// two: which shapes the deployment's table can carry is a question about the
+// table, and the WildcardMatch key answers it where the key is built.
 func parseFlowDescription(fd string) (*sdfFilter, error) {
 	fields := strings.Fields(fd)
 	if len(fields) < 4 {
@@ -2862,7 +3182,7 @@ func parseFlowDescription(fd string) (*sdfFilter, error) {
 		if err != nil {
 			return nil, fmt.Errorf("flow description %q: %w", fd, err)
 		}
-		f.sport, f.sportOK = port, true
+		f.sportLo, f.sportHi, f.sportOK = port.lo, port.hi, true
 		i++
 	}
 	if i >= len(fields) || fields[i] != "to" {
@@ -2883,7 +3203,7 @@ func parseFlowDescription(fd string) (*sdfFilter, error) {
 		if err != nil {
 			return nil, fmt.Errorf("flow description %q: %w", fd, err)
 		}
-		f.dport, f.dportOK = port, true
+		f.dportLo, f.dportHi, f.dportOK = port.lo, port.hi, true
 		i++
 	}
 	if i != len(fields) {
@@ -2922,28 +3242,36 @@ func parseFilterAddr(word string) (netip.Prefix, bool, int, error) {
 	return netip.PrefixFrom(a.Unmap(), a.BitLen()), false, 1, nil
 }
 
-// parseFilterPort reads one port of a flow description: a number, or a range
-// that collapses to one.
-func parseFilterPort(word string) (uint16, error) {
+// portRange is one port of a flow description: an inclusive range whose two
+// ends are equal for the single-port form.
+type portRange struct {
+	lo, hi uint16
+}
+
+// parseFilterPort reads one port of a flow description: a number, or the
+// inclusive range "low-high". The range is kept whole; whether a table can
+// carry it is the table's question, answered where the rule is built (a
+// WildcardMatch mask cannot, the firewall's port check can).
+func parseFilterPort(word string) (portRange, error) {
 	if lo, hi, ok := strings.Cut(word, "-"); ok {
 		a, err := strconv.ParseUint(lo, 10, 16)
 		if err != nil {
-			return 0, fmt.Errorf("invalid port %q", word)
+			return portRange{}, fmt.Errorf("invalid port %q", word)
 		}
 		b, err := strconv.ParseUint(hi, 10, 16)
 		if err != nil {
-			return 0, fmt.Errorf("invalid port %q", word)
+			return portRange{}, fmt.Errorf("invalid port %q", word)
 		}
-		if a != b {
-			return 0, fmt.Errorf("%w: port range %q", errNotExpressible, word)
+		if a > b {
+			return portRange{}, fmt.Errorf("invalid port range %q: %d is above %d", word, a, b)
 		}
-		return uint16(a), nil
+		return portRange{lo: uint16(a), hi: uint16(b)}, nil
 	}
 	v, err := strconv.ParseUint(word, 10, 16)
 	if err != nil {
-		return 0, fmt.Errorf("invalid port %q", word)
+		return portRange{}, fmt.Errorf("invalid port %q", word)
 	}
-	return uint16(v), nil
+	return portRange{lo: uint16(v), hi: uint16(v)}, nil
 }
 
 // -- answers ------------------------------------------------------------------
