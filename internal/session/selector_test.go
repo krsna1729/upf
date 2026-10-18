@@ -14,6 +14,8 @@ package session
 
 import (
 	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -27,6 +29,12 @@ import (
 // configures, and what deploy/custom-pdrmatch.yaml wires.
 func selectorConfig(fields ...Field) Config {
 	cfg := testConfig()
+	// The uplink is the custom profile's too (the map keyed by the F-TEID): two
+	// sessions that share a UE address are told apart by the tunnel there, which
+	// is what makes the *downlink* the place their address can collide.
+	cfg.Up.PDRTable, cfg.Up.PDRFields = "", nil
+	cfg.Up.PdrMatch = "pdr_match_ul"
+	cfg.Down.PDRTable, cfg.Down.PDRFields = "", nil
 	cfg.Down.PdrMatch = "pdr_match_dl"
 	cfg.Down.Selector = "sel_dl"
 	cfg.Down.SelectorActions = "sel_at"
@@ -141,8 +149,9 @@ func TestTheSelectorKeyCarriesTheRouteDomainWhereTheGraphHasOne(t *testing.T) {
 // rule are. The address is the first session's while it lives, and free again
 // once it is gone.
 func TestASecondSessionCannotTakeTheSelectorsAddress(t *testing.T) {
+	var logged bytes.Buffer
 	rec := &recorder{}
-	c := New(selectorConfig(DstIP), rec, quietLogger())
+	c := New(selectorConfig(DstIP), rec, slog.New(slog.NewTextHandler(&logged, nil)))
 	first := c.Establish(pdrMatchEstablishment(0x7301, "10.45.0.8", 0x51, 100, "")).(*message.SessionEstablishmentResponse)
 	if got := cause(t, first); got != ie.CauseRequestAccepted {
 		t.Fatalf("the first establishment answered cause %d", got)
@@ -151,6 +160,11 @@ func TestASecondSessionCannotTakeTheSelectorsAddress(t *testing.T) {
 	second := c.Establish(pdrMatchEstablishment(0x7302, "10.45.0.8", 0x52, 100, "")).(*message.SessionEstablishmentResponse)
 	if got := cause(t, second); got != ie.CauseRuleCreationModificationFailure {
 		t.Fatalf("a second session on the same UE address answered cause %d, want the rule failure", got)
+	}
+	// The refusal is the selector's own: the uplink of the two sessions is told
+	// apart by its tunnel, so what collides is the downlink address.
+	if !strings.Contains(logged.String(), "the downlink address 0/10.45.0.8 is session 1's") {
+		t.Errorf("the refusal does not name the downlink address it could not take:\n%s", logged.String())
 	}
 	// The refusal wrote nothing: a session that takes no claim it did not hold
 	// leaves the first session's rule alone.
@@ -162,6 +176,59 @@ func TestASecondSessionCannotTakeTheSelectorsAddress(t *testing.T) {
 	third := c.Establish(pdrMatchEstablishment(0x7303, "10.45.0.8", 0x53, 100, "")).(*message.SessionEstablishmentResponse)
 	if got := cause(t, third); got != ie.CauseRequestAccepted {
 		t.Fatalf("the address was not free after the first session's deletion: cause %d", got)
+	}
+}
+
+// A session whose downlink PDI moves to another UE address moves its selector
+// rule with it: the old key is erased (with the action record it referenced),
+// the new one is written, and the map key -- the session -- stays the session's.
+// The address it left is free for another session afterwards.
+func TestAModificationThatMovesTheUEAddressMovesTheSelectorsRule(t *testing.T) {
+	rec := &recorder{}
+	c := New(selectorConfig(DstIP), rec, quietLogger())
+	resp := c.Establish(pdrMatchEstablishment(0x7501, "10.45.0.6", 0x71, 100, "")).(*message.SessionEstablishmentResponse)
+	seid := upFSEID(t, resp)
+	move := func() *message.SessionModificationRequest {
+		return message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+			ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+					ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
+				ie.NewFARID(2)),
+		)
+	}
+	if got := cause(t, c.Modify(move())); got != ie.CauseRequestAccepted {
+		t.Fatalf("the address move answered cause %d", got)
+	}
+	changes := rec.last()
+	// The erase and the write are two operations on different keys, and the
+	// engine refuses two operations on one key -- so the old key must be gone
+	// from the write and the new one from the erase.
+	var erased, written [][]byte
+	for _, ch := range changesFor(changes, "sel_dl/rules") {
+		key := selectorKeyOfChange(t, ch)
+		if ch.Value == nil {
+			erased = append(erased, key[0])
+			continue
+		}
+		written = append(written, key[0])
+		if got := ch.Value["action_id"]; got != uint32(seid) {
+			t.Errorf("the new rule's action_id is %v, want the session id %d", got, seid)
+		}
+	}
+	if len(erased) != 1 || !bytes.Equal(erased[0], []byte{10, 45, 0, 6}) {
+		t.Errorf("the transaction erased %v, want the address the session left", erased)
+	}
+	if len(written) != 1 || !bytes.Equal(written[0], []byte{10, 45, 0, 7}) {
+		t.Errorf("the transaction wrote %v, want the address the session moved to", written)
+	}
+	// The map key is the session's either way: the move rewrites it, and one
+	// key is all the session has.
+	oneMapChange(t, changes, "pdr_match_dl/rules", uint32(seid))
+
+	// The address it left is free: the claim went with the key.
+	if got := cause(t, c.Establish(pdrMatchEstablishment(0x7502, "10.45.0.6", 0x72, 100, ""))); got != ie.CauseRequestAccepted {
+		t.Errorf("the address the session left answered cause %d, want it free", got)
 	}
 }
 

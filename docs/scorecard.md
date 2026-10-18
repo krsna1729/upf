@@ -132,7 +132,7 @@ packet through it).
 | 8 GTP-U: decap, encap, echo, end marker, DSCP | decap, encap, end marker, DSCP **work (live)**; echo untested here | `PROFILE=custom ci/session-path.sh` checks the end marker byte for byte and the DSCP copy; the lab graph carries no echo responder, and `ci/smoke-gtpu.sh` proves echo on the unchanged module |
 | 9 IPv6 | SDF prefixes **compile, untested**; UE address and F-TEID refused | the module's rules carry both families (the firewall rule shape), which is *better* than the generic wildcard path; the F-TEID key is IPv4-only, so an IPv6 session is still refused |
 | 10 MAR / ATSSS-LL | not implemented | phased in both profiles; needs a dual-3GPP deployment |
-| 11 ULCL / N9 route domains | partly | the routing model is control-side; the module is uplink-only, so N9 and the downlink need the selector below |
+| 11 ULCL / N9 route domains | partly | the routing model is control-side; the selector and the module now carry the downlink, so what N9 still needs is the *uplink* branch for a second instance's egress, not the selector |
 | 12 real-SMF interop | not run | in both profiles |
 
 **The checklist that closes the goal**, in order, each item with its own proof:

@@ -104,9 +104,8 @@ func (d Direction) Strategy() Strategy {
 
 // The profiles -profile selects. Generic is the shipped default and produces
 // today's graph, today's rules and today's packet path; custom is the keyed
-// per-session matcher on the uplink, with the downlink unchanged (the module is
-// uplink-only until the downlink's own selector -- a longest-prefix match on
-// the UE prefix -- exists: docs/scorecard.md, "The custom profile, row by row").
+// per-session matcher in both directions, with the downlink's session named by
+// the selector in front of it (selector.go: the module is no longer uplink-only).
 const (
 	GenericProfile = "generic"
 	CustomProfile  = "custom"

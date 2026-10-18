@@ -670,17 +670,28 @@ direction.
 2. **Which of that session's rules matches it, and what does that rule say to
    do?** That is the PDR stage, in both directions.
 
-**Today's chain has no session selector and needs none.** The shared PDR
-table's own key carries the masked UE address (or prefix), so the prefix
-matching happens where the SMF's PDI puts it: inside the PDR table, in both
-directions (`deploy/upf.yaml`, `deploy/session-path.yaml`). A dedicated
-downlink LPM exists only so that a session can be named *before* a 2–4 rule
+**The chain has a session selector now, and the shared table still needs none.**
+The shared PDR table's own key carries the masked UE address (or prefix), so the
+prefix matching happens where the SMF's PDI puts it: inside the PDR table, in
+both directions (`deploy/upf.yaml`, `deploy/session-path.yaml`). A dedicated
+downlink selector exists only so that a session can be named *before* a 2–4 rule
 scan — i.e. so each session can own its rules — so it is **not needed, it is
-enabled**, and it is written only if the measurement below asks for it. Under
-that design the shared table does **not** disappear either: an SDF-only
-downlink PDR has no UE address for a prefix search to find, so it stays in the
-shared per-domain table, and the compiler chooses per PDR which structure a
+enabled**, and it is written only for the profile whose downlink is the keyed
+per-session map. What was built is the spec's own look-up rather than the LPM
+this section first expected: **an exact match on (route domain, UE IPv4
+address)**, which is what 5.2.1 with 8.2.62's exact address asks for, as stock
+modules — `ExactMatch` (`sel_dl`) writing the session id into the packet's
+`action_id` metadata, then the keyed matcher reading that id
+(`internal/session/selector.go`, live in `ci/pdrmatch-path.sh`). An LPM is the
+structure for an IPv6 UE *prefix* or a framed route, and it is owed when those
+are served (IPv6 is refused today: docs/compliance.md). Under that design the
+shared table does **not** disappear either: a profile whose downlink is the
+shared table keeps it, and the compiler chooses per direction which structure a
 rule goes in.
+
+**The break-even line below is what a deployment below the target decides on.**
+It is not a threshold the selector waits for: the selector is written, and the
+line says where a *shared* downlink table is still the better choice.
 
 **The decision is a break-even line, not a threshold:**
 

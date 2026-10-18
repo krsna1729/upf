@@ -161,7 +161,7 @@ echo, end marker, DSCP marking, the per-rule counters).
 | the opt-in firewall path | not this path: that module is the generic profile's other strategy, not a third profile |
 | network instance / route domain | **untested**: the control side resolves it in both; the custom path needs one module per domain, or the domain in its key |
 | 7.5.8 — USAR / DLDR | USAR in both; **DLDR refused** on the custom path, because it needs a buffering flow |
-| 7.5.2.3 — FAR outer header and the tunnel | in both; the custom path is **uplink-only** today, so N6 needs the downlink selector (a longest-prefix match on the UE prefix) before the downlink rows hold there |
+| 7.5.2.3 — FAR outer header and the tunnel | in both; the custom path now carries the downlink too — the selector names the session by the UE address and the matcher holds its rules (`selector.go`, live in `ci/pdrmatch-path.sh`) — so N6's outer header is written on that path as well |
 | MAR / ATSSS-LL | not implemented in either profile; phased, and it needs a dual-3GPP deployment |
 
 The custom profile's item-by-item checklist is in `scorecard.md`'s "The custom
