@@ -621,7 +621,9 @@ func (s *Server) rejectSession(req message.Message, from net.Addr, cause uint8, 
 	case *message.SessionEstablishmentRequest:
 		// The answer is addressed by the CP F-SEID the request named -- the
 		// SMF's own identity for the session -- and by 0 when it named none.
-		resp = message.NewSessionEstablishmentResponse(0, 0, cpSEIDOf(r), r.Sequence(), 0, c)
+		// The Node ID is mandatory in every Establishment Response, a
+		// rejection included (TS 29.244 Table 7.5.3.1-1).
+		resp = message.NewSessionEstablishmentResponse(0, 0, cpSEIDOf(r), r.Sequence(), 0, s.nodeID, c)
 	case *message.SessionModificationRequest:
 		// With no session layer there is no CP F-SEID to read; the SEID the
 		// request carried is the only name left to answer under.

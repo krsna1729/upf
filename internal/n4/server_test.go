@@ -313,6 +313,11 @@ func TestAssociationReleaseEndsSessions(t *testing.T) {
 	if est.Sequence() != 3 {
 		t.Fatalf("sequence = %d, want 3", est.Sequence())
 	}
+	// Table 7.5.3.1-1 makes the Node ID mandatory in every Establishment
+	// Response, a rejection included.
+	if est.NodeID == nil {
+		t.Fatalf("the rejection carries no Node ID")
+	}
 }
 
 func TestSecondCPFunctionIsRejected(t *testing.T) {
