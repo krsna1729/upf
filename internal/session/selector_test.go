@@ -188,6 +188,23 @@ func TestASelectorThatIgnoresTheRouteDomainHoldsOneSessionPerAddress(t *testing.
 	}
 }
 
+// A selector field that is not the session's is refused before anything is
+// written: the key names the session, and the protocol or a port is a field of
+// one PDR -- a selector keyed on it would name the PDR rather than the session
+// the matcher needs. The refusal comes from the claim, which is the engine's key
+// (selectorClaim), so it happens before any rule of the message is applied.
+func TestASelectorFieldThatIsNotTheSessionsIsRefused(t *testing.T) {
+	rec := &recorder{}
+	c := New(selectorConfig(Proto), rec, quietLogger())
+	resp := c.Establish(pdrMatchEstablishment(0x7901, "10.45.0.10", 0x81, 100, "")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Fatalf("a selector keyed on the protocol answered cause %d, want the rule failure", got)
+	}
+	if n := len(rec.txns); n != 0 {
+		t.Errorf("the refused establishment applied %d transactions, want none", n)
+	}
+}
+
 // Two sessions whose downlink PDRs name one address would each select the
 // other's packets -- and the second's deletion would erase the first's rule --
 // so the second is refused, exactly as two sessions naming one WildcardMatch
