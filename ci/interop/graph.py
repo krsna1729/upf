@@ -17,6 +17,12 @@
 #     data network's MACs). This is a gap in the deployed graph, recorded in
 #     docs/interop.md, not a property of this environment.
 #
+#     **Delete this pair once the fork's Router calls its own `RewriteL2`**
+#     (`core/route/router.h`; the module stores a next hop's MACs and never
+#     writes them today): the MACs this script already puts in `rt/next_hops`
+#     then take effect by themselves, and the deployed graph needs no extra
+#     module either.
+#
 #   graph.py <deployed.yaml> <out.yaml> <if_n3> <if_n6> <n3_ip> <n6_mac> <dn_mac> <marker_path>
 import base64
 import re
