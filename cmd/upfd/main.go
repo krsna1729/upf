@@ -43,6 +43,18 @@ func run() error {
 	n4Addr := flag.String("n4", "0.0.0.0:8805", "PFCP (N4) UDP listen address")
 	nodeID := flag.String("node-id", "", "Node ID this UP function advertises (IP address or FQDN); default: the -n4 address")
 	level := flag.String("log-level", "info", "log level: debug, info, warn, error")
+	profile := flag.String("profile", session.GenericProfile,
+		"the deployment's dataplane strategy, by name (docs/design.md, \"Profiles\"): "+
+			strings.Join(session.ProfileNames(), " or ")+". It resolves once, at startup, to "+
+			"where each direction's PDR rules live, the graph carrying that composition and the "+
+			"module list the daemon must have loaded -- all logged with the session layer's "+
+			"readiness, and printed alone by -print-profile. The module-name flags below stay as "+
+			"overrides: the profile is their default and not a replacement, so -pdr-table-ul, "+
+			"-firewall-ul/-dl and -pdr-match-ul name one structure's module while the profile "+
+			"picks which structure a direction uses")
+	printProfile := flag.Bool("print-profile", false,
+		"print the resolved profile -- the graph to apply, the module list the daemon must have "+
+			"loaded, and each direction's rule home -- and exit, without dialing anything")
 
 	bessAddr := flag.String("bess", "", "bessd's control_v2 gRPC address (host:port); empty: no datapath, sessions are refused")
 	n3Addr := flag.String("n3-addr", "", "the UPF's N3 IPv4 address, advertised as the uplink F-TEID; required with -bess")
@@ -81,6 +93,15 @@ func run() error {
 			"daemon does not have (docs/compliance.md)")
 	firewallDL := flag.String("firewall-dl", "",
 		"the downlink firewall module, as -firewall-ul is the uplink one")
+	pdrMatchUL := flag.String("pdr-match-ul", "",
+		"the uplink keyed per-session matcher module whose \"<name>/rules\" *map* holds the uplink "+
+			"PDRs instead of -pdr-table-ul: one key per session, keyed by the F-TEID the decap "+
+			"wrote (its \"upf_teid\" metadata), whose value is that session's rules in the SMF's "+
+			"precedence order, so a session change is one upsert of O(that session's rules). The "+
+			"rules carry the 5-tuple with prefixes and port *ranges*, and a PDI naming a QFI is "+
+			"refused rather than matched more widely. Empty (the default): the WildcardMatch path. "+
+			"There is no downlink counterpart: a downlink packet carries no tunnel to name its "+
+			"session with, so the downlink's own selector is the next step (docs/scorecard.md)")
 	actionsUL := flag.String("actions-ul", "at_ul", "the uplink ActionTable module")
 	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
 	actionsDL := flag.String("actions-dl", "at_dl", "the downlink ActionTable module")
@@ -121,6 +142,30 @@ func run() error {
 			"modification's SNDEM flag moves a tunnel out from under a session "+
 			"(TS 29.244 5.3.2); empty: this UPF constructs none and advertises no EMPU")
 	flag.Parse()
+
+	// The profile, before anything else this run does: it is a start-time
+	// choice, and a name that is not a profile must not fall back to the
+	// default -- a deployment whose rules land in a structure nobody chose is
+	// exactly what naming the profile is for. What it resolves to is read here
+	// and never again: the packet path holds no profile check.
+	prof, err := session.ProfileFor(*profile)
+	if err != nil {
+		return err
+	}
+	if *printProfile {
+		// The resolution itself, for an operator or an arm (ci/profile.sh):
+		// the graph to apply and the modules the daemon must have loaded for
+		// this profile, printed before either exists. It is printed from here
+		// rather than repeated in ci/ so that the profile is defined once.
+		fmt.Printf("profile\t%s\ngraph\t%s\nmodules\t%s\nuplink\t%s\ndownlink\t%s\n",
+			prof.Name, prof.Graph, strings.Join(prof.Modules, ","), prof.Up.String(), prof.Down.String())
+		return nil
+	}
+	// Which flags the operator named: the profile is what a flag that names
+	// nothing resolves to, so an override is a flag that *was* given, not one
+	// whose value differs from its own default.
+	given := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
 
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(*level)); err != nil {
@@ -180,12 +225,13 @@ func run() error {
 			return fmt.Errorf("-buffer-store %q needs a positive -urr-interval: the Downlink Data Report is what that loop's reading of the buffering counters owes the SMF",
 				*bufferStore)
 		}
-		graph, err := graphConfig(graphArgs{
+		graph, err := graphConfig(profileArgs(prof, given, graphArgs{
 			n3: *n3Addr, n3MAC: *n3MAC, peerMAC: *peerMAC,
 			capacity:  uint32(*capacity),
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			pdrTableUL: *pdrTableUL, pdrTableDL: *pdrTableDL,
 			firewallUL: *firewallUL, firewallDL: *firewallDL,
+			pdrMatchUL: *pdrMatchUL,
 			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
@@ -194,7 +240,7 @@ func run() error {
 			actionsDL: *actionsDL, metersDL: *metersDL, tunnels: *tunnels,
 			countersUL: *countersUL, countersDL: *countersDL,
 			bufferStore: *bufferStore, bufferCounter: *bufferCounter, bufferGate: uint32(*bufferGate),
-		})
+		}))
 		if err != nil {
 			return err
 		}
@@ -256,7 +302,16 @@ func run() error {
 			cfg.UPFunctionFeatures[1] |= n4.EMPU
 		}
 		ready := []any{"bess", *bessAddr, "bess_version", client.Version(),
-			"daemon_epoch", client.Epoch(), "n3", graph.N3Addr.String()}
+			"daemon_epoch", client.Epoch(), "n3", graph.N3Addr.String(),
+			// The profile, as the one thing this run resolved it to: the rule
+			// home each direction uses, the graph that carries it and the
+			// modules the daemon must have loaded. Reported here because this
+			// is the only moment it exists -- there is no profile in the packet
+			// path or the session path to ask (docs/design.md).
+			"profile", prof.Name, "graph", prof.Graph,
+			"modules", strings.Join(prof.Modules, ","),
+			"uplink", graph.Up.Strategy().String(),
+			"downlink", graph.Down.Strategy().String()}
 		if graph.Instances != nil {
 			ready = append(ready, "network_instances", strings.Join(graph.Instances.Names(), ","))
 		}
@@ -583,6 +638,7 @@ type graphArgs struct {
 	pdrTableDL         string
 	firewallUL         string
 	firewallDL         string
+	pdrMatchUL         string
 	pdrFieldsUL        string
 	pdrFieldsDL        string
 	teidTable          string
@@ -606,6 +662,19 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	addr, err := netip.ParseAddr(n3)
 	if err != nil || !addr.Is4() {
 		return session.Config{}, fmt.Errorf("-n3-addr %q: an IPv4 address is required with -bess", n3)
+	}
+	// One direction holds its rules in one structure: the profile selects which
+	// (or the deployment, through the module flags), and two of the three named
+	// at once would be two writers of one chain -- the compiler writes each
+	// rule into both, and the packet path reads whichever the graph wires. Only
+	// the uplink has a keyed-matcher flag: its key is the F-TEID, which names a
+	// session on N3 and nothing on N6 (the downlink's own selector is the next
+	// step, docs/scorecard.md), so a downlink one would name a rule home no
+	// module provides.
+	if a.firewallUL != "" && a.pdrMatchUL != "" {
+		return session.Config{}, fmt.Errorf(
+			"the uplink has one rule home: -firewall-ul %q and -pdr-match-ul %q both name one",
+			a.firewallUL, a.pdrMatchUL)
 	}
 	// Each table matches the inner IPv4 packet: the UE address on the side the
 	// PDI names, and the SDF tuple where a filter constrains it
@@ -646,8 +715,11 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			PDRFields: upFields,
 			// The uplink's PDRs may live in a firewall module instead of the
 			// WildcardMatch table (BESS's `firewall`, whose rules carry port
-			// ranges and both address families); empty is the table.
+			// ranges and both address families), or in the keyed per-session
+			// matcher, whose map holds one key per session; empty is the table.
+			// The three are one home each (the check above).
 			Firewall: a.firewallUL,
+			PdrMatch: a.pdrMatchUL,
 			Actions:  a.actionsUL,
 			Meters:   a.metersUL,
 			Counters: a.countersUL,

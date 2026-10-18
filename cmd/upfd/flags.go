@@ -104,3 +104,33 @@ func parseInstances(spec string, maxDomains uint32) (*routing.Domains, error) {
 	}
 	return routing.New(ifaces, maxDomains)
 }
+
+// profileArgs applies a profile's strategy to the flags' own defaults: the
+// profile is what a module flag that names nothing resolves to, and every flag
+// the operator *did* name wins over it -- the flag is the override and the
+// profile is the default, so a deployment can run a profile with its own module
+// names without a second profile. A flag the operator did not name is its
+// declared default, and the profile overrides that: that is the whole point (a
+// profile that could not clear -pdr-table-ul's "pdr_ul" could not move the
+// uplink's rules out of that table).
+//
+// Only the rule home is a profile's: the tables, meters, counters and next hops
+// are the deployment's, and the profile leaves them as the flags gave them.
+func profileArgs(p session.Profile, given map[string]bool, a graphArgs) graphArgs {
+	if !given["pdr-table-ul"] {
+		a.pdrTableUL = p.Up.Table
+	}
+	if !given["firewall-ul"] {
+		a.firewallUL = p.Up.Firewall
+	}
+	if !given["pdr-match-ul"] {
+		a.pdrMatchUL = p.Up.PdrMatch
+	}
+	if !given["pdr-table-dl"] {
+		a.pdrTableDL = p.Down.Table
+	}
+	if !given["firewall-dl"] {
+		a.firewallDL = p.Down.Firewall
+	}
+	return a
+}
