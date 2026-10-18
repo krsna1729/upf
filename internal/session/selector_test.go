@@ -232,6 +232,43 @@ func TestAModificationThatMovesTheUEAddressMovesTheSelectorsRule(t *testing.T) {
 	}
 }
 
+// The capability the selector buys, and the reason the downlink had to move off
+// the shared table for it: a downlink PDR whose SDF filter names a port
+// *range*. The shared WildcardMatch keys on a masked value per field, and a mask
+// holds one port, not a range (compile.go's matchValue), so this message is
+// refused with cause 73 on the generic profile
+// (TestPortRangeIsRefusedNotMatchedTooWidely) -- and was refused on the custom
+// profile too while its downlink was that table. The keyed matcher's rules are
+// the firewall rule shape, which carries the two bounds.
+func TestTheSelectorCarriesADownlinkPortRange(t *testing.T) {
+	rec := &recorder{}
+	c := New(selectorConfig(DstIP), rec, quietLogger())
+	est := pdrMatchEstablishment(0x7701, "10.45.0.6", 0x91, 100, "permit out udp from any 5060 to assigned")
+	est.CreatePDR = []*ie.IE{
+		est.CreatePDR[0],
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any to assigned 5000-5100", "", "", "", 0)),
+			ie.NewFARID(2)),
+	}
+	resp := c.Establish(est).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("a downlink port range answered cause %d, want it accepted by the keyed matcher", got)
+	}
+	entry := oneMapChange(t, rec.last(), "pdr_match_dl/rules", uint32(upFSEID(t, resp)))
+	rules := pdrMatchRules(t, entry)
+	if len(rules) != 1 {
+		t.Fatalf("the session's downlink entry holds %d rules, want one", len(rules))
+	}
+	if got := rules[0]["dst_port_low"]; got != uint32(5000) {
+		t.Errorf("the rule's lower bound is %v, want 5000", got)
+	}
+	if got := rules[0]["dst_port_high"]; got != uint32(5100) {
+		t.Errorf("the rule's upper bound is %v, want 5100: the range is the rule's, not a single port", got)
+	}
+}
+
 // A session with two downlink addresses has two selector rules and one action
 // record: the record is the session's, so it goes only when the last rule that
 // references it goes. Erasing it early would leave a live rule naming an action
