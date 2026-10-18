@@ -82,17 +82,25 @@ func TestAProfileIsSelectedByNameOnly(t *testing.T) {
 	}
 }
 
-// A direction built without a profile still reads as the wildcard table, so an
-// unconfigured run writes its rules where it always did.
+// A direction whose PDRTable is the flag default reads as the wildcard table,
+// and an unset Strategy renders as one -- so an implementation that dropped the
+// field, or the default branch of String, leaves this red rather than green.
 func TestAnUnsetDirectionIsTheWildcardTable(t *testing.T) {
-	var d Direction
-	if s := d.Strategy(); s.PdrMatch != "" || s.Firewall != "" {
-		t.Errorf("an unset direction is not the wildcard table: %v", s)
+	d := Direction{PDRTable: "pdr_ul"}
+	s := d.Strategy()
+	if s.Table != "pdr_ul" || s.PdrMatch != "" || s.Firewall != "" {
+		t.Errorf("a direction with the default table does not read as the wildcard table: %v", s)
 	}
-	if s := (Strategy{Firewall: "fw"}).String(); !strings.Contains(s, "firewall") {
-		t.Errorf("a firewall strategy reads as %q", s)
+	if got := s.String(); !strings.Contains(got, "wildcard table") || !strings.Contains(got, "pdr_ul") {
+		t.Errorf("the default direction renders as %q", got)
 	}
-	if s := (Strategy{PdrMatch: "pm"}).String(); !strings.Contains(s, "keyed map") {
-		t.Errorf("a keyed strategy reads as %q", s)
+	if got := (Strategy{}).String(); !strings.Contains(got, "wildcard table") {
+		t.Errorf("an unset strategy renders as %q, not the wildcard table", got)
+	}
+	if got := (Strategy{Firewall: "fw"}).String(); !strings.Contains(got, "firewall") {
+		t.Errorf("a firewall strategy reads as %q", got)
+	}
+	if got := (Strategy{PdrMatch: "pm"}).String(); !strings.Contains(got, "keyed map") {
+		t.Errorf("a keyed strategy reads as %q", got)
 	}
 }
