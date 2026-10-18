@@ -934,21 +934,29 @@ addressed:
    `TestATickReadsEachCounterModuleOnce` pins the call count: one read per
    module, never one per session, and the reports it decides are compared
    element by element against the per-session path's). The reading itself is the
-   module's `get_counts`, one call per counter module -- the counter *resource*
-   (`<module>/counters`) is an entry's existence, keyed by ActionId, with an
-   empty value, so a resource readback names the measured rules and carries no
-   counts at all (90 B an entry: two `Any` envelopes, the key and the empty
-   value, each with its own type URL); the numbers are the module's per-worker
-   planes, read through its own command (`datapath/urr_count.cc`). At the
-   interval an operator sets (`-urr-interval` has no default; the flag is what
-   turns reporting on at all) the cost of one tick is **one call per counter
-   module, and 27 B per counted rule** -- measured by marshalling the module's
-   own response with its descriptor (`datapath/upf_datapath.desc`): an ActionId
-   up to 1M, a thousand-odd packets, a megabyte-odd of octets and two
-   ~10^12 ns stamps encode to 27.0 B per rule, 34.0 B with a 4M-wide ActionId
-   space, 4 GiB counts and day-old stamps. So 1M sessions at one counted PDR per
-   module is 1M rules, 25.7 MiB in one response (32.4 MiB at the widest
-   encoding), and two of them -- uplink and downlink -- are ~52 MiB per tick,
+   module's `get_counts`, one call per counter module. **That is not a
+   preference, it is the only read that carries counts:** the counter *resource*
+   (`<module>/counters`) is the existence of an entry, keyed by ActionId, with
+   an **empty value** -- `datapath/upf_datapath.proto` says why ("the counts are
+   not here: they are the module's per-worker planes, because a resource value
+   is copied on every publish and the controller rewrites a session's records on
+   every modification -- a number kept in the value would be zeroed by a
+   handover") -- so an entry is 90 B (two `Any` envelopes, the key and the empty
+   value, each with its own type URL; measured the same way, at the daemon's own
+   encoding) *without* a single count. A tick built on the pipeline's resource
+   readback would therefore read 90 B per counted rule and decide **every
+   report from zeros**; the numbers are the module's per-worker planes, and the
+   module's own command (`datapath/urr_count.cc`) is what enumerates them -- the
+   whole module's, when the argument names no rule. At the interval an operator
+   sets (`-urr-interval` has no default; the flag is what turns reporting on at
+   all) the cost of one tick is **one call per counter module, and 27 B per
+   counted rule** -- measured by marshalling the module's own response with its
+   descriptor (`datapath/upf_datapath.desc`): an ActionId up to 1M, a
+   thousand-odd packets, a megabyte-odd of octets and two ~10^12 ns stamps
+   encode to 27.0 B per rule, 34.0 B with a 4M-wide ActionId space, 4 GiB counts
+   and day-old stamps. So 1M sessions at one counted PDR per module is 1M rules,
+   25.7 MiB in one response (32.4 MiB at the widest encoding), and two of them
+   -- uplink and downlink -- are ~52 MiB per tick,
    some 1.8 MB/s at a 30 s interval and 0.9 MB/s at 60 s. The daemon refuses
    any response over 64 MiB (`kMaxMessageBytes`), which at the measured 27 B
    lands on **~2.5M rules in one module** (1.97M at the widest encoding): 1M

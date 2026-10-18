@@ -289,7 +289,13 @@ the arrival signal the Downlink Data Report is decided from on the BUFF branch.
   rule's first stamp, so the next reading's stamp means "a packet arrived since".
   The URR path uses that to open its next window; the DDN path reads with
   `restart_window: false` and clears only once the SMF has taken the report
-  (`bess.Client.{RuleCounts,PeekRuleCounts}`).
+  (`bess.Client.{RuleCounts,PeekRuleCounts}`). An argument that names **no**
+  rule is the module's whole table — `get_counts` enumerates every entry it
+  holds — which is the reading a usage tick makes: one call per counter module
+  rather than one per session, and the only read that carries counts at all
+  (the `<module>/counters` resource value is empty by design: a resource value
+  is copied on every publish, so a count kept in it would be zeroed by a
+  handover).
 
 ## Modules and drivers we take from BESS
 
