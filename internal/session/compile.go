@@ -232,6 +232,13 @@ type urrReq struct {
 	volQuota        volumeLimit
 	hasTimeQuota    bool
 	timeQuota       time.Duration
+
+	// hasLinked and linked are the URR's Linked URR IDs (TS 29.244 8.2.55): the
+	// other URRs it reports with, which the session groups and reports under one
+	// UR-SEQN. An Update URR that names any replaces the set; one that names
+	// none keeps it.
+	hasLinked bool
+	linked    []uint32
 }
 
 // The Measurement Method bits (TS 29.244 8.2.40, octet 5).
@@ -276,13 +283,13 @@ func triggerName(octet byte, bit uint8) string {
 
 // urrUnsupported is the IEs of a URR that change what the SMF would read from a
 // report and that this UP does not implement: an event count, a monitoring
-// time, an inactivity detector, a quota that expires on a timer, a link to
-// another URR's report, a limit on how many reports to send, a dropped-traffic
-// threshold. Each is refused when the URR is read rather than silently not
-// measured: the SMF bills from these reports, and one that arrives without what
-// was asked for is worse than a rule failure it can act on. (The list is by IE
-// name: the clause numbers of the refused ones are not this milestone's, and a
-// wrong number in a refusal is worse than none.)
+// time, an inactivity detector, a quota that expires on a timer, a limit on how
+// many reports to send, a dropped-traffic threshold. Each is refused when the
+// URR is read rather than silently not measured: the SMF bills from these
+// reports, and one that arrives without what was asked for is worse than a rule
+// failure it can act on. (The list is by IE name: the clause numbers of the
+// refused ones are not this milestone's, and a wrong number in a refusal is
+// worse than none.)
 var urrUnsupported = map[uint16]string{
 	ie.MeasurementInformation:    "Measurement Information",
 	ie.MonitoringTime:            "Monitoring Time",
@@ -292,7 +299,6 @@ var urrUnsupported = map[uint16]string{
 	ie.DroppedDLTrafficThreshold: "Dropped DL Traffic Threshold",
 	ie.UserPlaneInactivityTimer:  "User Plane Inactivity Timer",
 	ie.NumberOfReports:           "Number of Reports",
-	ie.LinkedURRID:               "Linked URR ID",
 	ie.AggregatedURRs:            "Aggregated URRs",
 	ie.TimeQuotaMechanism:        "Time Quota Mechanism",
 	ie.EventThreshold:            "Event Threshold",
@@ -753,6 +759,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		if u.hasTimeQuota {
 			entry.timeQuota, entry.hasTimeQuota = u.timeQuota, true
 		}
+		if u.hasLinked {
+			// The Linked URR IDs the update named replace the set; the links
+			// themselves are checked once the whole message is folded in.
+			entry.linked = u.linked
+		}
 		if u.hasVolQuota || u.hasTimeQuota || u.hasVolThreshold || u.hasTimeTh {
 			// A new quota (or threshold) is the SMF granting more usage: the
 			// drop a quota exhaustion put on this URR's PDRs is lifted, and the
@@ -771,6 +782,14 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// first (an Update PDR that does not name the URR), which is the
 			// order a modification takes.
 			return fmt.Errorf("%w: the URR %d is still named by a PDR of the session",
+				errNotExpressible, id)
+		}
+		if urrLinkedByAnotherURR(s, id) {
+			// Another URR of the session still links to this one (8.2.55):
+			// removing it would leave that link dangling and the group's report
+			// short a URR. The SMF updates the linking URR first, the way it
+			// disassociates a PDR before removing the URR the PDR names.
+			return fmt.Errorf("%w: the URR %d is still linked by another URR of the session",
 				errNotExpressible, id)
 		}
 		delete(s.URRs, id)
@@ -910,6 +929,20 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 // must follow the model as it is now rather than as the last message left it.
 // The caller holds the lock.
 func (c *Compiler) resolve(s *Session) error {
+	for _, uid := range urrIDsInOrder(s) {
+		for _, lid := range s.URRs[uid].linked {
+			if s.URRs[lid] == nil {
+				// The link names a URR the session does not hold (the SMF
+				// created or updated the URR with a Linked URR ID for something
+				// it did not provision, or removed the target in the same
+				// message): the group's report would name a URR nobody knows,
+				// refused the way a PDR naming an unknown URR is.
+				return fmt.Errorf(
+					"%w: URR %d's Linked URR ID names URR %d, which the session does not hold",
+					errNotExpressible, uid, lid)
+			}
+		}
+	}
 	for _, p := range pdrsInOrder(s) {
 		far := s.FARs[p.farID]
 		dir := c.direction(p.srcIfc)
@@ -1095,6 +1128,24 @@ func urrHeldByAPDR(s *Session, id uint32) bool {
 	for _, p := range s.PDRs {
 		for _, uid := range p.urrIDs {
 			if uid == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// urrLinkedByAnotherURR reports whether another URR of the session links to
+// this one (8.2.55). Removing a URR a live link still names would leave that
+// link dangling, and the group's report would be missing the URR the SMF asked
+// to hear about with it.
+func urrLinkedByAnotherURR(s *Session, id uint32) bool {
+	for uid, u := range s.URRs {
+		if uid == id {
+			continue
+		}
+		for _, lid := range u.linked {
+			if lid == id {
 				return true
 			}
 		}
@@ -2495,6 +2546,17 @@ func parseURR(i *ie.IE) (urrReq, error) {
 				return urrReq{}, fmt.Errorf("Time Quota: %w", err)
 			}
 			u.hasTimeQuota, u.timeQuota = true, v
+		case ie.LinkedURRID:
+			// The URR this one reports with (8.2.55). The IE may repeat: a URR
+			// may link to more than one other. Whether the link names a URR the
+			// session holds is checked once the whole message is folded in
+			// (resolve), because the target may be created in the same message.
+			id, err := c.LinkedURRID()
+			if err != nil {
+				return urrReq{}, fmt.Errorf("Linked URR ID: %w", err)
+			}
+			u.hasLinked = true
+			u.linked = append(u.linked, id)
 		}
 	}
 	if u.id == 0 {

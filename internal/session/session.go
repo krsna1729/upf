@@ -713,6 +713,11 @@ type urr struct {
 	timeQuota     time.Duration
 	hasTimeQuota  bool
 
+	// linked are the URR's Linked URR IDs (TS 29.244 8.2.55): the URRs this one
+	// reports with. A session's URRs joined by these edges are one linked group
+	// and share one UR-SEQN (report.go, "the group").
+	linked []uint32
+
 	// enforcing is set by the reporting task when a quota is exhausted: the
 	// PDRs that name this URR then drop. A modification that provisions a new
 	// quota or threshold clears it, which is how the SMF re-opens the traffic.

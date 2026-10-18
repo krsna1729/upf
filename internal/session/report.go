@@ -32,6 +32,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -137,6 +138,31 @@ type Report struct {
 	// Enforcing says this report stops the traffic: a quota it carries is used
 	// up, and the PDRs that name the URR now compile to a drop.
 	Enforcing bool
+
+	// Linked is the rest of a linked group, when this report is the group's:
+	// each is its own Usage Report IE, and every one of them -- this report's
+	// URR included -- carries this report's UR-SEQN, which is what 8.2.71 means
+	// by linked URRs sharing a sequence. It is empty for an unlinked URR, whose
+	// report is exactly one Usage Report IE.
+	Linked []LinkedUsage
+}
+
+// LinkedUsage is one URR of a linked group (8.2.55) as the group's report
+// carries it: the window its own rules measured, reported under the group's one
+// UR-SEQN.
+type LinkedUsage struct {
+	URRID uint32
+
+	// Up and Down are this URR's window's usage, by the direction the PDRs
+	// face, and Duration, First and Last are that window, as Report's are.
+	Up, Down Usage
+	Duration time.Duration
+	First    time.Time
+	Last     time.Time
+
+	// Enforcing says this URR's own quota brought the traffic down, so the SMF
+	// knows which member of the group spent its quota.
+	Enforcing bool
 }
 
 // flags is the Reporting Trigger this report carries (8.2.19), as the two
@@ -164,42 +190,55 @@ func (t Trigger) flags() (octet5, octet6 uint8) {
 // numbers, so the n4 layer sends what it is given and nothing else has to know
 // which bit means which trigger.
 func (r Report) IEs() []*ie.IE {
-	total := r.Up.add(r.Down)
-	octet5, octet6 := r.Trigger.flags()
+	// A usage report for the URR this report leads with, not an event report
+	// and not a downlink-data report: what the counters measured (8.2.18).
+	ies := []*ie.IE{ie.NewReportType(0, 0, 1, 0)}
+	ies = append(ies, usageReportIE(r.URRID, r.Seqn, r.Trigger, r.Up, r.Down, r.Duration, r.First, r.Last))
+	// A linked group is reported whole: each of the rest is its own Usage
+	// Report IE, and every one of them carries this report's UR-SEQN -- the one
+	// sequence the group shares (8.2.71).
+	for _, g := range r.Linked {
+		ies = append(ies, usageReportIE(g.URRID, r.Seqn, r.Trigger, g.Up, g.Down, g.Duration, g.First, g.Last))
+	}
+	return ies
+}
+
+// usageReportIE is one Usage Report within a Session Report Request (7.5.8.2):
+// the URR, the UR-SEQN it is reported under, the trigger, and the volume and
+// duration its window measured. Every Usage Report of one report shares that
+// report's UR-SEQN, which is what links a group's URRs to the SMF.
+func usageReportIE(urrID, seqn uint32, trigger Trigger, up, down Usage, duration time.Duration, first, last time.Time) *ie.IE {
+	total := up.add(down)
+	octet5, octet6 := trigger.flags()
 	// The IE holds the octets it needs: a quota's trigger is in octet 6, and
 	// leading with an empty octet 5 would be a bit the SMF did not ask for.
-	trigger := []uint8{octet5}
+	bits := []uint8{octet5}
 	if octet5 == 0 {
-		trigger = []uint8{octet6}
+		bits = []uint8{octet6}
 	} else if octet6 != 0 {
-		trigger = append(trigger, octet6)
+		bits = append(bits, octet6)
 	}
 	usage := []*ie.IE{
-		ie.NewURRID(r.URRID),
-		ie.NewURSEQN(r.Seqn),
-		ie.NewUsageReportTrigger(trigger...),
+		ie.NewURRID(urrID),
+		ie.NewURSEQN(seqn),
+		ie.NewUsageReportTrigger(bits...),
 		// All six counts: the SMF may bill either the total or the
 		// directions, and the UPF knows all of them (8.2.44).
 		ie.NewVolumeMeasurement(0x3f,
-			total.Octets, r.Up.Octets, r.Down.Octets,
-			total.Packets, r.Up.Packets, r.Down.Packets),
-		ie.NewDurationMeasurement(r.Duration),
+			total.Octets, up.Octets, down.Octets,
+			total.Packets, up.Packets, down.Packets),
+		ie.NewDurationMeasurement(duration),
 	}
 	// When the window's traffic ran, from the dataplane's own stamps: optional
 	// IEs an SMF reads for a duration measurement (8.2.44, 8.2.45), omitted
 	// rather than guessed when the counters carry none.
-	if !r.First.IsZero() {
-		usage = append(usage, ie.NewTimeOfFirstPacket(r.First))
+	if !first.IsZero() {
+		usage = append(usage, ie.NewTimeOfFirstPacket(first))
 	}
-	if !r.Last.IsZero() {
-		usage = append(usage, ie.NewTimeOfLastPacket(r.Last))
+	if !last.IsZero() {
+		usage = append(usage, ie.NewTimeOfLastPacket(last))
 	}
-	return []*ie.IE{
-		// A usage report for this URR, not an event report and not a
-		// downlink-data report: what the counters measured (8.2.18).
-		ie.NewReportType(0, 0, 1, 0),
-		ie.NewUsageReportWithinSessionReportRequest(usage...),
-	}
+	return ie.NewUsageReportWithinSessionReportRequest(usage...)
 }
 
 // EvaluateAll is Evaluate for every session the compiler holds, low SEID first,
@@ -325,78 +364,178 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 // decide updates every URR's bookkeeping and returns the reports they owe, and
 // whether any of them is enforcing something the dataplane has not been told
 // yet. The caller holds the lock.
+//
+// URRs are judged one linked group at a time (8.2.55): a URR and the URRs it
+// links to, directly or through others, are one group, and when any member owes
+// a report the group is reported whole -- each member's own window, all under
+// the one UR-SEQN the group shares (8.2.71). A URR with no link is a group of
+// one and is reported exactly as it was before linking existed.
 func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now time.Time) ([]Report, bool) {
 	var reports []Report
 	stopped := false
-	for _, uid := range urrIDsInOrder(s) {
-		u := s.URRs[uid]
-		up, down, first, last := c.countsOf(s, uid, counts)
-		// The first reading of a URR is its baseline, not its usage. The
-		// counting module's cells outlive an erased entry and the action pool
-		// reissues ids, so a fresh rule's ActionId can still hold the totals of
-		// the rule that had it before -- and a quota must not be spent by
-		// traffic that is not this URR's. What this costs is the usage between
-		// the URR's provisioning and the first reading: one evaluation
-		// interval, under-counted rather than invented.
-		if !u.baselined {
-			u.baselined = true
-			u.reported, u.lastUp, u.lastDown = now, up, down
+	for _, members := range linkedGroups(s) {
+		// One tick's reading per member, and what each owes from it.
+		type memberState struct {
+			uid            uint32
+			trigger        Trigger
+			due            bool
+			up, down       Usage // the window's usage
+			rawUp, rawDown Usage // the cumulative reading, the next window's base
+			window         time.Duration
+			first, last    time.Time
+		}
+		states := make([]memberState, 0, len(members))
+		anyDue := false
+		for _, uid := range members {
+			u := s.URRs[uid]
+			up, down, first, last := c.countsOf(s, uid, counts)
+			st := memberState{uid: uid, rawUp: up, rawDown: down}
+			if !u.baselined {
+				// The first reading of a URR is its baseline, not its usage
+				// (report.go, "the window"). It owes nothing itself, but the
+				// group it belongs to may still be reported, and then it is
+				// carried with a zero window.
+				u.baselined = true
+				u.reported, u.lastUp, u.lastDown = now, up, down
+				states = append(states, st)
+				continue
+			}
+			window := now.Sub(u.reported)
+			if window < 0 {
+				window = 0
+			}
+			upWindow, downWindow := up.since(u.lastUp), down.since(u.lastDown)
+			if !first.IsZero() && !last.Before(first) {
+				// This reading counted packets: it is the window's first
+				// activity when the window has none yet, and it is its last one.
+				u.stamped = true
+				if u.windowFirst.IsZero() {
+					u.windowFirst = first
+				}
+				u.windowLast = last
+			}
+			// The time a window's traffic ran is what a time limit is measured
+			// against -- the window's own first counted packet to its own last
+			// one, the same base the volume limits use, with the idle between
+			// them taken out. A graph whose counters carry no stamp at all
+			// falls back to the window's length, the number the clock gives
+			// while the traffic runs.
+			windowActive := window
+			if u.stamped {
+				windowActive = 0
+				if !u.windowFirst.IsZero() {
+					windowActive = u.windowLast.Sub(u.windowFirst)
+				}
+			}
+			st.up, st.down = upWindow, downWindow
+			st.window = window
+			st.first, st.last = windowTimes(u.windowFirst, u.windowLast, upWindow, downWindow)
+			// A limit that is reached stops the traffic whether or not it is
+			// the reason this report is going: a period that ends in the same
+			// window as a quota must not swallow the enforcement.
+			if u.quotaReached(upWindow, downWindow, windowActive) && !u.enforcing {
+				u.enforcing = true
+				stopped = true
+			}
+			trigger, due := u.due(upWindow, downWindow, window, windowActive)
+			st.trigger, st.due = trigger, due
+			if due {
+				anyDue = true
+			}
+			states = append(states, st)
+		}
+		if !anyDue {
 			continue
 		}
-		window := now.Sub(u.reported)
-		if window < 0 {
-			window = 0
-		}
-		upWindow, downWindow := up.since(u.lastUp), down.since(u.lastDown)
-		if !first.IsZero() && !last.Before(first) {
-			// This reading counted packets: it is the window's first activity
-			// when the window has none yet, and it is its last one.
-			u.stamped = true
-			if u.windowFirst.IsZero() {
-				u.windowFirst = first
-			}
-			u.windowLast = last
-		}
-		// The time a window's traffic ran is what a time limit is measured
-		// against -- the window's own first counted packet to its own last one,
-		// the same base the volume limits use, with the idle between them taken
-		// out. A graph whose counters carry no stamp at all falls back to the
-		// window's length, the number the clock gives while the traffic runs.
-		windowActive := window
-		if u.stamped {
-			windowActive = 0
-			if !u.windowFirst.IsZero() {
-				windowActive = u.windowLast.Sub(u.windowFirst)
+		// The group is reported whole: the first member in order that is due
+		// leads (its reason is the group's), the rest are carried with it, and
+		// all of them share the group's one UR-SEQN -- the lowest id's, so it
+		// is the same sequence however the members are ordered.
+		seqn := s.URRs[members[0]].seqn
+		lead := 0
+		for i := range states {
+			if states[i].due {
+				lead = i
+				break
 			}
 		}
-		first, last = windowTimes(u.windowFirst, u.windowLast, upWindow, downWindow)
-		// A limit that is reached stops the traffic whether or not it is the
-		// reason this report is going: a period that ends in the same window as
-		// a quota must not swallow the enforcement, and the window the report
-		// opens would otherwise put the quota out of reach of the next one.
-		if u.quotaReached(upWindow, downWindow, windowActive) && !u.enforcing {
-			u.enforcing = true
-			stopped = true
+		l := states[lead]
+		r := Report{
+			SEID: s.LocalSEID, CPSEID: s.CPSEID, URRID: l.uid,
+			Trigger: l.trigger, Seqn: seqn,
+			Up: l.up, Down: l.down,
+			Duration: l.window, First: l.first, Last: l.last, Enforcing: s.URRs[l.uid].enforcing,
 		}
-		trigger, due := u.due(upWindow, downWindow, window, windowActive)
-		if !due {
-			continue
+		for i, st := range states {
+			if i == lead {
+				continue
+			}
+			r.Linked = append(r.Linked, LinkedUsage{
+				URRID: st.uid, Up: st.up, Down: st.down,
+				Duration: st.window, First: st.first, Last: st.last,
+				Enforcing: s.URRs[st.uid].enforcing,
+			})
+			if s.URRs[st.uid].enforcing {
+				r.Enforcing = true
+			}
 		}
-		reports = append(reports, Report{
-			SEID: s.LocalSEID, CPSEID: s.CPSEID, URRID: uid,
-			Trigger: trigger, Seqn: u.seqn,
-			Up: upWindow, Down: downWindow,
-			Duration: window, First: first, Last: last, Enforcing: u.enforcing,
-		})
-		// The report opens the URR's next window, and it is the SMF's message
-		// that carries this usage: the counters are not reset (the dataplane
-		// knows nothing of reports), so the base is what moves -- and with it
-		// the window's own stamps, which the next tick writes afresh.
-		u.reported, u.lastUp, u.lastDown = now, up, down
-		u.windowFirst, u.windowLast = time.Time{}, time.Time{}
-		u.seqn++
+		reports = append(reports, r)
+		// The report opens every member's next window, and it is the SMF's
+		// message that carries this usage: the counters are not reset (the
+		// dataplane knows nothing of reports), so the base is what moves -- and
+		// with it the window's own stamps, which the next tick writes afresh.
+		for _, st := range states {
+			u := s.URRs[st.uid]
+			u.reported, u.lastUp, u.lastDown = now, st.rawUp, st.rawDown
+			u.windowFirst, u.windowLast = time.Time{}, time.Time{}
+		}
+		s.URRs[members[0]].seqn++
 	}
 	return reports, stopped
+}
+
+// linkedGroups partitions a session's URRs into linked groups: the connected
+// components of the Linked URR ID edges (8.2.55), each group's members sorted
+// low to high, and the groups sorted by their first member, so a session
+// reports them in one order whatever the map's is. The link is undirected for
+// grouping -- a URR "Y" may itself link to more URRs, and 5.2.2.4 makes the
+// group everything reachable from any of them. A URR with no link is a group of
+// one.
+func linkedGroups(s *Session) [][]uint32 {
+	ids := urrIDsInOrder(s)
+	parent := make(map[uint32]uint32, len(ids))
+	for _, id := range ids {
+		parent[id] = id
+	}
+	var find func(uint32) uint32
+	find = func(x uint32) uint32 {
+		for parent[x] != x {
+			parent[x] = parent[parent[x]]
+			x = parent[x]
+		}
+		return x
+	}
+	for _, id := range ids {
+		for _, lid := range s.URRs[id].linked {
+			if _, ok := parent[lid]; ok {
+				// resolve refuses a link the session cannot resolve, so a
+				// missing one here is a session that never compiled; the guard
+				// keeps such a link from inventing a group.
+				parent[find(id)] = find(lid)
+			}
+		}
+	}
+	grouped := make(map[uint32][]uint32, len(ids))
+	for _, id := range ids {
+		root := find(id)
+		grouped[root] = append(grouped[root], id)
+	}
+	groups := make([][]uint32, 0, len(grouped))
+	for _, g := range grouped {
+		groups = append(groups, g)
+	}
+	slices.SortFunc(groups, func(a, b []uint32) int { return cmp.Compare(a[0], b[0]) })
+	return groups
 }
 
 // windowTimes are the stamps a report carries: the window's own first packet

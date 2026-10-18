@@ -3399,6 +3399,125 @@ func TestEvaluateReportsTheWindowItMeasured(t *testing.T) {
 	}
 }
 
+// linkedEstablishment is the shape a linked pair needs: one PDR that both URRs
+// measure, URR 7 with the quota that gets spent, and URR 9 linked to linkedTo
+// (8.2.55) so the two report together.
+func linkedEstablishment(cpSEID uint64, linkedTo uint32) *message.SessionEstablishmentRequest {
+	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+		ie.NewFSEID(cpSEID, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x1000, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+			ie.NewFARID(1), ie.NewURRID(7), ie.NewURRID(9)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		quotaURR(7, 1000),
+		ie.NewCreateURR(
+			ie.NewURRID(9),
+			ie.NewMeasurementMethod(0, 1, 0),     // VOLUM
+			ie.NewReportingTriggers(0x00, 0x01),  // VOLQU
+			ie.NewVolumeQuota(0x01, 1<<40, 0, 0), // a quota URR 9 will not spend
+			ie.NewLinkedURRID(linkedTo),
+		),
+	)
+}
+
+// TestALinkedURRReportsItsGroupUnderOneURSEQN is the linked half of the URR
+// block: a URR linked to another (8.2.55) is read and validated, and when one
+// of the pair is due the report carries both, their usage under a single
+// UR-SEQN that the SMF reads as one combined report (8.2.71). URR 9's own
+// quota is never reached: it is reported because URR 7's is, which is what the
+// link means.
+func TestALinkedURRReportsItsGroupUnderOneURSEQN(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(linkedEstablishment(0x3033, 7)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment of a linked pair answered cause %d", got)
+	}
+	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	// The first reading of each URR is its baseline, not its usage.
+	if reports := evaluate(t, c, upFSEID(t, resp)); len(reports) != 0 {
+		t.Fatalf("the baseline reading returned %+v, want none", reports)
+	}
+	rec.counts = map[string][]bess.RuleCount{
+		testConfig().Up.Counters: {{ActionID: rule.actionID(), Packets: 10, Octets: 1500}},
+	}
+
+	reports := evaluate(t, c, upFSEID(t, resp))
+	if len(reports) != 1 {
+		t.Fatalf("the linked pair owed %d reports, want the group's one", len(reports))
+	}
+	r := reports[0]
+	if r.URRID != 7 || r.Trigger != TriggerVolumeQuota {
+		t.Errorf("the group report names URR %d with trigger %v, want URR 7 and the volume quota",
+			r.URRID, r.Trigger)
+	}
+	if !r.Enforcing {
+		t.Error("the group report does not say the spent quota stops the traffic")
+	}
+	// The linked half is carried with it: URR 9 measures the same rule and is
+	// reported beside URR 7, not on its own.
+	if len(r.Linked) != 1 || r.Linked[0].URRID != 9 {
+		t.Fatalf("the group report carries %+v linked, want URR 9", r.Linked)
+	}
+	if got := r.Linked[0].Up; got != (Usage{Packets: 10, Octets: 1500}) {
+		t.Errorf("URR 9's linked usage is %+v, want the window's 10 packets and 1500 octets", got)
+	}
+
+	// One report, one UR-SEQN: both Usage Report IEs carry the same sequence,
+	// which is what links the two URRs to the SMF (8.2.71).
+	var usageReports []*ie.IE
+	for _, i := range r.IEs() {
+		if i.Type == ie.UsageReportWithinSessionReportRequest {
+			usageReports = append(usageReports, i)
+		}
+	}
+	if len(usageReports) != 2 {
+		t.Fatalf("the report carries %d usage reports, want one for each linked URR", len(usageReports))
+	}
+	seqnOf := map[uint32]uint32{}
+	for _, ur := range usageReports {
+		var urrID, seqn uint32
+		for _, child := range ur.ChildIEs {
+			switch child.Type {
+			case ie.URRID:
+				urrID, _ = child.URRID()
+			case ie.URSEQN:
+				seqn, _ = child.URSEQN()
+			}
+		}
+		seqnOf[urrID] = seqn
+	}
+	if _, ok := seqnOf[7]; !ok {
+		t.Fatalf("the group's usage reports name %v, want URRs 7 and 9", seqnOf)
+	}
+	if seqnOf[7] != seqnOf[9] {
+		t.Errorf("the linked URRs carry UR-SEQNs %d and %d, want one shared sequence", seqnOf[7], seqnOf[9])
+	}
+	if seqnOf[7] != 0 {
+		t.Errorf("the group's first report carries UR-SEQN %d, want 0", seqnOf[7])
+	}
+}
+
+// TestALinkedURRNamingAnUnknownURRIsRefused: a Linked URR ID the session does
+// not hold is a link the SMF cannot get a report from, refused with cause 73
+// naming what could not be found (the same refusal a PDR naming an unknown URR
+// gets).
+func TestALinkedURRNamingAnUnknownURRIsRefused(t *testing.T) {
+	var logged bytes.Buffer
+	rec := &recorder{}
+	c := New(testConfig(), rec, slog.New(slog.NewTextHandler(&logged, nil)))
+	resp := c.Establish(linkedEstablishment(0x3034, 99)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Fatalf("a link naming an unknown URR answered cause %d, want 73", got)
+	}
+	if !strings.Contains(logged.String(), "99") {
+		t.Errorf("the refusal does not name the URR it could not find:\n%s", logged.String())
+	}
+}
+
 func TestEvaluateReportsThePeriodEvenWithNoTraffic(t *testing.T) {
 	// A periodic trigger reports while the URR is measured, traffic or none
 	// (5.2.2.3): a session whose usage stopped must still be visible to the SMF
@@ -4027,6 +4146,49 @@ func TestRemoveURRNeedsThePDRsToGoFirst(t *testing.T) {
 	}
 	if s := sessionOf(t, c, upFSEID(t, resp)); s.URRs[7] != nil {
 		t.Error("the session still holds the removed URR")
+	}
+}
+
+// TestARemoveURROfALinkedToURRIsRefused: a URR another URR links to (8.2.55) is
+// not removed while that link stands -- the group's report would be short a URR
+// -- refused with cause 73 the way a PDR still naming a URR is, and the URR
+// stays in the session.
+func TestARemoveURROfALinkedToURRIsRefused(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	// Only URR 9 is measured by the PDR; URR 7 exists so URR 9 can link to it
+	// (5.2.2.2.1: a URR may be provisioned without a PDR). Removing URR 7 is
+	// then refused for the link alone, not for a PDR still naming it.
+	linkedTo := ie.NewCreateURR(
+		ie.NewURRID(9),
+		ie.NewMeasurementMethod(0, 1, 0),     // VOLUM
+		ie.NewReportingTriggers(0x00, 0x01),  // VOLQU
+		ie.NewVolumeQuota(0x01, 1<<40, 0, 0), // a quota URR 9 will not spend
+		ie.NewLinkedURRID(7),
+	)
+	est := message.NewSessionEstablishmentRequest(0, 0, 0x3035, 1, 0,
+		ie.NewFSEID(0x3035, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x1000, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+			ie.NewFARID(1), ie.NewURRID(9)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		quotaURR(7, 1000),
+		linkedTo,
+	)
+	resp := c.Establish(est).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
+		ie.NewRemoveURR(ie.NewURRID(7)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("removing a URR another URR links to answered cause %d, want a rule failure", got)
+	}
+	if s := sessionOf(t, c, upFSEID(t, resp)); s.URRs[7] == nil {
+		t.Fatal("the refused removal took the linked-to URR out of the model")
 	}
 }
 
