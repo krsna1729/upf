@@ -58,6 +58,10 @@ func (c *Compiler) resources() []string {
 		// earlier run's flow would otherwise keep counting into a rule this
 		// process does not know about.
 		add(countersRes(Direction{Counters: c.cfg.Buffering.Counter}))
+		// And so are the store's per-flow "flows" entries: each carries the
+		// SMF's own numbers (8.2.29, 8.2.30) for a flow an earlier run held, and
+		// a later session that reuses the ActionId must not inherit them.
+		add(flowsRes(c.cfg.Buffering))
 	}
 	return names
 }

@@ -4,8 +4,10 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -76,9 +78,13 @@ func TestLiveSessionBuffersAndReleasesTheHeldPackets(t *testing.T) {
 	c := New(cfg, client, log)
 
 	// The control arm: nothing is buffered before this session exists, so a
-	// later non-zero reading is the session's doing.
+	// later non-zero reading is the session's doing, and the store holds no
+	// flow's own numbers either.
 	if before := countersOf(t, ctx, client, "cnt_buf"); len(before) != 0 {
 		t.Fatalf("cnt_buf already measures %d rules before any session exists: %v", len(before), before)
+	}
+	if before := storeFlowEntries(t, ctx, client, cfg.Buffering.Store); len(before) != 0 {
+		t.Fatalf("the store holds %d per-flow entries before any session exists: %v", len(before), before)
 	}
 	forwardedBefore := gatePackets(t, ctx, client, "enc")
 
@@ -93,6 +99,26 @@ func TestLiveSessionBuffersAndReleasesTheHeldPackets(t *testing.T) {
 			t.Errorf("the deletion answered cause %d", got)
 		}
 	}()
+
+	// 0. The store's own entry carries the SMF's numbers, live: 8.2.29's
+	// duration as the flow's timeout_ns and 8.2.30's Suggested Packet Count as
+	// its max_packets_per_flow (deviation 1 of docs/compliance.md's BUFF row).
+	// This is what makes the BAR cap and expire the flow rather than the graph's
+	// PacketStoreArg. The expiry itself is the store's own task (EvictExpired
+	// frees the packets at this timeout) and is not observable through this
+	// controller's control surface -- no module description or held-packet
+	// counter is served -- so this arm proves the numbers reached the store, not
+	// their effect.
+	entries := storeFlowEntries(t, ctx, client, cfg.Buffering.Store)
+	if len(entries) != 1 {
+		t.Fatalf("the store holds %d per-flow entries for one buffering session, want 1: %v", len(entries), entries)
+	}
+	if got := flowValueU64(t, entries[0].Value, "timeoutNs"); got != uint64(30*time.Second) {
+		t.Errorf("the store's entry carries timeoutNs %v, want the BAR's 30s", got)
+	}
+	if got := flowValueU64(t, entries[0].Value, "maxPacketsPerFlow"); got != 16 {
+		t.Errorf("the store's entry carries maxPacketsPerFlow %v, want the BAR's 16", got)
+	}
 
 	// 1. Held: the packets reach the branch's counter -- which is the store's
 	// input -- and the encap's output does not move.
@@ -169,11 +195,55 @@ func TestLiveSessionBuffersAndReleasesTheHeldPackets(t *testing.T) {
 
 	// The episode is over: the branch's counter entry is gone with the rule
 	// that buffered (compile erases it), so nothing is counted for a flow that
-	// no longer holds anything.
+	// no longer holds anything. The store's per-flow entry goes with it -- the
+	// numbers were the instruction for an episode that is over, and a later
+	// session that reuses the ActionId must not inherit them.
 	if counts := countersOf(t, ctx, client, "cnt_buf"); len(counts) != 0 {
 		t.Fatalf("the branch still measures %d rules after the flow stopped buffering: %v",
 			len(counts), counts)
 	}
+	if entries := storeFlowEntries(t, ctx, client, cfg.Buffering.Store); len(entries) != 0 {
+		t.Fatalf("the store still holds %d per-flow entries after the flow stopped buffering: %v",
+			len(entries), entries)
+	}
 	t.Logf("held: %d packets counted on the branch; forwarded after the instruction: %v -> %v",
 		held, forwardedBefore, forwarded)
+}
+
+// storeFlowEntries reads the store's per-flow "flows" entries as the daemon
+// holds them: the SMF's own numbers for each flow (8.2.29, 8.2.30), keyed by
+// the ActionId the rule carries.
+func storeFlowEntries(t *testing.T, ctx context.Context, client *bess.Client, store string) []bess.Entry {
+	t.Helper()
+	got, err := client.Contents(ctx, store+"/flows")
+	if err != nil {
+		t.Fatalf("reading %s/flows: %v", store, err)
+	}
+	return got[store+"/flows"]
+}
+
+// flowValueU64 reads a 64-bit field of a "flows" entry's value as the daemon
+// reported it. The SDK decodes the entry's protobuf JSON with UseNumber, so a
+// uint32 arrives as a number and a uint64 as a string (protojson's 64-bit form);
+// both are read here. `field` is the proto field's JSON name (protojson's
+// lowerCamelCase: "timeoutNs", "maxPacketsPerFlow").
+func flowValueU64(t *testing.T, value map[string]any, field string) uint64 {
+	t.Helper()
+	switch v := value[field].(type) {
+	case json.Number:
+		n, err := strconv.ParseUint(v.String(), 10, 64)
+		if err != nil {
+			t.Fatalf("the entry's %s is %v, not a number: %v", field, value[field], err)
+		}
+		return n
+	case string:
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			t.Fatalf("the entry's %s is %q, not a number: %v", field, v, err)
+		}
+		return n
+	default:
+		t.Fatalf("the entry carries no %s: %v", field, value)
+		return 0
+	}
 }

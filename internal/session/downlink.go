@@ -232,20 +232,27 @@ func barHoldsAFlow(s *Session, id uint8) bool {
 // (8.2.29, with its stopped-timer and infinite codes) and the DL Buffering
 // Suggested Packet Count (8.2.30) -- under the compiler's lock and in one step.
 //
-// The model is the whole of the effect today: the compiler does not write a
-// BAR's numbers into the store's per-flow entry yet (docs/compliance.md's BUFF
-// row, deviation 1), so no dataplane transaction is built here. That is also
-// what keeps this clear of a concurrent deletion -- this call runs on the
-// reporting goroutine, not the PFCP read loop, and a transaction compiled for a
-// session the SMF deleted meanwhile would rewrite the records its deletion
-// erased.
+// The numbers then reach the store's per-flow "flows" entry of every PDR that
+// buffers under this BAR (writeFlowEntry): the entry carries the timeout and the
+// cap the SMF just sent, so its extension is what expires and caps the flow that
+// is holding packets now, rather than the next time a request compiles the
+// session. That is one transaction of those entries alone.
 //
-// A response is not a request: nothing here is ever refused to the SMF, because
-// there is no answer to an answer. A response that carries no BAR, names a BAR
-// the session does not hold, or arrives after the flow's buffering episode has
-// ended is a logged no-op -- the treatment a stray report response gets
-// (internal/n4.onReportResponse) -- rather than a write to some other BAR or a
-// resurrection of an episode that is over.
+// This call runs on the reporting goroutine, not the PFCP read loop, so it holds
+// the compiler's lock only long enough to read the model and build the changes,
+// and applies them after releasing it. A session the SMF deleted meanwhile is
+// already out of c.sessions and is caught above; the worst a late landing leaves
+// is a per-flow entry for an ActionId no live rule names -- the sweep takes it
+// at the next restart, and a later session that reuses the id overwrites it, so
+// nothing is served the numbers of an episode it never had. A response is not a
+// request: nothing here is ever refused to the SMF, because there is no answer
+// to an answer.
+//
+// A response that carries no BAR, names a BAR the session does not hold, or
+// arrives after the flow's buffering episode has ended is a logged no-op -- the
+// treatment a stray report response gets (internal/n4.onReportResponse) --
+// rather than a write to some other BAR or a resurrection of an episode that is
+// over.
 func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE) {
 	if update == nil {
 		return
@@ -257,9 +264,9 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	s := c.sessions[seid]
 	if s == nil {
+		c.mu.Unlock()
 		c.log.Info("session: an Update BAR names a session that is gone; it is ignored",
 			"seid", seid, "bar", b.id)
 		return
@@ -268,6 +275,7 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 		// The SMF named a BAR this session does not hold. Applying it would
 		// create one under numbers nobody provisioned -- the guess a FAR naming
 		// an unknown BAR is refused for -- so it is dropped.
+		c.mu.Unlock()
 		c.log.Info("session: an Update BAR names a BAR the session does not hold; it is ignored",
 			"seid", seid, "bar", b.id)
 		return
@@ -278,11 +286,31 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 		// numbers now would leave them for a later episode they were never sent
 		// for. 5.2.4.1's "stop applying buffering when new instruction is
 		// received" is that move, and this response does not undo it.
+		c.mu.Unlock()
 		c.log.Info("session: an Update BAR arrives after its flow stopped buffering; it is ignored",
 			"seid", seid, "bar", b.id)
 		return
 	}
 	mergeBars(s, []barReq{b})
+	var changes []bess.Change
+	if c.cfg.Buffering != nil && c.cfg.Buffering.Store != "" {
+		for _, p := range pdrsInOrder(s) {
+			if !p.buffer {
+				continue
+			}
+			if f := s.FARs[p.farID]; f == nil || !f.hasBAR || f.barID != b.id {
+				continue
+			}
+			changes = append(changes, writeFlowEntry(c.cfg.Buffering, s.BARs[b.id], p)...)
+		}
+	}
+	c.mu.Unlock()
+	if len(changes) > 0 {
+		if err := c.ap.Apply(context.Background(), changes...); err != nil {
+			c.log.Warn("session: the store's per-flow entry was not rewritten for an Update BAR",
+				"seid", seid, "bar", b.id, "error", err)
+		}
+	}
 	c.log.Info("session: an Update BAR in a Session Report Response was applied",
 		"seid", seid, "bar", b.id, "duration", b.duration, "infinite", b.infinite, "count", b.count)
 }

@@ -67,6 +67,11 @@ as the Field text gives them, every mean below divides its own row again, and
 the four that appeared to have drifted (OAI-CN5G 54, free5GC 42, UPG-VPP 43,
 eUPF 28) come back unchanged. Each cell in this table was then checked against
 its block's Field text or the survey; block 3 was the only one out of step.
+**2026-10-18 (block 7):** the SMF's per-BAR numbers now land in the store's
+live `flows` entry, but the duration's expiry is BESS's own aging and is not
+observable through the control surface (block 7's text below), so its cell stays
+75 and the row still divides as written: 100+100+100+100+100+75+100+0+0+50+0 =
+725, and 725 / 11 = 65.9 → **66**.
 
 ## What each number is made of
 
@@ -192,10 +197,22 @@ and released when the SMF moved the path)`, with `held: 1536 packets counted on
 the branch; forwarded after the instruction: 0 -> 11136`.
 
 **Why 75 and not 100.** The arm proves buffering, DDN and the release. The DL
-Buffering Duration is read and unit-tested — `compile.go` parses it with the
-stopped-timer (all-zero) and infinite cases, `buffer_test.go` pins all three —
-but its expiry is not what the arm measures, and `TestABuffOnlyFARIsADrop` is the
-drop-buffered half.
+Buffering Duration now reaches the store: `compile.go` writes the flow's own
+`flows` entry — `timeout_ns` from 8.2.29 (the infinite unit as a present zero)
+and `max_packets_per_flow` from 8.2.30, each left out where the SMF named none —
+`buffer_test.go` pins the three duration codes and the entry's rewrite and erase
+(`TestABufferingFlowsOwnNumbersAreWrittenToTheStore`,
+`TestAnUpdateBARInAReportResponseRewritesTheStoreEntry`), and the live arm reads
+`buf/flows` back with the SMF's 30 s / 16. What it still cannot show is the
+duration *taking effect*: BESS's `EvictExpired` frees a flow's packets once they
+pass its `timeout_ns`, but only when the store reaches its global `max_packets`,
+and it emits nothing on a gate and no metric, while no module description or
+held-packet count is served through the control surface — so this arm shows the
+numbers written and read back, not the held packets seen going away. The
+sub-feature stays uncredited. (The cap half of the SMF's numbers,
+`max_packets_per_flow`, *is* enforced on every arrival and so is part of
+buffering, which the arm proves.) `TestABuffOnlyFARIsADrop` is the drop-buffered
+half.
 
 **History.** The arm's first run against a daemon carrying both contracts failed
 at its own first test: the daemon refused the session transaction, `#3 references

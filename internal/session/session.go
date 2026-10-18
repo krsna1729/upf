@@ -1042,6 +1042,14 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		if p.buffer && p.actionID != 0 && c.cfg.Buffering != nil && c.cfg.Buffering.Counter != "" {
 			add(bess.Change{Resource: bufferCountersRes(c.cfg.Buffering), Key: map[string]any{"action_id": p.actionID}})
 		}
+		// The store's per-flow "flows" entry is the session's too: compile
+		// writes the SMF's own numbers there (writeFlowEntry), and it is
+		// configuration, not the packets -- the drop command below frees those.
+		// A deletion that left the entry would hand a later session that reuses
+		// the ActionId a timeout and a cap the SMF never sent it.
+		if p.buffer && p.actionID != 0 && c.cfg.Buffering != nil && c.cfg.Buffering.Store != "" {
+			add(bess.Change{Resource: flowsRes(c.cfg.Buffering), Key: map[string]any{"id": p.actionID}})
+		}
 	}
 	// Meters belong to QERs, not to PDRs: compile writes one per policed
 	// direction whether or not a PDR names it, so a deletion erases them from

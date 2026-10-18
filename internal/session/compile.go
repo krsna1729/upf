@@ -1206,6 +1206,50 @@ func bufferCountersRes(b *Buffering) string { return b.Counter + "/counters" }
 // hold (8.2.29's duration and 8.2.30's count), keyed by the rule's ActionId.
 func flowsRes(b *Buffering) string { return b.Store + "/flows" }
 
+// barOf is the BAR a PDR's FAR names, or nil when the FAR names none: the
+// buffering instruction this flow's packets live under (TS 29.244 5.2.4.1,
+// 8.2.55). A FAR that names no BAR has no SMF numbers of its own, and the
+// store's module-wide arguments are the instruction for its flow.
+func barOf(s *Session, far *far) *bar {
+	if far == nil || !far.hasBAR {
+		return nil
+	}
+	return s.BARs[far.barID]
+}
+
+// writeFlowEntry writes the store's per-flow "flows" entry for a PDR that
+// buffers: the numbers the SMF's BAR gives this flow -- 8.2.29's DL Buffering
+// Duration as the store's timeout_ns and 8.2.30's DL Buffering Suggested Packet
+// Count as its max_packets_per_flow -- keyed by the same ActionId the rule
+// carries and the counter in front of the store is keyed by (BESS D-129), so
+// one id resolves the rule, its flow and the SMF's own numbers for it.
+//
+// A parameter the SMF did not name is left out of the entry rather than written
+// as zero: an absent field leaves the module's argument in force, a present
+// timeout_ns of zero means this flow never expires, and a present
+// max_packets_per_flow of zero means the module-wide per-flow default. The
+// deactivated timer and the infinite unit are exactly that distinction, so the
+// entry carries whatever the model holds and nothing more. The entry itself is
+// written with the rule either way, so its life follows the PDR's (compile and
+// a deletion erase it with the branch's counter).
+func writeFlowEntry(b *Buffering, bar *bar, p *pdr) []bess.Change {
+	if b == nil || b.Store == "" || p.actionID == 0 {
+		return nil
+	}
+	value := map[string]any{}
+	if ns, ok := bar.timeoutNS(); ok {
+		value["timeout_ns"] = ns
+	}
+	if bar != nil && bar.hasCount {
+		value["max_packets_per_flow"] = bar.count
+	}
+	return []bess.Change{{
+		Resource: flowsRes(b),
+		Key:      map[string]any{"id": p.actionID},
+		Value:    value,
+	}}
+}
+
 // writeBufferCounter writes the counting module's entry for a PDR that buffers.
 // The module sits on the BUFF branch, in front of the store, so its counters are
 // what makes "the first buffered DL packet for this PDR" visible to the
@@ -1357,16 +1401,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		erase(bess.Change{Resource: countersRes(dir), Key: map[string]any{"action_id": p.actionID}})
 	}
-	// liveBufferCounters is the same set for the BUFF branch's counter: a PDR
-	// that buffers is counted by the module in front of the store, and an entry
-	// a live PDR still needs must not be erased in the transaction that writes
-	// it.
-	liveBufferCounters := map[string]bool{}
-	if c.cfg.Buffering != nil && c.cfg.Buffering.Counter != "" {
+	// liveBuffering is the set of ActionIds a live PDR of this session buffers
+	// under: the entries of both the BUFF branch's counter and the store's
+	// "flows" table follow that PDR, and an entry a live flow still needs must
+	// not be erased in the transaction that writes it.
+	liveBuffering := map[uint32]bool{}
+	if c.cfg.Buffering != nil {
 		for _, p := range s.PDRs {
 			if p.buffer && p.actionID != 0 {
-				liveBufferCounters[bufferCountersRes(c.cfg.Buffering)+"\x00"+
-					strconv.FormatUint(uint64(p.actionID), 10)] = true
+				liveBuffering[p.actionID] = true
 			}
 		}
 	}
@@ -1378,12 +1421,26 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if !p.buffer || p.actionID == 0 || c.cfg.Buffering == nil || c.cfg.Buffering.Counter == "" {
 			return
 		}
-		if liveBufferCounters[bufferCountersRes(c.cfg.Buffering)+"\x00"+
-			strconv.FormatUint(uint64(p.actionID), 10)] {
+		if liveBuffering[p.actionID] {
 			return
 		}
 		erase(bess.Change{Resource: bufferCountersRes(c.cfg.Buffering),
 			Key: map[string]any{"action_id": p.actionID}})
+	}
+	// flowEntryErase is the same for the store's "flows" entry: it holds the
+	// SMF's own numbers for the flow, and a flow that no longer buffers (or
+	// goes) must not leave them behind for the next session that reuses the id.
+	// It is configuration only -- the store's release and drop commands are what
+	// free the packets a flow held (5.2.4.1).
+	flowEntryErase := func(p *pdr) {
+		if !p.buffer || p.actionID == 0 || c.cfg.Buffering == nil || c.cfg.Buffering.Store == "" {
+			return
+		}
+		if liveBuffering[p.actionID] {
+			return
+		}
+		erase(bess.Change{Resource: flowsRes(c.cfg.Buffering),
+			Key: map[string]any{"id": p.actionID}})
 	}
 	for _, p := range s.removed {
 		dir := c.direction(p.srcIfc)
@@ -1408,6 +1465,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		counterErase(p)
 		bufferCounterErase(p)
+		flowEntryErase(p)
 	}
 	// A PDR a modification replaced keeps its action and its tunnel, but its
 	// rule key can change under it (a new filter, a new address): the old key
@@ -1418,15 +1476,19 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// The flows whose episode this model ended (resolve), which a FAR-only
 	// modification leaves out of removed/stale entirely: their counter entry is
 	// what said "arrivals are news", and a flow that no longer holds anything
-	// must not go on being read.
+	// must not go on being read. The store's "flows" entry goes with it: the
+	// numbers are the instruction for an episode that is over.
 	for _, id := range s.ending {
-		if liveBufferCounters[bufferCountersRes(c.cfg.Buffering)+"\x00"+
-			strconv.FormatUint(uint64(id), 10)] {
+		if liveBuffering[id] {
 			continue
 		}
 		if c.BufferingConfigured() && id != 0 {
 			erase(bess.Change{Resource: bufferCountersRes(c.cfg.Buffering),
 				Key: map[string]any{"action_id": id}})
+		}
+		if c.cfg.Buffering != nil && c.cfg.Buffering.Store != "" && id != 0 {
+			erase(bess.Change{Resource: flowsRes(c.cfg.Buffering),
+				Key: map[string]any{"id": id}})
 		}
 	}
 	for _, old := range s.stale {
@@ -1443,6 +1505,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		counterErase(old)
 		bufferCounterErase(old)
+		flowEntryErase(old)
 	}
 
 	// Meters first: an action references the meter its QER resolved to. One
@@ -1566,6 +1629,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			changes = append(changes, writeCounter(p, dir)...)
 			if p.buffer {
 				changes = append(changes, writeBufferCounter(c.cfg.Buffering, p)...)
+				changes = append(changes, writeFlowEntry(c.cfg.Buffering, barOf(s, s.FARs[p.farID]), p)...)
 			}
 			continue
 		}

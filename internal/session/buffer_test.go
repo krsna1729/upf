@@ -214,6 +214,113 @@ func TestTheBARsParametersAreReadWhereverTheySit(t *testing.T) {
 	}
 }
 
+// TestABufferingFlowsOwnNumbersAreWrittenToTheStore closes deviation (1) of
+// docs/compliance.md's BUFF row: the store's per-flow "flows" entry is the
+// SMF's own instruction for that flow -- 8.2.29's DL Buffering Duration as the
+// store's timeout_ns and 8.2.30's Suggested Packet Count as its
+// max_packets_per_flow -- keyed by the same ActionId the rule carries (BESS
+// D-129), so the numbers cap and expire this flow rather than the graph's
+// arguments. It follows the BAR the PDR's FAR names through an update, and the
+// deactivated and infinite codes reach the entry as the store reads them
+// (absent, and a present zero for hold-without-expiry).
+func TestABufferingFlowsOwnNumbersAreWrittenToTheStore(t *testing.T) {
+	cfg := bufferingConfig()
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	resp := c.Establish(buffEstablishment(0x7104, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	flow := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 45, 0, 7}).actionID()
+	if flow == 0 {
+		t.Fatal("a BUFF FAR's rule carries no ActionId")
+	}
+	entry := find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
+	if got := entry.Value["timeout_ns"]; got != uint64(30*time.Second) {
+		t.Errorf("the flow's entry carries timeout_ns %v, want the BAR's 30s", got)
+	}
+	if got := entry.Value["max_packets_per_flow"]; got != uint32(16) {
+		t.Errorf("the flow's entry carries max_packets_per_flow %v, want the BAR's 16", got)
+	}
+
+	// An Update BAR rewrites the entry: the numbers the SMF sent last are the
+	// ones in force.
+	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 7, 0,
+		ie.NewUpdateBAR(
+			ie.UpdateBARWithinSessionModificationRequest,
+			ie.NewBARID(1),
+			ie.NewDLBufferingDuration(10*time.Second),
+			ie.NewDLBufferingSuggestedPacketCount(64),
+		))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	entry = find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
+	if got := entry.Value["timeout_ns"]; got != uint64(10*time.Second) {
+		t.Errorf("after the update the flow's entry carries timeout_ns %v, want 10s", got)
+	}
+	if got := entry.Value["max_packets_per_flow"]; got != uint32(64) {
+		t.Errorf("after the update the flow's entry carries max_packets_per_flow %v, want 64", got)
+	}
+
+	// The deactivated timer and a zero count are no instruction: the entry
+	// carries neither field, so the module's own numbers stay in force for this
+	// flow.
+	mod = message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 8, 0,
+		ie.NewUpdateBAR(
+			ie.UpdateBARWithinSessionModificationRequest,
+			ie.NewBARID(1),
+			ie.NewDLBufferingDuration(0),
+			ie.NewDLBufferingSuggestedPacketCount(0),
+		))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	entry = find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
+	if _, ok := entry.Value["timeout_ns"]; ok {
+		t.Errorf("a deactivated timer still wrote a timeout: %+v", entry.Value)
+	}
+	if _, ok := entry.Value["max_packets_per_flow"]; ok {
+		t.Errorf("a zero count still wrote a cap: %+v", entry.Value)
+	}
+
+	// The infinite unit is hold-without-expiry, which the store reads as a
+	// present timeout of zero -- not as "absent", which would be the graph's.
+	mod = message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 9, 0,
+		ie.NewUpdateBAR(
+			ie.UpdateBARWithinSessionModificationRequest,
+			ie.NewBARID(1),
+			ie.NewDLBufferingDuration(time.Duration(math.MaxInt64)),
+		))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	entry = find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
+	got, ok := entry.Value["timeout_ns"]
+	if !ok || got != uint64(0) {
+		t.Errorf("the infinite timer wrote timeout_ns %v (present %v), want a present 0", got, ok)
+	}
+
+	// A deletion takes the entry out with the rest of the session's records.
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upFSEID(t, resp), 9, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	erased := false
+	for _, ch := range rec.last() {
+		if ch.Resource != flowsRes(cfg.Buffering) || ch.Value != nil {
+			continue
+		}
+		if id, ok := ch.Key["id"].(uint32); ok && id == flow {
+			erased = true
+		}
+	}
+	if !erased {
+		t.Errorf("the deletion wrote no erase for %s's entry for action %d: the entry outlives the session",
+			flowsRes(cfg.Buffering), flow)
+	}
+}
+
 // TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession closes deviation
 // (3) of docs/compliance.md's BUFF row: 5.2.4.1 lets the CP function extend a
 // flow's buffering when it answers a Downlink Data Report, and the Update BAR it
@@ -272,6 +379,40 @@ func TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession(t *testing.T) 
 	entry = c.sessions[seid].BARs[1]
 	if entry.hasDuration || entry.hasCount {
 		t.Errorf("an all-zero Update BAR in a response left %+v, want no instruction at all", entry)
+	}
+}
+
+// TestAnUpdateBARInAReportResponseRewritesTheStoreEntry is the store half of
+// 5.2.4.1's extension: the numbers a Session Report Response carries reach the
+// per-flow "flows" entry of the flow that is holding packets now, so the
+// extended duration and cap are what expire and cap it -- not only the model,
+// which the next request to compile the session would have written anyway.
+func TestAnUpdateBARInAReportResponseRewritesTheStoreEntry(t *testing.T) {
+	cfg := bufferingConfig()
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+
+	resp := c.Establish(buffEstablishment(0x710b, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	flow := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 45, 0, 7}).actionID()
+	if flow == 0 {
+		t.Fatal("a BUFF FAR's rule carries no ActionId")
+	}
+
+	c.ApplyUpdateBAR(context.Background(), seid, ie.NewUpdateBARWithinSessionReportResponse(
+		ie.NewBARID(1),
+		ie.NewDLBufferingDuration(10*time.Second),
+		ie.NewDLBufferingSuggestedPacketCount(64),
+	))
+	entry := find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
+	if got := entry.Value["timeout_ns"]; got != uint64(10*time.Second) {
+		t.Errorf("the response left the store entry's timeout_ns %v, want 10s", got)
+	}
+	if got := entry.Value["max_packets_per_flow"]; got != uint32(64) {
+		t.Errorf("the response left the store entry's max_packets_per_flow %v, want 64", got)
 	}
 }
 
