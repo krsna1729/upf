@@ -5,6 +5,7 @@ package session
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/krsna1729/upf/internal/bess"
@@ -271,5 +272,40 @@ func TestRemovingAURRReportsItsLastWindowAsATerminationReport(t *testing.T) {
 	}
 	if len(trig) < 2 || trig[0] != 0 || trig[1] != 0x08 {
 		t.Errorf("the trigger is %#v, want only TERMR", trig)
+	}
+}
+
+func TestMeasurementInformationThatAsksForWhatIsDoneIsAccepted(t *testing.T) {
+	// free5GC sets MBQE|MNOP on every URR it sends (0x11) and 0 elsewhere; a
+	// real SMF's session is refused by the old blanket refusal. 0, MNOP, ISTM
+	// and MBQE are accepted; INAM and RADI stay refused.
+	for value, want := range map[uint8]uint8{
+		0x00: ie.CauseRequestAccepted, 0x10: ie.CauseRequestAccepted, 0x11: ie.CauseRequestAccepted,
+		0x08: ie.CauseRequestAccepted, 0x02: ie.CauseRuleCreationModificationFailure,
+		0x04: ie.CauseRuleCreationModificationFailure, 0x13: ie.CauseRuleCreationModificationFailure,
+	} {
+		c := New(testConfig(), &recorder{}, quietLogger())
+		urr := ie.NewCreateURR(ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00),
+			ie.NewVolumeThreshold(0x01, 1<<20, 0, 0), ie.NewMeasurementInformation(value))
+		if got := cause(t, c.Establish(urrEstablishment(0x3081+uint64(value), 7, urr))); got != want {
+			t.Errorf("Measurement Information %#x answered cause %d, want %d", value, got, want)
+		}
+	}
+}
+
+func TestTheEstablishmentResponseNamesTheNodeAndTheUPFSEIDAddress(t *testing.T) {
+	cfg := testConfig()
+	cfg.NodeID, cfg.N4Addr = "10.77.88.1", netip.MustParseAddr("10.77.88.1")
+	c := New(cfg, &recorder{}, quietLogger())
+	resp := c.Establish(urrEstablishment(0x3091, 7, quotaURR(7, 1<<30))).(*message.SessionEstablishmentResponse)
+	if resp.NodeID == nil {
+		t.Fatal("no Node ID in the response (mandatory, Table 7.5.3.1-1)")
+	}
+	if id, _ := resp.NodeID.NodeID(); id != "10.77.88.1" {
+		t.Errorf("Node ID %q, want 10.77.88.1", id)
+	}
+	f, err := resp.UPFSEID.FSEID()
+	if err != nil || f.IPv4Address == nil || f.IPv4Address.String() != "10.77.88.1" {
+		t.Errorf("UP F-SEID %+v (%v), want it to carry 10.77.88.1", f, err)
 	}
 }

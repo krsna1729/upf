@@ -249,6 +249,12 @@ type Config struct {
 	// deployment configures more than one.
 	Instances *routing.Domains
 
+	// NodeID is this UP function's Node ID as the association advertised it
+	// (IP address or FQDN), and N4Addr its N4 IPv4 address: the Session
+	// Establishment Response names the one and the UP F-SEID carries the other.
+	NodeID string
+	N4Addr netip.Addr
+
 	// N3Addr is the UPF's N3 IPv4 address: the F-TEID we advertise, and the
 	// outer source of a downlink packet.
 	N3Addr netip.Addr

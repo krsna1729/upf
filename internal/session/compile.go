@@ -316,7 +316,6 @@ func triggerName(octet byte, bit uint8) string {
 // refused ones are not this milestone's, and a wrong number in a refusal is
 // worse than none.)
 var urrUnsupported = map[uint16]string{
-	ie.MeasurementInformation:    "Measurement Information",
 	ie.MonitoringTime:            "Monitoring Time",
 	ie.InactivityDetectionTime:   "Inactivity Detection Time",
 	ie.QuotaHoldingTime:          "Quota Holding Time",
@@ -355,12 +354,12 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		// The request carries no CP F-SEID at all, so there is none to answer
 		// under either: the header's SEID is 0 (a session message always carries
 		// the SEID field, and 0 names no session).
-		return establishResponse(req, 0, 0, ie.CauseMandatoryIEMissing, nil)
+		return c.establishResponse(req, 0, 0, ie.CauseMandatoryIEMissing, nil)
 	}
 	pdrs, fars, bars, qers, urrs, err := parseCreate(ies)
 	if err != nil {
 		c.log.Warn("session: cannot read the establishment request", "error", err)
-		return establishResponse(req, cpSEID, 0, parseCause(err), nil)
+		return c.establishResponse(req, cpSEID, 0, parseCause(err), nil)
 	}
 
 	c.mu.Lock()
@@ -370,7 +369,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		created := s.createdPDRs(c.cfg)
 		c.mu.Unlock()
 		c.log.Info("session: establishment repeated", "cp_seid", cpSEID, "seid", s.LocalSEID)
-		return establishResponse(req, s.CPSEID, s.LocalSEID, ie.CauseRequestAccepted, created)
+		return c.establishResponse(req, s.CPSEID, s.LocalSEID, ie.CauseRequestAccepted, created)
 	}
 	local := c.nextSEID
 	c.nextSEID++
@@ -396,7 +395,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		c.mu.Lock()
 		c.releaseSession(s)
 		c.mu.Unlock()
-		return establishResponse(req, cpSEID, local, compileCause(err), nil)
+		return c.establishResponse(req, cpSEID, local, compileCause(err), nil)
 	}
 
 	changes, created, err := c.compile(s)
@@ -409,7 +408,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		c.mu.Lock()
 		c.releaseSession(s)
 		c.mu.Unlock()
-		return establishResponse(req, cpSEID, local, compileCause(err), nil)
+		return c.establishResponse(req, cpSEID, local, compileCause(err), nil)
 	}
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
 		c.log.Warn("session: the dataplane refused the session",
@@ -424,7 +423,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 			c.releaseSession(s)
 			c.mu.Unlock()
 		}
-		return establishResponse(req, cpSEID, local, causeOf(err), nil)
+		return c.establishResponse(req, cpSEID, local, causeOf(err), nil)
 	}
 
 	c.mu.Lock()
@@ -440,7 +439,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 
 	c.log.Info("session: established", "cp_seid", cpSEID, "seid", local,
 		"ue_ip", s.UEIP.String(), "pdrs", len(s.PDRs), "changes", len(changes))
-	return establishResponse(req, cpSEID, local, ie.CauseRequestAccepted, created)
+	return c.establishResponse(req, cpSEID, local, ie.CauseRequestAccepted, created)
 }
 
 // Modify implements n4.SessionHandler: the request's lists are merged into the
@@ -3201,6 +3200,26 @@ func parseURR(i *ie.IE) (urrReq, error) {
 		return urrReq{}, fmt.Errorf("%s: %w", what, err)
 	}
 	for _, c := range children {
+		if c.Type == ie.MeasurementInformation {
+			// 8.2.68, octet 5: MBQE 0x01, INAM 0x02, RADI 0x04, ISTM 0x08,
+			// MNOP 0x10. A report always carries the packet counts (MNOP) and
+			// a duration that starts when the URR is created (ISTM), so those
+			// ask for what is already done, and 0 asks for nothing. MBQE asks
+			// to count before QoS enforcement, which no graph can: the
+			// counter sits after the meter, so a throttled flow's usage is the
+			// forwarded part (docs/compliance.md). Real SMFs set it on every
+			// URR (free5GC does), so refusing it refuses every real session.
+			// INAM (a paused URR) and RADI (application detection) are not
+			// built and are refused.
+			if len(c.Payload) == 0 {
+				return urrReq{}, fmt.Errorf("%w: the URR's Measurement Information is empty", errNotExpressible)
+			}
+			if c.Payload[0]&^(0x01|0x08|0x10) != 0 || len(c.Payload) > 1 && c.Payload[1] != 0 {
+				return urrReq{}, fmt.Errorf("%w: the URR's Measurement Information %#x asks for INAM, RADI or a later flag, which this UP does not implement",
+					errNotExpressible, c.Payload)
+			}
+			continue
+		}
 		if name, ok := urrUnsupported[c.Type]; ok {
 			return urrReq{}, fmt.Errorf("%w: the URR names %s, and this UP does not implement it",
 				errNotExpressible, name)
@@ -3681,11 +3700,23 @@ func parseFilterPort(word string) (portRange, error) {
 // allocated -- for a message to the CP function that is its own F-SEID, which
 // it sent in the request's F-SEID IE). An SMF looks a session up by that value,
 // so answering under our own F-SEID is an answer to a session it does not have.
-func establishResponse(req *message.SessionEstablishmentRequest, cpSEID, local uint64,
+func (c *Compiler) establishResponse(req *message.SessionEstablishmentRequest, cpSEID, local uint64,
 	cause uint8, created []*ie.IE) message.Message {
-	ies := []*ie.IE{ie.NewCause(cause)}
+	// The Node ID is mandatory in the response (TS 29.244 Table 7.5.3.1-1) and
+	// the UP F-SEID carries this UP's address (8.2.37): an SMF that finds
+	// either missing refuses the response, and the session it describes stays
+	// programmed here with nobody to delete it.
+	var ies []*ie.IE
+	if c.cfg.NodeID != "" {
+		ies = append(ies, ie.NewNodeIDHeuristic(c.cfg.NodeID))
+	}
+	ies = append(ies, ie.NewCause(cause))
 	if cause == ie.CauseRequestAccepted {
-		ies = append(ies, ie.NewFSEID(local, nil, nil))
+		if c.cfg.N4Addr.Is4() {
+			ies = append(ies, ie.NewFSEID(local, net.IP(c.cfg.N4Addr.AsSlice()), nil))
+		} else {
+			ies = append(ies, ie.NewFSEID(local, nil, nil))
+		}
 		ies = append(ies, created...)
 	}
 	return message.NewSessionEstablishmentResponse(0, 0, cpSEID, req.Sequence(), 0, ies...)

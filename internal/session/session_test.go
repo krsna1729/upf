@@ -4228,9 +4228,9 @@ func TestAURRWithAnUnimplementedFieldIsRefused(t *testing.T) {
 		{"quota holding time", ie.NewCreateURR(
 			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00),
 			ie.NewQuotaHoldingTime(10*time.Second))},
-		{"measurement information", ie.NewCreateURR(
+		{"measurement information asking for INAM", ie.NewCreateURR(
 			ie.NewURRID(7), ie.NewMeasurementMethod(0, 1, 0), ie.NewReportingTriggers(0x02, 0x00),
-			ie.NewMeasurementInformation(0x08))},
+			ie.NewMeasurementInformation(0x02))},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

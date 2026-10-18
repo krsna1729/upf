@@ -231,7 +231,7 @@ func run() error {
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			pdrTableUL: *pdrTableUL, pdrTableDL: *pdrTableDL,
 			firewallUL: *firewallUL, firewallDL: *firewallDL,
-			pdrMatchUL: *pdrMatchUL,
+			pdrMatchUL:  *pdrMatchUL,
 			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
@@ -243,6 +243,16 @@ func run() error {
 		}))
 		if err != nil {
 			return err
+		}
+		graph.NodeID = id
+		if a, err := netip.ParseAddr(id); err == nil {
+			graph.N4Addr = a
+		} else if host, _, err := net.SplitHostPort(*n4Addr); err == nil {
+			// An FQDN Node ID: the F-SEID still carries the address the socket
+			// listens on, when it names one.
+			if a, err := netip.ParseAddr(host); err == nil && !a.IsUnspecified() {
+				graph.N4Addr = a
+			}
 		}
 		cfg.Sessions = session.New(graph, client, log)
 		compiler = cfg.Sessions.(*session.Compiler)
