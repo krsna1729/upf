@@ -70,6 +70,27 @@ modules:
     arg:
       templates:
         - "AgAAAAACAgAAAAABCABFAABJAAFAAEARUIwKFB4CwAACAQhoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARIIkKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm"
+
+  # Two more uplink streams on the same tunnel, each a G-PDU carrying a PDU
+  # Session Container (TS 38.415): QFI 5 and QFI 9, payloads "qfi5-upf!" and
+  # "qfi9-upf!". They start idle (burst 0): ci/pdrmatch runs one stream at a
+  # time, so a Dump's one-packet-a-second sample is that stream's.
+  - name: src_q5
+    mclass: Source
+    arg: {pkt_size: 95, burst: 0}
+  - name: rewrite_q5
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAABRAAFAAEARUIQKFB4CwAACAQhoCGgAPQAANP8ALREiM0QAAACFARAFAEUAACUAAUAAQBEgiQotAAIICAgIE4gANQARAABxZmk1LXVwZiE="
+  - name: src_q9
+    mclass: Source
+    arg: {pkt_size: 95, burst: 0}
+  - name: rewrite_q9
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAABRAAFAAEARUIQKFB4CwAACAQhoCGgAPQAANP8ALREiM0QAAACFARAJAEUAACUAAUAAQBEgiQotAAIICAgIE4gANQARAABxZmk5LXVwZiE="
   - name: teid
     mclass: WildcardMatch
     arg:
@@ -148,6 +169,10 @@ modules:
 connections:
   - {upstream: src_up, downstream: rewrite_up}
   - {upstream: rewrite_up, downstream: teid}
+  - {upstream: src_q5, downstream: rewrite_q5}
+  - {upstream: rewrite_q5, downstream: teid}
+  - {upstream: src_q9, downstream: rewrite_q9}
+  - {upstream: rewrite_q9, downstream: teid}
   - {upstream: teid, downstream: decap0}
   - {upstream: decap0, downstream: dump_u}
   - {upstream: dump_u, downstream: pdr_match_ul}

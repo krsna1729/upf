@@ -183,7 +183,7 @@ func run(target string) error {
 	}
 	fmt.Printf("pdrmatch: %s: %s gate %s carried %v, %s gate %s carried %v, %s left by the action's next hop\n",
 		id, actionsUL, n6Gate, resolved, router, n6Gate, uplink, router)
-	return nil
+	return qfiFlows(ctx, client)
 }
 
 // config is the deployed graph's shape (deploy/pdrmatch-path.yaml), in the
@@ -237,6 +237,35 @@ func establishment() *message.SessionEstablishmentRequest {
 			ie.NewFARID(1),
 			ie.NewQERID(1),
 		),
+		// The same tunnel's two QoS flows, at a higher precedence than the
+		// rule that names none: QFI 9 is dropped (its FAR does nothing) and
+		// QFI 5 is forwarded. A module that ignored the QFI would match the
+		// first of them for every packet of the tunnel.
+		ie.NewCreatePDR(
+			ie.NewPDRID(3),
+			ie.NewPrecedence(10),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, upTEID, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewSDFFilter(uplinkRule, "", "", "", 0),
+				ie.NewQFI(9),
+			),
+			ie.NewFARID(3),
+		),
+		ie.NewCreatePDR(
+			ie.NewPDRID(4),
+			ie.NewPrecedence(20),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, upTEID, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewSDFFilter(uplinkRule, "", "", "", 0),
+				ie.NewQFI(5),
+			),
+			ie.NewFARID(1),
+			ie.NewQERID(1),
+		),
 		ie.NewCreatePDR(
 			ie.NewPDRID(2),
 			ie.NewPrecedence(100),
@@ -260,6 +289,7 @@ func establishment() *message.SessionEstablishmentRequest {
 				ie.NewOuterHeaderCreation(0x0100, downTEID, "10.20.30.2", "", 0, 0, 0),
 			),
 		),
+		ie.NewCreateFAR(ie.NewFARID(3), ie.NewApplyAction(0)),
 		ie.NewCreateQER(
 			ie.NewQERID(1),
 			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
@@ -288,16 +318,28 @@ func readback(ctx context.Context, client *bess.Client, fseid *ie.FSEIDFields, t
 	if !ok || len(rules) == 0 {
 		return "", fmt.Errorf("%s: the value carries no rules: %v", rulesRes, entries[0].Value)
 	}
-	first, ok := rules[0].(map[string]any)
-	if !ok {
-		return "", fmt.Errorf("%s: the first rule is %T, not a rule", rulesRes, rules[0])
+	// The rule that names no QFI: the session's general one, and the one with
+	// an ActionId to read (QFI 9's drops, and names none). protojson spells
+	// the fields in lower camel case ("actionId", "qfi"), which is what the
+	// daemon's readback decodes to -- the same names the compiler wrote in
+	// snake case in the transaction.
+	var action json.Number
+	named := 0
+	for _, r := range rules {
+		rule, ok := r.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("%s: a rule is %T, not a rule", rulesRes, r)
+		}
+		if rule["qfi"] != nil {
+			named++
+			continue
+		}
+		if action, ok = rule["actionId"].(json.Number); !ok {
+			return "", fmt.Errorf("%s: the rule carries no action id: %v", rulesRes, rule)
+		}
 	}
-	// protojson spells the field in lower camel case ("actionId"), which is
-	// what the daemon's readback decodes to -- the same ActionId the compiler
-	// wrote as `action_id` in the transaction.
-	action, ok := first["actionId"].(json.Number)
-	if !ok {
-		return "", fmt.Errorf("%s: the rule carries no action id: %v", rulesRes, first)
+	if named != 2 || len(rules) != 3 {
+		return "", fmt.Errorf("%s holds %d rules, %d naming a QFI, want 3 and 2", rulesRes, len(rules), named)
 	}
 	line, err := json.Marshal(entries)
 	if err != nil {
@@ -392,4 +434,91 @@ func cause(i *ie.IE) uint8 {
 		return 0
 	}
 	return c
+}
+
+// qfiFlows is the QFI proof, read from the module's own gate counters: the
+// session's list is [QFI 9: drop, QFI 5: forward, no QFI: forward], and the
+// graph has a stream for each of the last two flows besides the plain one. One
+// stream runs at a time (a Source's `settings` is how the others are stopped),
+// so what a counter gained is that stream's.
+//
+//   - QFI 9 must reach the module (the decap's gate counts it) and must not
+//     leave it: its rule is a drop. A module that ignored the QFI would drop
+//     every stream, the next one included.
+//   - QFI 5 must leave the module and the router: the first rule of its list
+//     that matches is the forward, not the QFI 9 drop that precedes it in the
+//     session's order.
+func qfiFlows(ctx context.Context, client *bess.Client) error {
+	stop := func(src string, size int) error { return setBurst(ctx, client, src, size, 0) }
+	if err := stop("src_up", 87); err != nil {
+		return err
+	}
+	time.Sleep(time.Second) // what the plain stream already sent drains
+
+	gate := func(m string) (float64, error) { return gatePackets(ctx, client, m, n6Gate) }
+	run := func(src string) (decap, matched, routed float64, err error) {
+		var d0, m0, r0 float64
+		for _, g := range []struct {
+			m string
+			v *float64
+		}{{"decap0", &d0}, {module, &m0}, {router, &r0}} {
+			if *g.v, err = gate(g.m); err != nil {
+				return
+			}
+		}
+		if err = setBurst(ctx, client, src, 95, 32); err != nil {
+			return
+		}
+		time.Sleep(2500 * time.Millisecond) // two Dump samples of this stream
+		if err = stop(src, 95); err != nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+		var d1, m1, r1 float64
+		for _, g := range []struct {
+			m string
+			v *float64
+		}{{"decap0", &d1}, {module, &m1}, {router, &r1}} {
+			if *g.v, err = gate(g.m); err != nil {
+				return
+			}
+		}
+		return d1 - d0, m1 - m0, r1 - r0, nil
+	}
+
+	d, m, r, err := run("src_q9")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("pdrmatch: QFI 9 stream: the decap emitted %v, the module %v, the router %v\n", d, m, r)
+	if d == 0 {
+		return errors.New("the QFI 9 stream never reached the module: the check below would pass for want of traffic")
+	}
+	if m != 0 || r != 0 {
+		return fmt.Errorf("QFI 9's packets left the module (%v) or the router (%v): its rule drops", m, r)
+	}
+	fmt.Println("pdrmatch: ok: QFI 9's packets reached the module and were dropped by its QFI 9 rule")
+
+	d, m, r, err = run("src_q5")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("pdrmatch: QFI 5 stream: the decap emitted %v, the module %v, the router %v\n", d, m, r)
+	if d == 0 || m == 0 || r == 0 {
+		return fmt.Errorf("QFI 5's packets did not cross: decap %v, module %v, router %v", d, m, r)
+	}
+	fmt.Println("pdrmatch: ok: QFI 5's packets matched their own rule, not the QFI 9 drop that precedes it")
+	return nil
+}
+
+// setBurst sets a Source's `settings` singleton (burst 0 stops the stream).
+func setBurst(ctx context.Context, client *bess.Client, src string, size, burst int) error {
+	err := client.Apply(ctx, bess.Change{
+		Resource: src + "/settings",
+		Value:    map[string]any{"pkt_size": size, "burst": burst},
+	})
+	if err != nil {
+		return fmt.Errorf("setting %s/settings to burst %d: %w", src, burst, err)
+	}
+	return nil
 }

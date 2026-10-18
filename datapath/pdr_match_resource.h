@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -30,10 +31,28 @@ namespace pdr_match {
 inline constexpr uint16_t kDrop = 0xFFFF;
 inline constexpr uint16_t kPass = 0;
 
-// One session's rules, published whole: the structure that matches them, and
-// the entry the controller wrote, kept so "<module>/rules" reads back as given.
-struct Rules {
+// The rules that can apply to packets of one QFI, as one matcher over them in
+// the session's order, with the ActionId of each in the matcher's own
+// numbering (rule_id - 1): the packet path reads the id here, not out of the
+// protobuf.
+struct QfiRules {
   std::unique_ptr<const SessionMatcher> matcher;
+  std::vector<uint32_t> action_ids;
+};
+
+// One session's rules, published whole: the structures that match them, and
+// the entry the controller wrote, kept so "<module>/rules" reads back as given.
+//
+// A rule may name a QFI (TS 29.244 8.2.89), and the first rule that matches a
+// packet's tuple *and* its QFI wins, which one scan over the tuple cannot say:
+// so a packet of QFI q is matched by the list of the rules that name q or
+// nothing, in the session's order. `named` holds one such list per QFI some
+// rule names, and `any` the rules that name none -- what a packet of every
+// other QFI (and of none) can match. A session with no QFI-naming rule has
+// `any` and an empty `named`, and the packet path never reads the QFI.
+struct Rules {
+  QfiRules any;
+  std::vector<std::pair<uint8_t, QfiRules>> named;  // sorted by QFI; a few
   upf::pb::PdrMatchEntry arg;
 };
 
@@ -93,7 +112,12 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
   using bess::classifier::FirewallFamily;
   using bess::classifier::FirewallRule;
 
-  std::vector<FirewallRule> rules;
+  // A rule as the structure takes it, and the QFI it names, if any.
+  struct Parsed {
+    FirewallRule rule;
+    std::optional<uint8_t> qfi;
+  };
+  std::vector<Parsed> rules;
   rules.reserve(static_cast<size_t>(entry.rules_size()));
   int i = 0;
   for (const auto &rule : entry.rules()) {
@@ -153,6 +177,15 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
                   "reaches the ActionTable that would resolve it");
     }
 
+    std::optional<uint8_t> qfi;
+    if (rule.has_qfi()) {
+      if (rule.qfi() > 63) {
+        return std::unexpected(where + "QFI " + std::to_string(rule.qfi()) +
+                               " is out of range (0..63)");
+      }
+      qfi = static_cast<uint8_t>(rule.qfi());
+    }
+
     FirewallRule parsed;
     parsed.family = family;
     if (src) {
@@ -170,16 +203,53 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
     parsed.dst_port_high = static_cast<uint16_t>(dst_high);
     parsed.action = rule.drop() ? kDrop : kPass;
     parsed.action_id = rule.action_id();
-    rules.push_back(parsed);
+    rules.push_back({parsed, qfi});
     i++;
   }
 
-  auto matcher = MakeSessionMatcher(std::move(rules));
-  if (!matcher) {
-    return std::unexpected(matcher.error());
-  }
+  // One matcher over the rules a packet of `q` can match: those naming it, and
+  // those naming none, in the session's order. nullopt is "no QFI": the rules
+  // that name none.
+  auto build = [&rules](std::optional<uint8_t> q)
+      -> std::expected<QfiRules, std::string> {
+    std::vector<FirewallRule> list;
+    QfiRules out;
+    for (const Parsed &p : rules) {
+      if (!p.qfi || (q && *p.qfi == *q)) {
+        list.push_back(p.rule);
+        out.action_ids.push_back(p.rule.action_id);
+      }
+    }
+    auto matcher = MakeSessionMatcher(std::move(list));
+    if (!matcher) {
+      return std::unexpected(matcher.error());
+    }
+    out.matcher = std::move(*matcher);
+    return out;
+  };
+
   auto out = std::make_unique<Rules>();
-  out->matcher = std::move(*matcher);
+  auto any = build(std::nullopt);
+  if (!any) {
+    return std::unexpected(any.error());
+  }
+  out->any = std::move(*any);
+  std::vector<uint8_t> qfis;
+  for (const Parsed &p : rules) {
+    if (p.qfi) {
+      qfis.push_back(*p.qfi);
+    }
+  }
+  std::sort(qfis.begin(), qfis.end());
+  qfis.erase(std::unique(qfis.begin(), qfis.end()), qfis.end());
+  for (const uint8_t q : qfis) {
+    auto list = build(q);
+    if (!list) {
+      return std::unexpected("for QFI " + std::to_string(q) + ": " +
+                             list.error());
+    }
+    out->named.emplace_back(q, std::move(*list));
+  }
   out->arg = entry;
   return out;
 }

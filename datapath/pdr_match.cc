@@ -67,6 +67,15 @@ CommandResponse PdrMatch::Init(const upf::pb::PdrMatchArg &arg) {
     return CommandFailure(-action_attr_, "add_metadata_attr() failed");
   }
 
+  // The QoS flow, as the decap read it out of the PDU Session Container (0 when
+  // none was carried): what a rule that names a QFI is matched against. Read
+  // only by sessions that have such a rule; declared here so the attribute has
+  // an offset when the decap writes it.
+  qfi_attr_ = AddMetadataAttr("qfi", sizeof(uint8_t), AccessMode::kRead);
+  if (qfi_attr_ < 0) {
+    return CommandFailure(-qfi_attr_, "add_metadata_attr() failed");
+  }
+
   const size_t max_sessions =
       arg.max_sessions() == 0 ? kDefaultMaxSessions : arg.max_sessions();
   resource_ = std::make_unique<pdr_match::SessionResource>(name() + "/rules",
@@ -213,6 +222,11 @@ void PdrMatch::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   // offset is valid only when something reads the attribute; with no reader
   // there is nothing to resolve the action for, and nothing to write.
   const bool publish_action = bess::metadata::IsValidOffset(action_offset);
+  // The QFI is read only for a session that has a rule naming one; with no
+  // writer the attribute has no offset and a packet is of no QFI (0), which
+  // no rule names.
+  const bess::metadata::mt_offset_t qfi_offset = attr_offset(qfi_attr_);
+  const bool qfi_valid = bess::metadata::IsValidOffset(qfi_offset);
 
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
@@ -236,11 +250,24 @@ void PdrMatch::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
 
     bess::classifier::FirewallKey key;
     bess::classifier::FirewallTable::Match match;
+    // The rules this packet can match: the session's list for its QFI where
+    // some rule names it, else the rules that name none.
+    const pdr_match::QfiRules *list = &rules->any;
+    if (!rules->named.empty()) [[unlikely]] {
+      const uint8_t qfi =
+          qfi_valid ? get_attr_with_offset<uint8_t>(qfi_offset, pkt) : 0;
+      for (const auto &[q, named] : rules->named) {
+        if (q == qfi) {
+          list = &named;
+          break;
+        }
+      }
+    }
     // The family first: a session whose rules name no rule for this packet's
     // family cannot match it, and saying so costs no lookup.
     if (not KeyOf(pkt, &key) ||
-        not rules->matcher->HasFamily(key.family) ||
-        not rules->matcher->Lookup(key, &match)) [[unlikely]] {
+        not list->matcher->HasFamily(key.family) ||
+        not list->matcher->Lookup(key, &match)) [[unlikely]] {
       continue;
     }
     if (match.action == pdr_match::kDrop) [[unlikely]] {
@@ -248,9 +275,8 @@ void PdrMatch::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     }
 
     if (publish_action) {
-      // rule_id is 1-based, and the entry's rules are the session's in the
-      // order the controller wrote them -- the order the matcher matched in.
-      const uint32_t id = rules->arg.rules(match.rule_id - 1).action_id();
+      // rule_id is 1-based, in the list the packet was matched against.
+      const uint32_t id = list->action_ids[match.rule_id - 1];
       _set_attr_with_offset<be32_t>(action_offset, pkt, be32_t(id));
     }
     ogates[i] = 0;

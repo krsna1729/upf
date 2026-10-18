@@ -104,6 +104,21 @@ check "the matched packet left the router by its N6 gate" "$N6_HEX" \
       "02 00 00 00 00 02 02 00 00 00 00 01 08 00 45 00"
 check "the packet on N6 is the UE's" "$N6_HEX" "0a 2d 00 02 08 08 08 08"
 
+# The QoS flows, by their payloads ("qfi5-upf!", "qfi9-upf!"). Both reached the
+# module (they are in the decap's dump); only QFI 5's left it toward N6, so the
+# QFI 9 rule dropped its own flow and the QFI 5 rule forwarded the other.
+Q5="71 66 69 35 2d 75 70 66 21"
+Q9="71 66 69 39 2d 75 70 66 21"
+check "the QFI 5 flow reached the module" "$UP_HEX" "$Q5"
+check "the QFI 9 flow reached the module" "$UP_HEX" "$Q9"
+check "the QFI 5 flow left by N6" "$N6_HEX" "$Q5"
+if printf '%s\n' "$N6_HEX" | grep -Fq -- "$Q9"; then
+  echo "FAIL: the QFI 9 flow, whose rule drops, left by N6" >&2
+  FAIL=1
+else
+  echo "ok: the QFI 9 flow did not leave by N6"
+fi
+
 # The module, as the daemon loaded it: the matcher it was built over, and the
 # attribute its session key is read from -- the decap's F-TEID.
 if grep -Fq "pdr_match_ul/rules over firewall_scan, keyed by 'upf_teid'" "$LOG"; then

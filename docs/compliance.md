@@ -154,7 +154,7 @@ echo, end marker, DSCP marking, the per-rule counters).
 | row above | under the custom profile |
 |---|---|
 | 8.2.5 SDF filter — port ranges | **compiles, untested live**: the rule shape is the firewall's, so inclusive ranges are carried instead of refused |
-| 8.2.4 / 8.2.89 — QFI | **refused**: a QFI-naming PDI is refused on this path (its rules are the 5-tuple), where the wildcard path keys the rule on the QFI |
+| 8.2.4 / 8.2.89 — QFI | **in, live**: a QFI-naming PDI is a rule naming its flow; the module matches it against the decap's `qfi` attribute, one matcher per QFI the rules name (`ci/pdrmatch-path.sh`: the QFI 9 flow is dropped by its rule, the QFI 5 flow forwarded on its own ActionId; `TestAPdrMatchPDINamingAQFIIsCarriedOnItsRule`) |
 | 7.5.2.6 / 8.2.26 BUFF | **refused**: a BUFF PDR is refused on this path — the largest difference between the two profiles |
 | gap 6 — IPv6 | **partly better**: an SDF prefix of either family compiles (the module's rules carry both families), while the IPv6 UE address and the IPv6 F-TEID stay refused, because the key is IPv4-only |
 | the opt-in firewall path | not this path: that module is the generic profile's other strategy, not a third profile |
@@ -171,7 +171,7 @@ not take a row as profile-independent when it is not.
 
 Capability is not the only axis: the profiles differ in what a session change
 costs and what a packet costs. Nothing below benchmarks the custom path yet —
-its arm has not run — so each row says whether it is **measured**, **derived**
+its uplink arm (`ci/pdrmatch-path.sh`) has run, and checks correctness, not cost — so each row says whether it is **measured**, **derived**
 from measured rows, or **owed**.
 
 | axis | generic — wildcard | generic — firewall | custom — keyed | status |
@@ -284,10 +284,11 @@ fine" where the custom path simply cannot take the rule.
    deployment can run today; the PDI's own IPv6 *UE address* is still refused,
    because the F-TEID key, the tunnel record and the WildcardMatch key's
    address fields are IPv4-only, so an IPv6 prefix in a filter is not an IPv6
-   session; and the path is **unarmed** — the installed stage carries no
-   `firewall` module, so no `deploy/*.yaml` graph names one (a graph naming a
-   module the daemon does not have fails to load), no packet has crossed such a
-   rule, and the arms in `ci/` prove nothing about it. The rest of this gap
+   session; and the path is **unarmed** — no `deploy/*.yaml` graph names a
+   `firewall` module and no arm has run a packet through one of its rules. (The
+   stage built from this repo's BESS copy does load `Firewall`: a graph naming
+   it applies, observed once; an earlier note that the stage carried no such
+   module is stale.) The rest of this gap
    therefore stands as it was: the dataplane's tables, the two address fields
    and the TEID rule key would all need a second form, and this is what "IPv6
    not implemented" means here.

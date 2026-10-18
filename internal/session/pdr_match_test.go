@@ -345,28 +345,46 @@ func TestThePdrMatchPathIsOptIn(t *testing.T) {
 	}
 }
 
-func TestAPdrMatchPDINamingAQFIIsRefused(t *testing.T) {
-	// The module's rules are the 5-tuple: it carries no QFI, so a PDI that
-	// names one cannot be served without matching more widely than the filter.
-	// The SMF is told the rule failed rather than handed a session whose uplink
-	// selects the wrong packets.
+func TestAPdrMatchPDINamingAQFIIsCarriedOnItsRule(t *testing.T) {
+	// Two PDRs of one tunnel that differ only by QFI are two rules of the
+	// session's one list, each naming its flow; a PDR that names none names no
+	// key at all (a rule that says qfi=0 would match only a packet with no
+	// container). The order stays the SMF's Precedence order.
 	rec := &recorder{}
 	c := New(pdrMatchConfig("pdr_match_ul"), rec, quietLogger())
+	const teid = 0x71
+	pdr := func(id uint16, prec uint32, qfi int) *ie.IE {
+		pdi := []*ie.IE{
+			ie.NewSourceInterface(ie.SrcInterfaceAccess),
+			ie.NewFTEID(0x01, teid, net.ParseIP("192.0.2.1"), nil, 0),
+			ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+		}
+		if qfi >= 0 {
+			pdi = append(pdi, ie.NewQFI(uint8(qfi)))
+		}
+		return ie.NewCreatePDR(ie.NewPDRID(id), ie.NewPrecedence(prec), ie.NewPDI(pdi...), ie.NewFARID(1))
+	}
 	req := message.NewSessionEstablishmentRequest(0, 0, 0x6f01, 1, 0,
 		ie.NewFSEID(0x6f01, nil, nil),
-		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(100),
-			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, 0x71, net.ParseIP("192.0.2.1"), nil, 0),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
-				ie.NewQFI(9)),
-			ie.NewFARID(1)),
+		pdr(1, 300, -1), pdr(2, 100, 9), pdr(3, 200, 5),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
 	)
-	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
-		t.Errorf("a PDI naming a QFI answered cause %d, want a rule failure", got)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a PDI naming a QFI answered cause %d", got)
 	}
-	if len(rec.txns) != 0 {
-		t.Error("a refused session wrote to the dataplane")
+	list := pdrMatchRules(t, oneMapChange(t, rec.last(), "pdr_match_ul/rules", teid))
+	if len(list) != 3 {
+		t.Fatalf("the entry holds %d rules, want three", len(list))
+	}
+	for i, want := range []any{uint32(9), uint32(5), nil} { // Precedence 100, 200, 300
+		got, ok := list[i]["qfi"]
+		if want == nil {
+			if ok {
+				t.Errorf("rule %d names QFI %v, want none", i, got)
+			}
+		} else if got != want {
+			t.Errorf("rule %d names QFI %v, want %v", i, got, want)
+		}
 	}
 }
 

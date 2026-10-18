@@ -1,8 +1,8 @@
 # Handoff: the two-profile UPF
 
-Status: 2026-10-18, end of the session that built the profile mechanism and the
-keyed per-session matcher's compiler half. This file is the state of the work,
-what is verified and what is not, and the order the rest should be taken in.
+Status: 2026-10-18, updated after the module and its arm landed and ran. This
+file is the state of the work, what is verified and what is not, and what is
+left.
 
 ## The goal
 
@@ -26,51 +26,49 @@ profile" is the same ground over the compliance rows.
 
 Full suite green at every one of those commits, with **`GOWORK=off`**.
 
-## Uncommitted, and why
+## Landed since, and what proves it
 
-- **The module** — `datapath/pdr_match.{h,cc}`, `pdr_match_matcher.h` (the
-  seam), `pdr_match_resource.h`, `pdr_match_scan.cc`, plus `meson.build` and
-  `upf_datapath.proto`. **It compiles against the installed stage** (the objects
-  are in `datapath/build`, the `.so` links, the temporary indexed matcher is
-  deleted) and **no packet has ever crossed it**. It is not landable until it has
-  a test that fails without it — an encoding test, or the arm.
-- **The arm** — `ci/pdrmatch-path.sh`, `ci/pdrmatch/`, and the graph
-  `deploy/pdrmatch-path.yaml`. Never run. This is the slice that has killed
-  every agent that touched it.
-- **The custom graph's shape is wrong** — `deploy/custom-pdrmatch.yaml` is the
-  no-NIC shape (no ports, egress to a `sink`, no echo, no marker), so it differs
-  from `deploy/upf.yaml` by five things rather than by the matcher alone. Make
-  it `upf.yaml` with `pdr_ul` replaced by `pdr_match_ul` and `mt_ul_read`
-  dropped (the module reads `upf_teid` itself through `key_attr`), keeping the
-  ports, the echo and the marker.
+Commits are named by subject; hashes moved when `n4.test` (a 7 MB test binary
+that was the only binary ever tracked) was removed from history.
 
-## Next, in order
+| what | what proves it |
+|---|---|
+| every `ci/` lane on this repo's own BESS copy (`build/bess/`, built by `ci/vendor-bess.sh`; never `~/Projects/bess`), on free ports (`ci/bess-env.sh`), with a clean-shutdown verdict | `LD_DEBUG=libs ci/smoke-gtpu.sh`: no library initialised from outside the copy; every lane exits 0 only if `bessd` exits 0 on SIGTERM |
+| the `PdrMatch` module, its proto and the arm `ci/pdrmatch-path.sh` | a packet on N3, decapped, matched by the module, its ActionId resolved, out on N6; the module's key read back from the daemon |
+| a **use-after-free the arm found**: `UpsertOp::Publish` kept ownership of the `Rules` it published, so the op's destructor freed what the packet path read and a later erase retired it twice | fail-first: the pre-fix plugin fails the lane (`bessd exited with status 1 on shutdown`), the fixed one passes; the old arm had exited 0 on freed memory |
+| QFI on the custom path | `ci/pdrmatch-path.sh` (QFI 9 dropped by its rule, QFI 5 forwarded on its own ActionId, one stream at a time) and `TestAPdrMatchPDINamingAQFIIsCarriedOnItsRule` |
+| `deploy/custom-pdrmatch.yaml` ported: `upf.yaml` with the matcher swapped | a structural diff shows only that; it validates, and a copy with the NIC ports as unix sockets applies. A real apply needs a NIC |
+| the PFCP lane on the custom profile | `PROFILE=custom ci/n4-path.sh`, restart sweep and checkpoint replay included |
+| QER meter, URR counters, quota, DSCP, end marker through the module | `PROFILE=custom ci/session-path.sh` (the End Marker socket is rendered per run) |
 
-1. **The custom graph, ported** (above), then **load-check both graphs**: a
-   `bessd` from the installed stage loads them or it does not — the cheapest
-   real proof available, and the only thing that shows the module's `key_attr`
-   read is enough to give `upf_teid` an offset where `mt_ul_read` used to.
-2. **The module's encoding test**, which is what makes it landable.
-3. **The arm**: a session established with the opt-in, a packet on N3,
-   decapsulated, matched **by the module**, the right `action_id`, out on N6.
-4. **QFI on the custom path** — a `qfi` field on the rule, matched against the
-   metadata the decap writes from the PDU Session Container; the compiler's
-   refusal then comes off (`pdrMatchChanges`).
-5. **BUFF on the custom path** — the action names a **Router next hop**, not a
+`GOWORK=off go test ./...` passes. One `PROFILE=custom ci/session-path.sh` run
+failed once and its output was lost; 21 later runs (both profiles) passed, so
+it is **unexplained, not fixed**.
+
+## Left, in order
+
+1. **The firewall's `action_id`** — the stock module writes a per-rule id and an
+   `ActionTable` resolves it (D-141); `firewallRule` in `compile.go` does not
+   emit it, so our opt-in firewall path cannot carry a range or IPv6 PDR to its
+   own next hop. The stage **does** load `Firewall` (a graph naming it applied),
+   so this is armable.
+2. **BUFF on the custom path** — the action names a **Router next hop**, not a
    gate: `PdrMatch (rule, action_id) → ActionTable (next_hop_id metadata) →
    Router → gate`, so the store's input gate must be reachable as a next hop of
    the Router declared in its `next_hops` resource, with a config field for the
    id. **Check the placement first**: in `deploy/buffer-path.yaml` the store sits
    *before* `at_dl`, so via the action route it would sit after the Router and
    the release path would re-enter the meter and encap rather than the
-   ActionTable.
-6. **The downlink selector** — `route::LpmRouteTable` keyed on (route domain, UE
-   prefix), which is why the module is uplink-only today.
-7. **The firewall's `action_id`** — the stock module writes a per-rule id and an
-   `ActionTable` resolves it (D-141); `firewallRule` in `compile.go` does not
-   emit it, so our opt-in firewall path cannot carry a range or IPv6 PDR to its
-   own next hop. Small, and it makes the generic profile's other structure
-   honest.
+   ActionTable. Needs the owner's call.
+3. **The downlink selector** — `route::LpmRouteTable` keyed on (route domain, UE
+   prefix), which is why the module is uplink-only today. Needs a design call.
+4. **IPv6 through the module** and **route domains on the custom path** — the
+   key is IPv4-only; one module per domain or the domain in the key.
+5. **Not done anywhere**: gate/GBR, time and threshold URRs on the custom path
+   (live), the echo responder in the custom lab graph, an ASan build of the
+   plugin, a benchmark of the custom path, a real SMF, a NIC.
+6. **The force-push**: the rewritten history is local; the GitHub remote still
+   has `n4.test` until the owner force-pushes.
 
 ## Traps worth not rediscovering
 

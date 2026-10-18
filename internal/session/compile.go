@@ -3449,12 +3449,19 @@ func createdFTEID(teid uint32, addr netip.Addr) *ie.IE {
 // carry usefully (the policy is one resource for every session, so an id in it
 // would be one id).
 //
-// The QFI stays out, as it does on the firewall path: a PDI that names one is
-// refused rather than matched more widely than the filter (pdrMatchChanges).
+// A PDI's QFI (TS 29.244 8.2.89) is the rule's own: the module matches it
+// against the QoS flow the decap read out of the PDU Session Container, so two
+// PDRs of one tunnel that differ only by QFI are two rules of one session's
+// list, each chosen by its flow -- where the firewall path, whose table is the
+// 5-tuple, refuses a PDI that names one rather than match more widely than the
+// filter.
 func pdrMatchRule(p *pdr) (map[string]any, error) {
 	rule, err := firewallRule(p)
 	if err != nil {
 		return nil, err
+	}
+	if p.hasQFI {
+		rule["qfi"] = uint32(p.qfi)
 	}
 	if p.drop {
 		// A drop needs no action record and names none: the id the PDR may
@@ -3545,11 +3552,6 @@ func (c *Compiler) pdrMatchChanges(s *Session) ([]bess.Change, error) {
 			if p.teid == 0 {
 				return nil, fmt.Errorf(
 					"%w: PDR %d names no F-TEID, and the PdrMatch path keys a session by it",
-					errNotExpressible, p.id)
-			}
-			if p.hasQFI {
-				return nil, fmt.Errorf(
-					"%w: PDR %d names a QFI, which the PdrMatch path does not carry yet (the module's rules are the 5-tuple)",
 					errNotExpressible, p.id)
 			}
 			if p.buffer {

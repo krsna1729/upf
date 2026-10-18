@@ -123,13 +123,13 @@ packet through it).
 | block | on the custom path | why |
 |---|---|---|
 | 1 association, heartbeat, restart | works | the N4 layer is profile-independent |
-| 2 establishment, modification, deletion | **works, tested** | one key per session, keyed by the F-TEID, in SMF precedence order — committed with its seven tests (`3508638`) |
+| 2 establishment, modification, deletion | **works, tested** | one key per session, keyed by the F-TEID, in SMF precedence order — its seven unit tests, and live: `ci/pdrmatch-path.sh`, and `PROFILE=custom ci/n4-path.sh` (the whole PFCP lane, restart sweep and checkpoint replay included) |
 | 3 Session Report: USAR / DLDR | USAR works / DLDR refused | the report path is control-side; DLDR needs a buffering flow, and a BUFF PDR is refused on this path |
-| 4 PDI: precedence / F-TEID+CHID / UE IP / SDF+ranges / NI+QFI | precedence, F-TEID, UE IP, ranges work; QFI refused; domain untested | the key *is* the F-TEID, so a PDR is chosen by its tunnel and the UE address is not needed; the rule shape is the firewall's, so inclusive port ranges and both families compile; a QFI-naming PDI is refused (the rules are the 5-tuple) |
-| 5 QER: gate, MBR, GBR | untested | the meter and the action are per-PDR and the keyed path writes the same action ids |
-| 6 URR: volume, time, thresholds, quota, linked | untested | counters are per rule (per ActionId), which the keyed path writes |
+| 4 PDI: precedence / F-TEID+CHID / UE IP / SDF+ranges / NI+QFI | precedence, F-TEID, UE IP, **QFI** work (live); ranges compile, untested live; domain untested | the key *is* the F-TEID, so a PDR is chosen by its tunnel; the rule shape is the firewall's, so inclusive port ranges and both families compile; a QFI-naming PDI is a rule naming its flow, matched against the decap's `qfi` attribute: `ci/pdrmatch-path.sh` drops the QFI 9 flow by its rule and forwards the QFI 5 flow on its own rule's ActionId (`TestAPdrMatchPDINamingAQFIIsCarriedOnItsRule` for the compiler's half) |
+| 5 QER: gate, MBR, GBR | MBR meter **works (live)**; gate and GBR untested on this path | `PROFILE=custom ci/session-path.sh`: the session's QER is behind the meter its action names, and the packets cross it. A closed gate and a GBR are not exercised live in this profile |
+| 6 URR: volume, time, thresholds, quota, linked | **works (live)**: counters and quota | `PROFILE=custom ci/session-path.sh`: `TestLiveSessionCountsTheRulesATURReasures` and `TestLiveQuotaEvaluationStopsTheTraffic` pass through the module (counters per rule, quota enforcement stops the source). Time, thresholds and the linked group are not run through this path |
 | 7 BAR + DDN: buffering, DDN, duration, drop | **refused** | a BUFF PDR is refused on this path — the largest gap between the two profiles |
-| 8 GTP-U: decap, encap, echo, end marker, DSCP | untested | the tunnel modules are unchanged by the profile |
+| 8 GTP-U: decap, encap, echo, end marker, DSCP | decap, encap, end marker, DSCP **work (live)**; echo untested here | `PROFILE=custom ci/session-path.sh` checks the end marker byte for byte and the DSCP copy; the lab graph carries no echo responder, and `ci/smoke-gtpu.sh` proves echo on the unchanged module |
 | 9 IPv6 | SDF prefixes **compile, untested**; UE address and F-TEID refused | the module's rules carry both families (the firewall rule shape), which is *better* than the generic wildcard path; the F-TEID key is IPv4-only, so an IPv6 session is still refused |
 | 10 MAR / ATSSS-LL | not implemented | phased in both profiles; needs a dual-3GPP deployment |
 | 11 ULCL / N9 route domains | partly | the routing model is control-side; the module is uplink-only, so N9 and the downlink need the selector below |
@@ -138,28 +138,37 @@ packet through it).
 **The checklist that closes the goal**, in order, each item with its own proof:
 
 1. **The uplink arm** — a packet on N3, decapped, matched *by the module*, the
-   right `action_id`, egress on N6. In flight (`Upf.PdrMatchArm`), and it is
-   what commits the module.
-2. **The profile mechanism** — `-profile generic|custom`, resolved at startup,
-   with the default's no-regression shown by the existing arms. In flight
-   (`Upf.ProfileMechanism`).
+   right `action_id`, egress on N6. **Done**: `ci/pdrmatch-path.sh`, with a
+   clean-shutdown verdict. The arm's first run found the module freeing the
+   rules it had published (the packet path read freed memory and `bessd`
+   aborted on teardown); fixed in `UpsertOp::Publish`, with the pre-fix plugin
+   failing the lane and the fixed one passing.
+2. **The profile mechanism** — `-profile generic|custom`, resolved at startup.
+   **Done**: `PROFILE=custom ci/n4-path.sh` runs the whole PFCP lane on
+   `deploy/pdrmatch-path.yaml`; the default's no-regression is the same lane
+   with `PROFILE=generic`. `deploy/custom-pdrmatch.yaml` is the deployable
+   graph (`deploy/upf.yaml` with the matcher swapped); it validates, and a
+   copy with the NIC ports swapped for unix sockets applies. A real apply needs
+   a NIC.
 3. **Buffering on the custom path** — the module must carry a verdict for a BUFF
-   PDR (a gate or a store key), so the largest gap above closes. Module change.
-4. **QFI on the custom path** — the rule's key must carry the QFI, or the map
-   must be keyed per QFI. Module change.
+   PDR (a gate or a store key), so the largest gap above closes. Module change;
+   open, and the placement is the owner's call.
+4. **QFI on the custom path** — **Done**: the rule carries an optional `qfi`;
+   the module builds one matcher per QFI the rules name and picks it by the
+   decap's attribute. Live in `ci/pdrmatch-path.sh`.
 5. **The downlink selector** — `LpmRouteTable` keyed on (route domain, UE
    prefix), so a session is named on N6. Module change, and the reason the
-   module is uplink-only today.
-6. **A custom arm carrying QER + meters + URR counters** — the per-PDR action
-   ids and counters are already written; nothing has measured them through this
-   path.
-7. **A custom arm carrying the tunnel path messages** — echo, end marker, DSCP
-   marking — unchanged modules, unproven in this graph.
+   module is uplink-only today. Open.
+6. **A custom arm carrying QER + meters + URR counters** — **Done**:
+   `PROFILE=custom ci/session-path.sh` (see rows 5 and 6 for what it covers
+   and what it does not).
+7. **A custom arm carrying the tunnel path messages** — **Done** for end marker
+   and DSCP in that lane; echo is covered by the unchanged module's own arm.
 8. **An IPv6 SDF prefix through the module** — the capability the custom path
    has and the generic wildcard path does not; needs a v6 key form or a second
-   map.
+   map. Open.
 9. **Route domains on the custom path** — one module per domain, or the domain
-   in the key; unproven either way.
+   in the key; unproven either way. Open.
 
 ## The blocks, audited
 
@@ -226,8 +235,8 @@ one port value. As of 2026-10-18 the compiler has an opt-in path that carries it
 — `upfd -firewall-ul`/`-firewall-dl` put a direction's PDRs into BESS's
 `firewall` table, whose rules carry inclusive port ranges and both address
 families (`TestAPortRangeCompilesToAFirewallRuleWithItsRange`,
-`TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly`) — but that table is not in
-the installed stage, no graph in `deploy/` declares the module, and no packet
+`TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly`) — but no graph in `deploy/`
+declares the module (the stage does load it), and no packet
 has crossed such a rule, so the sub-feature stays uncredited on the same rule
 block 7 uses below: a number written and read back is not the effect shown. The
 cell moves when an arm can carry a range through the module, not when the
@@ -397,7 +406,7 @@ half of the first sub-feature, only in the compiler: a PDI's IPv6 UE address is
 still refused (the F-TEID key, the tunnel record and the WildcardMatch key's
 address fields are IPv4-only), so this is not an IPv6 session; IPv6 inner and
 outer headers and IPv6 on N9 are untouched; and the path cannot be run at all
-(the module is not in the installed stage, no graph declares it, no packet has
+(no graph declares the module, though the stage loads it, no packet has
 crossed one of its rules — `docs/compliance.md`, gap 6). Half of one sub-feature
 in the compiler, with nothing demonstrated, is not a third of the block.
 
@@ -442,7 +451,7 @@ close, on its own, against the current mean of 68:
 | close | block | block from → to | mean | cost |
 |---|---|---|---|---|
 | the port work's placement measurement (the vif's write itself landed on 2026-10-18: `deploy/veth-port.yaml` splits one port into the three interfaces and `ci/veth-port.sh` shows the compiler's rule selected by the domain the port wrote) | 11 | 50 → 100 | 68 → 73 | `docs/design.md`'s port section and `docs/ports.md`; needs a NIC -- a veth advertises no RSS offload (`ethdev_rss_hf=0x0`) |
-| IPv6 | 9 | 0 → 100 | 68 → 77 | the dataplane's tables and the F-TEID key: a second form, not a patch. An SDF filter's IPv6 *prefix* is compiled on the opt-in firewall path since 2026-10-18, which is not a close: the module is not in the installed stage and no packet has crossed one of its rules (block 9's note) |
+| IPv6 | 9 | 0 → 100 | 68 → 77 | the dataplane's tables and the F-TEID key: a second form, not a patch. An SDF filter's IPv6 *prefix* is compiled on the opt-in firewall path since 2026-10-18, which is not a close: no graph declares the module (the stage does load it) and no packet has crossed one of its rules (block 9's note) |
 | a real SMF (open5gs or free5GC) at the door | 12 | 0 → 100 | 68 → 77 | no code: an afternoon with a NIC and someone else's SMF |
 | all three | 9, 11, 12 | | **68 → 91** | |
 

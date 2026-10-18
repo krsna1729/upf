@@ -253,6 +253,14 @@ message PdrMatchRule {
   // selects the action this rule names (BESS D-141), exactly as the
   // WildcardMatch path's rules do.
   uint32 action_id = 9;
+
+  // The QoS flow the rule is about (TS 29.244 8.2.89): the rule matches only a
+  // packet whose PDU Session Container carried this QFI, which the decap
+  // writes as the "qfi" metadata attribute (0 when no container was carried).
+  // Absent, the rule matches a packet of any QFI. 0..63; it is `optional` so
+  // that "no QFI named" is not "QFI 0". The order is still the list's: the
+  // first rule that matches the packet's tuple *and* its QFI wins.
+  optional uint32 qfi = 10;
 }
 
 // PdrMatchEntry is one session's rule list, in the session's precedence order:
