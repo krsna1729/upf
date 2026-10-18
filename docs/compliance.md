@@ -177,7 +177,7 @@ from measured rows, or **owed**.
 | axis | generic — wildcard | generic — firewall | custom — keyed | status |
 |---|---|---|---|---|
 | one session change | rebuild the shard: ~44–50 µs at 1K rules, ~1 ms at 10K | rewrite the whole policy: O(all rules) | one upsert of that session's rules: O(its rules) | wildcard measured (published row); firewall derived; keyed owed |
-| one packet | one masked-tuple lookup in a table every session shares | one policy scan whose size is every session's rules | the session selector (an LPM lookup) plus a 2–4 rule scan | firewall measured (114 M keys/s at 10 rules hitting the first, 34 M/s at 1,000 spread, 26 M/s over IPv6, 117 M/s scanned at 10); selector-plus-scan owed |
+| one packet | one masked-tuple lookup in a table every session shares | an **indexed** lookup over the whole policy (the stock module builds `FirewallTable`; the scan is the custom path's matcher, not this one) | the session selector (an LPM lookup) plus a 2–4 rule scan | the indexed rows are measured — 114 M keys/s at 10 rules hitting the first, 34 M/s at 1,000 spread, 26 M/s over IPv6 — and the 117 M/s *scanned* row at 10 rules belongs to the custom path's matcher; the selector-plus-scan row is owed |
 | memory per session | per-rule and per-group in the shared table | per-rule in the policy | one map entry plus one rule vector | owed (BESS's per-rule/per-group rows are being measured) |
 | the 1M-session target | the rebuild makes it infeasible (tens of ms per change) | the whole-policy rewrite is worse | the shape it was built for | derived from the rows above |
 

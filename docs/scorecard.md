@@ -126,11 +126,11 @@ packet through it).
 | 2 establishment, modification, deletion | **works, tested** | one key per session, keyed by the F-TEID, in SMF precedence order — committed with its seven tests (`8d94d84`) |
 | 3 Session Report: USAR / DLDR | USAR works / DLDR refused | the report path is control-side; DLDR needs a buffering flow, and a BUFF PDR is refused on this path |
 | 4 PDI: precedence / F-TEID+CHID / UE IP / SDF+ranges / NI+QFI | precedence, F-TEID, UE IP, ranges work; QFI refused; domain untested | the key *is* the F-TEID, so a PDR is chosen by its tunnel and the UE address is not needed; the rule shape is the firewall's, so inclusive port ranges and both families compile; a QFI-naming PDI is refused (the rules are the 5-tuple) |
-| 5 QER: gate, MBR, GBR | works, untested | the meter and the action are per-PDR and the keyed path writes the same action ids |
-| 6 URR: volume, time, thresholds, quota, linked | works, untested | counters are per rule (per ActionId), which the keyed path writes |
+| 5 QER: gate, MBR, GBR | untested | the meter and the action are per-PDR and the keyed path writes the same action ids |
+| 6 URR: volume, time, thresholds, quota, linked | untested | counters are per rule (per ActionId), which the keyed path writes |
 | 7 BAR + DDN: buffering, DDN, duration, drop | **refused** | a BUFF PDR is refused on this path — the largest gap between the two profiles |
-| 8 GTP-U: decap, encap, echo, end marker, DSCP | works, untested | the tunnel modules are unchanged by the profile |
-| 9 IPv6 | SDF prefixes work; UE address and F-TEID refused | the module's rules carry both families (the firewall rule shape), which is *better* than the generic wildcard path; the F-TEID key is IPv4-only, so an IPv6 session is still refused |
+| 8 GTP-U: decap, encap, echo, end marker, DSCP | untested | the tunnel modules are unchanged by the profile |
+| 9 IPv6 | SDF prefixes **compile, untested**; UE address and F-TEID refused | the module's rules carry both families (the firewall rule shape), which is *better* than the generic wildcard path; the F-TEID key is IPv4-only, so an IPv6 session is still refused |
 | 10 MAR / ATSSS-LL | not implemented | phased in both profiles; needs a dual-3GPP deployment |
 | 11 ULCL / N9 route domains | partly | the routing model is control-side; the module is uplink-only, so N9 and the downlink need the selector below |
 | 12 real-SMF interop | not run | in both profiles |
