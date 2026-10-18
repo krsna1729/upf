@@ -19,6 +19,14 @@
 # at 0. The other arms' graphs are unchanged, so they keep running on a stage
 # without it -- this script exists so that upgrade is not a cliff.
 #
+# It also needs the store's bounded sweep (BESS 0bfd2783, the amendment to
+# D-129): `EvictExpiredBounded` frees a flow's packets once they pass its
+# per-flow timeout, 256 flows a run. An older daemon checks the timeout only
+# when the store reaches its global max_packets, which this graph never does at
+# these flow counts, so the held packets would stay where they are and the last
+# check below would fail -- not because the SMF's numbers are not in the store,
+# but because nothing frees on them.
+#
 # The plugin must be built first (see README.md); the script uses
 # datapath/build/libupf_datapath.so unless PLUG says otherwise. The daemon is
 # started with no hugepages (-m 0) and never left running; run it under the
@@ -140,14 +148,18 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_N4_TARGET=127.0.0.1:$N4_PORT \
   exit 1
 }
 
-# The datapath's half, against the same daemon: held, reported once, released.
-# Its output is kept because the release is this test's own evidence: it builds
-# its own controller (New(cfg, client, log)), so upfd is not the one releasing.
+# The datapath's half, against the same daemon: held, reported once, released --
+# and, in the sibling case, freed by the store's own timeout before the SMF's
+# instruction arrives, so that instruction releases nothing. Both tests' output
+# goes through tee: each case's evidence is the line the checks below match, and
+# the numbers in those lines are this arm's own proof, so they are left on this
+# script's stdout rather than only in the file. The tests build their own
+# controller (New(cfg, client, log)), so upfd is not the one releasing.
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=127.0.0.1:$BESS_PORT \
-  $GO test "$ROOT/internal/session/" -run 'TestLiveSessionBuffersAndReleasesTheHeldPackets' -count=1 -v \
-  >"$WORK/session-test.log" 2>&1 || {
-  echo "buffer-path: the buffering test failed; its output follows, then upfd's log" >&2
-  cat "$WORK/session-test.log" >&2
+  $GO test "$ROOT/internal/session/" -count=1 -v \
+  -run 'TestLiveSession(BuffersAndReleasesTheHeldPackets|HoldsNothingAfterTheBufferingDurationPasses)' \
+  2>&1 | tee "$WORK/session-test.log" || {
+  echo "buffer-path: the buffering tests failed (their output is above); upfd's log follows" >&2
   cat "$UPFD_LOG" >&2
   exit 1
 }
@@ -168,13 +180,18 @@ check "the controller reported the buffered downlink" "downlink data reported" "
 check "the report named the buffering PDR" "pdrs=[2]" "$UPFD_LOG"
 # Not upfd's counter: upf_buffer_flows_total is served over HTTP and never
 # logged, and this arm's upfd never drives a release -- the n4 test above
-# deletes its session without one. The evidence is the session test's own line:
+# deletes its session without one. The evidence is the session tests' own lines:
 # the branch's counter held the packets, and the encap's moved only after the
 # SMF's instruction. Where upfd itself releases a flow, its counter is what to
 # scrape; that belongs to an arm that drives the release through PFCP.
 check "the store released the flow on the SMF's instruction" "forwarded after the instruction:" "$WORK/session-test.log"
+# The expiry case's own line: the packets were freed by the store's sweep at the
+# BAR's short timeout_ns before the instruction arrived, so the release moved
+# nothing. The number after the arrow is the same count as before it -- an
+# absence, which is all a silent free can leave.
+check "the store freed the flow at the BAR's own duration" "forwarded after the wait:" "$WORK/session-test.log"
 
 if [ "$FAIL" = 0 ]; then
-  echo "buffer-path: ok (a BUFF FAR's packets were held, reported to the SMF over N4, and released when the SMF moved the path)"
+  echo "buffer-path: ok (a BUFF FAR's packets were held, reported to the SMF over N4, released when the SMF moved the path, and freed by the store's own timeout when the BAR's duration ran out)"
 fi
 exit "$FAIL"

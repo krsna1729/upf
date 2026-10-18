@@ -161,9 +161,8 @@ closed; `1` on `pdr_dl` is the buffering branch; `1` on the uplink's `teid`
 table is the echo module; and any gate no connection wires drops the packet,
 which is why the store's evictions need no module of their own — the store
 *evicts* a flow's oldest packet on gate 1 when its per-flow cap is reached, and
-*frees* an expired one outright (`EvictExpired`'s `bess::PacketFree`, no gate,
-no metric) when the store is at its global `max_packets` and its flow's own
-timeout has passed.
+*frees* an expired one outright (`bess::PacketFree`, no gate, no metric) on the
+owner's sweep once the packet is older than its flow's own timeout.
 
 A buffering flow's numbers are the SMF's, not the graph's: the compiler writes
 the store's `flows` entry for every buffering rule, keyed by the rule's
@@ -171,10 +170,13 @@ ActionId — `timeout_ns` from the BAR's DL Buffering Duration (8.2.29, the
 infinite unit as a present zero) and `max_packets_per_flow` from its Suggested
 Packet Count (8.2.30) — and leaves a field out where the SMF named none, which
 is when the module's own arguments above are the flow's numbers. The store's
-`StoreBatch` enforces the cap on every arrival; its timeout is honoured only in
-`EvictExpired`, which runs when `total_packets_` reaches `max_packets`, so a
-flow's duration bites under global memory pressure rather than on a timer of its
-own.
+`StoreBatch` enforces the cap on every arrival; its timeout is honoured by the
+owner's own sweep, `EvictExpiredBounded` (BESS 0bfd2783, the amendment to
+D-129): 256 flows a run from where the last run stopped, so the free happens on
+the store's next run after the deadline rather than on a timer the flow owns,
+and a run's cost does not grow with the store's size. A store at its global
+`max_packets` still runs `EvictExpired` over everything first — the pressure
+path, unchanged — which is the only path an older daemon had.
 
 ## Modules we own
 
@@ -306,7 +308,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | packet ownership | `bess::PacketRef` and the store's explicit free/release path; our modules copy no packet and allocate none |
 | tasks (`RegisterTask`/`RunTask`) | BESS's store drains released packets from a task; **none of our modules has one** — nothing in our packet path runs between packets |
 | `GetSchema`/descriptor set | the controller builds every message from the daemon's own schema, so a field this plugin does not have fails loudly instead of silently |
-| `ListMetrics` (D-116) | per-gate counters: how an unwired gate's drops (store eviction, overflow) and a chain's throughput are read. What it does *not* show is a command's effect on the packets a module holds: `packet_store`'s `drop` frees them with `bess::PacketFree` and only decrements `total_packets_` (visible in `GetDesc`, not in metrics), `EvictExpired` frees an aged flow's packets the same way (its own timeout, no counter at all), while `release` moves them to the release queue, which does reach a gate — and only once the store's owner task has applied the request, since the command is *accepted* when the call returns. That is why the session layer counts the *accepted* commands it issued (`Stats.BuffersReleased`/`BuffersDropped`/`BufferFailures`) rather than reading drops back out of the daemon |
+| `ListMetrics` (D-116) | per-gate counters: how an unwired gate's drops (store eviction, overflow) and a chain's throughput are read. What it does *not* show is a command's effect on the packets a module holds: `packet_store`'s `drop` frees them with `bess::PacketFree` and only decrements `total_packets_` (visible in `GetDesc`, not in metrics), `EvictExpired` (and the owner's per-run sweep, `EvictExpiredBounded`) frees an aged flow's packets the same way (its own timeout, no counter at all), while `release` moves them to the release queue, which does reach a gate — and only once the store's owner task has applied the request, since the command is *accepted* when the call returns. That is why the session layer counts the *accepted* commands it issued (`Stats.BuffersReleased`/`BuffersDropped`/`BufferFailures`) rather than reading drops back out of the daemon |
 | `tunnel/tunnel.h`, `conntrack/packet_parse.h` | header-only, experimental: the GTP-U codec and the parse types, installed by `bess-dev` |
 | `utils/{ip,ether,checksum,endian,time,logging}.h`, `dataplane/action_id.h`, `framework/{resource_codec,resource_registry,resource_bindings}.h`, `commands.h`, `pb/module_msg.pb.h` | the rest of the plugin's includes; no module reaches past these into BESS internals |
 

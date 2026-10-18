@@ -43,13 +43,13 @@ and introduces no claims of its own.
 | 4 | PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5) | **80** | — | — | — | — | — | — |
 | 5 | QER: gate, MBR, per-flow or GBR (3) | **100** | 67 | 67 | 33 | 0 | 67 | 67 |
 | 6 | URR: volume, time, thresholds, quota + enforcement, linked (5) | **100** | 60 | 60 | 60 | 100 | 0 | 0 |
-| 7 | BAR + DDN: buffering, DDN, duration, drop-buffered (4) | **75** | 75 | 75 | 25 | 0 | 0 | 25 |
+| 7 | BAR + DDN: buffering, DDN, duration, drop-buffered (4) | **100** | 75 | 75 | 25 | 0 | 0 | 25 |
 | 8 | GTP-U: decap, encap, echo, end marker, DSCP copy (5) | **100** | 40 | 80 | 40 | 40 | 40 | 80 |
 | 9 | IPv6: PFCP UE IP, inner + outer, N9 (3) | **0** | 0 | 0 | 0 | 33 | 0 | 0 |
 | 10 | MAR / ATSSS-LL (2) | **0** | 50 | 0 | 0 | 50 | 0 | 0 |
 | 11 | ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 |
 | 12 | real-SMF interop (1) | **0** | 0 | **100** | 0 | 0 | 0 | 0 |
-| | **mean of the eleven blocks every project scores (1-3, 5-12)** | **66** | **54** | **62** | **42** | **43** | **28** | **38** |
+| | **mean of the eleven blocks every project scores (1-3, 5-12)** | **68** | **54** | **62** | **42** | **43** | **28** | **38** |
 
 Block 4 is left out of every mean because no competitor cell exists for it (`—`),
 so no project is credited or debited for it. **Updated 2026-10-18 (block 6):**
@@ -67,11 +67,18 @@ as the Field text gives them, every mean below divides its own row again, and
 the four that appeared to have drifted (OAI-CN5G 54, free5GC 42, UPG-VPP 43,
 eUPF 28) come back unchanged. Each cell in this table was then checked against
 its block's Field text or the survey; block 3 was the only one out of step.
-**2026-10-18 (block 7):** the SMF's per-BAR numbers now land in the store's
-live `flows` entry, but the duration's expiry is BESS's own aging and is not
-observable through the control surface (block 7's text below), so its cell stays
-75 and the row still divides as written: 100+100+100+100+100+75+100+0+0+50+0 =
-725, and 725 / 11 = 65.9 → **66**.
+**2026-10-18 (block 7): the duration's expiry is proven live, so block 7 is
+100.** `ci/buffer-path.sh` now carries a second live case: a BAR whose DL
+Buffering Duration is 2 s, a store filled under it, a wait past the duration, and
+then the very instruction the first case uses to release — which moves nothing,
+because the store's own sweep freed the flow first. The cell moves and the mean
+is recomputed from the cells: the eleven blocks every project scores
+(1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12) are
+100+100+100+100+100+100+100+0+0+50+0 = **750**, and 750 / 11 = 68.18 → **68**
+(it was 725 / 11 = 65.9 → 66 with block 7 at 75). The row still divides as
+written, and block 7's section below says what the arm now proves — including
+that the free is *silent*, so what the arm observes is the absence of the
+release's effect rather than a count of anything.
 **2026-10-18 (the firewall path, blocks 4 and 9): no cell moves.** The compiler
 now has an opt-in path on which a port *range* and an IPv6 SDF prefix compile
 instead of being refused (`internal/session`, `upfd -firewall-ul`/`-firewall-dl`),
@@ -80,11 +87,12 @@ are about — but the module it writes to is not in the stage the arms run
 against, no `deploy/*.yaml` graph names it (a graph naming a module the daemon
 does not have fails to load), and nothing has matched a packet through such a
 rule. Unit tests justify the *compile*, not the capability, and this file's own
-precedent is block 7: numbers written and read back are not credited without the
-effect being shown (block 7's "Why 75 and not 100"). So block 4 stays **80** and
+precedent is block 7's history: numbers written and read back were not credited —
+its cell sat at 75 with the effect unshown — until the arm observed the effect
+live (block 7's section below). So block 4 stays **80** and
 block 9 **0**, the mean is unchanged, and its arithmetic is the same row as
-above: 100+100+100+100+100+75+100+0+0+50+0 = **725**, 725 / 11 = 65.9 →
-**66**. What would move them is a graph in the installed stage and an arm like
+above: 100+100+100+100+100+100+100+0+0+50+0 = **750**, 750 / 11 = 68.18 →
+**68**. What would move them is a graph in the installed stage and an arm like
 `ci/buffer-path.sh` that carries such a rule end to end — the work is named in
 each block below.
 
@@ -211,37 +219,70 @@ under the link).
 measure volume and time with thresholds but the survey shows no quota-enforcement
 or linked half; eUPF unwired; OMEC none.
 
-### 7. BAR + DDN — us 75
+### 7. BAR + DDN — us 100
 
 **Sub-features.** downlink buffering; DDN; buffering duration; drop-buffered.
 
 **Ours.** `TestABuffFARIsGatedToTheStoreAndCounted`,
 `TestTheDownlinkReportIsOwedOncePerBufferingEpisode`,
 `TestAModificationThatStopsBufferingReleasesTheFlow`, and the live arm
-`ci/buffer-path.sh`, which passes end to end against the 3f3716df stage:
+`ci/buffer-path.sh`, which passes end to end against a stage carrying BESS's
+`key_attrs` change (128fd237) and the bounded sweep below (0bfd2783):
 `ok: the controller reported the buffered downlink`, `ok: the report named the
-buffering PDR`, `ok: the store released the flow on the SMF's instruction`, and
+buffering PDR`, `ok: the store released the flow on the SMF's instruction`,
+`ok: the store freed the flow at the BAR's own duration`, and
 `buffer-path: ok (a BUFF FAR's packets were held, reported to the SMF over N4,
-and released when the SMF moved the path)`, with `held: 1536 packets counted on
-the branch; forwarded after the instruction: 0 -> 11136`.
+released when the SMF moved the path, and freed by the store's own timeout when
+the BAR's duration ran out)`. The two live cases' own lines are
+`held: 9248 packets counted on the branch; forwarded after the instruction:
+0 -> 5712` (the sibling's release, flooding the encap because the graph's
+source is still running) and `held: 6560 packets counted on the branch under the
+BAR's timeout_ns 2s, freed by the store's own sweep; forwarded after the wait:
+5712 -> 5712` (the expiry case's absence; both counts are packets a run's own
+timing decides, and what the case asserts is that the two are equal).
 
-**Why 75 and not 100.** The arm proves buffering, DDN and the release. The DL
-Buffering Duration now reaches the store: `compile.go` writes the flow's own
-`flows` entry — `timeout_ns` from 8.2.29 (the infinite unit as a present zero)
-and `max_packets_per_flow` from 8.2.30, each left out where the SMF named none —
+**Why 100.** All four sub-features are shown live. Buffering, the DDN and the
+release are the arm's first three checks; the **duration** is the fourth, and it
+is the half that sat uncredited until the store's own sweep could be waited out.
+The compiler half is unchanged: `compile.go` writes the flow's own `flows` entry
+— `timeout_ns` from 8.2.29 (the infinite unit as a present zero) and
+`max_packets_per_flow` from 8.2.30, each left out where the SMF named none —
 `buffer_test.go` pins the three duration codes and the entry's rewrite and erase
 (`TestABufferingFlowsOwnNumbersAreWrittenToTheStore`,
 `TestAnUpdateBARInAReportResponseRewritesTheStoreEntry`), and the live arm reads
-`buf/flows` back with the SMF's 30 s / 16. What it still cannot show is the
-duration *taking effect*: BESS's `EvictExpired` frees a flow's packets once they
-pass its `timeout_ns`, but only when the store reaches its global `max_packets`,
-and it emits nothing on a gate and no metric, while no module description or
-held-packet count is served through the control surface — so this arm shows the
-numbers written and read back, not the held packets seen going away. The
-sub-feature stays uncredited. (The cap half of the SMF's numbers,
-`max_packets_per_flow`, *is* enforced on every arrival and so is part of
-buffering, which the arm proves.) `TestABuffOnlyFARIsADrop` is the drop-buffered
-half.
+`buf/flows` back with the SMF's number.
+
+What the entry *does* is the store's own aging, and BESS's amendment to D-129
+(0bfd2783) is what makes it observable: the owner's run sweeps 256 flows from
+where the last run stopped (`EvictExpiredBounded`) and frees what is older than
+its `timeout_ns` whatever the store holds, where an older daemon checked the
+timeout only under global `max_packets` pressure — a store this small never
+reaches it. With one flow the rotation is one run, so the bound after the
+deadline is the store's next run (a blocked task is rescheduled within its own
+backoff, ~0.3 ms at most on this host), not a timer either side controls:
+`TestLiveSessionHoldsNothingAfterTheBufferingDurationPasses` states that bound
+and waits a second over the 2 s duration rather than racing it.
+
+**Why the proof is an absence.** The free is *silent*: the sweep calls
+`bess::PacketFree`, emits nothing on a gate and no metric, and the module's
+`GetDesc` is not reachable from this controller's control surface — so there is
+no count that could be read, and the observable is the absence of the effect the
+timeout would otherwise leave. That effect is the SMF's instruction (5.2.4.1's
+Update FAR that forwards the buffered downlink): the sibling case shows it
+releasing the flow and moving the encap (`0 -> 5712`), and the expiry case shows
+the same instruction moving nothing (`5712 -> 5712`) because the store freed
+the flow before it arrived. The expiry case stops the graph's generator after the
+fill — the Source's live `settings` singleton, `src_dn/settings` — because with
+the source running the instruction's own forwarding floods the encap with the
+graph's frames and a released flow's sixteen packets could not be seen at all.
+The differential is the per-flow entry itself, and it is what the arm proves on
+the *unfixed* side: with `timeout_ns` absent the module-wide `timeout_ms` (5000
+in `deploy/buffer-path.yaml`) is what holds the flow, so the same 3 s wait leaves
+the packets in the store and the instruction releases them — the run with the
+write suppressed fails with `the encap carried 16 packets after the instruction
+(was 0)` (one flow's cap, the packets that were still held). The 3 s wait is
+deliberately under that 5 s so that only the per-flow number can have freed them.
+`TestABuffOnlyFARIsADrop` is the drop-buffered half.
 
 **History.** The arm's first run against a daemon carrying both contracts failed
 at its own first test: the daemon refused the session transaction, `#3 references
@@ -329,23 +370,23 @@ no other project claims any.
 ## What moves our number
 
 The closes that were on this list have landed and are counted above: BAR + DDN
-(block 7, 0 → 75), the DLDR half of the report path (block 3, 50 → 100), both
+(block 7, 0 → 100), the DLDR half of the report path (block 3, 50 → 100), both
 proven by `ci/buffer-path.sh`, and linked UR-SEQN (block 6, 80 → 100, proven by
 `TestALinkedURRReportsItsGroupUnderOneURSEQN` and
 `TestALinkedURRNamingAnUnknownURRIsRefused`). Each row below is one remaining
-close, on its own, against the current mean of 66:
+close, on its own, against the current mean of 68:
 
 | close | block | block from → to | mean | cost |
 |---|---|---|---|---|
-| the port work's placement measurement (the vif's write itself landed on 2026-10-18: `deploy/veth-port.yaml` splits one port into the three interfaces and `ci/veth-port.sh` shows the compiler's rule selected by the domain the port wrote) | 11 | 50 → 100 | 66 → 71 | `docs/design.md`'s port section and `docs/ports.md`; needs a NIC -- a veth advertises no RSS offload (`ethdev_rss_hf=0x0`) |
-| IPv6 | 9 | 0 → 100 | 66 → 75 | the dataplane's tables and the F-TEID key: a second form, not a patch. An SDF filter's IPv6 *prefix* is compiled on the opt-in firewall path since 2026-10-18, which is not a close: the module is not in the installed stage and no packet has crossed one of its rules (block 9's note) |
-| a real SMF (open5gs or free5GC) at the door | 12 | 0 → 100 | 66 → 75 | no code: an afternoon with a NIC and someone else's SMF |
-| all three | 9, 11, 12 | | **66 → 89** | |
+| the port work's placement measurement (the vif's write itself landed on 2026-10-18: `deploy/veth-port.yaml` splits one port into the three interfaces and `ci/veth-port.sh` shows the compiler's rule selected by the domain the port wrote) | 11 | 50 → 100 | 68 → 73 | `docs/design.md`'s port section and `docs/ports.md`; needs a NIC -- a veth advertises no RSS offload (`ethdev_rss_hf=0x0`) |
+| IPv6 | 9 | 0 → 100 | 68 → 77 | the dataplane's tables and the F-TEID key: a second form, not a patch. An SDF filter's IPv6 *prefix* is compiled on the opt-in firewall path since 2026-10-18, which is not a close: the module is not in the installed stage and no packet has crossed one of its rules (block 9's note) |
+| a real SMF (open5gs or free5GC) at the door | 12 | 0 → 100 | 68 → 77 | no code: an afternoon with a NIC and someone else's SMF |
+| all three | 9, 11, 12 | | **68 → 91** | |
 
 The single-close means are the arithmetic from the cells: adding a block's gain
-to the 725/11 = 66 base (block 11's 50, or IPv6's 100, or the SMF's 100, each
-over 11), and the three together are (725 + 50 + 100 + 100) / 11 = 975 / 11 =
-88.6 → 89.
+to the 750/11 = 68 base (block 11's 50, or IPv6's 100, or the SMF's 100, each
+over 11), and the three together are (750 + 50 + 100 + 100) / 11 = 1000 / 11 =
+90.9 → 91.
 
 None of them is a rewrite. (GBR *as such* is not on the list because block 5's
 sub-feature is "per-flow **or** GBR", and the per-flow half is what the QFI work
@@ -354,14 +395,14 @@ its own close if the survey ever scored the two halves apart.)
 
 ## Three readings
 
-1. **We lead on the mean, and the lead is four points wide.** 66 against
+1. **We lead on the mean, and the lead is six points wide.** 68 against
    open5gs's 62 is not a verdict: it is the closes that landed this week (BAR +
    DDN, the DLDR half, and linked UR-SEQN) against open5gs's production interop,
    which we score 0 on. What we lead is real but narrow — markers 100 against 80,
    URR 100 against 60, QER 100 against 67, the report path 100 against free5GC's
-   50 and OMEC's 0 — and none of it is what a handover or a stalled UE notices.
-   One close still on the list, block 11's port work, would take the mean to 71
-   without touching the dataplane's shape.
+   50 and OMEC's 0, BAR + DDN 100 against their 75 — and none of it is what a
+   handover or a stalled UE notices. One close still on the list, block 11's port
+   work, would take the mean to 73 without touching the dataplane's shape.
 2. **The mean is not a verdict on the dataplane.** No row here is a throughput
    claim: the same-harness measurement that would settle that (verification plan
    section 2) has not been run. The floors that do exist are per packet and
