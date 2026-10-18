@@ -100,8 +100,30 @@ func run() error {
 			"precedence order, so a session change is one upsert of O(that session's rules). The "+
 			"rules carry the 5-tuple with prefixes and port *ranges*, and a PDI naming a QFI is "+
 			"refused rather than matched more widely. Empty (the default): the WildcardMatch path. "+
-			"There is no downlink counterpart: a downlink packet carries no tunnel to name its "+
-			"session with, so the downlink's own selector is the next step (docs/scorecard.md)")
+			"There is no downlink counterpart here: a downlink packet carries no tunnel to name its "+
+			"session with, so the downlink's own selector is what names it (-select-dl)")
+	pdrMatchDL := flag.String("pdr-match-dl", "",
+		"the downlink keyed per-session matcher module, as -pdr-match-ul is the uplink one: its map "+
+			"holds one key per session, keyed by the session id -select-dl writes into the packet's "+
+			"\"action_id\" metadata. It needs -select-dl: a downlink packet carries no tunnel, so "+
+			"nothing else could name its session")
+	selectDL := flag.String("select-dl", "",
+		"the downlink session selector: an ExactMatch module whose \"<name>/rules\" map holds one "+
+			"rule per (route domain, UE address) a session's downlink PDRs name, whose value is the "+
+			"session id it writes into the packet's \"action_id\" metadata -- the key "+
+			"-pdr-match-dl reads. It is what names a session for a packet that carries no tunnel "+
+			"(TS 29.244 5.2.1), and it needs -select-actions-dl and -pdr-match-dl")
+	selectActionsDL := flag.String("select-actions-dl", "",
+		"the ActionTable whose \"<name>/actions\" resource the selector's rules reference: BESS "+
+			"validates a rule's action id as a reference into that table, so every session id "+
+			"-select-dl writes needs a record there. It must be a table of its own, and it is never "+
+			"in the packet path: the selector's gate goes to the matcher")
+	selectFieldsDL := flag.String("select-fields-dl", "dst_ip",
+		"the selector's key, in the graph's order, from the same field names -pdr-fields-dl takes. "+
+			"Only a field of the session can be in it: dst_ip (the UE address the packet is "+
+			"addressed to) and, in a deployment with more than one network instance, route_domain "+
+			"(the interface the packet arrived on classified it). A field of one PDR (proto, "+
+			"sport, dport) is refused")
 	actionsUL := flag.String("actions-ul", "at_ul", "the uplink ActionTable module")
 	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
 	actionsDL := flag.String("actions-dl", "at_dl", "the downlink ActionTable module")
@@ -231,7 +253,9 @@ func run() error {
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			pdrTableUL: *pdrTableUL, pdrTableDL: *pdrTableDL,
 			firewallUL: *firewallUL, firewallDL: *firewallDL,
-			pdrMatchUL:  *pdrMatchUL,
+			pdrMatchUL: *pdrMatchUL, pdrMatchDL: *pdrMatchDL,
+			selectDL: *selectDL, selectActionsDL: *selectActionsDL,
+			selectFieldsDL: *selectFieldsDL,
 			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
@@ -676,6 +700,10 @@ type graphArgs struct {
 	firewallUL         string
 	firewallDL         string
 	pdrMatchUL         string
+	pdrMatchDL         string
+	selectDL           string
+	selectActionsDL    string
+	selectFieldsDL     string
 	pdrFieldsUL        string
 	pdrFieldsDL        string
 	teidTable          string
@@ -726,6 +754,42 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	if err != nil {
 		return session.Config{}, fmt.Errorf("-pdr-fields-dl: %w", err)
 	}
+	// The selector's key is the session's, so only the fields a session has can
+	// be in it: the UE address, and the route domain the deployment classified
+	// the packet in. A field of one PDR would need one rule per PDR, and the
+	// selector would no longer name the session the matcher holds rules under.
+	var selectFields []session.Field
+	if a.selectDL != "" {
+		selectFields, err = parsePDRFields(a.selectFieldsDL)
+		if err != nil {
+			return session.Config{}, fmt.Errorf("-select-fields-dl: %w", err)
+		}
+		for _, f := range selectFields {
+			if f != session.DstIP && f != session.RouteDomain {
+				return session.Config{}, fmt.Errorf(
+					"-select-fields-dl: the %s is a field of one PDR, and the selector's key is the session's "+
+						"(dst_ip, and route_domain where the deployment has one)", f)
+			}
+		}
+	}
+	// One path or none: a selector writes the key a matcher reads, so a
+	// deployment that names one without the other would either select sessions
+	// nothing matches or match a key nothing writes.
+	if (a.selectDL == "") != (a.pdrMatchDL == "") {
+		return session.Config{}, fmt.Errorf(
+			"-select-dl %q and -pdr-match-dl %q are one path: the selector writes the session id the "+
+				"matcher reads as its key", a.selectDL, a.pdrMatchDL)
+	}
+	if a.selectDL != "" && a.selectActionsDL == "" {
+		return session.Config{}, fmt.Errorf(
+			"-select-dl %q needs -select-actions-dl: a rule's action id is validated as a reference "+
+				"into an ActionTable's actions resource", a.selectDL)
+	}
+	if a.selectDL != "" && a.firewallDL != "" {
+		return session.Config{}, fmt.Errorf(
+			"the downlink has one rule home: -firewall-dl %q and -pdr-match-dl %q both name one",
+			a.firewallDL, a.pdrMatchDL)
+	}
 	var domains *routing.Domains
 	if a.instances != "" {
 		if domains, err = parseInstances(a.instances, a.maxDomains); err != nil {
@@ -766,11 +830,19 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			PDRTable:  a.pdrTableDL,
 			PDRFields: downFields,
 			Firewall:  a.firewallDL,
-			Actions:   a.actionsDL,
-			Meters:    a.metersDL,
-			Counters:  a.countersDL,
-			NextHop:   a.n3NextHop,
-			Tunnels:   a.tunnels,
+			// The downlink's PDRs may live in the keyed per-session matcher,
+			// whose map is keyed by the session id the selector writes: the
+			// three names are one path (the check above), because a matcher
+			// nothing selects a session for matches nothing at all.
+			PdrMatch:        a.pdrMatchDL,
+			Selector:        a.selectDL,
+			SelectorActions: a.selectActionsDL,
+			SelectorFields:  selectFields,
+			Actions:         a.actionsDL,
+			Meters:          a.metersDL,
+			Counters:        a.countersDL,
+			NextHop:         a.n3NextHop,
+			Tunnels:         a.tunnels,
 		},
 		Instances: domains,
 		N3Addr:    addr,

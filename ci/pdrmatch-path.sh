@@ -119,6 +119,18 @@ else
   echo "ok: the QFI 9 flow did not leave by N6"
 fi
 
+# The downlink: the graph's source has been sending the data network's reply
+# (8.8.8.8:5000 -> the UE:53) since the graph was applied, and the selector in
+# front of the matcher names the session by the address it is addressed to --
+# which is the only thing that can name it, a packet from N6 carrying no
+# tunnel. The encap's dump is where the whole downlink chain's verdict is: the
+# packet is inside a G-PDU for the session's TEID, with the outer header the
+# FAR's Outer Header Creation named.
+D_HEX=$(dump_hex dump_d "$LOG")
+check "the downlink packet was selected, matched and encapsulated" "$D_HEX" \
+      "08 08 08 08 0a 2d 00 02"
+check "the downlink G-PDU carries the session's TEID" "$D_HEX" "55 66 77 88"
+
 # The module, as the daemon loaded it: the matcher it was built over, and the
 # attribute its session key is read from -- the decap's F-TEID.
 if grep -Fq "pdr_match_ul/rules over firewall_scan, keyed by 'upf_teid'" "$LOG"; then

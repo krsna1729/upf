@@ -42,8 +42,14 @@ func TestAProfileNamesItsStrategies(t *testing.T) {
 	if custom.Up.Table != "" {
 		t.Errorf("the custom profile still writes the uplink's shared table: %v", custom.Up)
 	}
-	if custom.Down.PdrMatch != "" || custom.Down.Table == "" {
-		t.Errorf("the custom profile's downlink is not the shared table: %v", custom.Down)
+	if custom.Down.PdrMatch == "" || custom.Down.Table != "" {
+		t.Errorf("the custom profile's downlink is not the keyed map: %v", custom.Down)
+	}
+	if custom.Down.Selector == "" || custom.Down.SelectorActions == "" {
+		t.Errorf("the custom profile's downlink names no selector, and a keyed map needs one: %v", custom.Down)
+	}
+	if len(custom.Down.SelectorFields) == 0 {
+		t.Errorf("the custom profile's selector declares no key: %v", custom.Down)
 	}
 	if custom.Graph == generic.Graph {
 		t.Errorf("both profiles name one graph: %q", custom.Graph)

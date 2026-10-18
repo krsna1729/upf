@@ -65,13 +65,20 @@ const (
 	// the far end.
 	uplinkRule   = "permit out udp from any 53 to assigned"
 	downlinkRule = "permit out udp from any to assigned 53"
-	// The modules the claim is read from, by the names the graph declares.
-	module     = "pdr_match_ul"
-	rulesRes   = module + "/rules"
-	actionsUL  = "at_ul"
-	router     = "rt"
-	n6Gate     = "0"
-	waitWithin = 15 * time.Second
+	// The modules the claim is read from, by the names the graph declares: the
+	// uplink's matcher, and the downlink's selector and matcher, whose session
+	// the selector names by the UE address.
+	module      = "pdr_match_ul"
+	rulesRes    = module + "/rules"
+	actionsUL   = "at_ul"
+	downModule  = "pdr_match_dl"
+	downRes     = downModule + "/rules"
+	selector    = "sel_dl"
+	selectorRes = selector + "/rules"
+	router      = "rt"
+	n6Gate      = "0"
+	n3Gate      = "1"
+	waitWithin  = 15 * time.Second
 )
 
 // applyForw is the Apply Action of a FAR that forwards: the only one these two
@@ -102,7 +109,7 @@ func run(target string) error {
 
 	// The control arm, before the daemon holds any session.
 	before := map[string]float64{}
-	for _, m := range []string{module, actionsUL, router} {
+	for _, m := range []string{module, actionsUL, router, selector, downModule} {
 		n, err := gatePackets(ctx, client, m, n6Gate)
 		if err != nil {
 			return err
@@ -117,8 +124,22 @@ func run(target string) error {
 				m, before[m])
 		}
 	}
-	if err := empty(ctx, client, rulesRes); err != nil {
-		return err
+	// The downlink's two modules are counted on their own gate, and the graph's
+	// downlink source runs from the moment it is applied: a zero here is absent
+	// state, not absent traffic.
+	for _, m := range []string{selector, downModule} {
+		n, err := gatePackets(ctx, client, m, n6Gate)
+		if err != nil {
+			return err
+		}
+		if n != 0 {
+			return fmt.Errorf("%s had already emitted %v downlink packets before any session", m, n)
+		}
+	}
+	for _, res := range []string{rulesRes, selectorRes, downRes} {
+		if err := empty(ctx, client, res); err != nil {
+			return err
+		}
 	}
 
 	// The session, through the compiler: the uplink's PDRs are the PdrMatch
@@ -189,7 +210,87 @@ func run(target string) error {
 	}
 	fmt.Printf("pdrmatch: %s: %s gate %s carried %v, %s gate %s carried %v, %s left by the action's next hop\n",
 		id, actionsUL, n6Gate, resolved, router, n6Gate, uplink, router)
-	return qfiFlows(ctx, client)
+	if err := qfiFlows(ctx, client); err != nil {
+		return err
+	}
+	return downlink(ctx, client, fseid)
+}
+
+// downlink is the selector's half of the live proof: the session is named for a
+// packet that carries no tunnel by the UE address it is addressed to, and the
+// matcher behind the selector matches the session's own rules.
+//
+// The graph's downlink source has been running since the graph was applied, and
+// its frame is addressed to the UE, so the whole chain is exercised as soon as
+// the session is: before it, both modules emitted nothing (the control arm).
+func downlink(ctx context.Context, client *bess.Client, fseid *ie.FSEIDFields) error {
+	// The selector's rule, as the daemon holds it: the UE address as the key,
+	// and the session id it writes into the packet's metadata.
+	got, err := client.Contents(ctx, selectorRes)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", selectorRes, err)
+	}
+	entries := got[selectorRes]
+	if len(entries) != 1 {
+		return fmt.Errorf("%s holds %d keys, want the session's one address", selectorRes, len(entries))
+	}
+	line, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("pdrmatch: %s holds %s\n", selectorRes, line)
+	action, ok := entries[0].Value["actionId"].(json.Number)
+	if !ok {
+		return fmt.Errorf("%s: the rule carries no action id: %v", selectorRes, entries[0].Value)
+	}
+	if fmt.Sprint(action) != fmt.Sprint(fseid.SEID) {
+		return fmt.Errorf("%s names session %v, want the session's id %d", selectorRes, action, fseid.SEID)
+	}
+
+	// The matcher's own map, keyed by that same id: the selector writes the key
+	// the module reads, which is what ties the two together.
+	held, err := client.Contents(ctx, downRes)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", downRes, err)
+	}
+	down := held[downRes]
+	if len(down) != 1 {
+		return fmt.Errorf("%s holds %d keys, want the session's one", downRes, len(down))
+	}
+	if key := down[0].Key["session"]; fmt.Sprint(key) != fmt.Sprint(fseid.SEID) {
+		return fmt.Errorf("%s is keyed by %v, want the session id %d", downRes, key, fseid.SEID)
+	}
+	if rules, ok := down[0].Value["rules"].([]any); !ok || len(rules) != 1 {
+		return fmt.Errorf("%s: the session's value is %v, want its one downlink PDR's rules", downRes, down[0].Value)
+	}
+	fmt.Printf("pdrmatch: %s (SEID %d) holds the session's own rules\n", downRes, fseid.SEID)
+
+	// The selector matched: its output gate counts only what it named a session
+	// for, and a packet it does not match is dropped (its default gate).
+	named, err := waitFor(ctx, client, selector, n6Gate, 0)
+	if err != nil {
+		return fmt.Errorf("the selector never named a session: %w", err)
+	}
+	fmt.Printf("pdrmatch: ok: the selector named the session for %v downlink packets\n", named)
+	// And the matcher matched them: it emitted on its own gate, which is what
+	// says the rules the map holds were applied to the packet.
+	if _, err := waitFor(ctx, client, downModule, n6Gate, 0); err != nil {
+		return fmt.Errorf("the downlink matcher never matched the session's packet: %w", err)
+	}
+	// And the ActionId reached the packet path: the ActionTable resolved it, the
+	// meter passed the packet, and the encap left by the N3 next hop.
+	carried, err := waitFor(ctx, client, router, n3Gate, 0)
+	if err != nil {
+		return fmt.Errorf("the downlink packet never reached %s gate %s (the ActionTable did not resolve the ActionId): %w",
+			router, n3Gate, err)
+	}
+	matched, err := gatePackets(ctx, client, downModule, n6Gate)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("pdrmatch: ok: %s gate %s carried %v packets, and %s gate %s carried %v: the downlink left by the action's next hop\n",
+		downModule, n6Gate, matched, router, n3Gate, carried)
+	return nil
 }
 
 // config is the deployed graph's shape (deploy/pdrmatch-path.yaml), in the
@@ -209,13 +310,19 @@ func config() session.Config {
 			NextHop:  1,
 		},
 		Down: session.Direction{
-			PDRTable:  "pdr_dl",
-			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto, session.SrcPort, session.DstPort},
-			Actions:   "at_dl",
-			Meters:    "mt_dl",
-			Counters:  "cnt_dl",
-			NextHop:   2,
-			Tunnels:   "enc",
+			// The downlink's rules are the map's too, and its session is named
+			// by the selector in front of the matcher: the UE address the
+			// packet is addressed to (this graph is a one-instance deployment,
+			// so the route domain is not a field of the key).
+			PdrMatch:        downModule,
+			Selector:        selector,
+			SelectorActions: "sel_at",
+			SelectorFields:  []session.Field{session.DstIP},
+			Actions:         "at_dl",
+			Meters:          "mt_dl",
+			Counters:        "cnt_dl",
+			NextHop:         2,
+			Tunnels:         "enc",
 		},
 		N3Addr:  netip.MustParseAddr("192.0.2.1"),
 		N3MAC:   [6]byte{2, 0, 0, 0, 0, 1},

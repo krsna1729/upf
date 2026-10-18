@@ -1443,16 +1443,29 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 	}
 	// The opt-in map keys the session still holds, as the transaction will write
-	// them: one per F-TEID, the session's own. A removal or a replaced form
-	// whose key is in this set is not erased -- the write follows, and the
-	// engine rejects both operations on one key.
+	// them: one per session -- the uplink's F-TEID, the downlink's session id.
+	// A removal or a replaced form whose key is in this set is not erased --
+	// the write follows, and the engine rejects both operations on one key.
 	livePdrMatch := map[string]bool{}
 	for _, p := range s.PDRs {
 		dir := c.direction(p.srcIfc)
-		if dir.PdrMatch == "" || p.teid == 0 {
+		if dir.PdrMatch == "" {
 			continue
 		}
-		livePdrMatch[pdrMatchClaim(dir, p.teid)] = true
+		if key, err := pdrMatchSessionKey(dir, s, p); err == nil {
+			livePdrMatch[pdrMatchClaim(dir, key)] = true
+		}
+	}
+	// The selector keys the session still holds: one per (route domain, UE
+	// address) its downlink PDRs name. A replaced form whose key is in this set
+	// is not erased -- the rule is the same rule, written again.
+	liveSelector := map[string]bool{}
+	if c.cfg.Down.Selector != "" {
+		for _, p := range s.PDRs {
+			if k, ok := selectorKeyOf(p); ok {
+				liveSelector[selectorClaim(c.cfg.Down, k)] = true
+			}
+		}
 	}
 	// The counter entries the session still needs, as the transaction will write
 	// them: one per forwarding PDR a URR measures. A removal or a replaced form
@@ -1568,12 +1581,24 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				}
 			}
 		}
-		if dir.PdrMatch != "" && p.teid != 0 && !livePdrMatch[pdrMatchClaim(dir, p.teid)] {
+		if dir.PdrMatch != "" {
 			// The session's key goes only when the session's new form holds no
-			// PDR on this F-TEID: the key is the session's rules, so a form that
+			// PDR on this key: the key is the session's rules, so a form that
 			// kept none of them has nothing left to match, and one that kept
 			// some is rewritten by the write below.
-			erase(bess.Change{Resource: pdrMatchRes(dir), Key: map[string]any{"session": p.teid}})
+			if key, err := pdrMatchSessionKey(dir, s, p); err == nil && !livePdrMatch[pdrMatchClaim(dir, key)] {
+				erase(bess.Change{Resource: pdrMatchRes(dir), Key: map[string]any{"session": key}})
+			}
+		}
+		if k, ok := selectorKeyOf(p); ok && !liveSelector[selectorClaim(c.cfg.Down, k)] {
+			// The session's downlink no longer names this address: the rule
+			// goes, and with it the action record it referenced.
+			if key, err := selectorRuleKey(c.cfg.Down, k); err == nil {
+				erase(bess.Change{Resource: selectorRes(c.cfg.Down), Key: key})
+			}
+			if id, err := selectorID(s); err == nil && c.cfg.Down.SelectorActions != "" {
+				erase(bess.Change{Resource: selectorActionsRes(c.cfg.Down), Key: map[string]any{"id": id}})
+			}
 		}
 		if p.actionID != 0 {
 			erase(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
@@ -1630,11 +1655,23 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				}
 			}
 		}
-		if dir.PdrMatch != "" && old.teid != 0 && !livePdrMatch[pdrMatchClaim(dir, old.teid)] {
-			// A replaced form that moved to another F-TEID: the map key it held
+		if dir.PdrMatch != "" {
+			// A replaced form that moved to another key: the map key it held
 			// is not the one the new form writes, so it goes (the write below
 			// names the new one).
-			erase(bess.Change{Resource: pdrMatchRes(dir), Key: map[string]any{"session": old.teid}})
+			if key, err := pdrMatchSessionKey(dir, s, old); err == nil && !livePdrMatch[pdrMatchClaim(dir, key)] {
+				erase(bess.Change{Resource: pdrMatchRes(dir), Key: map[string]any{"session": key}})
+			}
+		}
+		if k, ok := selectorKeyOf(old); ok && !liveSelector[selectorClaim(c.cfg.Down, k)] {
+			// A replaced form whose UE address moved: its selector rule goes,
+			// and the action record it referenced with it.
+			if key, err := selectorRuleKey(c.cfg.Down, k); err == nil {
+				erase(bess.Change{Resource: selectorRes(c.cfg.Down), Key: key})
+			}
+			if id, err := selectorID(s); err == nil && c.cfg.Down.SelectorActions != "" {
+				erase(bess.Change{Resource: selectorActionsRes(c.cfg.Down), Key: map[string]any{"id": id}})
+			}
 		}
 		if old.teid != 0 && !teidNamed(s, old.teid) {
 			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(old.teid)})
@@ -1713,17 +1750,25 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			}
 			c.rules[rkey] = s.LocalSEID
 		}
-		if dir.PdrMatch != "" && p.teid != 0 {
+		if dir.PdrMatch != "" {
 			// One key per session, so the claim is on the session's key rather
-			// than on a rule: two sessions that would write one F-TEID's rules
-			// are refused here, exactly as two sessions that would write one
-			// WildcardMatch rule are -- a shared key would have one session's
-			// rules erased by the other's deletion. The claim is a rule key in
-			// every other respect: the same table, the same release.
-			claim := pdrMatchClaim(dir, p.teid)
+			// than on a rule: two sessions that would write one session's
+			// rules are refused here, exactly as two sessions that would write
+			// one WildcardMatch rule are -- a shared key would have one
+			// session's rules erased by the other's deletion. The claim is a
+			// rule key in every other respect: the same table, the same
+			// release. The key is the F-TEID the decap writes on the uplink,
+			// and the session id the selector writes on the downlink -- which
+			// no other session can hold, because the SEIDs are the compiler's
+			// own.
+			key, err := pdrMatchSessionKey(dir, s, p)
+			if err != nil {
+				return nil, nil, err
+			}
+			claim := pdrMatchClaim(dir, key)
 			if owner, taken := c.rules[claim]; taken && owner != s.LocalSEID {
 				return nil, nil, fmt.Errorf(
-					"%w: the session's rules are session %d's (F-TEID %#x)", errNotExpressible, owner, p.teid)
+					"%w: the session's rules are session %d's (key %#x)", errNotExpressible, owner, key)
 			}
 			if _, held := c.rules[claim]; !held {
 				claimed = append(claimed, claim)
@@ -1930,6 +1975,37 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		return nil, nil, err
 	}
 	changes = append(changes, policies...)
+	// The selector's rules and the record they reference, before the matcher's
+	// map that the record's id is the key of: a session's downlink packets are
+	// named by the selector, and the matcher holds what they are then matched
+	// against. One rule per (route domain, UE address) the session's downlink
+	// PDRs name, claimed like any other rule key -- two sessions whose PDRs
+	// name one address would each select the other's packets.
+	var selected []selectorKey
+	if c.cfg.Down.Selector != "" {
+		if selected, err = selectorKeys(s); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, k := range selected {
+		claim := selectorClaim(c.cfg.Down, k)
+		if owner, taken := c.rules[claim]; taken && owner != s.LocalSEID {
+			return nil, nil, fmt.Errorf(
+				"%w: the downlink address %s is session %d's", errNotExpressible, k, owner)
+		}
+		if _, held := c.rules[claim]; !held {
+			claimed = append(claimed, claim)
+			if !s.holdsRuleKey(claim) {
+				s.ruleKeys = append(s.ruleKeys, claim)
+			}
+		}
+		c.rules[claim] = s.LocalSEID
+	}
+	selectorWrites, err := c.selectorChanges(s)
+	if err != nil {
+		return nil, nil, err
+	}
+	changes = append(changes, selectorWrites...)
 	// The per-session matcher's map last: one key per session, each that
 	// session's own rules. It follows the action records the loop above wrote,
 	// because a rule names one -- and it is the only change the opt-in path
@@ -2695,7 +2771,7 @@ func (c *Compiler) requestedWindows(ctx context.Context, req *message.SessionMod
 	}
 	ask = slices.DeleteFunc(ask, func(id uint32) bool { return slices.Contains(removeURRs, id) })
 	if len(ask) > 0 {
-		if queried, err = c.windowsOf(ctx, s, ask, now); err != nil {
+		if queried, err = c.windowsOf(ctx, s, ask, now, sinceReport); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -2708,7 +2784,7 @@ func (c *Compiler) requestedWindows(ctx context.Context, req *message.SessionMod
 	if len(held) > 0 {
 		// The removal goes ahead whatever the counters say: the URR is going,
 		// and an unreadable one leaves the response without its report.
-		if removed, err = c.windowsOf(ctx, s, held, now); err != nil {
+		if removed, err = c.windowsOf(ctx, s, held, now, sinceReport); err != nil {
 			c.log.Warn("session: no termination usage report for a removed URR", "seid", s.LocalSEID, "error", err)
 			removed, err = nil, nil
 		}
@@ -3894,6 +3970,23 @@ func pdrMatchClaim(d Direction, teid uint32) string {
 	return pdrMatchRes(d) + "\x00" + strconv.FormatUint(uint64(teid), 10)
 }
 
+// pdrMatchKey is the key a direction's map holds one session's rules under: the
+// F-TEID of the PDR (the uplink, where the tunnel names the session), or the
+// session id the selector writes (the downlink, where the UE address does). A
+// direction with a selector keys by the session, so the PDR's own F-TEID -- of
+// which a downlink PDR has none -- is not consulted.
+func pdrMatchSessionKey(d Direction, s *Session, p *pdr) (uint32, error) {
+	if d.Selector != "" {
+		return selectorID(s)
+	}
+	if p.teid == 0 {
+		return 0, fmt.Errorf(
+			"%w: PDR %d names no F-TEID, and the PdrMatch path keys a session by it",
+			errNotExpressible, p.id)
+	}
+	return p.teid, nil
+}
+
 // pdrMatchEntry is one of a session's rules with the order it takes in its
 // list: the order is the SMF's own -- the lower Precedence wins and the module
 // applies the first rule that matches -- so the list is sorted by Precedence
@@ -3938,16 +4031,23 @@ func (c *Compiler) pdrMatchChanges(s *Session) ([]bess.Change, error) {
 			continue
 		}
 		// The uplink's key is the session's F-TEID: it is what the decap
-		// writes as the module's own key attribute, and what names a session on
-		// N3. The downlink has no such key -- an N6 packet carries no tunnel,
-		// so the session is the one whose UE address is the longest match on
-		// the packet's -- and that selector is the next step: a direction
-		// configured with this module and PDRs from the core side is refused
-		// rather than served by a key the packet cannot carry.
+		// writes as the module's own key attribute, and what names a session
+		// on N3. The downlink has no such key -- an N6 packet carries no
+		// tunnel -- so the key is the session id the selector writes into that
+		// same attribute after naming the session by its UE address
+		// (selector.go): one key per session either way, and the packet path
+		// reads one attribute.
 		//
 		// The lists, one per key, in the order the keys are first seen: the
 		// transaction is the same whatever the order, and an operator's log
 		// reads the same twice.
+		var downKey uint32
+		if side.core {
+			var err error
+			if downKey, err = selectorID(s); err != nil {
+				return nil, err
+			}
+		}
 		rules := map[uint32][]pdrMatchEntry{}
 		order := make([]uint32, 0, 1)
 		for _, p := range pdrsInOrder(s) {
@@ -3956,30 +4056,34 @@ func (c *Compiler) pdrMatchChanges(s *Session) ([]bess.Change, error) {
 			if (p.srcIfc == ie.SrcInterfaceCore) != side.core {
 				continue
 			}
-			if p.teid == 0 {
-				return nil, fmt.Errorf(
-					"%w: PDR %d names no F-TEID, and the PdrMatch path keys a session by it",
-					errNotExpressible, p.id)
+			key := downKey
+			if !side.core {
+				if p.teid == 0 {
+					return nil, fmt.Errorf(
+						"%w: PDR %d names no F-TEID, and the PdrMatch path keys a session by it",
+						errNotExpressible, p.id)
+				}
+				key = p.teid
 			}
 			if p.buffer {
 				return nil, fmt.Errorf(
 					"%w: PDR %d buffers, which is the buffering branch's gate and not this module's",
 					errNotExpressible, p.id)
 			}
-			if _, seen := rules[p.teid]; !seen {
-				order = append(order, p.teid)
+			if _, seen := rules[key]; !seen {
+				order = append(order, key)
 			}
 			for _, v := range p.variants() {
 				rule, err := pdrMatchRule(v)
 				if err != nil {
 					return nil, fmt.Errorf("PDR %d: %w", p.id, err)
 				}
-				rules[p.teid] = append(rules[p.teid], pdrMatchEntry{
+				rules[key] = append(rules[key], pdrMatchEntry{
 					precedence: p.precedence, pdr: p.id, rule: rule})
 			}
 		}
-		for _, teid := range order {
-			list := rules[teid]
+		for _, key := range order {
+			list := rules[key]
 			slices.SortStableFunc(list, func(a, b pdrMatchEntry) int {
 				if d := cmp.Compare(a.precedence, b.precedence); d != 0 {
 					return d
@@ -3992,7 +4096,7 @@ func (c *Compiler) pdrMatchChanges(s *Session) ([]bess.Change, error) {
 			}
 			changes = append(changes, bess.Change{
 				Resource: pdrMatchRes(dir),
-				Key:      map[string]any{"session": teid},
+				Key:      map[string]any{"session": key},
 				Value:    map[string]any{"rules": value},
 			})
 		}

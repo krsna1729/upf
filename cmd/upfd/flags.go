@@ -17,15 +17,12 @@ import (
 // is refused here, where the operator can fix it, rather than keying every
 // rule on a field the graph does not match.
 func parsePDRFields(spec string) ([]session.Field, error) {
-	names := map[string]session.Field{
-		"src":    session.SrcIP,
-		"dst":    session.DstIP,
-		"proto":  session.Proto,
-		"sport":  session.SrcPort,
-		"dport":  session.DstPort,
-		"domain": session.RouteDomain,
-		"teid":   session.UpfTEID,
-		"qfi":    session.QFI,
+	names := map[string]session.Field{}
+	for _, f := range []session.Field{
+		session.SrcIP, session.DstIP, session.Proto, session.SrcPort,
+		session.DstPort, session.RouteDomain, session.UpfTEID, session.QFI,
+	} {
+		names[f.FlagName()] = f
 	}
 	fields := make([]session.Field, 0, len(names))
 	for _, name := range strings.Split(spec, ",") {
@@ -132,5 +129,33 @@ func profileArgs(p session.Profile, given map[string]bool, a graphArgs) graphArg
 	if !given["firewall-dl"] {
 		a.firewallDL = p.Down.Firewall
 	}
+	if !given["pdr-match-dl"] {
+		a.pdrMatchDL = p.Down.PdrMatch
+	}
+	if !given["select-dl"] {
+		a.selectDL = p.Down.Selector
+	}
+	if !given["select-actions-dl"] {
+		a.selectActionsDL = p.Down.SelectorActions
+	}
+	if !given["select-fields-dl"] {
+		a.selectFieldsDL = fieldList(p.Down.SelectorFields, a.selectFieldsDL)
+	}
 	return a
+}
+
+// fieldList spells a strategy's selector fields as the flag's own syntax, so a
+// profile's key is the default of the flag that declares it: the graph the
+// profile names is what declares the selector's field list, and a deployment
+// that runs that graph without naming the flag must not fall back to another
+// key.
+func fieldList(fields []session.Field, fallback string) string {
+	if len(fields) == 0 {
+		return fallback
+	}
+	names := make([]string, 0, len(fields))
+	for _, f := range fields {
+		names = append(names, f.FlagName())
+	}
+	return strings.Join(names, ",")
 }

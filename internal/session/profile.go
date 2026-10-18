@@ -63,15 +63,27 @@ type Strategy struct {
 	Table    string
 	Firewall string
 	PdrMatch string
+	// Selector is the module that names a session for a packet that carries no
+	// tunnel (the downlink's): the keyed map holds one key per session, and
+	// something has to turn a packet into that key. SelectorActions is the
+	// ActionTable its rules reference, and SelectorFields the key it matches,
+	// as the graph declares it.
+	Selector        string
+	SelectorActions string
+	SelectorFields  []Field
 }
 
 // String is the strategy as an operator reads it: the structure and the module
-// the rules land in.
+// the rules land in, and the selector that names a session where the structure
+// needs one.
 func (s Strategy) String() string {
 	switch {
 	case s.Firewall != "":
 		return "firewall " + s.Firewall
 	case s.PdrMatch != "":
+		if s.Selector != "" {
+			return "keyed map " + s.PdrMatch + " selected by " + s.Selector
+		}
 		return "keyed map " + s.PdrMatch
 	default:
 		return "wildcard table " + s.Table
@@ -84,7 +96,10 @@ func (s Strategy) String() string {
 // what the run actually writes rules into -- which is what the startup log
 // reports, rather than the profile it was selected from.
 func (d Direction) Strategy() Strategy {
-	return Strategy{Table: d.PDRTable, Firewall: d.Firewall, PdrMatch: d.PdrMatch}
+	return Strategy{
+		Table: d.PDRTable, Firewall: d.Firewall, PdrMatch: d.PdrMatch,
+		Selector: d.Selector, SelectorActions: d.SelectorActions, SelectorFields: d.SelectorFields,
+	}
 }
 
 // The profiles -profile selects. Generic is the shipped default and produces
@@ -126,14 +141,21 @@ func ProfileFor(name string) (Profile, error) {
 		// wildcard table (`pdr_ul`) is not in the graph and not in the Config:
 		// the F-TEID the decap wrote is the session, and a session change is one
 		// upsert of that session's rules (docs/design.md, "the keyed write").
-		// The downlink keeps the shared table -- a downlink packet carries no
-		// tunnel to name its session with.
+		// The downlink is keyed the same way, and its session is named by the
+		// selector in front of the matcher: the UE address the packet is
+		// addressed to (this graph is a one-instance deployment, so the route
+		// domain is not a field of the key).
 		return Profile{
 			Name:    CustomProfile,
 			Graph:   "deploy/custom-pdrmatch.yaml",
 			Modules: []string{"GtpuDecap", "GtpuEncap", "GtpuEcho", "UrrCount", "PdrMatch"},
 			Up:      Strategy{PdrMatch: "pdr_match_ul"},
-			Down:    Strategy{Table: "pdr_dl"},
+			Down: Strategy{
+				PdrMatch:        "pdr_match_dl",
+				Selector:        "sel_dl",
+				SelectorActions: "sel_at",
+				SelectorFields:  []Field{DstIP},
+			},
 		}, nil
 	}
 	return Profile{}, fmt.Errorf("unknown profile %q: one of %s",
