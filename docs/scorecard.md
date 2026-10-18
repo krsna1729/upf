@@ -166,7 +166,8 @@ packet through it).
    (`selector.go`); the custom profile and `deploy/custom-pdrmatch.yaml` wire
    it. Live in `ci/pdrmatch-path.sh` (the selector named 4.7e7 packets, the
    matcher matched them, the encap's dump carries the data network's reply in a
-   G-PDU for the session's TEID). An LPM is owed only for an IPv6 UE *prefix*
+   G-PDU for the session's TEID) and in `ci/pdrmatch-2dn.sh` for the key's
+   route-domain half (two data networks, one UE address). An LPM is owed only for an IPv6 UE *prefix*
    or a framed route, neither of which this UP serves (IPv6 is refused).
 6. **A custom arm carrying QER + meters + URR counters** — **Done**:
    `PROFILE=custom ci/session-path.sh` (see rows 5 and 6 for what it covers
@@ -452,7 +453,12 @@ no other project claims any.
 
 **Sub-features.** Network Instance to route domain; branching on N9.
 
-**Ours.** `internal/routing`; `TestParseInstancesReadsTheDeployment`.
+**Ours.** `internal/routing`; `TestParseInstancesReadsTheDeployment`; live in
+`ci/pdrmatch-2dn.sh` -- two sessions holding the *same* UE address in two route
+domains (the graph's `Vif` writes the domain, the selector's key is (route
+domain, UE address)), both directions reaching their own network, and the
+fail-first that names the key: with `route_domain` dropped, the campus session
+takes the internet frame and that window fails while the others pass.
 
 **Field.** OMEC has ULCL/N9 (50); nothing else claims it.
 

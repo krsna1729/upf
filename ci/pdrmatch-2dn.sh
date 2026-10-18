@@ -233,6 +233,10 @@ contains "both of the selector's keys name the one UE address the two sessions s
 contains "the campus session's rule names session 2, not the internet session's 1" \
       "$(cat "$WORK/driver.log")" '"actionId":2'
 
+# The daemon stops the way an operator would (SIGTERM), and a daemon that aborts
+# on teardown has freed something it should not have.
+check_clean_shutdown "$DAEMON" || FAIL=1
+
 if [ "$FAIL" = 0 ]; then
   echo "pdrmatch-2dn: both data networks' subscribers, both directions, one address"
   rm -rf "$WORK"
