@@ -75,7 +75,16 @@ it is **unexplained, not fixed** (the log was not kept; keep logs with `tee` nex
    `pdr_map_downlink_ip4`); for IPv6 it is an LPM on the prefix (TS 29.244
    8.2.62: an IPv6 UE address is a /64 prefix). Either emits the session
    attribute `PdrMatch`'s `key_attr` already names, so the module does not
-   change. The generic profile needs neither table: its `pdr_dl` is keyed on the
+   change. **No custom selector module is needed**: stock `ExactMatch` keyed on
+   (`route_domain` attribute, destination address at offset 30), with
+   `action_resource: at_dl/actions`, writes the rule's `action_id` into the
+   packet, and `PdrMatch` with `key_attr: action_id` (declared once, as an
+   update, since 2026-10-18) reads it as the session key and overwrites it with
+   the matched PDR's own ActionId. The session's id is one id from the
+   compiler's action pool with a record in `at_dl/actions` (the engine checks a
+   rule's `action_id` as a reference). Probed live: 19.2M packets through
+   `ExactMatch -> PdrMatch` on a throwaway graph, both stages' gate 0 counters
+   equal. Not yet in a lane or the compiler. The generic profile needs neither table: its `pdr_dl` is keyed on the
    destination address and is the lookup. This is the spec's two-step model
    (5.2.1: session look-up, then the PDR look-up within the session). Needs the
    selector module(s); a design call on whether one module serves both

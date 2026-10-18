@@ -56,16 +56,28 @@ CommandResponse PdrMatch::Init(const upf::pb::PdrMatchArg &arg) {
   // owns it wrote it -- the decap, on the uplink. A read-only attribute no
   // module writes has no offset (core/metadata.cc), and a packet then names no
   // session: it is dropped, as a packet whose session the map does not hold is.
-  key_attr_ = AddMetadataAttr(arg.key_attr(), sizeof(be32_t), AccessMode::kRead);
-  if (key_attr_ < 0) {
-    return CommandFailure(-key_attr_, "add_metadata_attr() failed");
+  if (arg.key_attr() == "action_id") {
+    // The session key is the ActionId a stock ExactMatch selector wrote (the
+    // selector's rule names the session as its action, D-141): the one
+    // attribute is read as the key and then overwritten with the matched
+    // rule's own ActionId, so it is declared once, as an update -- a module
+    // may not declare one name twice.
+    key_attr_ = AddMetadataAttr("action_id", sizeof(be32_t), AccessMode::kUpdate);
+    if (key_attr_ < 0) {
+      return CommandFailure(-key_attr_, "add_metadata_attr() failed");
+    }
+    action_attr_ = key_attr_;
+  } else {
+    key_attr_ = AddMetadataAttr(arg.key_attr(), sizeof(be32_t), AccessMode::kRead);
+    if (key_attr_ < 0) {
+      return CommandFailure(-key_attr_, "add_metadata_attr() failed");
+    }
+    action_attr_ = AddMetadataAttr("action_id", sizeof(be32_t), AccessMode::kWrite);
+    if (action_attr_ < 0) {
+      return CommandFailure(-action_attr_, "add_metadata_attr() failed");
+    }
   }
   key_attr_name_ = arg.key_attr();
-
-  action_attr_ = AddMetadataAttr("action_id", sizeof(be32_t), AccessMode::kWrite);
-  if (action_attr_ < 0) {
-    return CommandFailure(-action_attr_, "add_metadata_attr() failed");
-  }
 
   // The QoS flow, as the decap read it out of the PDU Session Container (0 when
   // none was carried): what a rule that names a QFI is matched against. Read
