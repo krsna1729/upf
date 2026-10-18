@@ -2836,12 +2836,14 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 				p.srcIfc = v
 			}
 		case ie.NetworkInstance:
-			// The PDI's Network Instance (TS 29.244 8.2.4), read here and
-			// resolved in resolve: the deployment maps the name to an
-			// interface, its route domain and its pool. A name the deployment
-			// does not configure is refused there rather than served by the
-			// wrong interface -- with one instance configured, a rule naming
-			// another used to be indistinguishable from one naming ours.
+			// The PDI's Network Instance (TS 29.244 8.2.4): the instance "to
+			// match for the incoming packet", read here and resolved in
+			// resolve. With -instances, the deployment maps the name to an
+			// interface, its route domain and its pool, and a name it does
+			// not configure is refused rather than served by the wrong
+			// interface. Without -instances (the default, deploy/upf.yaml)
+			// there is one instance: every name is accepted and ignored, so
+			// the default deployment gives no isolation between instances.
 			p.instance = networkInstanceName(c.Payload)
 		case ie.QFI:
 			// The PDI's QFI (TS 29.244 8.2.89): the QoS flow this rule
