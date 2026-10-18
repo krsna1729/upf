@@ -17,6 +17,20 @@ type ContentReader interface {
 	Contents(ctx context.Context, names ...string) (map[string][]bess.Entry, error)
 }
 
+// sweepBatch bounds one erase transaction. A sweep at the 1M-session target
+// has millions of entries to take out, and one transaction carrying them all
+// meets two limits: the daemon's 64 MiB message limit (core/control/api_v2.h's
+// kMaxMessageBytes -- a typed rule is 131 B, so one transaction holds roughly
+// half a million of them, "beyond which a bulk load belongs on a streaming
+// path"), and its engine's per-transaction retirement budget, which refuses one
+// whose declared retirements exceed a batch with "transaction retires up to N
+// objects, more than one batch allows (2048); split it"
+// (core/dataplane/transaction_engine.cc, kBusy, retriable). 1000 changes per
+// transaction stays below both -- below the retirement budget even if every
+// change retires two objects -- and a sweep of a few hundred entries is still
+// one transaction.
+const sweepBatch = 1000
+
 // resources is every resource the compiler writes, as the deployed graph
 // spells them ("<module>/<table>"): the names a sweep reads and erases. A
 // module name the graph does not declare (a graph that charges nothing
@@ -69,14 +83,33 @@ func (c *Compiler) resources() []string {
 	return names
 }
 
-// Sweep empties the session tables in one transaction (docs/design.md's
-// restart wall): a controller that comes up against a daemon still holding an
-// earlier run's sessions takes them out before it serves PFCP, so no packet is
-// matched by a session this process never established. Everything the sweep
-// erases is a resource the compiler itself writes -- the graph's own resources
-// (a router's next hops, the module arguments) are not the controller's to
-// touch -- and it erases exactly what it read, key by key: nothing is emptied
-// that the readback did not report.
+// Sweep empties the session tables (docs/design.md's restart wall): a
+// controller that comes up against a daemon still holding an earlier run's
+// sessions takes them out before it serves PFCP, so no packet is matched by a
+// session this process never established. Everything the sweep erases is a
+// resource the compiler itself writes -- the graph's own resources (a router's
+// next hops, the module arguments) are not the controller's to touch -- and it
+// erases exactly what it read, key by key: nothing is emptied that the readback
+// did not report.
+//
+// The erase is chunked: the changes go out in transactions of at most
+// sweepBatch each, in sequence, rather than one transaction carrying every
+// entry of a million-session table (see that constant for what one such
+// transaction meets). The sweep stops at the first refused batch and returns
+// an error naming it and how much was erased before it, because the batches
+// before it are committed: a partial sweep is a dataplane holding some of an
+// earlier run's sessions, and the caller has to refuse to serve PFCP beside it
+// (upfd treats this error as fatal).
+//
+// The readback is not chunked, and cannot be: the daemon has no paged or
+// streamed read of a table's contents. GetPipelineRequest carries a resource
+// list and nothing else (no cursor, offset or chunk size), and a response above
+// the daemon's 64 MiB message limit is RESOURCE_EXHAUSTED with "name fewer
+// resources" -- naming fewer resources pages *between* tables but cannot split
+// the one table that holds a session each way. So at 1M sessions this reads
+// millions of entries in one message and meets that limit; the erase is bounded
+// regardless, and the read is the daemon's to grow (docs/design.md's
+// O(total sessions) item).
 //
 // It is deliberately not a pipeline reset: the graph stays, the session tables
 // empty. And nothing is erased when there is nothing to erase, because an
@@ -137,10 +170,18 @@ func (c *Compiler) Sweep(ctx context.Context) error {
 		c.log.Info("no earlier session left anything to erase", "tables", len(names))
 		return nil
 	}
-	if err := c.ap.Apply(ctx, changes...); err != nil {
-		return fmt.Errorf("erasing %d entries of an earlier run's sessions: %w", len(changes), err)
+	// One transaction per sweepBatch changes, in sequence, stopping at the
+	// first the daemon refuses: what it committed stays committed, so the error
+	// says which batch failed and how much is already gone.
+	batches := (len(changes) + sweepBatch - 1) / sweepBatch
+	for start := 0; start < len(changes); start += sweepBatch {
+		end := min(start+sweepBatch, len(changes))
+		if err := c.ap.Apply(ctx, changes[start:end]...); err != nil {
+			return fmt.Errorf("erasing an earlier run's sessions: batch %d of %d failed, with %d of %d entries erased: %w",
+				start/sweepBatch+1, batches, start, len(changes), err)
+		}
 	}
 	c.log.Warn("erased an earlier run's session entries before serving",
-		"entries", len(changes), "tables", len(names))
+		"entries", len(changes), "tables", len(names), "transactions", batches)
 	return nil
 }

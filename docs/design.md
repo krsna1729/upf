@@ -729,33 +729,46 @@ longer than /24 that fall in a /24's entry. A per-session LPM is therefore
 impossible at 1M sessions (64 MiB each); a single table holding every session's
 prefixes is not, which is what this design already assumes. But the fixed cost
 means our *per-domain* tables multiply it, and **both families pay it**: a
-dual-stack domain is two tables, so three such domains are ~384 MiB before a
-single group (`rte_lpm` and `rte_lpm6` each costing 64 MiB fixed per table) —
-which is why the number of LPM instances has to stay a handful, and why domains
-want to be few and long-lived rather than per-tenant. The group memory depends
-on *clustering* rather than on the entry count: 1M /32s spread over 1M distinct
-/24s is ~1M groups (~1 GB by the same 1 KiB-per-group arithmetic), while the
-same 1M inside a few shared /24s is a handful of groups — so the deployment's
-address plan matters as much as the session count. v6 is the same shape, not a
-cheaper one: `rte_lpm6`'s `tbl24` is also `1 << 24` entries of a 4-byte
-`struct rte_lpm6_tbl_entry` (`lib/lpm/rte_lpm6.c`), its `tbl8` groups are the
-same 1 KiB each, and it adds a `rules_tbl` hash over the rules. None of these
-numbers is settled: Main is measuring the fixed allocation and a realistic v4
-distribution, and v6's group count.
+dual-stack domain is two tables — `rte_lpm` and `rte_lpm6` each costing 64 MiB
+fixed per table — so three such domains are ~384 MiB before a single group, i.e.
+**~128 MiB per dual-stack domain**. That is a count times a fixed number, so the
+whole cost is predictable before anything is deployed (`domains × 128 MiB`),
+which is what makes "few, long-lived domains" a constraint rather than a
+preference: it decides whether a per-tenant domain is affordable at all. The
+group memory depends on *clustering* rather than on the entry count: 1M /32s
+spread over 1M distinct /24s is ~1M groups (~1 GB by the same 1 KiB-per-group
+arithmetic), while the same 1M inside a few shared /24s is a handful of groups
+— so the deployment's address plan matters as much as the session count. v6 is
+the same shape, not a cheaper one: `rte_lpm6`'s `tbl24` is also `1 << 24`
+entries of a 4-byte `struct rte_lpm6_tbl_entry` (`lib/lpm/rte_lpm6.c`), its
+`tbl8` groups are the same 1 KiB each, and it adds a `rules_tbl` hash over the
+rules. None of these numbers is settled: Main is measuring **both families'
+fixed parts and both group behaviours** (and a realistic v4 distribution), and
+will not publish the row until both exist — the shape and the arithmetic here
+come from the headers, the numbers are owed.
 
 **The three pieces have one owner each.** The keyed write is ours to write —
 the map-resource module above, `PdrMatch`-shaped, one key per session,
 `ExactMatch`'s shape rather than the firewall module's whole-policy singleton.
-The small-policy matcher is BESS's — the `firewall` module's classifier-side
-table (`core/modules/firewall.cc`, the D-147 work), which the compiler can opt
-into today (`upfd -firewall-ul`/`-firewall-dl`) and no deployment configures.
-And the selector that *names the session* on the downlink is the LPM: a
-different structure, with a different cost (a lookup per packet, inside the
-break-even line above) and a different limit (the domain count, and the
-deployment's address plan). Keeping the three apart is what lets each be
-measured and replaced on its own — and conflating them is how a whole-policy
-write came to look like the right shape for per-session state in the first
-place.
+The matcher side is BESS's, and it is two pieces, not one: the `firewall`
+module extracts a rule's key from the packet and applies its verdict (the
+D-147 work, which the compiler can opt into today with `upfd -firewall-ul`/
+`-firewall-dl` and no deployment configures), and **`FirewallScan` is the
+small-policy matcher we hold one of per session** (`core/classifier/
+firewall_table.h`, beside `FirewallTable`). On BESS's side of that line —
+neither of these is ours, and we have not run them — `FirewallScan`'s
+`Lookup`/`LookupBatch` return the same `Match` shape and call the same
+`FirewallTable::Matches` predicate the index calls per group, so the two
+structures cannot disagree about what a rule means; its `Create` makes the same
+refusals the index's `Build` makes, rule for rule; and their test walks a random
+corpus of both families through the scan, the index and a scalar reference for
+agreement. Both pieces land in Main's next push. And the selector that *names
+the session* on the downlink is the LPM: a different structure, with a
+different cost (a lookup per packet, inside the break-even line above) and a
+different limit (the domain count, and the deployment's address plan). Keeping
+the three apart is what lets each be measured and replaced on its own — and
+conflating them is how a whole-policy write came to look like the right shape
+for per-session state in the first place.
 
 ## Where a table lives: shared, per-worker, or behind a ring
 
@@ -837,17 +850,27 @@ the 1M target is a claim about the whole system, so all three have to be
 addressed:
 
 1. **`Compiler.Sweep`.** It reads every session table's full contents back in
-   one `Contents` call and erases what it read **key by key in one
-   transaction** -- its own doc comment says so ("erases exactly what it read,
-   key by key"; "empties the session tables in one transaction"). At 1M sessions
-   that is a readback of millions of entries, which meets gRPC's message size
-   limit, and a transaction carrying millions of Changes, which meets the
-   daemon's transaction memory. The fix is a paged or streamed readback with a
-   chunked erase, or a table-level clear if the daemon grows one. The design
-   sentence that *prescribes* it is part of the defect, not only the code:
-   "emptying the session tables" is written below as one transaction, and that
-   sentence was written for a lab-sized session count, so it now says chunked
-   and why.
+   one `Contents` call and erases what it read **key by key**, now in bounded
+   transactions (`sweepBatch`, 1000 changes each) rather than one: the daemon
+   refuses one transaction per sweep twice over, at 64 MiB of changes and at its
+   engine's retirement budget ("transaction retires up to N objects, more than
+   one batch allows (2048); split it"). The read half is what is left: at 1M
+   sessions that is a readback of millions of entries in one message, which
+   meets gRPC's message size limit. It cannot be paged from
+   here -- the daemon's `GetPipelineRequest` carries a resource list and no
+   offset, cursor or chunk size, and the only lever it names is the limit itself
+   ("A response above the message limit is RESOURCE_EXHAUSTED: name fewer
+   resources", `api_v2.cc`), which splits *between* tables and not inside the
+   one table that holds a session each way. Two other shapes that exist do not
+   bound it either: the SDK's `Pipeline`/`WithResources` is that same call, and
+   the daemon's one table-level clear -- a desired-state pipeline that *lists* a
+   resource with no entries clears it, `ResourceContents`' own comment -- builds
+   one server-side transaction with one op per entry it finds (`Converge` →
+   `engine.Apply(ops)` under the control-plane lock), so it moves the key
+   enumeration to the daemon without bounding the transaction. The chunked erase
+   is ours and is done; the paged or streamed readback is the daemon's to grow.
+   The design sentence that *prescribed* the defect is corrected above
+   ("emptying the session tables" now says chunked and why).
 2. **The firewall policy is a whole-policy singleton, so every session change
    rewrites every session's rules.** `compile.go`'s `firewallChanges` builds
    "the whole policy of every configured firewall module ... every live
@@ -1021,9 +1044,9 @@ The walls, in order:
    plane's: a session's SEIDs, its URR configuration and its identity are
    `upfd`'s, in memory. So a restart needs a checkpoint and a replay path --
    and, until then, the controller empties the session tables itself at
-   startup (`session.Compiler.Sweep`, one transaction, before the PFCP socket
-   opens), because the previous incarnation's records are indistinguishable
-   from this one's.
+   startup (`session.Compiler.Sweep`, in bounded transactions, before the PFCP
+   socket opens, and fatal to the run if it cannot finish), because the previous
+   incarnation's records are indistinguishable from this one's.
    The replay path is `upfd -checkpoint <path>`: an append-only journal of the
    *applied* PFCP session messages, not a serialisation of the model, because
    the messages are already the complete description of what a session is, any

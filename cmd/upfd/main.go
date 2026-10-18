@@ -203,12 +203,17 @@ func run() error {
 		// The restart wall (docs/design.md): the daemon may still hold an
 		// earlier controller's sessions, and this process knows none of them --
 		// they would match packets with ids nothing here can name. They go
-		// before the PFCP socket opens, in one transaction. A daemon that
-		// cannot be read back is a warning, not an outage: refusing to serve
-		// PFCP because the sweep could not read would take the node down over
-		// stale entries the SMF is about to replace anyway.
+		// before the PFCP socket opens, in transactions of a bounded size
+		// (session.Compiler.Sweep). A sweep that fails is fatal, deliberately:
+		// it erases in batches, so a failure leaves the tables half-erased and
+		// this process cannot tell which of the earlier run's sessions still
+		// match packets, and it also fails when the daemon cannot be read back
+		// at all -- in both cases what the run would serve PFCP over is unknown.
+		// Refusing to start keeps the node out of the association, which the
+		// SMF sees and retries, instead of answering for sessions this
+		// dataplane does not hold.
 		if err := cfg.Sessions.(*session.Compiler).Sweep(ctx); err != nil {
-			log.Warn("could not take an earlier run's sessions out of the dataplane", "error", err)
+			return fmt.Errorf("the startup sweep did not finish: %w", err)
 		}
 		// And the checkpoint goes back in, after the sweep: the replay writes
 		// the sessions the journal describes, so the dataplane holds those and

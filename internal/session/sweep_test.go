@@ -5,6 +5,8 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/krsna1729/upf/internal/bess"
@@ -16,14 +18,26 @@ type sweepFake struct {
 	contents map[string][]bess.Entry
 	changes  [][]bess.Change
 	cleared  []string
-	err      error
+	// applies counts every Apply call, a recorded transaction or not, so a
+	// test can tell "the sweep stopped" from "the sweep sent nothing".
+	applies int
+	// failBatch, when non-zero, is the number of the transaction the dataplane
+	// refuses: what the daemon does with the one batch that is too big, or the
+	// one change in it it will not accept. The batches before it stay
+	// recorded, and none after it is sent.
+	failBatch int
+	err       error
 }
 
 func (f *sweepFake) Apply(_ context.Context, changes ...bess.Change) error {
+	f.applies++
 	if f.err != nil {
 		return f.err
 	}
-	f.changes = append(f.changes, changes)
+	if f.failBatch != 0 && f.applies == f.failBatch {
+		return fmt.Errorf("the dataplane refused the batch")
+	}
+	f.changes = append(f.changes, append([]bess.Change(nil), changes...))
 	return nil
 }
 
@@ -166,6 +180,125 @@ func TestSweepWithNothingToEraseWritesNothing(t *testing.T) {
 	}
 	if len(f.changes) != 0 {
 		t.Errorf("the sweep wrote %d transactions over empty tables, want none", len(f.changes))
+	}
+}
+
+// staleEntries fills the session tables with n entries, one per key across
+// every resource, the way an earlier run's million sessions would be spread.
+func staleEntries(f *sweepFake, names []string, n int) {
+	for i := range n {
+		name := names[i%len(names)]
+		f.contents[name] = append(f.contents[name], bess.Entry{Key: map[string]any{"id": uint64(i + 1)}})
+	}
+}
+
+// TestSweepErasesInBoundedBatchesAtScale is the restart wall at the size the
+// deployment target implies: 5000 stale entries across the session tables are
+// erased in transactions of at most sweepBatch changes each -- never one
+// transaction carrying every entry, which the daemon's message limit and its
+// engine's retirement budget both refuse at 1M sessions -- and every entry the
+// readback reported is erased exactly once, across them.
+//
+// It is the unit half of the chunked erase: the readback is still one
+// Contents call because the daemon offers no paged or streamed read of a
+// table's contents, so what this test bounds is the write.
+func TestSweepErasesInBoundedBatchesAtScale(t *testing.T) {
+	const entries = 5000
+	f := &sweepFake{contents: map[string][]bess.Entry{}}
+	c := New(liveConfig(), f, quietLogger())
+	names := c.resources()
+	staleEntries(f, names, entries)
+
+	if err := c.Sweep(context.Background()); err != nil {
+		t.Fatalf("the sweep: %v", err)
+	}
+	want := (entries + sweepBatch - 1) / sweepBatch
+	if len(f.changes) != want {
+		t.Fatalf("the sweep wrote %d transactions for %d entries, want %d of at most %d changes each",
+			len(f.changes), entries, want, sweepBatch)
+	}
+	erased := map[string]int{}
+	for i, tx := range f.changes {
+		if len(tx) > sweepBatch {
+			t.Errorf("transaction %d carries %d changes, above the %d-change batch bound",
+				i+1, len(tx), sweepBatch)
+		}
+		for _, ch := range tx {
+			if ch.Key == nil {
+				t.Errorf("transaction %d erased %s with no key", i+1, ch.Resource)
+			}
+			if ch.Value != nil {
+				t.Errorf("transaction %d wrote %s with a value: an erase carries a key and no value",
+					i+1, ch.Resource)
+			}
+			erased[fmt.Sprintf("%s/%v", ch.Resource, ch.Key["id"])]++
+		}
+	}
+	if len(erased) != entries {
+		t.Errorf("the sweep erased %d distinct entries, want the %d it read", len(erased), entries)
+	}
+	for key, n := range erased {
+		if n != 1 {
+			t.Errorf("entry %s was erased %d times, want once", key, n)
+		}
+	}
+}
+
+// TestSweepStopsAtTheFirstFailedBatch is the chunked erase's failure mode, and
+// the reason a sweep error is fatal to the caller: the batches before the
+// refused one are committed, the ones after it are never sent, and the error
+// says which batch failed and how much was already erased. A run that came up
+// beside that would serve PFCP over a dataplane it half-emptied.
+func TestSweepStopsAtTheFirstFailedBatch(t *testing.T) {
+	const entries = 5000
+	f := &sweepFake{contents: map[string][]bess.Entry{}, failBatch: 3}
+	c := New(liveConfig(), f, quietLogger())
+	names := c.resources()
+	staleEntries(f, names, entries)
+
+	err := c.Sweep(context.Background())
+	if err == nil {
+		t.Fatal("the sweep reported success after a batch the dataplane refused")
+	}
+	if f.applies != 3 {
+		t.Errorf("the sweep called the dataplane %d times, want 3: it must stop at the first refused batch", f.applies)
+	}
+	if len(f.changes) != 2 {
+		t.Fatalf("the sweep committed %d transactions, want the 2 before the refused one", len(f.changes))
+	}
+	committed := 0
+	for _, tx := range f.changes {
+		committed += len(tx)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("batch 3 of %d", (entries+sweepBatch-1)/sweepBatch),
+		fmt.Sprintf("%d of %d entries erased", committed, entries),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the sweep's error %q does not say %q: an operator has to know which batch failed and what is already gone",
+				err, want)
+		}
+	}
+}
+
+// TestSweepLeavesNothingErasedWhenTheReadbackFails pins the other side of the
+// same failure mode: the erase is chunked but the readback is a single call,
+// so a reader error happens before any batch exists and nothing at all is
+// written. The sweep must not turn "I could not read" into "there was nothing
+// there" -- a dataplane it cannot read may still hold an earlier run's
+// sessions.
+func TestSweepLeavesNothingErasedWhenTheReadbackFails(t *testing.T) {
+	f := &sweepFake{
+		contents: map[string][]bess.Entry{},
+		err:      errors.New("the daemon listed no contents"),
+	}
+	c := New(liveConfig(), f, quietLogger())
+	if err := c.Sweep(context.Background()); err == nil {
+		t.Fatal("the sweep reported success over a dataplane it could not read")
+	}
+	if f.applies != 0 || len(f.changes) != 0 {
+		t.Errorf("the sweep wrote %d transactions over %d calls of a dataplane it could not read, want none",
+			len(f.changes), f.applies)
 	}
 }
 
