@@ -67,7 +67,14 @@ it is **unexplained, not fixed** (the log was not kept; keep logs with `tee` nex
    BUFF through an action's next hop would put the store *after* the Router and
    the release would re-enter the meter and encap. `pdrMatchChanges` refuses
    BUFF on a PdrMatch direction until then.
-3. **The downlink selector** — `PdrMatch` is keyed by session, and the session of
+3. **The downlink selector** — **deferred by decision (2026-10-18)**: with one
+   instance (internet) and IPv4 only, the generic downlink (`pdr_dl`, one
+   WildcardMatch on destination address plus filter fields) already finds the
+   session and the PDR in one lookup, and the custom profile's downlink uses the
+   same table. A per-session downlink gains the spec's two-step shape and a path
+   to IPv6 prefixes, and blocks nothing. Revisit when IPv6 UEs or more than one
+   network instance are supported; the design below stands, and needs no custom
+   module. Interop with a real SMF takes priority. The design: `PdrMatch` is keyed by session, and the session of
    a downlink packet is found by its destination address, so a selector in front
    of it must map (route domain, destination address) → session. For IPv4 that
    is an **exact-match** table (every project whose source was read does the
