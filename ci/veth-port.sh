@@ -389,6 +389,13 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} \
 check "the compiler writes one rule per domain for one filter" \
   "--- PASS: TestTwoInstancesRouteIndependently" "$WORK/compiler.log"
 
+# The evidence itself, so a run's output is the proof and not only the verdict:
+# the port's own line, the device's own telemetry, and the rule the compiler
+# wrote into the port's downlink table.
+echo "veth-port: port    $(grep -F 'upf_port driver' "$WORK/status.txt")"
+echo "veth-port: device  $(tr -d '\n' <"$WORK/telemetry.json")"
+echo "veth-port: rule    $(tr -d '\n' <"$WORK/pdr_dl_rule.json")"
+
 if [ "$FAIL" = 0 ]; then
   echo "veth-port: ok (one port, four queues, three interfaces with their own route domains, and the compiler's rule selected by one of them)"
 fi
