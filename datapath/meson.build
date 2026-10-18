@@ -44,9 +44,17 @@ upf_proto = custom_target(
 # One plugin, one library: the modules are registered together (BESS_PLUGIN
 # names the library, ADD_MODULE the classes), and the manifest loads both by
 # class name from this single .so.
+# PdrMatch matches a session's rules through the seam in pdr_match_matcher.h:
+# one session's rule list, compiled once when the resource publishes it and
+# matched once per packet. pdr_match_scan.cc is the seam's only implementation,
+# over BESS's FirewallScan (core/classifier/firewall_table.h), which is what a
+# session's handful of rules wants. The indexed FirewallTable is not a
+# fallback: a stage that lacks the scan fails the build here instead of
+# matching differently at run time.
 upf_datapath = shared_module(
   'upf_datapath',
-  ['gtpu_decap.cc', 'gtpu_echo.cc', 'gtpu_encap.cc', 'urr_count.cc', upf_proto[0], upf_proto[1]],
+  ['gtpu_decap.cc', 'gtpu_echo.cc', 'gtpu_encap.cc', 'pdr_match.cc',
+   'pdr_match_scan.cc', 'urr_count.cc', upf_proto[0], upf_proto[1]],
   include_directories: include_directories('.'),
   dependencies: [bess_dep, protobuf_dep],
   install: true,

@@ -179,3 +179,87 @@ message TunnelEntry {
   // field reads as 0 and loads with the copy behaviour.
   uint32 marking = 6;
 }
+
+// -- the per-session matcher ------------------------------------------------
+//
+// PdrMatch holds one key per session -- "<module>/rules", a map resource whose
+// value is *that session's rule list* -- so a session change is one upsert of
+// O(that session's rules) rather than a rewrite of a table every session shares
+// (docs/design.md, "the keyed write"). The session is the id the packet path
+// reads from the module's key attribute: on the uplink the F-TEID the decap
+// wrote, which is what identifies a session on N3. The downlink's selector --
+// longest-prefix match on the UE address for an N6 packet that carries no
+// tunnel -- is the next step and is not this; the module's key attribute names
+// what its graph writes today.
+
+// PdrMatchArg configures the per-session matcher.
+message PdrMatchArg {
+  // The metadata attribute the session key is read from: 4 bytes, network
+  // order, the id "<module>/rules" is keyed by. Required, and it must be an
+  // attribute some module in the graph writes (the decap writes "upf_teid").
+  string key_attr = 1;
+
+  // How many sessions the map holds. 0 means 65536. The map is allocated once,
+  // at creation, and is not resized: a session that does not fit is refused at
+  // programming time rather than silently dropped by the packet path.
+  uint32 max_sessions = 2;
+}
+
+// PdrMatchSettings is the module's own settings, beside the map: the singleton
+// "<module>/settings". The map is the sessions; this is the module.
+message PdrMatchSettings {
+  // The attribute the session key is read from, as PdrMatchArg's field of the
+  // same meaning. Changing it re-points the packet path at another attribute,
+  // which is a wiring change an operator may make without recreating the
+  // module; the sessions already written keep their keys.
+  string key_attr = 1;
+}
+
+// PdrMatchKey is one key of "<module>/rules": the session, as the packet path
+// reads it. 0 names no session and is refused.
+message PdrMatchKey {
+  uint32 session = 1;
+}
+
+// PdrMatchRule is one PDR of the session, as the rule it compiles to: the
+// 5-tuple the packet carries, with prefixes and port ranges, and the action
+// the packet leaves with. It is BESS's FirewallArg.Rule's shape (the fields
+// the firewall path writes, protobuf/module_msg.proto) with the ordering the
+// list gives it: a session's rules are in the SMF's precedence order, and the
+// first rule that matches the packet wins.
+message PdrMatchRule {
+  // Source and destination prefixes, CIDR, the length mandatory: "" is any
+  // address of the rule's family, and a filter whose address carries host bits
+  // means its network ("10.10.1.5/16" is "10.10.0.0/16").
+  string src_ip = 1;
+  string dst_ip = 2;
+
+  // IP protocol number, 0 for any.
+  uint32 proto = 3;
+
+  // Inclusive port ranges. An absent high bound is the full range, which is why
+  // they are `optional`: a plain 0 default would mean "port 0 only".
+  uint32 src_port_low = 4;
+  optional uint32 src_port_high = 5;
+  uint32 dst_port_low = 6;
+  optional uint32 dst_port_high = 7;
+
+  // Drop matching packets instead of forwarding them. A rule that drops cannot
+  // name an action.
+  bool drop = 8;
+
+  // The ActionId a matching packet carries, 0 for none: the module writes it
+  // into the packet's "action_id" metadata, so an ActionTable downstream
+  // selects the action this rule names (BESS D-141), exactly as the
+  // WildcardMatch path's rules do.
+  uint32 action_id = 9;
+}
+
+// PdrMatchEntry is one session's rule list, in the session's precedence order:
+// the first rule that matches wins. The order is the list's, not a field's --
+// the WildcardMatch path inverts the Precedence into the classifier's priority
+// because its rules are separate keys, and this one keeps the SMF's own order
+// because they are not.
+message PdrMatchEntry {
+  repeated PdrMatchRule rules = 1;
+}
