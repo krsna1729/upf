@@ -20,7 +20,7 @@ Session Report Request was seen in the 15 s hold.
 |---|---|---|
 | 1 | Association Setup | accepted, heartbeats every 10 s answered |
 | 7-8 | Session Establishment (478 B) | accepted; response carries Node ID, UP F-SEID with V4 address, Created PDR |
-| 9-10 | Session Modification (173 B: Update PDR 2, Update FAR 2 with the gNB's tunnel) | accepted; the response still carried a Created PDR on this run (fixed afterwards in `4f40f59`, not re-run) |
+| 9-10 | Session Modification (173 B: Update PDR 2, Update FAR 2 with the gNB's tunnel) | accepted; the response carried a Created PDR on the first run, and since `4f40f59` it is `Cause 1` alone (re-run `runs/final`, capture checked: the only Created PDR is in the establishment response) |
 | 13-14 | Session Deletion | accepted; the 197 B response carries one TERMR Usage Report per URR (trigger `000800`, URSEQN 0); the SMF completed the release |
 
 The earlier result, kept below as the record of what failed first, is that
