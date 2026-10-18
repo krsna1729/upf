@@ -962,13 +962,17 @@ addressed:
    lands on **~2.5M rules in one module** (1.97M at the widest encoding): 1M
    sessions at one counted PDR per module fit, and a deployment that measures
    2-4 PDRs per session crosses it at ~620K-1.2M sessions (earlier with the
-   widest encoding). There the read has to be split -- the module's
-   `get_counts` takes an explicit ActionId list, so a shard is a slice of the
-   ids, not a resource name (naming fewer *resources* splits between tables and
-   cannot split the one table that holds a rule each way: `Sweep`'s item 1
-   above). A paged read would carry the same path to 1M at the single-digit
-   MB/s above, so that ceiling is the read's shape, not the pull model's, and
-   nothing about the loop is O(sessions) in round trips any more. The remaining
+   widest encoding). Past that the read has to be split, and the split is by
+   **ActionId**: the module's `get_counts` takes an explicit id list, so a shard
+   is a slice of the rules, not a resource name (naming fewer *resources* splits
+   between tables and cannot split the one table that holds a rule each way:
+   `Sweep`'s item 1 above) -- names cannot split one table, ids can, so past the
+   ceiling the answer is **fewer rules per read and not a bigger message**, and
+   the ceiling is per module in rules, not a session count (1M sessions at one
+   counted PDR per module is half of it). At the 1M target the whole-module read
+   is therefore the answer as it stands: ~52 MiB a tick and the 1.8 MB/s at a
+   30 s interval above, reached without any paging, and nothing about the loop
+   is O(sessions) in round trips any more. The remaining
    O(all sessions) is the bytes: every tick still reads every counted rule (the
    restart wall's sweep has the same read, once). Beside it, as the
    design-level improvement that removes the per-tick O(all sessions) read
