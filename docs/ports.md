@@ -61,7 +61,11 @@ all three: a `Vif` (`core/modules/vif.{h,cc}`) matches a frame by `(VLAN,
 destination MAC)` -- and answers ARP for an interface's address -- and sends it
 out that interface's output gate, writing `vif_id` and `route_domain` into the
 packet's metadata on the way. The three interfaces are the manifest's, each
-with its own MAC, address, route domain and gate.
+with its own MAC, address, route domain and gate; the deployment's own graph
+uses one for its single N6 port (`deploy/upf.yaml`'s `vif_n6`: the data
+network's frames are the interface's) with `l2_sort` keeping the interface's
+own frames -- the ARP answer, which is not IP -- on the port instead of the
+downlink chain.
 
 Two facts a graph must respect:
 

@@ -12,13 +12,18 @@
 #   - deploy/session-live.yaml is this shape without ports, for a host with no
 #     bound NIC; ci/session-live.sh programs a whole session into it.
 #
-# Three values here are the deployment's and must match upfd's flags:
+# The values here are the deployment's and must match upfd's flags:
 #   enc's src_ip   = -n3-addr   (the UPF's N3 address; 192.0.2.1 is RFC 5737's
 #                                documentation address, replace it)
 #   rt/next_hops   = -n6-next-hop is the id an uplink action names (1 below),
 #                    and -n3-next-hop the one a downlink action names (2
 #                    below, the encap's gate). Both egress_gates are this
 #                    file's connections: 0 toward n6_out, 1 toward enc.
+#   the N6 side    = vif_n6's one interface (the UPF's N6 MAC and address:
+#                    what the data network resolves, and what its frames are
+#                    addressed to) and hop 1's dst_mac, the next hop those
+#                    frames name. The interface's address is the link's
+#                    gateway for the UE pool.
 # The N3 and N6 port names are the manifest's, not the driver's: a PortInc or
 # PortOut names the port this file declares.
 
@@ -57,6 +62,34 @@ modules:
   - name: n6_in
     mclass: PortInc
     arg: {port: n6}
+
+  # The N6 port's interface. The Vif matches a frame by (VLAN, destination MAC)
+  # and sends what it matched out of the interface's gate; it also answers ARP
+  # for an interface's address, in place, and sends that out of the same gate
+  # (docs/design.md, "N3, N6, N9: one port, three interfaces"). An ARP reply
+  # is not IP, so one rule on l2_sort sends it back out of the port; the
+  # interface's IP frames (the default gate) enter the downlink table. A frame
+  # that names no interface is dropped, and sink_other is where that shows.
+  - name: vif_n6
+    mclass: Vif
+    arg:
+      default_gate: 0
+      interfaces:
+        # The deployment's N6 identity: the MAC hop 1's src_mac repeats below,
+        # the address (192.0.2.2, the pool's gateway on this link), a route
+        # domain for a graph whose key reads one (this file's does not), and
+        # the gate the interface's frames leave by.
+        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 1, gate: 1}
+  - name: l2_sort
+    mclass: WildcardMatch
+    arg:
+      fields:
+        # The frame's EtherType: Eth (12).
+        - {offset: 12, num_bytes: 2}
+      # The interface's IP frames: everything that is not ARP.
+      default_gate: 1
+  - name: sink_other
+    mclass: Sink
 
   # The control plane's End Marker path (TS 29.244 5.3.2): upfd writes a whole
   # frame to this unix socket, and the port delivers it to the N3 output,
@@ -148,6 +181,13 @@ modules:
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
+  # The hop count is the chain's, before the router resolves anything: the
+  # uplink's decrement is the UE's own (RFC 791; RFC 1122 3.2.1.7: decrement,
+  # and drop at 1). The module has no ICMP Time Exceeded and keeps nothing but
+  # its gate counters, so that drop is silent -- recorded in docs/datapath.md
+  # and docs/compliance.md.
+  - name: ttl_ul
+    mclass: UpdateTTL
   - name: at_dl
     mclass: ActionTable
     arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
@@ -157,6 +197,10 @@ modules:
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
+  # The downlink's decrement: the data network's hop count. The outer headers
+  # the encap builds after it are the tunnel's and carry the encap's own.
+  - name: ttl_dl
+    mclass: UpdateTTL
 
   - name: rt
     mclass: Router
@@ -184,14 +228,25 @@ connections:
   - {upstream: pdr_ul, downstream: at_ul}
   - {upstream: at_ul, downstream: mt_ul}
   - {upstream: mt_ul, downstream: cnt_ul}
-  - {upstream: cnt_ul, downstream: rt}
+  - {upstream: cnt_ul, downstream: ttl_ul}
+  - {upstream: ttl_ul, downstream: rt}
   - {upstream: rt, downstream: n6_out}
 
-  - {upstream: n6_in, downstream: pdr_dl}
+  # The N6 port's ingress: the interface gate's frames -- the Vif's answer and
+  # what was addressed to the interface -- go through l2_sort, whose ARP rule
+  # sends a reply back out of the port and whose default gate is the downlink
+  # table. Two producers reach n6_out, and a PortOut takes both.
+  - {upstream: n6_in, downstream: vif_n6}
+  - {upstream: vif_n6, downstream: l2_sort, ogate: 1}
+  - {upstream: l2_sort, downstream: n6_out}
+  - {upstream: l2_sort, downstream: pdr_dl, ogate: 1}
+  - {upstream: vif_n6, downstream: sink_other}
+
   - {upstream: pdr_dl, downstream: at_dl}
   - {upstream: at_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
-  - {upstream: cnt_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: ttl_dl}
+  - {upstream: ttl_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: n3_out}
   # The marker leaves on the same N3 port a downlink packet would, which is
@@ -204,8 +259,21 @@ resources:
   # deployment with several N3 ports gives each its own, and one that wants
   # prefix routing instead of pre-resolved actions uses IPLookup's routes --
   # a Router's routes table is never consulted when the action names a hop.
+  # Hop 1 is the N6 side (base64: 02:00:00:00:06:02, the data network's next
+  # hop, and 02:00:00:00:06:01, vif_n6's interface): the Router writes those
+  # addresses into every frame it resolves the hop for (BESS D-153). Hop 2
+  # has none: the encap builds that frame's own.
   rt/next_hops:
     - key: {id: 1}
-      value: {egress_gate: 0}
+      value: {egress_gate: 0, dst_mac: "AgAAAAYC", src_mac: "AgAAAAYB"}
     - key: {id: 2}
       value: {egress_gate: 1}
+
+  # l2_sort's one rule: ARP (0x0806) leaves by the N6 port. It is the Vif's
+  # own reply, the frame it built in place for the interface's address; the
+  # request it answers arrived on the port and never entered the chain.
+  l2_sort/rules:
+    - key:
+        values: [{value_bin: "CAY="}]
+        masks: [{value_bin: "//8="}]
+      value: {priority: 100, gate: 0}

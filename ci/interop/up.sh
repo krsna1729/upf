@@ -99,7 +99,7 @@ else
       *)      DEPLOYED=$ROOT/deploy/upf.yaml ;;
     esac
     python3 "$(dirname "${BASH_SOURCE[0]}")/graph.py" "$DEPLOYED" "$STATE/graph.yaml" "$IF_N3" "$IF_N6" \
-      "$N3_IP" "$N6_MAC" "$DN_MAC" "$STATE/end-marker.sock" || die "building the dataplane graph failed"
+      "$N3_IP" "$N6_MAC" "$DN_MAC" "$DN_GW" "$STATE/end-marker.sock" || die "building the dataplane graph failed"
     GRAPH=$STATE/graph.yaml
     detach bessd sudo -n -E env "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
       "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$STATE/bessd-own.pid" -modules="$PLUG" -f

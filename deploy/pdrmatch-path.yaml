@@ -5,8 +5,8 @@
 # "the keyed write"). Everything else is that graph's, so the two can be read
 # side by side and the one difference is the thing under test.
 #
-# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_match_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> dump_n6 -> sink_n6
-# downlink  src_dn -> rewrite_dn -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> rt -> enc -> dump_d -> sink_n3
+# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_match_ul -> at_ul -> mt_ul -> cnt_ul -> ttl_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
+# downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> sel_dl -> pdr_match_dl -> at_dl -> mt_dl -> cnt_dl -> ttl_dl -> rt -> enc -> dump_d -> sink_n3
 #
 # The uplink chain is the claim: `pdr_match_ul` is the only module that reads
 # the decapsulated packet's 5-tuple (there is no WildcardMatch in the chain,
@@ -32,7 +32,13 @@
 #             the PDI, protocol 17 and destination port 53 from the filter)
 #   downlink  the data network's answer 8.8.8.8:5000 -> 10.45.0.2:53, which the
 #             downlink PDR matches on the WildcardMatch path (this arm does not
-#             build the downlink selector, so that direction is unchanged)
+#             build the downlink selector, so that direction is unchanged). It
+#             is addressed to the N6 interface's MAC, the deployment's own
+#             pair, as in deploy/session-path.yaml.
+#
+# The N6 side (vif_n6, l2_sort, sink_other, merge_n6, dump_n6) and the TTL
+# modules are deploy/session-path.yaml's, unchanged: that file carries the
+# comments.
 #
 # Metadata attributes are laid out in module registration order, so decap0 --
 # which writes "upf_teid" -- is listed first and `pdr_match_ul`, which reads it
@@ -108,8 +114,13 @@ modules:
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
+  - name: ttl_ul
+    mclass: UpdateTTL
   - name: rt
     mclass: Router
+  # The port: the router's frames and the interface's own meet here.
+  - name: merge_n6
+    mclass: Merge
   # The uplink's own egress: a Dump on the router's N6 gate, so what is checked
   # is the packet that left the graph toward N6 rather than one that entered it.
   - name: dump_n6
@@ -125,7 +136,23 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAABAgAAAAACCABFuAAlAAFAAEARH9EICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAYBAgAAAAYCCABFuAAlAAFAAEARH9EICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
+  # The N6 port's interface and the port's merge, as deploy/session-path.yaml
+  # wires them (that file carries the comments).
+  - name: vif_n6
+    mclass: Vif
+    arg:
+      default_gate: 0
+      interfaces:
+        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 1, gate: 1}
+  - name: l2_sort
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 12, num_bytes: 2}
+      default_gate: 1
+  - name: sink_other
+    mclass: Sink
   # The downlink's selector and matcher, as deploy/custom-pdrmatch.yaml wires
   # them: a packet from the data network carries no tunnel, so the session it
   # belongs to is the one whose UE address it is addressed to. The selector
@@ -155,6 +182,8 @@ modules:
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
+  - name: ttl_dl
+    mclass: UpdateTTL
   - name: enc
     mclass: GtpuEncap
     arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
@@ -188,17 +217,24 @@ connections:
   - {upstream: pdr_match_ul, downstream: at_ul}
   - {upstream: at_ul, downstream: mt_ul}
   - {upstream: mt_ul, downstream: cnt_ul}
-  - {upstream: cnt_ul, downstream: rt}
-  - {upstream: rt, downstream: dump_n6, ogate: 0}
+  - {upstream: cnt_ul, downstream: ttl_ul}
+  - {upstream: ttl_ul, downstream: rt}
+  - {upstream: rt, downstream: merge_n6, ogate: 0}
+  - {upstream: merge_n6, downstream: dump_n6}
   - {upstream: dump_n6, downstream: sink_n6}
 
   - {upstream: src_dn, downstream: rewrite_dn}
-  - {upstream: rewrite_dn, downstream: sel_dl}
+  - {upstream: rewrite_dn, downstream: vif_n6}
+  - {upstream: vif_n6, downstream: l2_sort, ogate: 1}
+  - {upstream: l2_sort, downstream: sel_dl, ogate: 1}
+  - {upstream: l2_sort, downstream: merge_n6}
+  - {upstream: vif_n6, downstream: sink_other}
   - {upstream: sel_dl, downstream: pdr_match_dl}
   - {upstream: pdr_match_dl, downstream: at_dl}
   - {upstream: at_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
-  - {upstream: cnt_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: ttl_dl}
+  - {upstream: ttl_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: dump_d}
   - {upstream: dump_d, downstream: sink_n3}
@@ -212,9 +248,16 @@ workers:
 resources:
   # The actions' next hops, as in deploy/session-path.yaml: id 1 is the uplink's
   # N6 route (gate 0) and id 2 the downlink's N3 one (gate 1). The compiler
-  # names them, not the session.
+  # names them, not the session; hop 1 carries that file's N6 MACs too.
   rt/next_hops:
     - key: {id: 1}
-      value: {egress_gate: 0}
+      value: {egress_gate: 0, dst_mac: "AgAAAAYC", src_mac: "AgAAAAYB"}
     - key: {id: 2}
       value: {egress_gate: 1}
+
+  # As in deploy/session-path.yaml: the Vif's ARP answer leaves by the port.
+  l2_sort/rules:
+    - key:
+        values: [{value_bin: "CAY="}]
+        masks: [{value_bin: "//8="}]
+      value: {priority: 100, gate: 0}

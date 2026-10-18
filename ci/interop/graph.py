@@ -8,27 +8,24 @@
 #     makes;
 #   * the encap's outer source is the N3 address, and the end-marker socket
 #     moves out of /tmp;
-#   * the uplink's egress gets a layer-2 rewrite the deployed graph does not
-#     have: after the decap the frame still carries the N3 frame's addresses
-#     (the gNB's as source, the N3 port's as destination -- docs/design.md,
-#     "Framing"), and the Router picks only the gate, so a frame leaving N6
-#     would name the wrong destination MAC on the data network. Two stock
-#     modules do the rewrite: GenericDecap (14 bytes) and GenericEncap (the
-#     data network's MACs). This is a gap in the deployed graph, recorded in
-#     docs/interop.md, not a property of this environment.
+#   * the addresses the graph writes into frames are this rig's. The N6 next
+#     hop (`rt/next_hops`, id 1) carries the deployment's own MAC pair in the
+#     file, and here it is the veths': the Router writes a resolved hop's
+#     addresses into the frame it forwards, so what the graph names is what the
+#     data network sees (BESS D-153). Where the graph has an N6 interface
+#     (deploy/upf.yaml: the Vif; the keyed graph has none), its MAC is this
+#     rig's too -- so a frame the data network sends is the interface's -- and
+#     its address is the gateway the rig's data network routes the pool
+#     through. ci/interop/net.sh sets that neighbour permanently, so the
+#     interface answers no ARP in this rig (the deployment's own frames are
+#     what the MAC substitution is for).
 #
-#     **Delete this pair once the fork's Router calls its own `RewriteL2`**
-#     (`core/route/router.h`; the module stores a next hop's MACs and never
-#     writes them today): the MACs this script already puts in `rt/next_hops`
-#     then take effect by themselves, and the deployed graph needs no extra
-#     module either.
-#
-#   graph.py <deployed.yaml> <out.yaml> <if_n3> <if_n6> <n3_ip> <n6_mac> <dn_mac> <marker_path>
+#   graph.py <deployed.yaml> <out.yaml> <if_n3> <if_n6> <n3_ip> <n6_mac> <dn_mac> <dn_gw> <marker_path>
 import base64
 import re
 import sys
 
-src, out, if_n3, if_n6, n3_ip, n6_mac, dn_mac, marker = sys.argv[1:9]
+src, out, if_n3, if_n6, n3_ip, n6_mac, dn_mac, dn_gw, marker = sys.argv[1:10]
 
 
 def mac(s):
@@ -59,28 +56,16 @@ assert n == 1, 'no ports: block before modules:'
 new, n = re.subn(r'src_ip: "[0-9.]+"', f'src_ip: "{n3_ip}"', new, count=1)
 assert n == 1, 'no GtpuEncap src_ip'
 
-# The layer-2 rewrite of the uplink's egress, in front of the N6 port.
-l2 = f'''  # The N6 egress's layer 2: strip the frame's Ethernet header and write the
-  # data network's (this environment's gap-filler, see the header comment).
-  - name: n6_l2
-    mclass: GenericDecap
-    arg: {{bytes: 14}}
-  - name: n6_eth
-    mclass: GenericEncap
-    arg:
-      fields:
-        - {{size: 6, value: {{value_bin: "{mac(dn_mac)}"}}}}
-        - {{size: 6, value: {{value_bin: "{mac(n6_mac)}"}}}}
-        - {{size: 2, value: {{value_int: 2048}}}}  # 0x0800, IPv4
+# The N6 next hop's MACs: this rig's pair in place of the file's (or of an
+# absent pair, as deploy/custom-pdrmatch.yaml's hop has it).
+new, n = re.subn(r'^      value: \{egress_gate: 0(?:, dst_mac: "[^"]*", src_mac: "[^"]*")?\}$',
+                 f'      value: {{egress_gate: 0, dst_mac: "{mac(dn_mac)}", src_mac: "{mac(n6_mac)}"}}',
+                 new, count=1, flags=re.M)
+assert n == 1, 'no rt/next_hops hop 1'
 
-'''
-new, n = re.subn(r'^connections:\n', lambda m: l2 + 'connections:\n', new, count=1, flags=re.M)
-assert n == 1, 'no connections: block'
-
-new, n = re.subn(r'^  - \{upstream: rt, downstream: n6_out\}\n',
-                 '  - {upstream: rt, downstream: n6_l2}\n'
-                 '  - {upstream: n6_l2, downstream: n6_eth}\n'
-                 '  - {upstream: n6_eth, downstream: n6_out}\n', new, count=1, flags=re.M)
-assert n == 1, 'no rt -> n6_out connection'
+# The N6 interface, where the graph has one (0 in the keyed graph).
+new, n = re.subn(r'^        - \{id: 1, vlan: 0, mac_addr: "[^"]*", ip_addr: "[^"]*", route_domain: [0-9]+, gate: 1\}$',
+                 f'        - {{id: 1, vlan: 0, mac_addr: "{n6_mac}", ip_addr: "{dn_gw}", route_domain: 1, gate: 1}}',
+                 new, count=1, flags=re.M)
 
 open(out, 'w').write(new)

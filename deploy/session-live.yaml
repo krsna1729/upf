@@ -80,6 +80,13 @@ modules:
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
+  # The hop count, as in deploy/upf.yaml: each chain decrements the inner
+  # packet's TTL before the router resolves a next hop. No packets cross this
+  # graph; the modules are here so the chain's shape is the deployment's.
+  - name: ttl_ul
+    mclass: UpdateTTL
+  - name: ttl_dl
+    mclass: UpdateTTL
   - name: rt
     mclass: Router
   - name: enc
@@ -94,11 +101,13 @@ connections:
   - {upstream: pdr_ul, downstream: at_ul}
   - {upstream: at_ul, downstream: mt_ul}
   - {upstream: mt_ul, downstream: cnt_ul}
-  - {upstream: cnt_ul, downstream: rt}
+  - {upstream: cnt_ul, downstream: ttl_ul}
+  - {upstream: ttl_ul, downstream: rt}
   - {upstream: pdr_dl, downstream: at_dl}
   - {upstream: at_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
-  - {upstream: cnt_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: ttl_dl}
+  - {upstream: ttl_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: sink}
 
@@ -106,9 +115,11 @@ resources:
   # The actions' next hops: the deployment's, not a session's (a session's
   # action names them by id). Both directions' actions name one, because both
   # chains hold an ActionTable and the module fails closed when the id it writes
-  # has no reader.
+  # has no reader. Hop 1's MACs are deploy/upf.yaml's: the data network's next
+  # hop and the N6 interface, the addresses the Router writes into every frame
+  # it resolves that hop for (BESS D-153).
   rt/next_hops:
     - key: {id: 1}
-      value: {egress_gate: 0}
+      value: {egress_gate: 0, dst_mac: "AgAAAAYC", src_mac: "AgAAAAYB"}
     - key: {id: 2}
       value: {egress_gate: 1}

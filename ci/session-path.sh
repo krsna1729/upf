@@ -11,10 +11,11 @@
 # Two halves, deliberately: the Go test programs the session and reads the
 # daemon's own counters (zero before the session exists, non-zero after), and
 # this script checks the bytes in the daemon's Dump output -- the decapsulated
-# inner packet on the uplink, the outer Eth/IPv4/UDP/GTP-U the encap wrote on
-# the downlink, with the session's TEID. Between them they cover the claim
-# "the session's state is what makes the packets move", which neither half
-# shows alone.
+# inner packet on the uplink, the frame that left N6 with the interface's
+# addresses and the chain's decremented TTL, the outer Eth/IPv4/UDP/GTP-U the
+# encap wrote on the downlink, with the session's TEID. Between them they cover
+# the claim "the session's state is what makes the packets move", which neither
+# half shows alone.
 #
 # The plugin must be built first (see README.md); the script uses
 # datapath/build/libupf_datapath.so unless PLUG says otherwise. The daemon is
@@ -102,6 +103,7 @@ sleep "$SECONDS_RUN"
 FAIL=0
 . "$ROOT/ci/dumphex.sh"
 UP_HEX=$(dump_hex dump_u "$LOG")
+N6_HEX=$(dump_hex dump_n6 "$LOG")
 DOWN_HEX=$(dump_hex dump_d "$LOG")
 MARKER_HEX=$(dump_hex dump_m "$LOG")
 check() { # check <description> <the dump's hex> <fixed string it must contain>
@@ -129,6 +131,22 @@ check "encap used the session's downlink TEID" "$DOWN_HEX" "55 66 77 88"
 # class would send every downlink packet as best effort. The inner packet's own
 # TOS is b8 as well, and the outer comes first.
 check "the outer header carries the inner DSCP" "$DOWN_HEX" "45 b8 00 49 00 00 40 00 40 11"
+
+# The N6 exit (dump_n6), where the deployment's own shape shows: the Router
+# resolved next hop 1 for the frame, and the hop's addresses are the data
+# network's next hop as destination and the interface's MAC as source
+# (deploy/upf.yaml; BESS D-153). The TTL is the uplink chain's decrement, 64
+# (0x40) to 63 (0x3f), on the inner packet the router forwarded -- the outer
+# header of a tunneled frame is the encap's own.
+check "the forwarded frame carries the N6 next hop's addresses" "$N6_HEX" \
+      "02 00 00 00 06 02 02 00 00 00 06 01 08 00 45 00"
+check "the uplink's TTL was decremented" "$N6_HEX" "45 00 00 25 00 01 40 00 3f 11"
+
+# The downlink's decrement is the inner packet's (the data network's hop
+# count), not the tunnel's: the outer header the encap builds keeps its own
+# 0x40, which the DSCP check above reads.
+check "the downlink's TTL was decremented" "$DOWN_HEX" \
+      "45 b8 00 25 00 01 40 00 3f 11"
 
 # The control plane's End Marker: the handover modification (SNDEM) made the
 # UPF construct a 60-byte frame naming the tunnel the session left -- the OLD

@@ -99,10 +99,13 @@ check "the inner packet is the UE's" "$UP_HEX" "0a 2d 00 02 08 08 08 08"
 # And on the router's N6 gate, which only a match can reach: the TEID table
 # drops a G-PDU no session names, and the module drops a packet the session's
 # rules do not match, so these bytes are the module's verdict plus the
-# ActionTable's, in a frame.
+# ActionTable's, in a frame -- with the deployment's N6 addresses (the Router's
+# hop 1, BESS D-153) and the uplink chain's decremented TTL, as in
+# ci/session-path.sh.
 check "the matched packet left the router by its N6 gate" "$N6_HEX" \
-      "02 00 00 00 00 02 02 00 00 00 00 01 08 00 45 00"
+      "02 00 00 00 06 02 02 00 00 00 06 01 08 00 45 00"
 check "the packet on N6 is the UE's" "$N6_HEX" "0a 2d 00 02 08 08 08 08"
+check "the uplink's TTL was decremented" "$N6_HEX" "45 00 00 25 00 01 40 00 3f 11"
 
 # The QoS flows, by their payloads ("qfi5-upf!", "qfi9-upf!"). Both reached the
 # module (they are in the decap's dump); only QFI 5's left it toward N6, so the
@@ -130,6 +133,7 @@ D_HEX=$(dump_hex dump_d "$LOG")
 check "the downlink packet was selected, matched and encapsulated" "$D_HEX" \
       "08 08 08 08 0a 2d 00 02"
 check "the downlink G-PDU carries the session's TEID" "$D_HEX" "55 66 77 88"
+check "the downlink's TTL was decremented" "$D_HEX" "45 b8 00 25 00 01 40 00 3f 11"
 
 # The module, as the daemon loaded it: the matcher it was built over, and the
 # attribute its session key is read from -- the decap's F-TEID.

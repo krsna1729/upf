@@ -443,16 +443,22 @@ Measured (`runs/dp4`, `runs/dp5`, generic; `runs/dp-custom`, custom):
 | the whole traffic accounted | both URRs' windows plus the deletion's termination report sum to 20 packets / 4560 octets each way, exactly what crossed (`runs/dp-fix`; before the fix `runs/dp5` delivered 20 for URR 1 and 11 for URR 2 -- finding 20) |
 | a report the session's end overtook | the queued report is cancelled, not sent (`upf_usage_reports_total{outcome="cancelled"}`), and its usage goes in the termination report instead |
 
-Two gaps this arm exposed, neither of them the rig's:
+Two gaps this arm exposed; the first is closed:
 
-1. **The deployed graph cannot put a destination MAC on an N6 egress frame.**
-   The decap leaves the inner packet behind the *outer* frame's addresses
-   (`docs/design.md`, "Framing"), and the fork's `Router` picks the gate from a
-   resolved next hop but never calls `route::RewriteL2` — so a next hop's
-   `dst_mac`/`src_mac` are stored and inert, and a frame leaves N6 naming the
-   N3 peer. The rig fills it with stock `GenericDecap`+`GenericEncap`
-   (`ci/interop/graph.py`), which goes away once the fork's Router calls
-   `RewriteL2`; the deployed graph needs the same fix either way.
+1. **The deployed graph cannot put a destination MAC on an N6 egress frame --
+   closed.** The decap leaves the inner packet behind the *outer* frame's
+   addresses (`docs/design.md`, "Framing"), and the fork's `Router` used to
+   pick the gate from a resolved next hop without writing its addresses;
+   **BESS D-153** landed (`route::RewriteL2`: a resolved hop's
+   `dst_mac`/`src_mac` go into the frame the Router forwards), and
+   `deploy/upf.yaml`'s hop 1 now carries the data network's pair. The rig's
+   `GenericDecap`+`GenericEncap` gap-filler is deleted from `ci/interop/graph.py`;
+   what the renderer still does is translate the graph's addresses to this rig's
+   veths -- the hop's MACs, and the N6 interface's own (the `vif_n6`
+   `deploy/upf.yaml` now has, which matches the rig's data network and answers
+   for its gateway address; the rig's permanent neighbour means no ARP is
+   exchanged). The deployed behaviour has a lane of its own: `ci/session-path.sh`
+   byte-checks the addresses in the frame that left `dump_n6`.
 2. **Finding 20** (above): the URR windows, not the packets.
 
 ## Reproduce

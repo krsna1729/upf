@@ -98,7 +98,12 @@ an Ethernet header (`core/modules/ip_lookup.cc` reads `eth + 1`), so the decap l
 the inner packet behind a header it writes from the headroom the outer headers
 occupied (the outer frame's addresses, the inner packet's version), and the encap
 takes that header off before it writes the outer one -- a G-PDU's payload is the inner
-IP packet, not a frame (TS 29.281). Neither direction copies a payload byte.
+IP packet, not a frame (TS 29.281). Neither direction copies a payload byte, and
+each egress names its peer in that header itself: the encap builds the outer
+frame's addresses from the tunnel record, and the `Router` writes the resolved
+next hop's `dst_mac`/`src_mac` into the frame it forwards (BESS D-153) -- so a
+frame leaving N6 names the data network's next hop and the interface it left by
+(`deploy/upf.yaml`'s hop 1, byte-checked by `ci/session-path.sh` at `dump_n6`).
 
 **Two chains, one per direction.** A module has one output gate per path, and a rule
 names an `ActionId` that resolves against the actions resource its table declares
@@ -567,7 +572,12 @@ domain in the rule's key wherever the graph declares it (`domain` in
 half is the vif's `route_domain` -- a rule's key can carry the domain only where
 something writes it into the packet -- and it is in: `deploy/veth-port.yaml`
 declares the three interfaces on one port and the tables that read what they
-write. A deployment that has no vif still tells two instances apart by what the
+write. The deployed graph wires the same module for its one N6 port: `vif_n6`
+matches the data network's frames by `(VLAN, MAC)` and answers ARP for its
+address, and `l2_sort` keeps the interface's own frames -- the ARP answer, which
+is not IP -- on the port instead of the downlink chain; nothing there reads the
+domain it writes (`deploy/upf.yaml`; `ci/session-path.sh` sends the frames
+through it). A deployment that has no vif still tells two instances apart by what the
 ingress writes on its own: on the uplink the tunnel the G-PDU arrived on
 (`upf_teid`, the decap's own attribute), which is
 what `deploy/session-instances.yaml` declares and `ci/session-instances.sh`
