@@ -18,6 +18,9 @@ type sweepFake struct {
 	contents map[string][]bess.Entry
 	changes  [][]bess.Change
 	cleared  []string
+	// reads is every Contents call's resource list, as made: what the sweep
+	// asked the daemon to pack into one response, call by call.
+	reads [][]string
 	// applies counts every Apply call, a recorded transaction or not, so a
 	// test can tell "the sweep stopped" from "the sweep sent nothing".
 	applies int
@@ -56,8 +59,17 @@ func (f *sweepFake) ReleaseFlow(_ context.Context, module string, id uint32) err
 func (f *sweepFake) DropFlow(_ context.Context, module string, id uint32) error { return nil }
 
 func (f *sweepFake) Contents(_ context.Context, names ...string) (map[string][]bess.Entry, error) {
+	f.reads = append(f.reads, append([]string(nil), names...))
 	if f.err != nil {
 		return nil, f.err
+	}
+	// The daemon's own refusal, and the reason the sweep reads one resource per
+	// call: every resource named is packed into one response, and one above
+	// kMaxMessageBytes (64 MiB) is RESOURCE_EXHAUSTED ("name fewer resources").
+	// A read naming the whole session layer is what a 1M-session dataplane
+	// answers that to.
+	if len(names) > 1 {
+		return nil, fmt.Errorf("bess: pipeline: rpc error: code = ResourceExhausted desc = the pipeline with its resources is above the 67108864-byte message limit: name fewer resources")
 	}
 	out := map[string][]bess.Entry{}
 	for _, n := range names {
@@ -193,15 +205,15 @@ func staleEntries(f *sweepFake, names []string, n int) {
 }
 
 // TestSweepErasesInBoundedBatchesAtScale is the restart wall at the size the
-// deployment target implies: 5000 stale entries across the session tables are
-// erased in transactions of at most sweepBatch changes each -- never one
-// transaction carrying every entry, which the daemon's message limit and its
-// engine's retirement budget both refuse at 1M sessions -- and every entry the
-// readback reported is erased exactly once, across them.
-//
-// It is the unit half of the chunked erase: the readback is still one
-// Contents call because the daemon offers no paged or streamed read of a
-// table's contents, so what this test bounds is the write.
+// deployment target implies, on both halves of it. The readback is one
+// Contents call per resource, never one naming them all: every resource named
+// is packed into one response there, and the daemon refuses a response above
+// its 64 MiB message limit (RESOURCE_EXHAUSTED, "name fewer resources"), which
+// the whole session layer of a 1M-session dataplane is -- so the bound is the
+// largest single table, not the sum of the tables. The fake reader answers that
+// refusal exactly as the daemon does. And the erase is chunked: 5000 entries
+// go out in transactions of at most sweepBatch changes each, never one
+// transaction carrying every entry, with every entry read erased exactly once.
 func TestSweepErasesInBoundedBatchesAtScale(t *testing.T) {
 	const entries = 5000
 	f := &sweepFake{contents: map[string][]bess.Entry{}}
@@ -211,6 +223,26 @@ func TestSweepErasesInBoundedBatchesAtScale(t *testing.T) {
 
 	if err := c.Sweep(context.Background()); err != nil {
 		t.Fatalf("the sweep: %v", err)
+	}
+	// One read per resource, each naming exactly that one: a read naming them
+	// all is the message the daemon refuses at this size.
+	if len(f.reads) != len(names) {
+		t.Errorf("the sweep read the dataplane %d times for %d resources, want one read each",
+			len(f.reads), len(names))
+	}
+	read := map[string]int{}
+	for i, got := range f.reads {
+		if len(got) != 1 {
+			t.Errorf("read %d names %v: one Contents call names one resource, so the 64 MiB message limit bounds a table and not the sum of them",
+				i+1, got)
+			continue
+		}
+		read[got[0]]++
+	}
+	for _, name := range names {
+		if read[name] != 1 {
+			t.Errorf("the sweep read %s %d times, want once", name, read[name])
+		}
 	}
 	want := (entries + sweepBatch - 1) / sweepBatch
 	if len(f.changes) != want {

@@ -482,9 +482,16 @@ type Entry struct {
 
 // Contents reads the current entries of the named resources in one round trip
 // (Pipeline with include_resources), which is what a restarted controller
-// needs before it can take an earlier run's sessions out. The response carries
-// every named resource's entries, so a resource the daemon does not have -- a
-// module the graph does not load -- comes back with none.
+// needs before it can take an earlier run's sessions out. Every name must be a
+// resource the daemon has: one it does not -- a module the graph does not load
+// -- fails the read (the daemon's ReadResources answers ENOENT, "no resource
+// ... (ListTransactionResources lists them)"), it does not come back empty.
+//
+// Naming several resources packs all of them into one response, and the daemon
+// refuses a response above its 64 MiB message limit with RESOURCE_EXHAUSTED
+// ("name fewer resources"). So a caller reading tables that may be large names
+// **one resource per call**: session.Compiler.Sweep does, which is what makes
+// that limit bound the largest single table instead of the sum of them.
 func (c *Client) Contents(ctx context.Context, names ...string) (map[string][]Entry, error) {
 	snap, err := c.sdk.Pipeline(ctx, sdk.WithResources(names...))
 	if err != nil {

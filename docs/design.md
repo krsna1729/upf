@@ -440,21 +440,31 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   resources back with `bess.Client.Contents`, erases exactly the entries it
   found, and leaves the graph's own resources alone) — or by a `bessd` restart,
   and by the SMF re-establishing, which its own path management forces once the
-  Recovery Time Stamp changes. The chunking is implemented, and the readback is
-  not: `Sweep` erases in transactions of at most 1000 changes each
-  (`sweepBatch`), in sequence, and stops at the first the daemon refuses -- a
-  partial sweep leaves the tables half-empty, so `upfd` treats any sweep error
-  as fatal rather than serving PFCP beside one (a few hundred entries are still
-  one transaction). The readback stays one `Contents` call, because the daemon
-  exposes no paged or streamed read of a table's contents: its
+  Recovery Time Stamp changes. The chunking is implemented on both halves:
+  `Sweep` erases in transactions of at most 1000 changes each (`sweepBatch`),
+  in sequence, and stops at the first the daemon refuses -- a partial sweep
+  leaves the tables half-empty, so `upfd` treats any sweep error as fatal rather
+  than serving PFCP beside one (a few hundred entries are still one
+  transaction) -- and it reads the tables back **one `Contents` call per
+  resource**, never one call naming them all, because every resource a call
+  names is packed into one response and the daemon refuses a response above its
+  64 MiB message limit (`RESOURCE_EXHAUSTED`, "name fewer resources"; its
   `GetPipelineRequest` carries a resource list and no cursor, offset or chunk
-  size, and a response above the 64 MiB message limit is `RESOURCE_EXHAUSTED`
-  with "name fewer resources" -- naming fewer resources pages *between* tables,
-  which cannot split the one table that holds a session each way. So a sweep at
-  1M sessions reads millions of entries in one message and meets that limit; the
-  erase is bounded regardless, and the paged read is the daemon's to grow
-  ("Session scale" below, item 1 of the control plane's O(total sessions)
-  operations). What is still missing is the replay path that
+  size). **The ceiling is therefore a table, not a session count:** a resource
+  read is bounded by that message limit, so a table is readable to roughly 510K
+  entries at 131 B each, and one resource per call is what puts the limit on the
+  largest single table rather than the sum of all of them. That is the interim's
+  limit, and past that table's capacity the operator's escape is a `bessd`
+  restart, which discards the warm dataplane -- which is why "the erase is
+  chunked" must not be read as "the sweep scales to 1M" on its own. **The target
+  is a bounded clear, which removes the readback entirely:** the readback exists
+  only so the sweep can name the keys it erases, a client-side enumeration of a
+  table the daemon already owns, so the operation to expose is *clear this
+  resource*, batched inside the daemon -- a handful of control calls, no read.
+  That is the direction recorded here and it is a BESS item; until it exists,
+  the per-resource read above is what makes a sweep work to roughly 510K entries
+  per table ("Session scale" below, item 1 of the control plane's O(total
+  sessions) operations). What is still missing is the replay path that
   would keep the sessions across a restart instead of emptying them: Wall 4
   below is that work.
 - Either restart must be a *reapply*, never a trust fall: the controller
@@ -849,28 +859,40 @@ before the dataplane footprint above becomes the limit. They are all ours, and
 the 1M target is a claim about the whole system, so all three have to be
 addressed:
 
-1. **`Compiler.Sweep`.** It reads every session table's full contents back in
-   one `Contents` call and erases what it read **key by key**, now in bounded
-   transactions (`sweepBatch`, 1000 changes each) rather than one: the daemon
-   refuses one transaction per sweep twice over, at 64 MiB of changes and at its
-   engine's retirement budget ("transaction retires up to N objects, more than
-   one batch allows (2048); split it"). The read half is what is left: at 1M
-   sessions that is a readback of millions of entries in one message, which
-   meets gRPC's message size limit. It cannot be paged from
-   here -- the daemon's `GetPipelineRequest` carries a resource list and no
-   offset, cursor or chunk size, and the only lever it names is the limit itself
-   ("A response above the message limit is RESOURCE_EXHAUSTED: name fewer
-   resources", `api_v2.cc`), which splits *between* tables and not inside the
-   one table that holds a session each way. Two other shapes that exist do not
-   bound it either: the SDK's `Pipeline`/`WithResources` is that same call, and
-   the daemon's one table-level clear -- a desired-state pipeline that *lists* a
-   resource with no entries clears it, `ResourceContents`' own comment -- builds
-   one server-side transaction with one op per entry it finds (`Converge` →
-   `engine.Apply(ops)` under the control-plane lock), so it moves the key
-   enumeration to the daemon without bounding the transaction. The chunked erase
-   is ours and is done; the paged or streamed readback is the daemon's to grow.
-   The design sentence that *prescribed* the defect is corrected above
-   ("emptying the session tables" now says chunked and why).
+1. **`Compiler.Sweep`.** It reads the session tables back and erases what it
+   read **key by key**. Both halves are now bounded, and neither is unbounded
+   any more: the erase goes out in transactions of `sweepBatch` (1000) changes
+   rather than one -- the daemon refuses one transaction per sweep twice over,
+   at 64 MiB of changes and at its engine's retirement budget ("transaction
+   retires up to N objects, more than one batch allows (2048); split it") -- and
+   the readback is **one `Contents` call per resource**, never one call naming
+   them all, because every resource a call names is packed into one response and
+   a response above the daemon's 64 MiB message limit is refused with "name
+   fewer resources" (`api_v2.cc`).
+   **What is left is the ceiling, and it is per table:** the daemon has no paged
+   or cursored read (`GetPipelineRequest` carries a resource list and no offset,
+   chunk size or cursor), so one resource read is one message, and a table is
+   readable to roughly 510K entries at 131 B each. That is the interim's limit:
+   at 1M sessions a single table that holds a session each way is past it, past
+   a table's capacity the operator's escape is a `bessd` restart, which discards
+   the warm dataplane, and nothing in the session layer lifts it (the SDK's
+   `Pipeline`/`WithResources` is the same call).
+   **The target is a bounded clear, which removes the readback entirely.** The
+   readback exists only so the sweep can name the keys it erases -- a
+   client-side enumeration of a table the daemon already owns, which at 1M
+   sessions is both the 64 MiB wall and a million entries' worth of work. The
+   operation to expose is *clear this resource*, batched inside the daemon,
+   which makes the sweep a handful of control calls and no read at all. The
+   shape exists already: a desired-state pipeline that *lists* a resource with
+   no entries clears it (`ResourceContents`' own comment), but it builds one
+   server-side transaction with one op per entry it finds (`Converge` →
+   `engine.Apply(ops)` under the control-plane lock), so it is unbounded exactly
+   where the sweep is now bounded -- the batching inside the daemon is what is
+   missing, not the operation. That is the direction recorded here, a BESS item;
+   until it exists, the per-resource read above is what makes a sweep work to
+   roughly 510K entries per table.
+   The design sentence that *prescribed* the defect is corrected
+   above ("emptying the session tables" now says chunked on both halves and why).
 2. **The firewall policy is a whole-policy singleton, so every session change
    rewrites every session's rules.** `compile.go`'s `firewallChanges` builds
    "the whole policy of every configured firewall module ... every live

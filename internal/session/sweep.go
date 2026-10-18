@@ -101,15 +101,22 @@ func (c *Compiler) resources() []string {
 // earlier run's sessions, and the caller has to refuse to serve PFCP beside it
 // (upfd treats this error as fatal).
 //
-// The readback is not chunked, and cannot be: the daemon has no paged or
-// streamed read of a table's contents. GetPipelineRequest carries a resource
-// list and nothing else (no cursor, offset or chunk size), and a response above
-// the daemon's 64 MiB message limit is RESOURCE_EXHAUSTED with "name fewer
-// resources" -- naming fewer resources pages *between* tables but cannot split
-// the one table that holds a session each way. So at 1M sessions this reads
-// millions of entries in one message and meets that limit; the erase is bounded
-// regardless, and the read is the daemon's to grow (docs/design.md's
-// O(total sessions) item).
+// The readback is one Contents call per resource, never one naming them all:
+// every resource a call names is packed into one response, and the daemon
+// refuses a response above its 64 MiB message limit (RESOURCE_EXHAUSTED, "name
+// fewer resources"). At 1M sessions the session tables together are well past
+// that limit; naming one resource at a time is the only lever the daemon
+// offers, and it makes the bound the largest single table rather than the sum
+// of them. A single read is still one message, so a table is readable to
+// roughly 510K entries at 131 B each: the largest single table is the interim's
+// ceiling, not the session count, and past that table's capacity the operator's
+// escape is a `bessd` restart, which discards the warm dataplane. The target
+// recorded in docs/design.md's restart wall is a bounded clear -- *clear this
+// resource*, batched inside the daemon -- which removes this readback
+// altogether: it exists only to name the keys to erase, a client-side
+// enumeration of a table the daemon already owns. There is no paged read to use
+// today: GetPipelineRequest carries a resource list and nothing else -- no
+// cursor, offset or chunk size.
 //
 // It is deliberately not a pipeline reset: the graph stays, the session tables
 // empty. And nothing is erased when there is nothing to erase, because an
@@ -132,9 +139,28 @@ func (c *Compiler) Sweep(ctx context.Context) error {
 		return errors.New("session: this dataplane cannot be read back, so an earlier run's sessions cannot be swept")
 	}
 	names := c.resources()
-	contents, err := c.contents.Contents(ctx, names...)
-	if err != nil {
-		return fmt.Errorf("reading the session tables: %w", err)
+	// One resource per call, never one naming them all. The daemon packs every
+	// resource named into one response, and a response above its 64 MiB message
+	// limit is refused (RESOURCE_EXHAUSTED, "name fewer resources" --
+	// core/control/api_v2.cc): at 1M sessions the session tables together are
+	// well past it, so naming fewer resources is the only lever there is, and
+	// naming one resource at a time is what makes the bound the largest single
+	// table instead of the sum of them. Each read is still one message of its
+	// own -- a table is readable to roughly 510K entries of 131 B each -- so
+	// the largest single table is the interim's ceiling, and past it the
+	// operator's escape is a `bessd` restart, which discards the warm
+	// dataplane. The target (docs/design.md's restart wall) is a bounded clear
+	// in the daemon, which removes this readback altogether: it exists only to
+	// name the keys to erase.
+	contents := make(map[string][]bess.Entry, len(names))
+	for _, name := range names {
+		read, err := c.contents.Contents(ctx, name)
+		if err != nil {
+			return fmt.Errorf("reading the session table %s: %w", name, err)
+		}
+		for n, entries := range read {
+			contents[n] = entries
+		}
 	}
 	// A firewall policy is a singleton ("<module>/rules" holds the whole
 	// policy, D-147): it has no key to erase, and the write is the whole
