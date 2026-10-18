@@ -152,6 +152,7 @@ downstream is keyed by.
 | `deploy/upf.yaml` | the deployment | PMD ports `n3`/`n6` (one rx queue each), `MetadataTest` after the decap, the marker port; **no buffering branch** |
 | `deploy/session-path.yaml` | `ci/session-path.sh`, `ci/n4-path.sh`, `ci/session-report.sh` | Sources `src_up`/`src_dn`, `Rewrite`, `Dump`, `Sink`; frames fixed so a test can byte-check them; no buffering branch |
 | `deploy/buffer-path.yaml` | `ci/buffer-path.sh` | `session-path.yaml` **plus** `cnt_buf`/`buf` and the `pdr_dl` ogate-1 connection; needs a daemon with BESS's packet store key attribute |
+| `deploy/pdrmatch-buffer-path.yaml` | `PROFILE=custom ci/buffer-path.sh` | `pdrmatch-path.yaml` **plus** the same buffering branch as `buffer-path.yaml`, in the same place (the placement is TS 29.244 5.2.4.2's, so both profiles share it) |
 | `deploy/session-live.yaml` | `ci/session-live.sh` | no packet path: the control path's tables only |
 | `deploy/smoke-gtpu.yaml` | `ci/smoke-gtpu.sh` | the two datapath halves alone |
 

@@ -37,7 +37,16 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-GRAPH=${GRAPH:-$ROOT/deploy/buffer-path.yaml}
+# PROFILE=custom runs the same lane with the keyed per-session matcher on the
+# uplink (deploy/pdrmatch-buffer-path.yaml): the buffering branch is in the same
+# place in both graphs (TS 29.244 5.2.4.2), and the lane shows it hold, report
+# and release the same way.
+PROFILE=${PROFILE:-generic}
+case "$PROFILE" in
+  generic) GRAPH=${GRAPH:-$ROOT/deploy/buffer-path.yaml}; PROFILE_ARGS=() ;;
+  custom)  GRAPH=${GRAPH:-$ROOT/deploy/pdrmatch-buffer-path.yaml}; PROFILE_ARGS=(-profile custom) ;;
+  *) echo "buffer-path: PROFILE is generic or custom, not $PROFILE" >&2; exit 2 ;;
+esac
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
 TICK=${TICK:-1s}
@@ -123,7 +132,7 @@ fi
 "$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
 
 (cd "$ROOT" && $GO build -o "$WORK/upfd" ./cmd/upfd)
-"$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
+"$WORK/upfd" "${PROFILE_ARGS[@]}" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
   -n3-addr 192.0.2.1 -urr-interval "$TICK" \
   -buffer-store buf -buffer-counter cnt_buf -buffer-gate 1 -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
@@ -152,7 +161,7 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_N4_TARGET=127.0.0.1:$N4_PORT \
 # the numbers in those lines are this arm's own proof, so they are left on this
 # script's stdout rather than only in the file. The tests build their own
 # controller (New(cfg, client, log)), so upfd is not the one releasing.
-MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=127.0.0.1:$BESS_PORT \
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=127.0.0.1:$BESS_PORT UPF_PROFILE=$PROFILE \
   $GO test "$ROOT/internal/session/" -count=1 -v \
   -run 'TestLiveSession(BuffersAndReleasesTheHeldPackets|HoldsNothingAfterTheBufferingDurationPasses)' \
   2>&1 | tee "$WORK/session-test.log" || {

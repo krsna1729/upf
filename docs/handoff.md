@@ -52,16 +52,34 @@ it is **unexplained, not fixed** (the log was not kept; keep logs with `tee` nex
    `FIREWALL=1 ci/session-path.sh` on `deploy/firewall-path.yaml`, failing with
    the old compiler and passing with the new). What is not yet sent through it:
    a port-range PDR and an IPv6 packet.
-2. **BUFF on the custom path** — the action names a **Router next hop**, not a
-   gate: `PdrMatch (rule, action_id) → ActionTable (next_hop_id metadata) →
-   Router → gate`, so the store's input gate must be reachable as a next hop of
-   the Router declared in its `next_hops` resource, with a config field for the
-   id. **Check the placement first**: in `deploy/buffer-path.yaml` the store sits
-   *before* `at_dl`, so via the action route it would sit after the Router and
-   the release path would re-enter the meter and encap rather than the
-   ActionTable. Needs the owner's call.
-3. **The downlink selector** — `route::LpmRouteTable` keyed on (route domain, UE
-   prefix), which is why the module is uplink-only today. Needs a design call.
+2. **BUFF on the custom path** — decided, and shown for what runs today. The
+   placement is the spec's, so it is one placement for both profiles: TS 29.244
+   5.2.4.2 has the buffered packets forwarded or dropped "following the packet
+   forwarding model specified in clause 5.2.1" under the new instruction, so the
+   store sits **before** the ActionTable, on the matcher's buffer gate, and
+   releases into the ActionTable's input (`deploy/buffer-path.yaml`:
+   `pdr_dl` gate 1 → `cnt_buf` → `buf` → `at_dl`). The custom profile's downlink
+   matcher is the stock WildcardMatch, so it is already that placement:
+   `PROFILE=custom ci/buffer-path.sh` (graph `deploy/pdrmatch-buffer-path.yaml`)
+   holds, reports and releases exactly as the generic lane does. Not done: when
+   `PdrMatch` serves a downlink (item 3) it needs a second output gate for a
+   BUFF verdict (a rule field, a configurable gate, default 1), because routing
+   BUFF through an action's next hop would put the store *after* the Router and
+   the release would re-enter the meter and encap. `pdrMatchChanges` refuses
+   BUFF on a PdrMatch direction until then.
+3. **The downlink selector** — `PdrMatch` is keyed by session, and the session of
+   a downlink packet is found by its destination address, so a selector in front
+   of it must map (route domain, destination address) → session. For IPv4 that
+   is an **exact-match** table (every project whose source was read does the
+   same: Open5GS `upf_sess_find_by_ue_ip_address`, eUPF's
+   `pdr_map_downlink_ip4`); for IPv6 it is an LPM on the prefix (TS 29.244
+   8.2.62: an IPv6 UE address is a /64 prefix). Either emits the session
+   attribute `PdrMatch`'s `key_attr` already names, so the module does not
+   change. The generic profile needs neither table: its `pdr_dl` is keyed on the
+   destination address and is the lookup. This is the spec's two-step model
+   (5.2.1: session look-up, then the PDR look-up within the session). Needs the
+   selector module(s); a design call on whether one module serves both
+   families.
 4. **IPv6 through the module** and **route domains on the custom path** — the
    key is IPv4-only; one module per domain or the domain in the key.
 5. **Known limits of the QFI arm**: the QFI 5 phase proves the flow is
