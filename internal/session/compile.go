@@ -2842,7 +2842,8 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 // stand while its uplink blackholed. Both are refused with the cause the SMF
 // can fix rather than carried into a key. For a QER's QFI (the value the
 // encap writes into the downlink container) the decap's sentinel is not in
-// play: refusing 0 there is a plain limit, not the same reason.
+// play, and a QER's QFI 0 is carried as "mark nothing" (parseQER), so only
+// the PDI's keeps the refusal.
 func qfiIE(c *ie.IE, what string) (uint8, error) {
 	v, err := c.QFI()
 	if err != nil {
@@ -3428,7 +3429,13 @@ func parseQER(i *ie.IE) (qerReq, error) {
 			// The QER's QFI (TS 29.244 8.2.89): the QoS flow this QER
 			// polices, and the one a downlink packet's PDU Session Container
 			// must name. resolve carries it into the tunnel record the PDR's
-			// FAR writes.
+			// FAR writes. QFI 0 is in the spec's range and is what OMEC's
+			// pfcpsim sends by default; the encap writes no container for a
+			// tunnel whose QFI is 0, so the QER marks nothing -- the same
+			// downlink packet a QER with no QFI IE gets.
+			if v, err := c.QFI(); err == nil && v == 0 {
+				continue
+			}
 			qfi, err := qfiIE(c, "the QER's")
 			if err != nil {
 				return qerReq{}, err

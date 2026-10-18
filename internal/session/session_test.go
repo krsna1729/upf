@@ -1869,6 +1869,24 @@ func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 	if got, ok := tunnelOf(t, rec, "10.45.0.3").Value["qfi"]; ok {
 		t.Errorf("the tunnel record of a QER with no QFI carries %v, want no field", got)
 	}
+
+	// A third, whose QER names QFI 0 -- in the spec's range, and what OMEC's
+	// pfcpsim sends unless told otherwise: it marks nothing, the same record
+	// as a QER with no QFI. It used to be refused, and with it every session
+	// of that simulator.
+	zero := establishment(0x9106, "10.45.0.4")
+	zero.CreatePDR[1] = downlinkPDRWithQER(2, "10.45.0.4", 1)
+	zero.CreateQER[0] = ie.NewCreateQER(
+		ie.NewQERID(1),
+		ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+		ie.NewQFI(0),
+	)
+	if got := cause(t, c.Establish(zero)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a QER naming QFI 0 answered cause %d, want accepted", got)
+	}
+	if got, ok := tunnelOf(t, rec, "10.45.0.4").Value["qfi"]; ok {
+		t.Errorf("the tunnel record of a QER naming QFI 0 carries %v, want no field", got)
+	}
 }
 
 // TestAFARsTransportLevelMarkingReachesTheTunnelRecord: the ToS/Traffic Class
