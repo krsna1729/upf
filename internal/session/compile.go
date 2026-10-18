@@ -2602,7 +2602,9 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 // implementation, not of the spec. A byte above 63 is a flow no packet
 // carries: a rule keyed on one would match nothing, and the session would
 // stand while its uplink blackholed. Both are refused with the cause the SMF
-// can fix rather than carried into a key.
+// can fix rather than carried into a key. For a QER's QFI (the value the
+// encap writes into the downlink container) the decap's sentinel is not in
+// play: refusing 0 there is a plain limit, not the same reason.
 func qfiIE(c *ie.IE, what string) (uint8, error) {
 	v, err := c.QFI()
 	if err != nil {
