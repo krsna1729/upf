@@ -12,3 +12,6 @@ go.work.sum
 *.pid
 /n4bench
 /pdrmatch
+
+# local reading copies of other projects (not part of the repo)
+/.scratch/
