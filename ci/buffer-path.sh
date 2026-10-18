@@ -130,6 +130,14 @@ fi
   exit 1
 }
 "$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
+# A run that fell back to the generic graph would pass everything below.
+if [ "$PROFILE" = custom ]; then
+  "$BESSCTL" -s "127.0.0.1:$BESS_PORT" get >"$WORK/pipeline.txt" 2>&1; grep -qi "pdr_\?match_ul" "$WORK/pipeline.txt" || {
+    echo "buffer-path: PROFILE=custom but the active graph has no PdrMatch module" >&2
+    exit 1
+  }
+  echo "ok: the uplink matcher is the custom PdrMatch (pdr_match_ul)"
+fi
 
 (cd "$ROOT" && $GO build -o "$WORK/upfd" ./cmd/upfd)
 "$WORK/upfd" "${PROFILE_ARGS[@]}" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
@@ -199,6 +207,6 @@ check "the store freed the flow at the BAR's own duration" "forwarded after the 
 
 check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
-  echo "buffer-path: ok (a BUFF FAR's packets were held, reported to the SMF over N4, released when the SMF moved the path, and freed by the store's own timeout when the BAR's duration ran out)"
+  echo "buffer-path: ok (a BUFF FAR's packets were held, reported to the SMF over N4, released when the SMF moved the path, and freed by the store's own timeout when the BAR's duration ran out; profile $PROFILE)"
 fi
 exit "$FAIL"

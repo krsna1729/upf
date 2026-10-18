@@ -513,7 +513,7 @@ func qfiFlows(ctx context.Context, client *bess.Client) error {
 	if d == 0 || m == 0 || r == 0 {
 		return fmt.Errorf("QFI 5's packets did not cross: decap %v, module %v, router %v", d, m, r)
 	}
-	fmt.Println("pdrmatch: ok: QFI 5's packets matched their own rule, not the QFI 9 drop that precedes it")
+	fmt.Println("pdrmatch: ok: QFI 5's packets were forwarded, not dropped by the QFI 9 rule ahead of them")
 	return nil
 }
 

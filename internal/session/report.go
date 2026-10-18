@@ -791,6 +791,7 @@ type urrWindow struct {
 	duration    time.Duration
 	first, last time.Time
 	groupLeader uint32
+	reportedAt  time.Time // the URR's base time when read: a tick that reported since has moved it
 }
 
 // windowsOf reads the counters of the URRs a session holds and returns the
@@ -837,7 +838,7 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 			nowUp, nowDown, f, l := c.countsOf(s, uid, counts)
 			w := urrWindow{
 				uid: uid, seqn: seqn, rawUp: nowUp, rawDown: nowDown,
-				duration: max(now.Sub(u.reported), 0), groupLeader: members[0],
+				duration: max(now.Sub(u.reported), 0), groupLeader: members[0], reportedAt: u.reported,
 			}
 			if u.baselined {
 				w.up, w.down = nowUp.since(u.lastUp), nowDown.since(u.lastDown)
@@ -879,15 +880,17 @@ func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) 
 	bumped := map[uint32]bool{}
 	for _, w := range windows {
 		u := s.URRs[w.uid]
-		if u == nil {
+		if u == nil || !u.reported.Equal(w.reportedAt) {
+			// Gone, or a reporting tick reported it since this reading: moving
+			// the base back would report the same usage twice.
 			continue
 		}
 		u.baselined = true
 		u.reported, u.lastUp, u.lastDown = now, w.rawUp, w.rawDown
 		u.windowFirst, u.windowLast = time.Time{}, time.Time{}
-		if !bumped[w.groupLeader] {
+		if lead := s.URRs[w.groupLeader]; lead != nil && !bumped[w.groupLeader] {
 			bumped[w.groupLeader] = true
-			s.URRs[w.groupLeader].seqn++
+			lead.seqn++
 		}
 	}
 }

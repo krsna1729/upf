@@ -98,3 +98,14 @@ func TestAMatchTheUPDoesNotImplementIsRefusedNotDropped(t *testing.T) {
 		})
 	}
 }
+
+func TestAnIDOnlyFilterNothingDefinesIsNeverACatchAllRule(t *testing.T) {
+	// Both PDRs name the ID and none carries the description: the filter has
+	// no field set, which compiled to a rule matching the whole UE address.
+	c := New(testConfig(), &recorder{}, quietLogger())
+	got := cause(t, c.Establish(bidirectional(0x7c03,
+		ie.NewSDFFilter("", "", "", "", 7), ie.NewSDFFilter("", "", "", "", 7))))
+	if got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("cause %d, want a rule failure", got)
+	}
+}

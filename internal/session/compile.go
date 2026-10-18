@@ -672,7 +672,10 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	c.mu.Unlock()
 	// What each URR measured since its last report goes in the answer
 	// (5.2.2.3.1): read now, while the rules that count it still exist.
-	usage := c.terminationReports(context.Background(), s, time.Now())
+	var usage []*ie.IE
+	if !c.restoring {
+		usage = c.terminationReports(context.Background(), s, time.Now())
+	}
 	if err := c.remove(context.Background(), s); err != nil {
 		c.log.Warn("session: the dataplane refused the deletion", "seid", seid, "error", err)
 		return deleteResponse(req, hdr, causeOf(err))
@@ -2104,6 +2107,9 @@ func pref(p netip.Prefix) (match, error) {
 // form a 4-byte mask cannot carry is a session the SMF is told to fix, not one
 // whose rule quietly matches everything.
 func (p *pdr) matchValue(f Field) (match, bool, error) {
+	if p.sdf != nil && p.sdf.bare {
+		return match{}, false, fmt.Errorf("%w: SDF Filter ID %d was never resolved to a flow description", errNotExpressible, p.sdf.id)
+	}
 	// The filter as the packets this PDR selects carry it: the SMF provisions
 	// the downlink form on both PDRs, and an ACCESS PDR's is swapped (5.2.1A.2A).
 	sd := p.oriented()
@@ -2246,6 +2252,9 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 // session, holds one id per rule. A rule that drops names none (the module
 // refuses a drop with one).
 func firewallRule(p *pdr) (map[string]any, error) {
+	if p.sdf != nil && p.sdf.bare {
+		return nil, fmt.Errorf("%w: SDF Filter ID %d was never resolved to a flow description", errNotExpressible, p.sdf.id)
+	}
 	var src, dst netip.Prefix
 	// The filter as the packets this PDR selects carry it (5.2.1A.2A): the
 	// downlink form as provisioned, swapped for an ACCESS PDR.
