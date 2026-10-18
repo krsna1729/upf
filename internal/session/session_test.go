@@ -3567,6 +3567,135 @@ func TestALinkedURRNamingAnUnknownURRIsRefused(t *testing.T) {
 	}
 }
 
+// liusaEstablishment is the shape the LIUSA trigger needs: one PDR both URRs
+// measure, URR 7 asking for Linked Usage Reporting (8.2.19, LIUSA) and linked
+// to URR 9, and URR 9 carrying the volume quota that gets spent. URR 7 also
+// carries a period that would report on its own if LIUSA were ignored.
+func liusaEstablishment(cpSEID uint64, linkedTo uint32) *message.SessionEstablishmentRequest {
+	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+		ie.NewFSEID(cpSEID, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x1000, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+			ie.NewFARID(1), ie.NewURRID(7), ie.NewURRID(9)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		ie.NewCreateURR(
+			ie.NewURRID(7),
+			ie.NewMeasurementMethod(0, 1, 0),         // VOLUM
+			ie.NewReportingTriggers(0x80|0x01, 0x00), // LIUSA and PERIO
+			ie.NewMeasurementPeriod(time.Second),
+			ie.NewLinkedURRID(linkedTo),
+		),
+		quotaURR(9, 1000),
+	)
+}
+
+// TestALiusaURRIsReportedWithTheURRItLinksTo: LIUSA (8.2.19) makes the link the
+// trigger. URR 7 asks for it and links to URR 9; when URR 9's own quota is due
+// the group's one report carries URR 7 with it, under the group's UR-SEQN --
+// URR 7's own period never fires for it.
+func TestALiusaURRIsReportedWithTheURRItLinksTo(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(liusaEstablishment(0x3041, 9)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("a URR asking for Linked Usage Reporting answered cause %d, want accepted", got)
+	}
+	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	// The first reading of each URR is its baseline, not its usage.
+	if reports := evaluate(t, c, upFSEID(t, resp)); len(reports) != 0 {
+		t.Fatalf("the baseline reading returned %+v, want none", reports)
+	}
+	rec.counts = map[string][]bess.RuleCount{
+		testConfig().Up.Counters: {{ActionID: rule.actionID(), Packets: 10, Octets: 1500}},
+	}
+
+	reports := evaluate(t, c, upFSEID(t, resp))
+	if len(reports) != 1 {
+		t.Fatalf("the LIUSA pair owed %d reports, want the group's one", len(reports))
+	}
+	r := reports[0]
+	// URR 9 is the reason the report is due; URR 7 is the LIUSA half, carried
+	// in it rather than reported on its own.
+	if r.URRID != 9 || r.Trigger != TriggerVolumeQuota {
+		t.Errorf("the report names URR %d with trigger %v, want URR 9 and the volume quota",
+			r.URRID, r.Trigger)
+	}
+	if len(r.Linked) != 1 || r.Linked[0].URRID != 7 {
+		t.Fatalf("the report carries %+v linked, want the LIUSA URR 7", r.Linked)
+	}
+	if got := r.Linked[0].Up; got != (Usage{Packets: 10, Octets: 1500}) {
+		t.Errorf("URR 7's linked usage is %+v, want the window's 10 packets and 1500 octets", got)
+	}
+}
+
+// TestALiusaURRDoesNotReportOnItsOwnTrigger: URR 7's period passes with URR 9,
+// the URR it links to, not due -- and nothing is owed, because LIUSA makes the
+// link the trigger and not URR 7's own measurement.
+func TestALiusaURRDoesNotReportOnItsOwnTrigger(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(liusaEstablishment(0x3042, 9)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("a URR asking for Linked Usage Reporting answered cause %d, want accepted", got)
+	}
+	seid := upFSEID(t, resp)
+	if reports := evaluate(t, c, seid); len(reports) != 0 {
+		t.Fatalf("the baseline reading returned %+v, want none", reports)
+	}
+	// URR 7's one-second period is past and no traffic reached URR 9's quota.
+	reports, err := c.Evaluate(context.Background(), seid, time.Now().Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("evaluating: %v", err)
+	}
+	if len(reports) != 0 {
+		t.Fatalf("the LIUSA URR reported on its own period: %+v", reports)
+	}
+}
+
+// TestALiusaURRWithNoLinkIsRefused: LIUSA without a link is a trigger with
+// nothing to fire on -- the report the SMF asked to be told about would never
+// come -- so it is refused with cause 73 naming what is missing, like the
+// link's own refusals.
+func TestALiusaURRWithNoLinkIsRefused(t *testing.T) {
+	cases := []struct {
+		name string
+		urr  *ie.IE
+		want string // what the refusal must name
+	}{
+		{"no link at all", ie.NewCreateURR(
+			ie.NewURRID(7),
+			ie.NewMeasurementMethod(0, 1, 0),
+			ie.NewReportingTriggers(0x80|0x01, 0x00), // LIUSA and PERIO
+			ie.NewMeasurementPeriod(time.Second)), "Linked Usage Reporting"},
+		{"a link naming an unknown URR", ie.NewCreateURR(
+			ie.NewURRID(7),
+			ie.NewMeasurementMethod(0, 1, 0),
+			ie.NewReportingTriggers(0x80|0x01, 0x00), // LIUSA and PERIO
+			ie.NewMeasurementPeriod(time.Second),
+			ie.NewLinkedURRID(99)), "99"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logged bytes.Buffer
+			rec := &recorder{}
+			c := New(testConfig(), rec, slog.New(slog.NewTextHandler(&logged, nil)))
+			resp := c.Establish(urrEstablishment(0x3043, 7, tc.urr)).(*message.SessionEstablishmentResponse)
+			if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+				t.Fatalf("a LIUSA URR with %s answered cause %d, want 73", tc.name, got)
+			}
+			if !strings.Contains(logged.String(), tc.want) {
+				t.Errorf("the refusal does not name what is missing (%q):\n%s", tc.want, logged.String())
+			}
+			if len(rec.txns) != 0 {
+				t.Error("a refused session wrote to the dataplane")
+			}
+		})
+	}
+}
+
 func TestEvaluateReportsThePeriodEvenWithNoTraffic(t *testing.T) {
 	// A periodic trigger reports while the URR is measured, traffic or none
 	// (5.2.2.3): a session whose usage stopped must still be visible to the SMF

@@ -709,6 +709,14 @@ type urr struct {
 	onVolQuota  bool
 	onTimeQuota bool
 
+	// linkedReporting is LIUSA (8.2.19): the URR is reported through its link,
+	// not on its own triggers -- the group's report is owed when a URR it is
+	// linked to is due, and this URR is carried in it. Its own limits still
+	// stop the traffic (quotaReached), and its window still moves with the
+	// group's report. A LIUSA URR with nothing linked to it is refused when
+	// the session is resolved (compile.go, `resolve`).
+	linkedReporting bool
+
 	// period is the Measurement Period (8.2.42) in seconds, with periodic set.
 	period time.Duration
 

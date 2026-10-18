@@ -370,6 +370,12 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 // a report the group is reported whole -- each member's own window, all under
 // the one UR-SEQN the group shares (8.2.71). A URR with no link is a group of
 // one and is reported exactly as it was before linking existed.
+//
+// A member whose triggers carry LIUSA (8.2.19) is the exception that proves the
+// link: it is reported through the link, never on its own measurement, so it
+// owes nothing itself and the group is due only where another member is. Its
+// window still moves with the group's report, and its own limits still stop the
+// traffic (quotaReached above), which is what the SMF reads in the report.
 func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now time.Time) ([]Report, bool) {
 	var reports []Report
 	stopped := false
@@ -438,6 +444,13 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 				stopped = true
 			}
 			trigger, due := u.due(upWindow, downWindow, window, windowActive)
+			if u.linkedReporting {
+				// LIUSA (8.2.19): this URR's report is the link's, owed when a
+				// URR it is linked to is due, so its own triggers generate
+				// nothing. Its window is still what the group's report carries
+				// for it, and it is still opened by that report below.
+				trigger, due = 0, false
+			}
 			st.trigger, st.due = trigger, due
 			if due {
 				anyDue = true

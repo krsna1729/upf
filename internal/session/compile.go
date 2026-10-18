@@ -229,8 +229,11 @@ type urrReq struct {
 	onTimeTh    bool
 	onVolQuota  bool
 	onTimeQuota bool
-	hasPeriod   bool
-	period      time.Duration
+	// linkedReporting is LIUSA (8.2.19): the URR reports through its link
+	// rather than on its own triggers. Which URRs that is is `linked` below.
+	linkedReporting bool
+	hasPeriod       bool
+	period          time.Duration
 
 	hasVolThreshold bool
 	volThreshold    volumeLimit
@@ -257,14 +260,14 @@ const (
 )
 
 // The Reporting Triggers bits this UP implements (TS 29.244 8.2.19), one octet
-// at a time: PERIO, VOLTH and TIMTH in the first, VOLQU and TIMQU in the
-// second. Every other bit -- QUHTI, START, STOPT, DROTH, LIUSA, ENVCL, MACAR,
-// EVETH, EVEQU, IPMJL, QUVTI, REEMR, UPINT, and the spares -- is refused when
-// the URR is read: a trigger the SMF asked for and this UP quietly ignores is a
-// report the SMF never gets, and it bills from them.
+// at a time: PERIO, VOLTH, TIMTH and LIUSA in the first, VOLQU and TIMQU in the
+// second. Every other bit -- QUHTI, START, STOPT, DROTH, ENVCL, MACAR, EVETH,
+// EVEQU, IPMJL, QUVTI, REEMR, UPINT, and the spares -- is refused when the URR
+// is read: a trigger the SMF asked for and this UP quietly ignores is a report
+// the SMF never gets, and it bills from them.
 var (
-	triggersImplemented = [2]uint8{trigPeriodic | trigVolumeTh | trigTimeTh, trigVolQuota | trigTimeQuota}
-	triggersFirstOctet  = map[uint8]string{0x08: "QUHTI", 0x10: "START", 0x20: "STOPT", 0x40: "DROTH", 0x80: "LIUSA"}
+	triggersImplemented = [2]uint8{trigPeriodic | trigVolumeTh | trigTimeTh | trigLiusa, trigVolQuota | trigTimeQuota}
+	triggersFirstOctet  = map[uint8]string{0x08: "QUHTI", 0x10: "START", 0x20: "STOPT", 0x40: "DROTH"}
 	triggersSecondOctet = map[uint8]string{0x04: "ENVCL", 0x08: "MACAR", 0x10: "EVETH", 0x20: "EVEQU", 0x40: "IPMJL", 0x80: "QUVTI"}
 	triggersThirdOctet  = map[uint8]string{0x01: "REEMR", 0x02: "UPINT"}
 )
@@ -273,6 +276,7 @@ const (
 	trigPeriodic  = 0x01 // PERIO (octet 5 bit 1)
 	trigVolumeTh  = 0x02 // VOLTH (octet 5 bit 2)
 	trigTimeTh    = 0x04 // TIMTH (octet 5 bit 3)
+	trigLiusa     = 0x80 // LIUSA (octet 5 bit 8)
 	trigVolQuota  = 0x01 // VOLQU (octet 6 bit 1)
 	trigTimeQuota = 0x02 // TIMQU (octet 6 bit 2)
 )
@@ -762,6 +766,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		if u.hasTriggers {
 			entry.periodic, entry.onVolumeTh, entry.onTimeTh = u.periodic, u.onVolumeTh, u.onTimeTh
 			entry.onVolQuota, entry.onTimeQuota = u.onVolQuota, u.onTimeQuota
+			entry.linkedReporting = u.linkedReporting
 		}
 		if u.hasPeriod {
 			entry.period = u.period
@@ -948,6 +953,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 // must follow the model as it is now rather than as the last message left it.
 // The caller holds the lock.
 func (c *Compiler) resolve(s *Session) error {
+	linkedTo := make(map[uint32]bool, len(s.URRs))
 	for _, uid := range urrIDsInOrder(s) {
 		for _, lid := range s.URRs[uid].linked {
 			if s.URRs[lid] == nil {
@@ -960,6 +966,18 @@ func (c *Compiler) resolve(s *Session) error {
 					"%w: URR %d's Linked URR ID names URR %d, which the session does not hold",
 					errNotExpressible, uid, lid)
 			}
+			linkedTo[lid] = true
+		}
+	}
+	for _, uid := range urrIDsInOrder(s) {
+		// LIUSA (8.2.19) is the link itself: a URR that asks for Linked Usage
+		// Reporting has no report of its own -- the group's is owed when a URR
+		// it is linked to is due -- so a LIUSA URR with no link in either
+		// direction is a URR the SMF asked to hear about and never would.
+		if u := s.URRs[uid]; u.linkedReporting && len(u.linked) == 0 && !linkedTo[uid] {
+			return fmt.Errorf(
+				"%w: URR %d asks for Linked Usage Reporting (LIUSA), and no URR of the session is linked to it",
+				errNotExpressible, uid)
 		}
 	}
 	for _, p := range pdrsInOrder(s) {
@@ -2608,6 +2626,7 @@ func parseURR(i *ie.IE) (urrReq, error) {
 			u.periodic = flags[0]&trigPeriodic != 0
 			u.onVolumeTh = flags[0]&trigVolumeTh != 0
 			u.onTimeTh = flags[0]&trigTimeTh != 0
+			u.linkedReporting = flags[0]&trigLiusa != 0
 			if len(flags) > 1 {
 				u.onVolQuota = flags[1]&trigVolQuota != 0
 				u.onTimeQuota = flags[1]&trigTimeQuota != 0
