@@ -162,10 +162,11 @@ build/stage/bin/bessctl apply deploy/upf.yaml
   block-7 rows and compliance's BUFF row carry the evidence, including the arm's
   default-stage negative. The DDN trigger is a poll of the branch's counters at
   `-urr-interval`, so its latency is up to one tick and a deployment that wants
-  DDN must set that interval. `ci/buffer-path.sh`
-  proves the whole path against a live daemon (it needs a `bessd` built with
-  BESS's `packet_store` key_attrs change, which is why its graph is
-  `deploy/buffer-path.yaml` rather than the shared one).
+  DDN must set that interval. `ci/buffer-path.sh` proves the whole path against
+  a live daemon (it needs a `bessd` built with BESS's `packet_store` key_attrs
+  change and, for the expiry check, the store's bounded sweep (`0bfd2783`),
+  which is why its graph is `deploy/buffer-path.yaml` rather than the shared
+  one).
 - The two GTP-U path messages are in. `gtpu_echo` answers an Echo Request
   (type 1, TEID 0) with the reply TS 29.281 7.2.2 prescribes — the S flag, the
   request's sequence number, the mandatory Recovery IE and this node's Recovery

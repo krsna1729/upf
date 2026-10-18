@@ -752,23 +752,23 @@ the map-resource module above, `PdrMatch`-shaped, one key per session,
 `ExactMatch`'s shape rather than the firewall module's whole-policy singleton.
 The matcher side is BESS's, and it is two pieces, not one: the `firewall`
 module extracts a rule's key from the packet and applies its verdict (the
-D-147 work, which the compiler can opt into today with `upfd -firewall-ul`/
-`-firewall-dl` and no deployment configures), and **`FirewallScan` is the
-small-policy matcher we hold one of per session** (`core/classifier/
-firewall_table.h`, beside `FirewallTable`). On BESS's side of that line —
-neither of these is ours, and we have not run them — `FirewallScan`'s
-`Lookup`/`LookupBatch` return the same `Match` shape and call the same
-`FirewallTable::Matches` predicate the index calls per group, so the two
-structures cannot disagree about what a rule means; its `Create` makes the same
-refusals the index's `Build` makes, rule for rule; and their test walks a random
-corpus of both families through the scan, the index and a scalar reference for
-agreement. Both pieces land in Main's next push. And the selector that *names
-the session* on the downlink is the LPM: a different structure, with a
-different cost (a lookup per packet, inside the break-even line above) and a
-different limit (the domain count, and the deployment's address plan). Keeping
-the three apart is what lets each be measured and replaced on its own — and
-conflating them is how a whole-policy write came to look like the right shape
-for per-session state in the first place.
+D-147 work, which the compiler can opt into today with `upfd -firewall-ul` and
+`-firewall-dl`, and no deployment configures), and **`FirewallScan` is the
+small-policy matcher we hold one of per session**, in
+`core/classifier/firewall_table.h` beside `FirewallTable`. On BESS's side of
+that line — neither of these is ours, and we have not run them —
+`FirewallScan`'s `Lookup`/`LookupBatch` return the same `Match` shape and call
+the same `FirewallTable::Matches` predicate the index calls per group, so the
+two structures cannot disagree about what a rule means; its `Create` makes the
+same refusals the index's `Build` makes, rule for rule; and their test walks a
+random corpus of both families through the scan, the index and a scalar
+reference for agreement. Both pieces land in Main's next push. And the selector
+that *names the session* on the downlink is the LPM: a different structure,
+with a different cost (a lookup per packet, inside the break-even line above)
+and a different limit (the domain count, and the deployment's address plan).
+Keeping the three apart is what lets each be measured and replaced on its own —
+and conflating them is how a whole-policy write came to look like the right
+shape for per-session state in the first place.
 
 ## Where a table lives: shared, per-worker, or behind a ring
 
