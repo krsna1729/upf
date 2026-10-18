@@ -231,6 +231,13 @@ build/bess/stage/bin/bessctl apply deploy/upf.yaml
   node's own counters -- sessions held, establishments, modifications,
   deletions, refusals, usage reports sent/refused/held/dropped, and whether a CP
   function is associated -- in the Prometheus text format.
+- Two outside checks run as lanes. `ci/interop/run.sh` brings up free5GC v4.3.0
+  from its published images on a private bridge and runs a real SMF's
+  association, PDU session and release against `upfd` (N4 only: no packet
+  crosses the dataplane; `docs/interop.md`). `ci/cntc-path.sh` drives TOSSI
+  CNTC's PFCP simulator and its N3 robustness frames against `upfd` and `bessd`
+  and checks the answers; it is not CNTC's verdict and earns no certificate
+  (`docs/compliance.md`, finding 18).
 - The port split is in, on a veth: `deploy/veth-port.yaml` is one PMD port with
   four queues split by a `Vif` into N3/N6/N9, each with its own address and
   route domain, and `ci/veth-port.sh` proves the queues, the split and the
