@@ -98,7 +98,17 @@ bc resume >/dev/null
 # <arm>.go before the next one, so the shell reads a window's dump lines -- which
 # the Dumps write once a second -- before the next window's packets exist.
 await() { # await <name>: wait for the driver's handshake file
-  for _ in $(seq 1 600); do [ -e "$WORK/$1" ] && return 0; sleep 0.1; done
+  for _ in $(seq 1 600); do
+    [ -e "$WORK/$1" ] && return 0
+    if ! kill -0 "$DRIVER" 2>/dev/null; then
+      # A driver that refused a message is gone, and its own line says which
+      # one: waiting out the deadline would hide it behind a timeout.
+      echo "pdrmatch-2dn: the driver stopped before it signalled $1; its output follows" >&2
+      cat "$WORK/driver.log" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
   echo "pdrmatch-2dn: the driver never signalled $1" >&2
   return 1
 }

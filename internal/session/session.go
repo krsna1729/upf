@@ -1390,7 +1390,9 @@ func (c *Compiler) settle(s *Session) {
 	if c.cfg.Down.Selector != "" {
 		for _, p := range s.PDRs {
 			if k, ok := selectorKeyOf(p); ok {
-				live[selectorClaim(c.cfg.Down, k)] = true
+				if claim, err := selectorClaim(c.cfg.Down, k); err == nil {
+					live[claim] = true
+				}
 			}
 		}
 	}
@@ -1432,7 +1434,10 @@ func (c *Compiler) settle(s *Session) {
 			if !ok {
 				continue
 			}
-			claim := selectorClaim(c.cfg.Down, k)
+			claim, err := selectorClaim(c.cfg.Down, k)
+			if err != nil {
+				continue // never claimed: nothing to give up
+			}
 			if !live[claim] && c.rules[claim] == s.LocalSEID {
 				delete(c.rules, claim)
 				s.forgetRuleKey(claim)

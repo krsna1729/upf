@@ -204,10 +204,41 @@ func (c *Compiler) selectorErases(s *Session) ([]bess.Change, error) {
 }
 
 // selectorClaim is the compiler's own name for one key of a direction's
-// selector. Two sessions whose downlink PDRs name one (route domain, address)
-// would each select the other's packets, and the second's rule would erase the
-// first's on the way out, so the second is refused exactly as two sessions
-// naming one WildcardMatch rule are.
-func selectorClaim(d Direction, k selectorKey) string {
-	return selectorRes(d) + "\x00" + k.String()
+// selector. Two sessions whose downlink PDRs name one key would each select the
+// other's packets, and the second's rule would erase the first's on the way out,
+// so the second is refused exactly as two sessions naming one WildcardMatch rule
+// are.
+//
+// The name is the *engine's* key, byte for byte (selectorRuleKey): a name built
+// from the session's own fields would let two sessions whose keys differ in a
+// field the graph does not declare -- the route domain, with a selector
+// configured for the address alone -- hold one engine key between them, and the
+// second's rule would silently take the first's packets.
+func selectorClaim(d Direction, k selectorKey) (string, error) {
+	key, err := selectorRuleKey(d, k)
+	if err != nil {
+		return "", err
+	}
+	return selectorRes(d) + "\x00" + selectorKeyString(key), nil
+}
+
+// claimOf is selectorClaim for the paths that must not fail on it: a key whose
+// claim cannot be built was never written (the write path refuses it), so it is
+// in no live set, and the caller's own selectorRuleKey call refuses the erase.
+func claimOf(d Direction, k selectorKey) string {
+	claim, _ := selectorClaim(d, k)
+	return claim
+}
+
+// selectorKeyString is one selector rule key as one string: the declared fields'
+// bytes in the graph's order, which is what the module's own key is. Two keys
+// the engine cannot tell apart cannot be told apart here either.
+func selectorKeyString(key map[string]any) string {
+	fields, _ := key["fields"].([]map[string]any)
+	var b []byte
+	for _, f := range fields {
+		value, _ := f["value_bin"].([]byte)
+		b = append(b, value...)
+	}
+	return string(b)
 }

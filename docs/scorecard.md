@@ -457,8 +457,9 @@ no other project claims any.
 `ci/pdrmatch-2dn.sh` -- two sessions holding the *same* UE address in two route
 domains (the graph's `Vif` writes the domain, the selector's key is (route
 domain, UE address)), both directions reaching their own network, and the
-fail-first that names the key: with `route_domain` dropped, the campus session
-takes the internet frame and that window fails while the others pass.
+fail-first that names the key: with `route_domain` dropped, the two sessions'
+rules are one engine key, so the campus establishment is refused with cause 73
+(finding 21) instead of silently taking the internet frame.
 
 **Field.** OMEC has ULCL/N9 (50); nothing else claims it.
 

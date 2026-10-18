@@ -143,6 +143,51 @@ func TestTheSelectorKeyCarriesTheRouteDomainWhereTheGraphHasOne(t *testing.T) {
 	}
 }
 
+// The other half of that fact: where the graph does *not* classify by the route
+// domain, the domain cannot keep two sessions apart either. Their rules are one
+// key to the engine -- the address alone -- so the second session is refused,
+// and the refusal is the same one a same-domain collision gets. A claim built
+// from the session's own (route domain, address) would differ while the rule it
+// guards is the same rule, and the second session's rule would silently take
+// the first's packets (found live by ci/pdrmatch-2dn.sh's probe: with
+// `route_domain` dropped from the key, the campus session took the internet
+// frame).
+func TestASelectorThatIgnoresTheRouteDomainHoldsOneSessionPerAddress(t *testing.T) {
+	var logged bytes.Buffer
+	rec := &recorder{}
+	cfg := instancedConfig(t)
+	cfg.Down.PdrMatch = "pdr_match_dl"
+	cfg.Down.Selector = "sel_dl"
+	cfg.Down.SelectorActions = "sel_at"
+	cfg.Down.SelectorFields = []Field{DstIP} // the graph reads no route domain
+	c := New(cfg, rec, slog.New(slog.NewTextHandler(&logged, nil)))
+
+	first := c.Establish(instancedEstablishment(0x7801, "10.45.0.9", 0x61, "internet")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, first); got != ie.CauseRequestAccepted {
+		t.Fatalf("the first establishment answered cause %d", got)
+	}
+	// The key the engine holds, and therefore the key the claim is: the address
+	// alone, whatever the session's own fields are.
+	key := selectorKeyOfChange(t, changesFor(rec.last(), "sel_dl/rules")[0])
+	if len(key) != 1 || !bytes.Equal(key[0], []byte{10, 45, 0, 9}) {
+		t.Fatalf("the selector's key is %v, want the address alone (the graph declares one field)", key)
+	}
+	before := len(rec.txns)
+	second := c.Establish(instancedEstablishment(0x7802, "10.45.0.9", 0x62, "ims")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, second); got != ie.CauseRuleCreationModificationFailure {
+		t.Fatalf("the second instance's session on the same address answered cause %d, want the rule failure: the two sessions' keys are one key", got)
+	}
+	if msg := logged.String(); !strings.Contains(msg, "the downlink address") || !strings.Contains(msg, "10.45.0.9") ||
+		!strings.Contains(msg, "is session 1's") {
+		t.Errorf("the refusal does not name the downlink key it could not take:\n%s", msg)
+	}
+	// The refused establishment wrote nothing, so the first session's rule is
+	// still the first session's: the second did not take it on the way in.
+	if got := len(rec.txns); got != before {
+		t.Errorf("the refused establishment applied %d transactions, want none", got-before)
+	}
+}
+
 // Two sessions whose downlink PDRs name one address would each select the
 // other's packets -- and the second's deletion would erase the first's rule --
 // so the second is refused, exactly as two sessions naming one WildcardMatch

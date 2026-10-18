@@ -1463,7 +1463,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	if c.cfg.Down.Selector != "" {
 		for _, p := range s.PDRs {
 			if k, ok := selectorKeyOf(p); ok {
-				liveSelector[selectorClaim(c.cfg.Down, k)] = true
+				if claim, err := selectorClaim(c.cfg.Down, k); err == nil {
+					liveSelector[claim] = true
+				}
 			}
 		}
 	}
@@ -1590,7 +1592,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				erase(bess.Change{Resource: pdrMatchRes(dir), Key: map[string]any{"session": key}})
 			}
 		}
-		if k, ok := selectorKeyOf(p); ok && !liveSelector[selectorClaim(c.cfg.Down, k)] {
+		if k, ok := selectorKeyOf(p); ok && !liveSelector[claimOf(c.cfg.Down, k)] {
 			// The session's downlink no longer names this address: the rule
 			// goes. Its action record goes only with the last rule that
 			// references it -- a session whose other address is still live
@@ -1668,7 +1670,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				erase(bess.Change{Resource: pdrMatchRes(dir), Key: map[string]any{"session": key}})
 			}
 		}
-		if k, ok := selectorKeyOf(old); ok && !liveSelector[selectorClaim(c.cfg.Down, k)] {
+		if k, ok := selectorKeyOf(old); ok && !liveSelector[claimOf(c.cfg.Down, k)] {
 			// A replaced form whose UE address moved: its selector rule goes,
 			// and the action record only with the last rule that names it --
 			// the same guard as the removed form above.
@@ -1996,7 +1998,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 	}
 	for _, k := range selected {
-		claim := selectorClaim(c.cfg.Down, k)
+		claim, err := selectorClaim(c.cfg.Down, k)
+		if err != nil {
+			return nil, nil, err
+		}
 		if owner, taken := c.rules[claim]; taken && owner != s.LocalSEID {
 			return nil, nil, fmt.Errorf(
 				"%w: the downlink address %s is session %d's", errNotExpressible, k, owner)
