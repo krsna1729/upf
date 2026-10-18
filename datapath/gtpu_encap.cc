@@ -146,7 +146,7 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
               return std::unexpected("invalid 'qfi' field");
             }
             tunnel.qfi = static_cast<uint8_t>(value.qfi());
-            // The Transport Level Marking (8.2.42) is the IE's two octets, so
+            // The Transport Level Marking (8.2.12) is the IE's two octets, so
             // anything wider than them is a record no message could have
             // produced. 0 -- absent, or the SMF asking for none -- means the
             // inner TOS is copied.
@@ -264,11 +264,11 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
         pkt.head_data<const bess::utils::Ipv4 *>()->type_of_service;
 
     // When the session's record names a Transport Level Marking (TS 29.244
-    // 8.2.42), the SMF's DSCP wins over the inner packet's: the marking's high
+    // 8.2.12), the SMF's DSCP wins over the inner packet's: the marking's high
     // octet is the ToS/Traffic Class the outer header carries and its low
     // octet is the mask naming which bits of the inner header's own class
     // survive -- the ECN bits with the spec's 0xFC, which applying the marking
-    // must not change (the NOTE under 8.2.42). Without a marking the inner TOS
+    // must not change (the NOTE under 8.2.12). Without a marking the inner TOS
     // is copied, byte for byte as before.
     uint8_t outer_tos = inner_tos;
     if (tunnel->marking != 0) {

@@ -1823,7 +1823,7 @@ func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 }
 
 // TestAFARsTransportLevelMarkingReachesTheTunnelRecord: the ToS/Traffic Class
-// the SMF asks this session's outer headers to carry (TS 29.244 8.2.42, in the
+// the SMF asks this session's outer headers to carry (TS 29.244 8.2.12, in the
 // FAR's forwarding parameters) reaches the dataplane through the tunnel record
 // the FAR's outer header creation writes -- the record whose "marking" the
 // encap reads to mark the outer IPv4 header instead of copying the inner TOS.
@@ -1838,7 +1838,7 @@ func TestAFARsTransportLevelMarkingReachesTheTunnelRecord(t *testing.T) {
 	}
 
 	// The SMF's marking as the IE encodes it: the DSCP of EF (46) in the ToS
-	// octet, 46<<2 = 0xb8, and the spec's 0xFC mask (8.2.42).
+	// octet, 46<<2 = 0xb8, and the spec's 0xFC mask (8.2.12).
 	const ef = 0xb8fc
 
 	rec := &recorder{}

@@ -169,12 +169,12 @@ message TunnelEntry {
   // else.
   uint32 qfi = 5;
 
-  // The SMF's Transport Level Marking (TS 29.244 8.2.42, in a FAR's forwarding
+  // The SMF's Transport Level Marking (TS 29.244 8.2.12, in a FAR's forwarding
   // parameters) for this session's outer headers: the IE's two octets as an
   // OctetString, the DSCP in the high octet and the mask in the low one. The
   // encap applies it over the inner packet's own ToS/Traffic Class -- the mask
   // names the bits the inner header keeps, the ECN bits with the spec's 0xFC
-  // (the NOTE under 8.2.42) -- and 0 means the SMF asked for no marking, so the
+  // (the NOTE under 8.2.12) -- and 0 means the SMF asked for no marking, so the
   // encap copies the inner TOS as it always did. A record that predates the
   // field reads as 0 and loads with the copy behaviour.
   uint32 marking = 6;

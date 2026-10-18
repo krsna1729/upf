@@ -568,7 +568,7 @@ type far struct {
 	barID  uint8
 
 	// hasMarking and marking are the FAR's Transport Level Marking
-	// (TS 29.244 8.2.42, inside the Forwarding Parameters): the two octets the
+	// (TS 29.244 8.2.12, inside the Forwarding Parameters): the two octets the
 	// SMF asks this FAR's outer headers to be marked with, the DSCP in the
 	// high octet and the mask in the low one. It reaches the tunnel record a
 	// downlink PDR's FAR writes, where the encap applies it over the inner

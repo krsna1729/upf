@@ -37,7 +37,7 @@
 // session's.
 //
 // The outer IPv4 header's ToS/Traffic Class is the inner packet's own unless
-// the session's record names a Transport Level Marking (TS 29.244 8.2.42), in
+// the session's record names a Transport Level Marking (TS 29.244 8.2.12), in
 // which case the marking's DSCP wins and the mask names which of the inner
 // header's class bits survive (the ECN bits, with the spec's 0xFC). Either way
 // the class the RAN's transport is marked by reaches the outer header.
@@ -61,7 +61,7 @@ class GtpuEncap final : public Module {
     bess::utils::Ethernet::Address ether_src;
     bess::utils::Ethernet::Address ether_dst;
     uint8_t qfi;      // 0: write no PDU Session Container
-    // The SMF's Transport Level Marking (TS 29.244 8.2.42): the ToS/Traffic
+    // The SMF's Transport Level Marking (TS 29.244 8.2.12): the ToS/Traffic
     // Class the outer IPv4 header is marked with, the DSCP in the high byte
     // and the mask in the low one (the bits the inner header keeps, the ECN
     // bits with the spec's 0xFC). 0: no marking, copy the inner TOS.

@@ -171,7 +171,7 @@ type farReq struct {
 	barID  uint8
 
 	// hasMarking and marking are the FAR's Transport Level Marking
-	// (8.2.42, inside the Forwarding Parameters): what the SMF asks the outer
+	// (8.2.12, inside the Forwarding Parameters): what the SMF asks the outer
 	// header's ToS/Traffic Class to carry, the DSCP in the high octet and the
 	// mask in the low one. An Update FAR's omission keeps the value the
 	// session has, the way the instance's does.
@@ -746,7 +746,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			entry.hasBAR, entry.barID = true, f.barID
 		}
 		if f.hasMarking {
-			// The Transport Level Marking (8.2.42) merges like the instance: an
+			// The Transport Level Marking (8.2.12) merges like the instance: an
 			// Update FAR that names none keeps the value the session has.
 			entry.hasMarking, entry.marking = true, f.marking
 		}
@@ -1737,7 +1737,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				value["qfi"] = uint32(p.encapQFI)
 			}
 			if far.hasMarking {
-				// The FAR's Transport Level Marking (8.2.42): the ToS/Traffic
+				// The FAR's Transport Level Marking (8.2.12): the ToS/Traffic
 				// Class the SMF asked this session's outer IPv4 headers to
 				// carry -- the DSCP in the high octet, the mask in the low one
 				// -- which the encap applies over the inner packet's own class
@@ -2843,7 +2843,7 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 			}
 			f.hasOuter, f.teid, f.peer = true, fields.TEID, peer.Unmap()
 		case ie.TransportLevelMarking:
-			// The FAR's Transport Level Marking (8.2.42): the SMF asking this
+			// The FAR's Transport Level Marking (8.2.12): the SMF asking this
 			// FAR's outer headers to bear a ToS/Traffic Class of its choosing
 			// rather than the inner packet's. The IE is the two octets as an
 			// OctetString -- the DSCP in the first, the mask in the second --
