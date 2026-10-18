@@ -968,17 +968,38 @@ addressed:
    cannot split the one table that holds a rule each way: `Sweep`'s item 1
    above). A paged read would carry the same path to 1M at the single-digit
    MB/s above, so that ceiling is the read's shape, not the pull model's, and
-   nothing about the loop is O(sessions) in round trips any more. The remaining O(all sessions) is the bytes: every
-   tick still reads every counted rule (the restart wall's sweep has the same
-   read, once). Beside it, as the design-level improvement that removes the
-   per-tick O(all sessions) read entirely, the counter module could report
+   nothing about the loop is O(sessions) in round trips any more. The remaining
+   O(all sessions) is the bytes: every tick still reads every counted rule (the
+   restart wall's sweep has the same read, once). Beside it, as the
+   design-level improvement that removes the per-tick O(all sessions) read
+   entirely -- and that is where this ends up -- the counter module could report
    threshold crossings itself (a dataplane that flags "this rule crossed X"),
-   and the tick would read only what was flagged; that is BESS's
-   dataplane->control event channel (its G1.4,
-   `WatchEvents`), recorded here and not available, and the reason it is the
-   target is *latency*: a pulled quota or threshold is enforced no sooner than
-   the tick, so a 60 s interval lets a quota overrun for up to 60 s, while a
-   pushed crossing is enforced when it happens. "Incremental evaluation" is not
+   and the tick would read only what was flagged. **That mechanism is mostly
+   already built, so the target is an event type and a
+   consumer, not a transport:** `core/stats/event_hub.h` has the shape (a module
+   registers an event type in `Init`, a worker posts with
+   `Post(ctx->wid, WorkerEvent{...})` and never blocks -- a full per-worker ring
+   refuses the event and counts it, and the maintenance loop's `DrainWorkers`
+   moves what was posted into the log the `WatchEvents` stream reads: bounded,
+   per worker, drop-and-count), and `core/stats/event_throttle.h` is the piece
+   for this use case -- at most one event per second per worker, **carrying the
+   count**, called on the failure path only, so what the control plane reads is
+   "this worker crossed this threshold, N times" and never one event per
+   crossing. What is left to design is the **composition**, not the channel:
+   which crossings are worth a report, and how the pushed crossings and the
+   pulled counts compose so that a session is **never double-reported** -- a
+   crossing that already produced a report must not be reported again by the
+   next tick's read of the same window -- with the pull staying the fallback for
+   whatever the channel drops (a full ring, a ring lost across a restart),
+   which is the path the bulk read above already carries to 1M on its own. One
+   constraint follows from the traps above: a pushed crossing and a pulled count
+   have to come from the **same per-worker planes**, or the two disagree -- the
+   empty-value trap seen from the other end, a report whose trigger came from
+   the channel and whose window came from a resource-shaped read. The reason
+   this is the target is *latency*, not volume: a pulled quota or threshold is
+   enforced no sooner than the tick, so a 60 s interval lets a quota overrun for
+   up to 60 s before anything notices, while a pushed crossing is enforced when
+   it happens. "Incremental evaluation" is not
    that fix and does not fit the code: a session cannot be skipped for a volume
    threshold or a quota without reading its counters first, so the information
    that would justify skipping arrives only after the read.
