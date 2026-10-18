@@ -409,11 +409,51 @@ those is programmed is not visible in the log; the only notice `upfd` gives of
 an IE it does not support is the URR refusal.
 
 Open: Open5GS (no official image), free5GC's own UPF (not relevant), a second
-UE/session, N9, **packets through the dataplane** (this environment has no
-N3/N6 ports, so every volume is zero), a periodic or threshold Session Report
-Request answered by a real SMF, and the SMF-initiated release/modify paths
-(T3591/T3592 timers). `ci/interop/run.sh` is the regression entry point: it
-ends with `stage reached: c` and `upfd` and `bessd` shutting down cleanly.
+UE/session, N9, the SMF-initiated release/modify paths (T3591/T3592 timers),
+and finding 20 (a usage report's window opens when the tick decides it, so a
+report the session's end overtakes takes its usage with it). `ci/interop/run.sh`
+is the regression entry point: it ends with `stage reached: c` and `upfd` and
+`bessd` shutting down cleanly.
+
+## The dataplane arm (`DATAPLANE=1`): real packets through `bessd`
+
+Everything above is N4 only: the gNB and UE run, but no packet reaches the
+graph, so every volume is zero. With `DATAPLANE=1` the same environment carries
+the UE's own traffic, and nothing about the N4 side changes.
+
+```
+gNB container 10.77.88.20 (MAC fixed)  --docker bridge-->  veth upfi-n3b | upfi-n3  = bessd's N3 port (10.77.88.2)
+bessd, upfd on the host                bessd's N6 port upfi-n6  <--veth-->  eth0 of netns upf-interop-dn (10.99.0.1)
+```
+
+| piece | who makes it | why |
+|---|---|---|
+| the two veths, the data network's namespace, the bridge port | `ci/interop/net.sh` (fixed names, MACs, addresses; removed by `down.sh`) | the gNB's GTP-U must reach a port bessd owns, and the UPF's N3 address must be answered by nobody's kernel |
+| the graph | `ci/interop/graph.py`, from `deploy/upf.yaml` (or `deploy/custom-pdrmatch.yaml` with `PROFILE=custom`) | the deployed graph with this rig's ports, addresses and MACs |
+| the gNB's fixed address and MAC, and a permanent neighbour for the N3 address | `ci/interop/ue.sh` | `upfd -peer-mac` is one next hop: the downlink's outer Ethernet header names the gNB |
+| the UE's route to the data network, then the echo | `ci/interop/ue.sh traffic` | UERANSIM installs the session's prefix on the tunnel and nothing else, so without it the echo leaves by the container's default route |
+| `-urr-interval 1s` | `ci/interop/up.sh` | without it no URR is ever read: no periodic or threshold report reaches the SMF, and even the termination reports are zero (the first reading of a URR is its baseline) |
+
+Measured (`runs/dp4`, `runs/dp5`, generic; `runs/dp-custom`, custom):
+
+| what | result |
+|---|---|
+| the echo | 20 packets, **0% loss**, each way: `cnt_ul +20`, `cnt_dl +20` packets (the graph's own counting modules) |
+| the URRs at a real SMF | PERIO reports before the traffic, then VOLTH reports with real volume: 2052 octets / 9 packets each way, accepted (`Session Report Response`, cause 1) |
+| the whole traffic accounted | URR 1's windows sum to 20 packets / 4560 octets each way, exactly what crossed |
+| URR 2 (the same triggers) | 9 + 2 = 11 packets: finding 20, the usage a decided-but-undelivered report held was refused with cause 65 after the deletion |
+
+Two gaps this arm exposed, neither of them the rig's:
+
+1. **The deployed graph cannot put a destination MAC on an N6 egress frame.**
+   The decap leaves the inner packet behind the *outer* frame's addresses
+   (`docs/design.md`, "Framing"), and the fork's `Router` picks the gate from a
+   resolved next hop but never calls `route::RewriteL2` — so a next hop's
+   `dst_mac`/`src_mac` are stored and inert, and a frame leaves N6 naming the
+   N3 peer. The rig fills it with stock `GenericDecap`+`GenericEncap`
+   (`ci/interop/graph.py`), which goes away once the fork's Router calls
+   `RewriteL2`; the deployed graph needs the same fix either way.
+2. **Finding 20** (above): the URR windows, not the packets.
 
 ## Reproduce
 
