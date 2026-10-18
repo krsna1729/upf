@@ -138,6 +138,58 @@ Every row above that says "not implemented" or "not read" is a *deployment*
 statement, not a silent failure: the UPF ignores what it does not read, and the
 Association Setup Response declares no optional feature it cannot honour.
 
+## Profiles: what each row means in each profile
+
+Two dataplane strategies are selectable (docs/design.md, "Profiles"): **generic**
+— stock BESS modules, whose per-direction strategy picks the wildcard table or
+the firewall module — and **custom** — this tree's keyed per-session matcher
+(`PdrMatch`: one map key per session, keyed by the F-TEID, value in SMF
+precedence order). Every row above is written for the generic profile; this
+section says which rows read differently under the custom one, and the rule for
+the rest: **a row not named here holds in both profiles**, because it is
+control-side (the N4 layer, the session store, the reporting path, the routing
+model) or carried by modules the profile does not change (GTP-U decap and encap,
+echo, end marker, DSCP marking, the per-rule counters).
+
+| row above | under the custom profile |
+|---|---|
+| 8.2.5 SDF filter — port ranges | **compiles, untested live**: the rule shape is the firewall's, so inclusive ranges are carried instead of refused |
+| 8.2.4 / 8.2.89 — QFI | **refused**: a QFI-naming PDI is refused on this path (its rules are the 5-tuple), where the wildcard path keys the rule on the QFI |
+| 7.5.2.6 / 8.2.26 BUFF | **refused**: a BUFF PDR is refused on this path — the largest difference between the two profiles |
+| gap 6 — IPv6 | **partly better**: an SDF prefix of either family compiles (the module's rules carry both families), while the IPv6 UE address and the IPv6 F-TEID stay refused, because the key is IPv4-only |
+| the opt-in firewall path | not this path: that module is the generic profile's other strategy, not a third profile |
+| network instance / route domain | **untested**: the control side resolves it in both; the custom path needs one module per domain, or the domain in its key |
+| 7.5.8 — USAR / DLDR | USAR in both; **DLDR refused** on the custom path, because it needs a buffering flow |
+| 7.5.2.3 — FAR outer header and the tunnel | in both; the custom path is **uplink-only** today, so N6 needs the downlink selector (a longest-prefix match on the UE prefix) before the downlink rows hold there |
+| MAR / ATSSS-LL | not implemented in either profile; phased, and it needs a dual-3GPP deployment |
+
+The custom profile's item-by-item checklist is in `scorecard.md`'s "The custom
+profile, row by row". This section exists so that a reader of *this* file does
+not take a row as profile-independent when it is not.
+
+### The performance difference, as far as it is measured
+
+Capability is not the only axis: the profiles differ in what a session change
+costs and what a packet costs. Nothing below benchmarks the custom path yet —
+its arm has not run — so each row says whether it is **measured**, **derived**
+from measured rows, or **owed**.
+
+| axis | generic — wildcard | generic — firewall | custom — keyed | status |
+|---|---|---|---|---|
+| one session change | rebuild the shard: ~44–50 µs at 1K rules, ~1 ms at 10K | rewrite the whole policy: O(all rules) | one upsert of that session's rules: O(its rules) | wildcard measured (published row); firewall derived; keyed owed |
+| one packet | one masked-tuple lookup in a table every session shares | one policy scan whose size is every session's rules | the session selector (an LPM lookup) plus a 2–4 rule scan | firewall measured (114 M keys/s at 10 rules hitting the first, 34 M/s at 1,000 spread, 26 M/s over IPv6, 117 M/s scanned at 10); selector-plus-scan owed |
+| memory per session | per-rule and per-group in the shared table | per-rule in the policy | one map entry plus one rule vector | owed (BESS's per-rule/per-group rows are being measured) |
+| the 1M-session target | the rebuild makes it infeasible (tens of ms per change) | the whole-policy rewrite is worse | the shape it was built for | derived from the rows above |
+
+Two cautions that travel with these numbers. **The crossover moves with the
+deployment**: it exists only for deployments that change rules at all, and the
+selector's memory moves by an order of magnitude with the address plan, so any
+published line needs its shape attached. And **the comparison covers only what
+both can compile** — the timing corpus is the intersection (IPv4,
+mask-expressible ports), because the custom path refuses a QFI-naming PDI and a
+BUFF PDR; a timing run must therefore never be read as "the generic path is
+fine" where the custom path simply cannot take the rule.
+
 ## Gaps, in the order they close
 
 1. **URR** (7.5.2.4 + the Session Report path): volume and time per URR,
