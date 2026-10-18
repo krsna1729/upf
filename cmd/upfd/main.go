@@ -324,9 +324,10 @@ func run() error {
 // answer is kept and tried again (reportQueue), because an unanswered send
 // leaves the outcome unknown rather than known bad.
 // reportSender is the half of the N4 node the reporting loop uses: one Session
-// Report Request, its Cause, and an error when it was not answered.
+// Report Request, the CP function's answer (its Cause, and the Update BAR it may
+// carry), and an error when it was not answered.
 type reportSender interface {
-	Report(ctx context.Context, cpSEID uint64, ies ...*ie.IE) (uint8, error)
+	Report(ctx context.Context, cpSEID uint64, ies ...*ie.IE) (n4.ReportAnswer, error)
 }
 
 // reportQueueDepth bounds one session's reports waiting for an answer, and
@@ -488,14 +489,20 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 		// latency (docs/design.md: the trigger is a poll of the branch's
 		// counters, at this loop's period).
 		for _, d := range sessions.EvaluateDownlinks(ctx) {
-			cause, err := sender.Report(ctx, d.CPSEID, d.IEs()...)
-			if err != nil || cause != ie.CauseRequestAccepted {
+			answer, err := sender.Report(ctx, d.CPSEID, d.IEs()...)
+			if err != nil || answer.Cause != ie.CauseRequestAccepted {
 				reports.ddnFailed.Add(1)
 				log.Warn("downlink data report not delivered", "seid", d.SEID, "cp_seid", d.CPSEID,
-					"pdrs", d.PDRs, "cause", cause, "error", err)
+					"pdrs", d.PDRs, "cause", answer.Cause, "error", err)
 				continue
 			}
 			sessions.ConfirmDownlinks(ctx, d.SEID, d.PDRs)
+			// The SMF may answer a Downlink Data Report with an Update BAR
+			// (5.2.4.1): it extends the holding of the flow the report named,
+			// and the session layer applies it to the same model a modification
+			// writes. Applied after the report is confirmed, so the episode the
+			// numbers belong to is the one just taken.
+			sessions.ApplyUpdateBAR(ctx, d.SEID, answer.UpdateBAR)
 			reports.ddnSent.Add(1)
 			log.Info("downlink data reported: the SMF has been told about packets being held",
 				"seid", d.SEID, "cp_seid", d.CPSEID, "pdrs", d.PDRs)
@@ -515,7 +522,7 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 			// The report is addressed to the CP function, and the header's
 			// SEID is the identity the *receiver* looks the session up with:
 			// the CP F-SEID, not ours (TS 29.244 7.2.2.4.2).
-			cause, err := sender.Report(ctx, r.report.CPSEID, r.report.IEs()...)
+			answer, err := sender.Report(ctx, r.report.CPSEID, r.report.IEs()...)
 			if err != nil {
 				reports.held.Add(1)
 				backoff := reportBackoff(r.attempts+1, every)
@@ -529,14 +536,18 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 				break
 			}
 			queue.done(seid)
-			if cause != ie.CauseRequestAccepted {
+			if answer.Cause != ie.CauseRequestAccepted {
 				reports.refused.Add(1)
 				log.Warn("usage report refused", "seid", r.report.SEID, "cp_seid", r.report.CPSEID,
-					"urr", r.report.URRID, "trigger", r.report.Trigger.String(), "cause", cause)
+					"urr", r.report.URRID, "trigger", r.report.Trigger.String(), "cause", answer.Cause)
 			} else {
 				reports.sent.Add(1)
 				acknowledge(r.report, "acknowledged", "attempts", r.attempts+1)
 			}
+			// An answer may carry an Update BAR whatever it reports (5.2.4.1's
+			// named case is the Downlink Data Report, handled above); the
+			// session layer owns whether it means anything for this session.
+			sessions.ApplyUpdateBAR(ctx, r.report.SEID, answer.UpdateBAR)
 			if r.report.Enforcing {
 				log.Info("quota spent: the session's traffic is stopped",
 					"seid", r.report.SEID, "urr", r.report.URRID)

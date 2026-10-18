@@ -150,13 +150,26 @@ type pending struct {
 	tries  int
 }
 
+// ReportAnswer is what the CP function answered a Session Report Request with
+// (TS 29.244 7.5.8.3): the Cause that says whether it took the report, and the
+// Update BAR it may carry. 5.2.4.1 gives one meaning to the Update BAR here --
+// when the CP function answers a Downlink Data Report it may extend the flow's
+// buffering -- and its numbers are the ones the session must hold afterwards.
+type ReportAnswer struct {
+	Cause uint8
+	// UpdateBAR is the Update BAR IE (7.5.2.6, 8.2.29-8.2.30) the response
+	// carried, or nil when it carried none: a response without one changes
+	// nothing.
+	UpdateBAR *ie.IE
+}
+
 // reportWait is a Session Report Request this node sent and has no answer to
 // yet. The UP function initiates that exchange (TS 29.244 7.5.8), so unlike
 // every other message here it is this node's own transaction, and the answer is
 // handed to the Report call that is waiting for it rather than to a handler.
 type reportWait struct {
 	seq uint32
-	got chan uint8 // the Cause the CP function answered with, buffered once
+	got chan ReportAnswer // the CP function's answer, buffered once
 }
 
 // Server is a PFCP node on the N4 interface.
@@ -386,9 +399,13 @@ func sequenceNumber(b []byte) uint32 {
 // The Cause and the error are different things: a report the SMF *refused* is an
 // answer (it arrived, and the caller decides what to do with the cause), while
 // an error means no answer came at all. Only one report is in flight at a time.
-func (s *Server) Report(ctx context.Context, seid uint64, ies ...*ie.IE) (uint8, error) {
+//
+// The answer carries the Update BAR the response did, if any (5.2.4.1): the
+// session layer applies it to the session the report came from, so this call
+// returns it rather than reading it and dropping it.
+func (s *Server) Report(ctx context.Context, seid uint64, ies ...*ie.IE) (ReportAnswer, error) {
 	if s.conn == nil {
-		return 0, errors.New("n4: the socket is not bound")
+		return ReportAnswer{}, errors.New("n4: the socket is not bound")
 	}
 	s.reportMu.Lock()
 	defer s.reportMu.Unlock()
@@ -398,11 +415,11 @@ func (s *Server) Report(ctx context.Context, seid uint64, ies ...*ie.IE) (uint8,
 		s.mu.Unlock()
 		// 7.5.8.2: a report exists on an association. Sending one to nobody
 		// would be a report the SMF never hears.
-		return 0, errors.New("n4: no CP function is associated")
+		return ReportAnswer{}, errors.New("n4: no CP function is associated")
 	}
 	to := s.peer.addr
 	seq := s.nextSequence()
-	wait := &reportWait{seq: seq, got: make(chan uint8, 1)}
+	wait := &reportWait{seq: seq, got: make(chan ReportAnswer, 1)}
 	s.report = wait
 	s.mu.Unlock()
 	defer func() {
@@ -417,13 +434,13 @@ func (s *Server) Report(ctx context.Context, seid uint64, ies ...*ie.IE) (uint8,
 	for try := 1; ; try++ {
 		s.reply(to, req)
 		select {
-		case cause := <-wait.got:
-			return cause, nil
+		case answer := <-wait.got:
+			return answer, nil
 		case <-ctx.Done():
-			return 0, fmt.Errorf("n4: session report for SEID %d: %w", seid, ctx.Err())
+			return ReportAnswer{}, fmt.Errorf("n4: session report for SEID %d: %w", seid, ctx.Err())
 		case <-time.After(s.cfg.ReportTimeout):
 			if try >= s.cfg.ReportRetries {
-				return 0, fmt.Errorf("n4: no answer to the session report for SEID %d after %d requests",
+				return ReportAnswer{}, fmt.Errorf("n4: no answer to the session report for SEID %d after %d requests",
 					seid, try)
 			}
 			s.log.Warn("n4: the session report is unanswered; sending it again",
@@ -435,7 +452,9 @@ func (s *Server) Report(ctx context.Context, seid uint64, ies ...*ie.IE) (uint8,
 // onReportResponse hands the CP function's answer to the Report call waiting
 // for it: the sequence number is the transaction, and a response to a report
 // that already timed out is logged and dropped rather than delivered to the
-// next one.
+// next one. The Update BAR the response may carry (5.2.4.1) goes with the
+// answer: it is an instruction that belongs to the session the report named,
+// and dropping it here would leave the numbers a Session Modification set.
 func (s *Server) onReportResponse(resp *message.SessionReportResponse) {
 	cause := uint8(ie.CauseRequestRejected)
 	if resp.Cause != nil {
@@ -452,7 +471,7 @@ func (s *Server) onReportResponse(resp *message.SessionReportResponse) {
 		return
 	}
 	select {
-	case wait.got <- cause:
+	case wait.got <- ReportAnswer{Cause: cause, UpdateBAR: resp.UpdateBAR}:
 	default:
 		// The request was answered twice (this node's own retransmission
 		// answered after the first answer arrived): the first one is the

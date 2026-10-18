@@ -175,10 +175,10 @@ type queueSender struct {
 	refusal    uint8 // a Cause to answer with instead of accepted
 }
 
-func (s *queueSender) Report(_ context.Context, _ uint64, ies ...*ie.IE) (uint8, error) {
+func (s *queueSender) Report(_ context.Context, _ uint64, ies ...*ie.IE) (n4.ReportAnswer, error) {
 	urr, seqn, err := reportIdentity(ies)
 	if err != nil {
-		return 0, err
+		return n4.ReportAnswer{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -186,12 +186,12 @@ func (s *queueSender) Report(_ context.Context, _ uint64, ies ...*ie.IE) (uint8,
 	s.at = append(s.at, time.Now())
 	if s.unanswered > 0 {
 		s.unanswered--
-		return 0, errors.New("no answer from the SMF")
+		return n4.ReportAnswer{}, errors.New("no answer from the SMF")
 	}
 	if s.refusal != 0 {
-		return s.refusal, nil
+		return n4.ReportAnswer{Cause: s.refusal}, nil
 	}
-	return ie.CauseRequestAccepted, nil
+	return n4.ReportAnswer{Cause: ie.CauseRequestAccepted}, nil
 }
 
 func (s *queueSender) snapshot() []sentReport {

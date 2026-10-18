@@ -455,8 +455,11 @@ func TestReportCarriesTheUsageAndTakesTheAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
-	if cause != ie.CauseRequestAccepted {
-		t.Errorf("the report's answer carries cause %d, want accepted", cause)
+	if cause.Cause != ie.CauseRequestAccepted {
+		t.Errorf("the report's answer carries cause %d, want accepted", cause.Cause)
+	}
+	if cause.UpdateBAR != nil {
+		t.Errorf("an answer with no Update BAR returned %+v, want nil", cause.UpdateBAR)
 	}
 	req := <-got
 	if req == nil {
@@ -478,6 +481,64 @@ func TestReportCarriesTheUsageAndTakesTheAnswer(t *testing.T) {
 	}
 	if id, err := children[0].URRID(); err != nil || id != 7 {
 		t.Errorf("the usage report names URR %d (%v), want 7", id, err)
+	}
+}
+
+// TestReportReturnsTheUpdateBARTheAnswerCarried is 5.2.4.1's Update BAR in a
+// Session Report Response: when the CP function answers a report it may extend
+// the flow's buffering, and the IE it sent is what Report hands back with the
+// Cause -- the session layer applies it to the session the report came from, so
+// dropping it here would leave the numbers a Session Modification set.
+func TestReportReturnsTheUpdateBARTheAnswerCarried(t *testing.T) {
+	srv, addr := startServer(t, n4.Config{})
+	conn := connect(t, addr)
+	associate(t, conn, 1)
+
+	go func() {
+		// The SMF's side: receive the report, answer it with an Update BAR.
+		req, ok := recvMsg(t, conn, waitFor).(*message.SessionReportRequest)
+		if !ok {
+			t.Errorf("the SMF received no Session Report Request")
+			return
+		}
+		sendMsg(t, conn, message.NewSessionReportResponse(0, 0, req.SEID(), req.Sequence(), 0,
+			ie.NewCause(ie.CauseRequestAccepted),
+			ie.NewUpdateBARWithinSessionReportResponse(
+				ie.NewBARID(1),
+				ie.NewDLBufferingDuration(10*time.Second),
+				ie.NewDLBufferingSuggestedPacketCount(64),
+			)))
+	}()
+
+	answer, err := srv.Report(context.Background(), 0x1133,
+		ie.NewReportType(0, 0, 0, 1), // DLDR: the report the SMF is answering with numbers
+		ie.NewDownlinkDataReport(ie.NewPDRID(2)),
+	)
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if answer.Cause != ie.CauseRequestAccepted {
+		t.Errorf("the answer carries cause %d, want accepted", answer.Cause)
+	}
+	if answer.UpdateBAR == nil {
+		t.Fatal("the Update BAR the answer carried was not returned")
+	}
+	children, err := answer.UpdateBAR.UpdateBAR()
+	if err != nil {
+		t.Fatalf("the Update BAR's IEs: %v", err)
+	}
+	byType := map[uint16]*ie.IE{}
+	for _, child := range children {
+		byType[child.Type] = child
+	}
+	if id, err := byType[ie.BARID].BARID(); err != nil || id != 1 {
+		t.Errorf("the Update BAR names BAR %d (%v), want 1", id, err)
+	}
+	if d, err := byType[ie.DLBufferingDuration].DLBufferingDuration(); err != nil || d != 10*time.Second {
+		t.Errorf("the Update BAR's duration is %v (%v), want 10s", d, err)
+	}
+	if n, err := byType[ie.DLBufferingSuggestedPacketCount].DLBufferingSuggestedPacketCount(); err != nil || n != 64 {
+		t.Errorf("the Update BAR's suggested count is %d (%v), want 64", n, err)
 	}
 }
 

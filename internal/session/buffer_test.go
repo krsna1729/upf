@@ -214,6 +214,147 @@ func TestTheBARsParametersAreReadWhereverTheySit(t *testing.T) {
 	}
 }
 
+// TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession closes deviation
+// (3) of docs/compliance.md's BUFF row: 5.2.4.1 lets the CP function extend a
+// flow's buffering when it answers a Downlink Data Report, and the Update BAR it
+// carries there is applied to the same model a Session Modification's Update BAR
+// writes -- the DL Buffering Duration (8.2.29, with the stopped-timer and
+// infinite codes) and the DL Buffering Suggested Packet Count (8.2.30).
+func TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession(t *testing.T) {
+	rec := &recorder{}
+	c := New(bufferingConfig(), rec, quietLogger())
+
+	resp := c.Establish(buffEstablishment(0x7109, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	// The numbers a Session Modification set, which the response replaces.
+	if entry := c.sessions[seid].BARs[1]; entry == nil || entry.duration != 30*time.Second || entry.count != 16 {
+		t.Fatalf("the establishment's BAR is %+v, want 30s/16", entry)
+	}
+
+	c.ApplyUpdateBAR(context.Background(), seid, ie.NewUpdateBARWithinSessionReportResponse(
+		ie.NewBARID(1),
+		ie.NewDLBufferingDuration(10*time.Second),
+		ie.NewDLBufferingSuggestedPacketCount(64),
+	))
+	entry := c.sessions[seid].BARs[1]
+	if !entry.hasDuration || entry.duration != 10*time.Second || entry.infinite {
+		t.Errorf("the response's duration left %+v, want 10s", entry)
+	}
+	if !entry.hasCount || entry.count != 64 {
+		t.Errorf("the response's suggested count left %+v, want 64", entry)
+	}
+	if ns, ok := entry.timeoutNS(); !ok || ns != uint64(10*time.Second) {
+		t.Errorf("the flow's timeout is (%d, %v), want (10s, true)", ns, ok)
+	}
+
+	// The infinite unit is hold-without-expiry, exactly as in a modification.
+	c.ApplyUpdateBAR(context.Background(), seid, ie.NewUpdateBARWithinSessionReportResponse(
+		ie.NewBARID(1),
+		ie.NewDLBufferingDuration(time.Duration(math.MaxInt64)),
+	))
+	entry = c.sessions[seid].BARs[1]
+	if !entry.infinite {
+		t.Fatalf("the infinite timer in a response was read as %+v", entry)
+	}
+	if ns, ok := entry.timeoutNS(); !ok || ns != 0 {
+		t.Errorf("the infinite timer's timeout is (%d, %v), want (0, true)", ns, ok)
+	}
+
+	// And the deactivated code clears the override, as 8.2.29 says.
+	c.ApplyUpdateBAR(context.Background(), seid, ie.NewUpdateBARWithinSessionReportResponse(
+		ie.NewBARID(1),
+		ie.NewDLBufferingDuration(0),
+		ie.NewDLBufferingSuggestedPacketCount(0),
+	))
+	entry = c.sessions[seid].BARs[1]
+	if entry.hasDuration || entry.hasCount {
+		t.Errorf("an all-zero Update BAR in a response left %+v, want no instruction at all", entry)
+	}
+}
+
+// TestAnUpdateBARForABARTheSessionDoesNotHoldIsIgnored is the stray-response
+// case: the SMF names a BAR the session does not have. It must not create one
+// or overwrite something else -- it is a no-op, the way a report response with
+// no report waiting for it is ignored (internal/n4.onReportResponse) -- and a
+// response that carries no Update BAR at all changes nothing either.
+func TestAnUpdateBARForABARTheSessionDoesNotHoldIsIgnored(t *testing.T) {
+	rec := &recorder{}
+	c := New(bufferingConfig(), rec, quietLogger())
+
+	resp := c.Establish(buffEstablishment(0x710a, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	txns := len(rec.txns)
+
+	c.ApplyUpdateBAR(context.Background(), seid, ie.NewUpdateBARWithinSessionReportResponse(
+		ie.NewBARID(2),
+		ie.NewDLBufferingDuration(10*time.Second),
+		ie.NewDLBufferingSuggestedPacketCount(64),
+	))
+	c.ApplyUpdateBAR(context.Background(), seid, nil)
+
+	if len(c.sessions[seid].BARs) != 1 {
+		t.Errorf("the session holds %d BARs after an Update BAR for BAR 2, want the one it had",
+			len(c.sessions[seid].BARs))
+	}
+	if entry := c.sessions[seid].BARs[1]; entry.duration != 30*time.Second || entry.count != 16 {
+		t.Errorf("the BAR the session holds is now %+v, want the establishment's 30s/16", entry)
+	}
+	if len(rec.txns) != txns {
+		t.Errorf("an Update BAR the session cannot place wrote %d transactions, want none", len(rec.txns)-txns)
+	}
+}
+
+// TestAnUpdateBARAfterTheEpisodeEndedIsIgnored: an Update BAR in a Session
+// Report Response answers a Downlink Data Report for a flow that was buffering.
+// If the SMF's own later instruction already moved that PDR off buffering, the
+// numbers arrive for an episode that is over, and applying them would leave them
+// for a later episode they were never sent for (5.2.4.1's "stop applying
+// buffering when new instruction is received" is that move, and a response does
+// not undo it).
+func TestAnUpdateBARAfterTheEpisodeEndedIsIgnored(t *testing.T) {
+	rec := &recorder{}
+	c := New(bufferingConfig(), rec, quietLogger())
+
+	resp := c.Establish(buffEstablishment(0x710b, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+
+	// The SMF's own instruction moves the FAR to forward: the episode is over.
+	mod := message.NewSessionModificationRequest(0, 0, seid, 7, 0,
+		ie.NewUpdateFAR(
+			ie.NewFARID(2),
+			ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceAccess),
+				ie.NewOuterHeaderCreation(0x0100, 0x55667788, "10.20.30.2", "", 0, 0, 0),
+			),
+		))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	txns := len(rec.txns)
+
+	c.ApplyUpdateBAR(context.Background(), seid, ie.NewUpdateBARWithinSessionReportResponse(
+		ie.NewBARID(1),
+		ie.NewDLBufferingDuration(10*time.Second),
+		ie.NewDLBufferingSuggestedPacketCount(64),
+	))
+	if entry := c.sessions[seid].BARs[1]; entry == nil || entry.duration != 30*time.Second || entry.count != 16 {
+		t.Errorf("the BAR is %+v after an Update BAR for an ended episode, want the establishment's 30s/16", entry)
+	}
+	if len(rec.txns) != txns {
+		t.Errorf("an Update BAR for an ended episode wrote %d transactions, want none", len(rec.txns)-txns)
+	}
+}
+
 // TestAModificationThatStopsBufferingReleasesTheFlow is the instruction half of
 // 5.2.4.1: "the UP function shall stop applying buffering when new instruction
 // is received from the CP function. The buffered packets shall be either dropped

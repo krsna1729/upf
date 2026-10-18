@@ -209,6 +209,84 @@ func pdrByAction(s *Session, actionID uint32) *pdr {
 	return nil
 }
 
+// barHoldsAFlow reports whether a PDR of the session buffers under this BAR: a
+// downlink FAR that names it with Apply Action BUFF and not FORW (8.2.26), the
+// state resolve writes for the idle-UE case. The caller holds the lock.
+func barHoldsAFlow(s *Session, id uint8) bool {
+	for _, p := range s.PDRs {
+		if !p.buffer {
+			continue
+		}
+		if f := s.FARs[p.farID]; f != nil && f.hasBAR && f.barID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// ApplyUpdateBAR applies the Update BAR a Session Report Response carried
+// (TS 29.244 5.2.4.1): when the CP function answers a Downlink Data Report it
+// may extend the buffering of the flow that held the packets, and those numbers
+// replace the ones a Session Modification set for the same BAR ID. It writes the
+// same model a modification's Update BAR does -- the DL Buffering Duration
+// (8.2.29, with its stopped-timer and infinite codes) and the DL Buffering
+// Suggested Packet Count (8.2.30) -- under the compiler's lock and in one step.
+//
+// The model is the whole of the effect today: the compiler does not write a
+// BAR's numbers into the store's per-flow entry yet (docs/compliance.md's BUFF
+// row, deviation 1), so no dataplane transaction is built here. That is also
+// what keeps this clear of a concurrent deletion -- this call runs on the
+// reporting goroutine, not the PFCP read loop, and a transaction compiled for a
+// session the SMF deleted meanwhile would rewrite the records its deletion
+// erased.
+//
+// A response is not a request: nothing here is ever refused to the SMF, because
+// there is no answer to an answer. A response that carries no BAR, names a BAR
+// the session does not hold, or arrives after the flow's buffering episode has
+// ended is a logged no-op -- the treatment a stray report response gets
+// (internal/n4.onReportResponse) -- rather than a write to some other BAR or a
+// resurrection of an episode that is over.
+func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE) {
+	if update == nil {
+		return
+	}
+	b, err := parseBAR(update)
+	if err != nil {
+		c.log.Warn("session: cannot read the Update BAR of a Session Report Response",
+			"seid", seid, "error", err)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.sessions[seid]
+	if s == nil {
+		c.log.Info("session: an Update BAR names a session that is gone; it is ignored",
+			"seid", seid, "bar", b.id)
+		return
+	}
+	if s.BARs[b.id] == nil {
+		// The SMF named a BAR this session does not hold. Applying it would
+		// create one under numbers nobody provisioned -- the guess a FAR naming
+		// an unknown BAR is refused for -- so it is dropped.
+		c.log.Info("session: an Update BAR names a BAR the session does not hold; it is ignored",
+			"seid", seid, "bar", b.id)
+		return
+	}
+	if !barHoldsAFlow(s, b.id) {
+		// The episode this report answered is over: the SMF's own instruction
+		// moved the PDR off buffering (or the PDR went), and applying the
+		// numbers now would leave them for a later episode they were never sent
+		// for. 5.2.4.1's "stop applying buffering when new instruction is
+		// received" is that move, and this response does not undo it.
+		c.log.Info("session: an Update BAR arrives after its flow stopped buffering; it is ignored",
+			"seid", seid, "bar", b.id)
+		return
+	}
+	mergeBars(s, []barReq{b})
+	c.log.Info("session: an Update BAR in a Session Report Response was applied",
+		"seid", seid, "bar", b.id, "duration", b.duration, "infinite", b.infinite, "count", b.count)
+}
+
 // downlinkAsk is one tick's worth of work per session: the flows to read.
 type downlinkAsk struct {
 	seid   uint64

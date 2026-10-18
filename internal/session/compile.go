@@ -627,6 +627,35 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	return deleteResponse(req, hdr, ie.CauseRequestAccepted)
 }
 
+// mergeBars folds a message's Create BAR / Update BAR parameters into the
+// session's BARs. The caller holds the lock.
+//
+// An Update BAR carries what changes (7.5.4.3's update form is how a Session
+// Modification Request or a Session Report Response hands the SMF's next
+// instruction over): the parameters it names replace the ones before. All-zero
+// Duration is the deactivated code rather than a value -- 8.2.29's timer is
+// stopped -- so it clears the override, and a Suggested Packet Count of zero
+// does the same, since "hold no packets" is not an instruction anyone sends.
+func mergeBars(s *Session, bars []barReq) {
+	for _, b := range bars {
+		entry := s.BARs[b.id]
+		if entry == nil {
+			entry = &bar{id: b.id}
+			s.BARs[b.id] = entry
+		}
+		if b.hasDuration {
+			if b.deactivated {
+				entry.hasDuration = false
+			} else {
+				entry.hasDuration, entry.duration, entry.infinite = true, b.duration, b.infinite
+			}
+		}
+		if b.hasCount {
+			entry.hasCount, entry.count = b.count > 0, b.count
+		}
+	}
+}
+
 // merge folds a request's objects into the session's model.
 func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq, qers []qerReq,
 	urrs []urrReq, removePDRs []uint16, removeFARs []uint32, removeBARs []uint8,
@@ -699,30 +728,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			entry.hasBAR, entry.barID = true, f.barID
 		}
 	}
-	for _, b := range bars {
-		entry := s.BARs[b.id]
-		if entry == nil {
-			entry = &bar{id: b.id}
-			s.BARs[b.id] = entry
-		}
-		// An Update BAR carries what changes (7.5.4.3's update form is how a
-		// Session Modification Request or a Session Report Response hands the
-		// SMF's next instruction over): the parameters it names replace the
-		// ones before. All-zero Duration is the deactivated code rather than a
-		// value -- 8.2.29's timer is stopped -- so it clears the override, and
-		// a Suggested Packet Count of zero does the same, since "hold no
-		// packets" is not an instruction anyone sends.
-		if b.hasDuration {
-			if b.deactivated {
-				entry.hasDuration = false
-			} else {
-				entry.hasDuration, entry.duration, entry.infinite = true, b.duration, b.infinite
-			}
-		}
-		if b.hasCount {
-			entry.hasCount, entry.count = b.count > 0, b.count
-		}
-	}
+	mergeBars(s, bars)
 	for _, u := range urrs {
 		entry := s.URRs[u.id]
 		if entry == nil {
