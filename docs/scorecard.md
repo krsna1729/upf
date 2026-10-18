@@ -39,7 +39,7 @@ and introduces no claims of its own.
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | 1 | association, heartbeat, restart detection (3) | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
 | 2 | session establishment, modification, deletion (3) | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
-| 3 | Session Report Request: USAR, DLDR (2) | **100** | 50 | 100 | 50 | 100 | 50 | 0 |
+| 3 | Session Report Request: USAR, DLDR (2) | **100** | 100 | 100 | 100 | 50 | 0 | 0 |
 | 4 | PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5) | **80** | — | — | — | — | — | — |
 | 5 | QER: gate, MBR, per-flow or GBR (3) | **100** | 67 | 67 | 33 | 0 | 67 | 67 |
 | 6 | URR: volume, time, thresholds, quota + enforcement, linked (5) | **80** | 60 | 60 | 60 | 100 | 0 | 0 |
@@ -49,15 +49,19 @@ and introduces no claims of its own.
 | 10 | MAR / ATSSS-LL (2) | **0** | 50 | 0 | 0 | 50 | 0 | 0 |
 | 11 | ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 |
 | 12 | real-SMF interop (1) | **0** | 0 | **100** | 0 | 0 | 0 | 0 |
-| | **mean of the eleven blocks every project scores (1-3, 5-12)** | **64** | **49** | **62** | **37** | **48** | **32** | **38** |
+| | **mean of the eleven blocks every project scores (1-3, 5-12)** | **64** | **54** | **62** | **42** | **43** | **28** | **38** |
 
 Block 4 is left out of every mean because no competitor cell exists for it (`—`),
-so no project is credited or debited for it. **Recomputed 2026-10-18:** four of
-these means (OAI-CN5G, free5GC, UPG-VPP, eUPF) had stopped dividing their own
-cells — OAI's row 3 was still counted at 100 in the mean while its cell said 50,
-UPG-VPP's row 10 counted at 0 while its cell said 50, and free5GC's and eUPF's
-had drifted the same way, which is how a stale mean reads as a real difference.
-Every number here now divides its row.
+so no project is credited or debited for it. **Corrected 2026-10-18:** block 3's
+competitor cells had been written one place over — OAI-CN5G held free5GC's 50,
+free5GC held UPG-VPP's 100, eUPF held OAI's 50 — which contradicted the block's
+own Field text ("OAI…, open5gs…, free5GC… send both; UPG-VPP sends usage reports,
+DLDR not evidenced; eUPF's URR is unwired, OMEC has none") and made the means
+look as if they had stopped following their cells. They had not: with the cells
+as the Field text gives them, every mean below divides its own row again, and
+the four that appeared to have drifted (OAI-CN5G 54, free5GC 42, UPG-VPP 43,
+eUPF 28) come back unchanged. Each cell in this table was then checked against
+its block's Field text or the survey; block 3 was the only one out of step.
 
 ## What each number is made of
 
@@ -280,10 +284,10 @@ its own close if the survey ever scored the two halves apart.)
    62 is not a verdict: it is the two closes that landed this week (BAR + DDN and
    the DLDR half) against open5gs's production interop, which we score 0 on. What
    we lead is real but narrow — markers 100 against 80, URR 80 against 60, QER
-   100 against 67, the report path 100 against 100/50 — and none of it is what a
-   handover or a stalled UE notices. Two closes still on the list (linked
-   UR-SEQN, the vif that writes the route domain) would take the mean to 69
-   without touching the dataplane's shape.
+   100 against 67, the report path 100 against free5GC's 50 and OMEC's 0 — and
+   none of it is what a handover or a stalled UE notices. Two closes still on
+   the list (linked UR-SEQN, the vif that writes the route domain) would take the
+   mean to 69 without touching the dataplane's shape.
 2. **The mean is not a verdict on the dataplane.** No row here is a throughput
    claim: the same-harness measurement that would settle that (verification plan
    section 2) has not been run. The floors that do exist are per packet and
