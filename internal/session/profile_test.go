@@ -9,6 +9,7 @@
 package session
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,23 @@ func TestAProfileNamesItsStrategies(t *testing.T) {
 	}
 	if custom.Graph == generic.Graph {
 		t.Errorf("both profiles name one graph: %q", custom.Graph)
+	}
+}
+
+// A profile's graph is a path this repository ships. `-profile custom` naming a
+// graph a fresh checkout does not have would be a deployment whose composition
+// nobody can apply -- and nothing else would notice, because upfd names the
+// graph rather than applying it.
+func TestAProfilesGraphIsInTheTree(t *testing.T) {
+	for _, name := range ProfileNames() {
+		p, err := ProfileFor(name)
+		if err != nil {
+			t.Fatalf("ProfileFor(%q): %v", name, err)
+		}
+		if _, err := os.Stat("../../" + p.Graph); err != nil {
+			t.Errorf("profile %q names %s, which the tree does not have: %v",
+				name, p.Graph, err)
+		}
 	}
 }
 
