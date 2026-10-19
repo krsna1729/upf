@@ -20,7 +20,7 @@ func validArgs() graphArgs {
 		pdrTableUL: "pdr_ul", pdrTableDL: "pdr_dl",
 		pdrFieldsUL: "src,dst,proto,sport,dport,qfi", pdrFieldsDL: "src,dst,proto,sport,dport",
 		selectFieldsDL: "dst_ip",
-		teidTable: "teid", teidGate: 0,
+		teidTable:      "teid", teidGate: 0,
 		actionsUL: "at_ul", metersUL: "mt_ul",
 		actionsDL: "at_dl", metersDL: "mt_dl",
 		tunnels: "enc",
@@ -51,9 +51,28 @@ func TestGraphConfigMapsTheFlags(t *testing.T) {
 	if cfg.Down.Tunnels != "enc" || cfg.Up.Tunnels != "" {
 		t.Errorf("tunnels: up %q, down %q", cfg.Up.Tunnels, cfg.Down.Tunnels)
 	}
-	// The two next hops are the router's, one per direction.
+	// The two next hops are the router's, one per direction, and the access
+	// side's is its own: a forward whose FAR names Destination Interface
+	// Access leaves by it whichever direction the PDR is on, which is what
+	// indirect data forwarding needs. 0 leaves it to the downlink's.
 	if cfg.Up.NextHop != 1 || cfg.Down.NextHop != 2 {
 		t.Errorf("next hops: up %d, down %d", cfg.Up.NextHop, cfg.Down.NextHop)
+	}
+	if cfg.AccessNextHop != 0 {
+		t.Errorf("the access next hop is %d, want the flag's 0 by default", cfg.AccessNextHop)
+	}
+	args := validArgs()
+	args.accessNextHop = 3
+	args.maxDomains = 2
+	args.instances = "name=internet,domain=1,next-hop=1,tunnel-next-hop=3,sgi-lan-next-hop=4,arp=arp_n6,arp-mac=02:00:00:00:06:01"
+	if cfg, err = graphConfig(args); err != nil {
+		t.Fatalf("graphConfig with -access-next-hop and -instances: %v", err)
+	}
+	if cfg.AccessNextHop != 3 {
+		t.Errorf("the access next hop is %d, want the flag's 3", cfg.AccessNextHop)
+	}
+	if ifc, ok := cfg.Instances.Lookup("internet"); !ok || ifc.ARP != "arp_n6" {
+		t.Errorf("the instance's ARP identity did not reach the compiler: %+v (found %v)", ifc, ok)
 	}
 	// One capacity, three id spaces: the modules refuse an id beyond it.
 	if cfg.MaxActions != 4096 || cfg.MaxMeters != 4096 || cfg.MaxTEIDs != 4096 {
@@ -84,7 +103,7 @@ func TestGraphConfigMapsTheFlags(t *testing.T) {
 		t.Errorf("the default graph opts into a firewall path: up %q, down %q",
 			cfg.Up.Firewall, cfg.Down.Firewall)
 	}
-	args := validArgs()
+	args = validArgs()
 	args.firewallUL, args.firewallDL = "fw_ul", "fw_dl"
 	if cfg, err = graphConfig(args); err != nil {
 		t.Fatalf("graphConfig with firewall modules: %v", err)

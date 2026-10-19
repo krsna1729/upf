@@ -67,10 +67,21 @@ func run() error {
 	n3NextHop := flag.Uint("n3-next-hop", 2,
 		"the Router next hop a downlink forward leaves by: the encap's gate "+
 			"(a chain with an ActionTable fails closed when its action names none)")
+	accessNextHop := flag.Uint("access-next-hop", 0,
+		"the Router next hop a forward whose FAR names Destination Interface Access "+
+			"(TS 29.244 8.2.24, value 0) leaves by, whichever direction the PDR is on: the "+
+			"encap, on a downlink forward, and the indirect-forwarding tunnel on an uplink "+
+			"one. 0 (the default): the downlink direction's own -n3-next-hop, which is what "+
+			"a deployment without uplink forwarding needs")
 	instances := flag.String("instances", "",
 		"the deployment's network instances (TS 29.244 8.2.4), ';'-separated, each "+
-			"\"name=<instance>,domain=<route domain>,next-hop=<id>,pool=<prefix>[,...]\"; "+
-			"empty: the one-instance deployment, where no PDI's Network Instance is read")
+			"\"name=<instance>,domain=<route domain>[,next-hop=<id>][,tunnel-next-hop=<id>]\"+"+
+			"\"[,sgi-lan-next-hop=<id>][,vn-next-hop=<id>][,pool=<prefix>][,arp=<module>]\"+"+
+			"\"[,arp-mac=<xx:xx:xx:xx:xx:xx>]\"; the *-next-hop keys are the instance's "+
+			"egresses, one per FAR Destination Interface value (8.2.24) and per outer header "+
+			"creation: a plain forward toward the data network, a tunneled one (N9, indirect "+
+			"forwarding), one toward the service LAN and one that re-enters the subscriber "+
+			"side. empty: the one-instance deployment, where no PDI's Network Instance is read")
 	maxDomains := flag.Uint("max-domains", 1,
 		"the graph's Router max_domains: every -instances domain must be below it, "+
 			"and a packet classified in one the router does not have resolves to no table")
@@ -163,7 +174,52 @@ func run() error {
 		"the graph's unix_port socket an End Marker packet is written to when a "+
 			"modification's SNDEM flag moves a tunnel out from under a session "+
 			"(TS 29.244 5.3.2); empty: this UPF constructs none and advertises no EMPU")
+	// The config file's own flag: its value is read back from the flag set
+	// (applyLayers), because it must be layered like any other flag before the
+	// file it names is read.
+	flag.String(configFlag, "",
+		"a JSON config file carrying the same settings as these flags, keyed by flag name: "+
+			"{\"n4\": \"0.0.0.0:8805\", \"instances\": \"name=internet,domain=0,next-hop=1\"}. "+
+			"Optional: with no path named here (or in UPFD_CONFIG), no file is read, and one "+
+			"that is named must be readable. Every flag is also settable in the environment "+
+			"as UPFD_<FLAG> (upper case, '-' becomes '_'): the command line wins over the "+
+			"environment, which wins over the file, which wins over the flag's own default")
+	printConfig := flag.Bool("print-config", false,
+		"print the effective settings -- every flag's value after the command line, the "+
+			"environment and -config's file were applied -- in -config's own JSON format, "+
+			"and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(),
+			"upfd: the UPF controller -- PFCP (N4) towards the SMF, BESS over control_v2.\n\n"+
+				"Settings come from three places, highest first: the command line, the\n"+
+				"environment (UPFD_<FLAG>: upper case, '-' as '_'), and the optional JSON\n"+
+				"config file -config names. Each fills only the flags the sources above it\n"+
+				"left alone, and -print-config prints the result.\n\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
+
+	// Which flags any source named -- the command line, the environment or the
+	// config file: the profile is what a flag that names nothing resolves to,
+	// so an override is a flag a source named, not one whose value happens to
+	// differ from its default. It is resolved before anything reads a flag.
+	given, err := applyLayers(flag.CommandLine)
+	if err != nil {
+		return err
+	}
+	if *printConfig {
+		// The effective settings, in the file's own format, and nothing else:
+		// this is the way to see what a deployment resolves to and the way to
+		// write the first config file.
+		out, err := effectiveConfig(flag.CommandLine)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\n", out)
+		if !*printProfile {
+			return nil
+		}
+	}
 
 	// The profile, before anything else this run does: it is a start-time
 	// choice, and a name that is not a profile must not fall back to the
@@ -183,11 +239,6 @@ func run() error {
 			prof.Name, prof.Graph, strings.Join(prof.Modules, ","), prof.Up.String(), prof.Down.String())
 		return nil
 	}
-	// Which flags the operator named: the profile is what a flag that names
-	// nothing resolves to, so an override is a flag that *was* given, not one
-	// whose value differs from its own default.
-	given := map[string]bool{}
-	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
 
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(*level)); err != nil {
@@ -251,12 +302,13 @@ func run() error {
 			n3: *n3Addr, n3MAC: *n3MAC, peerMAC: *peerMAC,
 			capacity:  uint32(*capacity),
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
-			pdrTableUL: *pdrTableUL, pdrTableDL: *pdrTableDL,
+			accessNextHop: uint32(*accessNextHop),
+			pdrTableUL:    *pdrTableUL, pdrTableDL: *pdrTableDL,
 			firewallUL: *firewallUL, firewallDL: *firewallDL,
 			pdrMatchUL: *pdrMatchUL, pdrMatchDL: *pdrMatchDL,
 			selectDL: *selectDL, selectActionsDL: *selectActionsDL,
 			selectFieldsDL: *selectFieldsDL,
-			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
+			pdrFieldsUL:    *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
 			endMarker: *endMarker,
@@ -693,6 +745,7 @@ type graphArgs struct {
 	capacity           uint32
 	n6NextHop          uint32
 	n3NextHop          uint32
+	accessNextHop      uint32
 	instances          string
 	maxDomains         uint32
 	pdrTableUL         string
@@ -846,6 +899,11 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		},
 		Instances: domains,
 		N3Addr:    addr,
+		// Where a forward whose FAR names Destination Interface Access leaves
+		// by, whichever direction the PDR is on: a downlink forward's encap,
+		// and the indirect-forwarding tunnel an uplink forward leaves through
+		// (8.2.2 NOTE 2). 0 leaves it to the downlink direction's own hop.
+		AccessNextHop: a.accessNextHop,
 	}
 	if a.bufferStore != "" {
 		// The buffering branch is all three names or none: a store collects the
