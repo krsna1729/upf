@@ -32,12 +32,13 @@ downstream is keyed by.
                               +---------+----------+          |  upf_teid, qfi (u8) |
                                         |                     +----------+----------+
                           ogate 1: default gate                         | 0
-                          (TEID 0, no rule)                              v
+                          (no rule names it)                             v
                                         |                     +---------------------+
                                         v                     | mt_ul_read          |
                               +-------------------+           |  MetadataTest       |  (a write-only attribute
                               | echo0  GtpuEcho   |           |  reads upf_teid     |   gets no offset unless
-                              |  type 1 -> type 2 |           +----------+----------+   something reads it)
+                              |  type 1 -> type 2 |
+                              |  G-PDU -> type 26 |           +----------+----------+   something reads it)
                               +---------+---------+                      | 0
                                         |                                v
                                         |                     +---------------------+
@@ -161,7 +162,8 @@ downstream is keyed by.
 Gate numbers, in full: `0` is the chain's next module; `8192` is `DROP_GATE`
 (`core/gate.h`), what a rule carries when its FAR drops or a QER's gate is
 closed; `1` on `pdr_dl` is the buffering branch; `1` on the uplink's `teid`
-table is the echo module; and any gate no connection wires drops the packet,
+table is the responder (echo and Error Indication); and any gate no connection
+wires drops the packet,
 which is why the store's evictions need no module of their own — the store
 *evicts* a flow's oldest packet on gate 1 when its per-flow cap is reached, and
 *frees* an expired one outright (`bess::PacketFree`, no gate, no metric) on the
@@ -270,13 +272,23 @@ second), and no further extension header. That is 8 bytes of the packet's
 headroom, sized before the prepend; a record with `qfi == 0` writes none of it,
 so the wire is byte for byte what it was before the field existed.
 
-### `gtpu_echo` — path management
+### `gtpu_echo` — path management, and the tunnels that are gone
 
-Answers a GTP-U Echo Request (type 1, TEID 0 — the only message a UPF sees on
-TEID 0 that names no session) with the reply TS 29.281 7.2.2 prescribes, and
-drops everything else it is handed. It is reached through the TEID table's
-*default* gate and sits outside the session path entirely; it reads no session
-state and allocates nothing.
+Answers the two GTP-U messages a UPF sees on a TEID that names no session:
+
+* an **Echo Request** (type 1, always TEID 0) with the reply TS 29.281 7.2.2
+  prescribes -- the S-flag field, the Recovery IE with a zero restart counter,
+  and this node's Recovery Time Stamp;
+* a **G-PDU** (type 255) on any other unnamed TEID with an **Error Indication**
+  (type 26) carrying the TEID the peer used (7.3.1: a node that has retired a
+  tunnel answers so the peer stops sending into it). S is clear, the header's
+  TEID is 0 (the peer knows no tunnel toward this node), and the tail is the
+  TEID IE alone.
+
+Both are the request rewritten in place (addresses swapped, type replaced,
+lengths recomputed) and reach it through the TEID table's *default* gate; it
+sits outside the session path entirely, reads no session state and allocates
+nothing. Any other message type it is handed is dropped.
 
 ### `urr_count` — usage, and the buffering signal
 

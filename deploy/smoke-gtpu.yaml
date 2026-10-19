@@ -65,10 +65,12 @@ modules:
         # header's flags/type/length (4). One rule per session; no rule (or a
         # TEID no rule names) is what the default gate takes.
         - {offset: 46, num_bytes: 4}
-      # The default gate is the echo module, not the drop: the only traffic
-      # that reaches a UPF on a TEID no session names is an Echo Request,
-      # whose TEID is 0. The module answers those and drops everything else,
-      # so a G-PDU with an unknown TEID still goes nowhere.
+      # The default gate is the responder, not the drop: TEID 0 is the echo
+      # path (7.1) and a TEID no rule names is a G-PDU for a tunnel this node
+      # does not have, which 7.3.1 answers with an Error Indication. Both
+      # replies come from the same module class; they are two instances only so
+      # that each chain has its own Dump (a Dump prints what it sees when its
+      # interval comes round, so two frames sharing one would race).
       default_gate: 1
   - name: mt_md
     mclass: MetadataTest
@@ -85,10 +87,11 @@ modules:
   - name: sink_up
     mclass: Sink
 
-  # A second uplink chain whose G-PDU carries TEID 0x55667788, which no session
-  # entry names: the decap must drop it, and the frame's inner source address
-  # (10.0.0.2) must never appear in the log. Same frame as the first, with the
-  # TEID and the inner address changed.
+  # A second uplink chain whose G-PDU carries TEID 0x55667788, which no rule
+  # names: the table's default gate takes it, the responder answers it with an
+  # Error Indication (7.3.1), and the frame's inner source address (10.0.0.2)
+  # must never appear in the log -- the payload goes nowhere. Same frame as the
+  # first, with the TEID and the inner address changed.
   - name: src_drop
     mclass: Source
     arg: {pkt_size: 87, burst: 1}
@@ -142,8 +145,18 @@ modules:
         # whose value is de ad be ef 00 00 00 00: the reply must not carry
         # that one back. 14 + 20 + 8 + 8 + 4 + 11 bytes.
         - "AgAAAAABAgAAAAACCABFAAAzAABAAEAR6o8KFB4CChQeAQhoCGgAHwAAMgEADwAAAAASNAAA5wAI3q2+7wAAAAA="
+  # TEID 0's rule (below) sends the echo arm to this responder; the table's
+  # default gate sends a G-PDU on an unnamed TEID to echo_err, so each reply
+  # has a Dump to itself.
   - name: echo0
     mclass: GtpuEcho
+  - name: echo_err
+    mclass: GtpuEcho
+  - name: dump_err
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_err
+    mclass: Sink
   - name: dump_echo
     mclass: Dump
     arg: {interval: 1}
@@ -247,9 +260,12 @@ connections:
   - {upstream: mt_md, downstream: dump_up}
   - {upstream: dump_up, downstream: sink_up}
 
-  # The table's default gate (ogate 1): the echo module, which answers an Echo
-  # Request and drops everything else the table did not match.
-  - {upstream: teid, downstream: echo0, ogate: 1}
+  # Two responders: TEID 0's rule (ogate 3, the echo arm) and the table's
+  # default gate (ogate 1, the responder an unnamed TEID reaches).
+  - {upstream: teid, downstream: echo0, ogate: 3}
+  - {upstream: teid, downstream: echo_err, ogate: 1}
+  - {upstream: echo_err, downstream: dump_err}
+  - {upstream: dump_err, downstream: sink_err}
   - {upstream: src_echo, downstream: rewrite_echo}
   - {upstream: rewrite_echo, downstream: teid}
   - {upstream: echo0, downstream: dump_echo}
@@ -284,6 +300,12 @@ resources:
         values: [{value_bin: "ESIzRA=="}]
         masks: [{value_bin: "/////w=="}]
       value: {priority: 100, gate: 0}
+    # TEID 0: the echo path (7.1). Its own gate and responder, so the reply
+    # has a Dump to itself.
+    - key:
+        values: [{value_bin: "AAAAAA=="}]
+        masks: [{value_bin: "/////w=="}]
+      value: {priority: 100, gate: 3}
     # The container-less frame's TEID (0x11223345), whose rule takes the
     # table's second gate: its own decap, reader and Dump, so its metadata is
     # printed whatever the first chain is doing.

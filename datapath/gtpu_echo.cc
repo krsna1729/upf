@@ -27,8 +27,10 @@ using bess::utils::be32_t;
 // The GTP-U message types this module knows (TS 29.281 table 6.1-1).
 constexpr uint8_t kEchoRequest = 1;
 constexpr uint8_t kEchoResponse = 2;
+constexpr uint8_t kErrorIndication = 26;
+constexpr uint8_t kGtpdu = 255;
 
-// The information elements an Echo Response carries (TS 29.281 7.2.2): the
+// An Echo Response's information elements (TS 29.281 7.2.2): the
 // Recovery IE is mandatory there "due to backwards compatibility reasons" and
 // its restart counter is set to zero (8.2); the Recovery Time Stamp is
 // optional (8.7) and this module sends it, because a peer that reads it learns
@@ -40,6 +42,12 @@ constexpr uint8_t kRecoveryTimeStamp = 231;    // TLV: two octets of length (8.7
 // N-PDU number, next extension header type -- 5.1 sets S for an echo) and the
 // two IEs above.
 constexpr size_t kReplyTail = 4 + 2 + 11;
+
+// An Error Indication's tail (7.3.1): no S-flag field (5.1 leaves S clear) and
+// the TEID IE -- type 16, TV, a four-octet value -- naming the TEID the peer
+// used for a tunnel this node does not have.
+constexpr uint8_t kTeidIe = 16;
+constexpr size_t kErrorTail = 1 + 4;
 
 // Seconds from 1900-01-01 to 1970-01-01: the Recovery Time Stamp's value is
 // "the time in seconds relative to 00:00:00 on 1 January 1900" (8.7), which is
@@ -55,6 +63,16 @@ inline uint16_t Get16(const uint8_t *p) { return static_cast<uint16_t>(p[0] << 8
 inline void Put16(uint8_t *p, uint16_t v) {
   p[0] = static_cast<uint8_t>(v >> 8);
   p[1] = static_cast<uint8_t>(v);
+}
+inline uint32_t Get32(const uint8_t *p) {
+  return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 |
+         static_cast<uint32_t>(p[2]) << 8 | static_cast<uint32_t>(p[3]);
+}
+inline void Put32(uint8_t *p, uint32_t v) {
+  p[0] = static_cast<uint8_t>(v >> 24);
+  p[1] = static_cast<uint8_t>(v >> 16);
+  p[2] = static_cast<uint8_t>(v >> 8);
+  p[3] = static_cast<uint8_t>(v);
 }
 
 }  // namespace
@@ -125,18 +143,31 @@ void GtpuEcho::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     if ((g[0] >> 5) != 1 || (g[0] & 0x10) == 0 || (g[0] & 0x05) != 0) [[unlikely]] {
       continue;
     }
-    if (g[1] != kEchoRequest) [[unlikely]] {
+    // Two messages reach this module through the TEID table's default gate: an
+    // Echo Request (7.1, TEID 0) and a G-PDU whose TEID no session names
+    // (7.3.1). The second is answered with an Error Indication when its TEID is
+    // not 0 -- TEID 0 is the echo path, and no G-PDU carries it.
+    const bool echo = g[1] == kEchoRequest;
+    if (!echo && g[1] != kGtpdu) [[unlikely]] {
       continue;  // a message type this module does not answer
     }
     if (gtp + bess::tunnel::kGtpuBaseBytes + Get16(g + 2) > pkt.total_len()) [[unlikely]] {
       continue;
     }
+    uint32_t unknownTeid = 0;
+    if (!echo) {
+      unknownTeid = Get32(g + 4);
+      if (unknownTeid == 0) [[unlikely]] {
+        continue;  // TEID 0 is the echo path (7.1), not a failed tunnel
+      }
+    }
+    const size_t tailLen = echo ? kReplyTail : kErrorTail;
 
     // The request's sequence number, which the reply answers with (5.1: a
     // receiver interprets it when S is set). An Echo Request this module
     // accepts without the S-flag field has none, and the reply sends zero.
     uint16_t sequence = 0;
-    if ((g[0] & 0x02) != 0) {
+    if (echo && (g[0] & 0x02) != 0) {
       if (gtp + bess::tunnel::kGtpuBaseBytes + 2 > pkt.total_len()) [[unlikely]] {
         continue;  // S set, no room for the field
       }
@@ -155,7 +186,7 @@ void GtpuEcho::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     std::swap(ip->src, ip->dst);
     ip->length = be16_t(static_cast<uint16_t>(bess::tunnel::kIpv4Bytes +
                                               bess::tunnel::kUdpBytes +
-                                              bess::tunnel::kGtpuBaseBytes + kReplyTail));
+                                              bess::tunnel::kGtpuBaseBytes + tailLen));
     ip->checksum = bess::utils::CalculateIpv4NoOptChecksum(*ip);
 
     // The UDP header: the ports swapped -- so the reply leaves for the port
@@ -166,14 +197,16 @@ void GtpuEcho::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     Put16(udp, Get16(udp + 2));
     Put16(udp + 2, src_port);
     Put16(udp + 4, static_cast<uint16_t>(bess::tunnel::kUdpBytes +
-                                         bess::tunnel::kGtpuBaseBytes + kReplyTail));
+                                         bess::tunnel::kGtpuBaseBytes + tailLen));
     Put16(udp + 6, 0);
 
-    // The GTP-U header: an Echo Response with the S-flag field and TEID 0,
-    // which is the TEID an echo message carries (7.1).
-    g[0] = 0x32;  // version 1, PT 1, S 1, E/PN 0
-    g[1] = kEchoResponse;
-    Put16(g + 2, static_cast<uint16_t>(kReplyTail));
+    // The GTP-U header. An Echo Response carries the S-flag field and TEID 0
+    // (7.1); an Error Indication carries S clear and TEID 0 too -- the peer
+    // knows no tunnel toward this node, so the TEID it used travels in the
+    // IE below (7.3.1).
+    g[0] = echo ? 0x32 : 0x30;  // version 1, PT 1; S 1 for the echo, E/PN 0
+    g[1] = echo ? kEchoResponse : kErrorIndication;
+    Put16(g + 2, static_cast<uint16_t>(tailLen));
     auto *teid = reinterpret_cast<be32_t *>(g + 4);
     *teid = be32_t(0);
 
@@ -189,9 +222,15 @@ void GtpuEcho::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     if (pkt.total_len() > keep) {
       pkt.trim(static_cast<uint16_t>(pkt.total_len() - keep));
     }
-    auto *tail = static_cast<uint8_t *>(pkt.append(static_cast<uint16_t>(kReplyTail)));
+    auto *tail = static_cast<uint8_t *>(pkt.append(static_cast<uint16_t>(tailLen)));
     if (tail == nullptr) [[unlikely]] {
       continue;  // no tailroom for the reply
+    }
+    if (!echo) {
+      tail[0] = kTeidIe;
+      Put32(tail + 1, unknownTeid);
+      ogates[i] = 0;
+      continue;
     }
     Put16(tail, sequence);
     tail[2] = 0;  // N-PDU number

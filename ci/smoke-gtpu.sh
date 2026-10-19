@@ -140,9 +140,10 @@ refute_metadata "no packet leaves 0 in the QFI byte of a container-less G-PDU" \
       "11 22 33 45 00"
 
 # The session table is what makes a TEID ours: the second uplink chain's frame
-# carries TEID 0x55667788, which no entry names, so the decap dropped it -- its
-# inner source address (10.0.0.2) must not appear anywhere in the log.
-refute "decap dropped a G-PDU whose TEID is not a session" "0a 00 00 02"
+# carries TEID 0x55667788, which no rule names, so the table's default gate
+# answered it (the Error Indication below) -- its inner source address
+# (10.0.0.2) must not appear anywhere in the log: the payload goes nowhere.
+refute "an unknown TEID's payload goes nowhere" "0a 00 00 02"
 
 # Downlink: the plugin resolved the ActionId the packet carried against
 # encap0/tunnels and built the outer headers: Eth (the record's addresses),
@@ -205,6 +206,14 @@ check "echo carried the request's sequence, the Recovery IE, and its own stamp" 
 # to tell when the entity it is talking to started. Any occurrence of those
 # bytes would come from the reply, because the request itself is never dumped.
 refute "echo replaced the request's stamp instead of echoing it" "de ad be ef"
+
+# The frame whose TEID no rule names (src_drop's, 0x55667788) reaches the
+# table's default gate, and the responder answers it with an Error Indication
+# (TS 29.281 7.3.1): type 26, S clear, its length 5 (the TEID IE alone), TEID 0
+# in the header and the peer's TEID in the IE. A node that only dropped it
+# would leave the peer sending into a tunnel that no longer exists.
+check "an unnamed TEID is answered with an Error Indication" "30 1a 00 05 00 00"
+check "the Error Indication names the TEID the peer used" "10 55 66 77 88"
 
 check_clean_shutdown "$DAEMON" || FAIL=1
 if [ "$FAIL" = 0 ]; then
