@@ -266,12 +266,11 @@ resources:
   # the encap whatever instance the PDI named.
   rt/next_hops:
     - key: {id: 1}
-      # The internet instance's exit, with that data network's L2. A stage built
-      # from the fork's current source writes a resolved next hop's addresses
-      # into the frame (D-153); the stage these lanes run against stores the
-      # pair and leaves the frame's addresses alone (docs/interop.md), so
-      # ci/pdrmatch-2dn proves per-instance egress by which exit's Dump saw the
-      # frame, not by its Ethernet header.
+      # The internet instance's exit, with that data network's L2: the Router
+      # writes a resolved next hop's addresses into the frame it forwards
+      # (BESS D-153), so the two instances' uplink frames leave with different
+      # Ethernet headers -- and ci/pdrmatch-2dn.sh byte-checks them in the Dump
+      # of the exit each one left by.
       value: {egress_gate: 0, dst_mac: "AgAAAAoC", src_mac: "AgAAAAoB"}
     - key: {id: 2}
       # The access side: the encap builds its own outer header, so this hop
