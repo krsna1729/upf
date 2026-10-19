@@ -17,13 +17,35 @@
 #                                documentation address, replace it)
 #   rt/next_hops   = -n6-next-hop is the id an uplink action names (1 below),
 #                    and -n3-next-hop the one a downlink action names (2
-#                    below, the encap's gate). Both egress_gates are this
-#                    file's connections: 0 toward n6_out, 1 toward enc.
+#                    below, the encap's gate). -access-next-hop is the id a
+#                    forward whose FAR names Destination Interface Access
+#                    leaves by whichever direction it is on (2 below as well,
+#                    the encap; a deployment without uplink forwarding leaves
+#                    it 0 and the downlink's own id serves). The egress_gates
+#                    are this file's connections: 0 toward n6_out, 1 toward
+#                    enc, and -- for the egresses a deployment adds with
+#                    -instances -- 2 toward enc again (a tunnel out of an
+#                    instance: N9, or indirect forwarding, hop 3) and 4 into
+#                    pdr_dl (the 5G VN re-injection, hop 5). The Router's gate
+#                    is interface - 1 (D-049), so hop 4 would be a service-LAN
+#                    port's; this file declares none, so a deployment whose
+#                    -instances names sgi-lan-next-hop adds that port and hop.
 #   the N6 side    = vif_n6's one interface (the UPF's N6 MAC and address:
 #                    what the data network resolves, and what its frames are
 #                    addressed to) and hop 1's dst_mac, the next hop those
 #                    frames name. The interface's address is the link's
 #                    gateway for the UE pool.
+#   the ARP proxy  = arp_n6, on the ARP branch of the N6 ingress: l2_sort
+#                    sends every ARP frame there before the Vif sees it (an
+#                    ARP request is addressed to the broadcast MAC, which no
+#                    interface matches). Its "entries" resource holds the
+#                    interface's own address and every subscriber's: upfd
+#                    writes one entry per session per UE address
+#                    (-instances' arp/arp-mac is the module and the MAC those
+#                    replies carry), and the deployment declares the
+#                    interface's own entry below. The module drops every
+#                    non-ARP packet and every request it holds no entry for,
+#                    so nothing but ARP may be sent to it.
 # The N3 and N6 port names are the manifest's, not the driver's: a PortInc or
 # PortOut names the port this file declares.
 
@@ -63,13 +85,34 @@ modules:
     mclass: PortInc
     arg: {port: n6}
 
+  # The N6 ingress' first stop: every frame's EtherType, so the ARP branch is
+  # taken before any interface sees the frame. An ARP request names the
+  # broadcast MAC, which no Vif matches -- without this rule the request would
+  # be dropped before arp_n6 (the deployment's ARP proxy, and the only answer
+  # for the subscriber addresses) could read it.
+  - name: l2_sort
+    mclass: WildcardMatch
+    arg:
+      fields:
+        # The frame's EtherType: Eth (12).
+        - {offset: 12, num_bytes: 2}
+      # Everything that is not ARP: the interface's IP frames.
+      default_gate: 1
+  # The ARP responder: it answers for the addresses its "entries" resource
+  # holds -- the interface's own (below) and one entry per session per UE
+  # address (upfd writes those with the session). It rewrites the request in
+  # place into the reply and emits it on gate 0, toward the port; a request it
+  # holds no entry for, and every packet that is not an ARP request, is
+  # dropped. Nothing but the l2_sort rule above may send it traffic.
+  - name: arp_n6
+    mclass: UpfArpResponder
+    arg: {max_entries: 65536}
   # The N6 port's interface. The Vif matches a frame by (VLAN, destination MAC)
-  # and sends what it matched out of the interface's gate; it also answers ARP
-  # for an interface's address, in place, and sends that out of the same gate
-  # (docs/design.md, "N3, N6, N9: one port, three interfaces"). An ARP reply
-  # is not IP, so one rule on l2_sort sends it back out of the port; the
-  # interface's IP frames (the default gate) enter the downlink table. A frame
-  # that names no interface is dropped, and sink_other is where that shows.
+  # and sends what it matched out of the interface's gate; its own ARP answer
+  # is unused here, because l2_sort diverts ARP before it (arp_n6 answers for
+  # the interface's address too). The interface's IP frames (the interface
+  # gate) enter the downlink table. A frame that names no interface is
+  # dropped, and sink_other is where that shows.
   - name: vif_n6
     mclass: Vif
     arg:
@@ -77,17 +120,10 @@ modules:
       interfaces:
         # The deployment's N6 identity: the MAC hop 1's src_mac repeats below,
         # the address (192.0.2.2, the pool's gateway on this link), a route
-        # domain for a graph whose key reads one (this file's does not), and
-        # the gate the interface's frames leave by.
-        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 1, gate: 1}
-  - name: l2_sort
-    mclass: WildcardMatch
-    arg:
-      fields:
-        # The frame's EtherType: Eth (12).
-        - {offset: 12, num_bytes: 2}
-      # The interface's IP frames: everything that is not ARP.
-      default_gate: 1
+        # domain for a graph whose key reads one (this file's does not, and
+        # rt's max_domains is 1: domain 0 is the only one there is), and the
+        # gate the interface's frames leave by.
+        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 0, gate: 1}
   - name: sink_other
     mclass: Sink
 
@@ -232,14 +268,15 @@ connections:
   - {upstream: ttl_ul, downstream: rt}
   - {upstream: rt, downstream: n6_out}
 
-  # The N6 port's ingress: the interface gate's frames -- the Vif's answer and
-  # what was addressed to the interface -- go through l2_sort, whose ARP rule
-  # sends a reply back out of the port and whose default gate is the downlink
-  # table. Two producers reach n6_out, and a PortOut takes both.
-  - {upstream: n6_in, downstream: vif_n6}
-  - {upstream: vif_n6, downstream: l2_sort, ogate: 1}
-  - {upstream: l2_sort, downstream: n6_out}
-  - {upstream: l2_sort, downstream: pdr_dl, ogate: 1}
+  # The N6 port's ingress: l2_sort first, so ARP reaches arp_n6 (whose reply
+  # leaves the port) and everything else reaches the interface. What the
+  # interface matched enters the downlink table; what it did not is dropped in
+  # sink_other. Three producers reach n6_out, and a PortOut takes them all.
+  - {upstream: n6_in, downstream: l2_sort}
+  - {upstream: l2_sort, downstream: arp_n6}
+  - {upstream: arp_n6, downstream: n6_out}
+  - {upstream: l2_sort, downstream: vif_n6, ogate: 1}
+  - {upstream: vif_n6, downstream: pdr_dl, ogate: 1}
   - {upstream: vif_n6, downstream: sink_other}
 
   - {upstream: pdr_dl, downstream: at_dl}
@@ -248,6 +285,13 @@ connections:
   - {upstream: cnt_dl, downstream: ttl_dl}
   - {upstream: ttl_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
+  # The egresses an instance's forwards take beyond the data network: a tunnel
+  # out of the instance (N9, or the indirect-forwarding tunnel of an uplink
+  # forward, hop 3) and the 5G VN re-injection, which puts the packet back into
+  # the subscriber-side chain (hop 5). Both are one hop id an action names; the
+  # connections are what give that id a gate.
+  - {upstream: rt, downstream: enc, ogate: 2}
+  - {upstream: rt, downstream: pdr_dl, ogate: 4}
   - {upstream: enc, downstream: n3_out}
   # The marker leaves on the same N3 port a downlink packet would, which is
   # where the peer that must read it is listening.
@@ -263,17 +307,32 @@ resources:
   # hop, and 02:00:00:00:06:01, vif_n6's interface): the Router writes those
   # addresses into every frame it resolves the hop for (BESS D-153). Hop 2
   # has none: the encap builds that frame's own.
+  # Hop 3 is a tunnel out of a network instance and hop 5 is the 5G VN
+  # re-injection: both leave by the encap and the downlink table respectively,
+  # and upfd names them from -instances' tunnel-next-hop and vn-next-hop. A
+  # deployment that does not serve those values declares neither.
   rt/next_hops:
     - key: {id: 1}
       value: {egress_gate: 0, dst_mac: "AgAAAAYC", src_mac: "AgAAAAYB"}
     - key: {id: 2}
       value: {egress_gate: 1}
+    - key: {id: 3}
+      value: {egress_gate: 2}
+    - key: {id: 5}
+      value: {egress_gate: 4}
 
-  # l2_sort's one rule: ARP (0x0806) leaves by the N6 port. It is the Vif's
-  # own reply, the frame it built in place for the interface's address; the
-  # request it answers arrived on the port and never entered the chain.
+  # l2_sort's one rule: ARP (0x0806) is the responder's. Everything else is
+  # the interface's (the table's default gate, 1).
   l2_sort/rules:
     - key:
         values: [{value_bin: "CAY="}]
         masks: [{value_bin: "//8="}]
       value: {priority: 100, gate: 0}
+
+  # The ARP proxy's own entry: the interface's address, so the data network can
+  # resolve the link's gateway even before a session exists. The subscriber
+  # entries are upfd's, one per session per UE address, and they are claimed
+  # and erased with the session; this one is the deployment's and stays.
+  arp_n6/entries:
+    - key: {ip: "192.0.2.2"}
+      value: {mac_addr: "02:00:00:00:06:01"}
