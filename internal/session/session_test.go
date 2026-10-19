@@ -4777,3 +4777,64 @@ func TestAPDIsDestinationAndTheSDFsMustAgree(t *testing.T) {
 		t.Errorf("a filter naming another destination answered cause %d, want a rule failure", got)
 	}
 }
+
+// TestAFARThatAsksForL7WorkIsRefused: Header Enrichment (8.2.67), Redirect
+// Information (8.2.20) and Proxying (8.2.97) instruct the UP to write into the
+// subscriber's traffic. Nothing here reads L7, and forwarding as if the IEs were
+// absent would leave the SMF believing an instruction was applied.
+func TestAFARThatAsksForL7WorkIsRefused(t *testing.T) {
+	cases := []struct {
+		name string
+		ie   *ie.IE
+	}{
+		{"header enrichment", ie.NewHeaderEnrichment(0, "X-UPF", "1")},
+		{"redirect", ie.NewRedirectInformation(2, "http://example.invalid/")},
+		{"proxying", ie.NewProxying(0, 0)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			c := New(testConfig(), rec, quietLogger())
+			req := message.NewSessionEstablishmentRequest(0, 0, 0x5566, 1, 0,
+				ie.NewFSEID(0x5566, nil, nil),
+				ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+					ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+						ie.NewFTEID(0x01, 0x55667788, net.ParseIP("192.0.2.1"), nil, 0),
+						ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+					ie.NewFARID(1)),
+				ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+					ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore), tc.ie)),
+			)
+			if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+				t.Errorf("a FAR carrying %s answered cause %d, want a rule failure", tc.name, got)
+			}
+			if len(rec.txns) != 0 {
+				t.Error("a refused session wrote to the dataplane")
+			}
+		})
+	}
+}
+
+// TestAFARThatAsksToDuplicateIsRefused: Apply Action's DUPL (8.2.26 bit 5)
+// names a second forwarding FAR, and no chain here branches one packet to two
+// actions.
+func TestAFARThatAsksToDuplicateIsRefused(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5567, 1, 0,
+		ie.NewFSEID(0x5567, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x55667788, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw|applyDUPL),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a FAR asking to duplicate answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
