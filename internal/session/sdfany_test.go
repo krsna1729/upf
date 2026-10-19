@@ -35,7 +35,8 @@ func uplinkPDI(cp uint64, filters []string, qfis []uint8) *message.SessionEstabl
 	return message.NewSessionEstablishmentRequest(0, 0, cp, 1, 0,
 		ie.NewFSEID(cp, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(100), ie.NewPDI(pdi...), ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 	)
 }
 

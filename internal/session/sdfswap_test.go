@@ -27,7 +27,8 @@ func uplinkWithDLForm(sdf string) *message.SessionEstablishmentRequest {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter(sdf, "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 	)
 }
 

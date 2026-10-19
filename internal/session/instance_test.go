@@ -403,36 +403,42 @@ func TestAnUpdateFARKeepsWhatItDoesNotCarry(t *testing.T) {
 		return nextHop(t, changes, "at_ul/actions", ul.actionID())
 	}
 
-	// Only the Apply Action: the forward does not move, so it still leaves by
-	// the FAR's instance (ims, 3) -- not by the PDI's (internet, 1), which is
-	// where the zero destination interface and the empty instance would send it.
+	// The Apply Action, with the forwarding parameters a forwarding FAR must
+	// carry and no instance among them: the forward does not move, so it still
+	// leaves by the FAR's instance (ims, 3) -- not by the PDI's (internet, 1),
+	// which is where an update that dropped the instance would send it.
 	if got := hop(t, message.NewSessionModificationRequest(0, 0, 1, 2, 0,
 		ie.NewFSEID(1, nil, nil),
-		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)))); got != 3 {
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))))); got != 3 {
 		t.Errorf("after an Apply-Action-only update the forward takes next hop %d, want the instance's 3 still", got)
 	}
 
-	// Only the instance, in the update form: that form is a different IE from
-	// the create form, and the destination interface it does not carry stays
-	// core -- so the forward leaves by voip (4), not by the uplink's own hop
-	// (1), which is where a zeroed destination interface takes it.
+	// The instance, in the update form: that form is a different IE from the
+	// create form, and naming one moves the forward -- it leaves by voip (4),
+	// not by the PDI's internet (1), which is where the record's instance would
+	// take it.
 	if got := hop(t, message.NewSessionModificationRequest(0, 0, 1, 3, 0,
 		ie.NewFSEID(1, nil, nil),
 		ie.NewUpdateFAR(ie.NewFARID(1),
 			ie.NewApplyAction(applyForw),
-			ie.NewUpdateForwardingParameters(ie.NewNetworkInstance("voip"))))); got != 4 {
+			ie.NewUpdateForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceCore),
+				ie.NewNetworkInstance("voip"))))); got != 4 {
 		t.Errorf("naming an instance in the update form took next hop %d, want voip's 4", got)
 	}
 
-	// Only the destination interface, and its value is 0: the access side is a
-	// value an SMF names, not an absent field, so the forward moves -- the
-	// instance is not resolved then, and the rule takes the uplink's own hop.
+	// The destination interface, and its value is 0: the access side is a value
+	// an SMF names, not an absent field, so the forward moves -- the instance is
+	// not resolved then, and an uplink PDR's forward toward the access side
+	// leaves through the encap, which the downlink direction's own hop (2) is,
+	// whichever direction the PDR is on.
 	if got := hop(t, message.NewSessionModificationRequest(0, 0, 1, 4, 0,
 		ie.NewFSEID(1, nil, nil),
 		ie.NewUpdateFAR(ie.NewFARID(1),
 			ie.NewApplyAction(applyForw),
-			ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))))); got != 1 {
-		t.Errorf("an update to the access side took next hop %d, want the uplink's own 1", got)
+			ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))))); got != 2 {
+		t.Errorf("an update to the access side took next hop %d, want the access side's 2", got)
 	}
 
 	// And back to the core side: the instance those two updates did not carry

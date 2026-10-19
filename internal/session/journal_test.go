@@ -101,7 +101,8 @@ func TestTheCheckpointReplaysSessions(t *testing.T) {
 	// replayed session that answered under a new one would be a session the SMF
 	// cannot reach.
 	if got := cause(t, c2.Modify(message.NewSessionModificationRequest(0, 0, seid, 4, 0,
-		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw))))); got != ie.CauseRequestAccepted {
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)))))); got != ie.CauseRequestAccepted {
 		t.Errorf("a modification addressed to the session's old SEID answered cause %d, want accepted", got)
 	}
 	// The deleted session is not back, and its retransmitted deletion is
