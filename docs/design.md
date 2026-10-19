@@ -71,8 +71,10 @@ table in front of the decap, one per session:
   ones, whose gate is the decap's output. A G-PDU whose TEID no rule names never
   reaches the decap (the table's default gate drops it), so the decap needs no
   session table at all: it strips headers, writes `upf_teid` and passes the inner
-  packet on (TS 29.281 answers an Error Indication to the peer; the notification
-  path is a later item). This is also the *whole* cost of the F-TEID match, and it
+  packet on (TS 29.281 answers an Error Indication to the peer -- the responder
+  behind the table's default gate does, 7.3.1; the notification path to the SMF
+  is a later item, finding 15). This is also the *whole* cost of the F-TEID
+  match, and it
   is one hash lookup, the same table machinery every other rule uses.
 - A *session table* in the plugin was the first design, and it does not work: the
   fork's `SlotResource` keys are dense ids in `1..capacity` (`slot_table.h`), and a

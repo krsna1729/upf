@@ -6,23 +6,25 @@
 #include "module.h"
 #include "upf_datapath.pb.h"
 
-// Answers a GTP-U Echo Request (TS 29.281 7.2, message type 1) with the reply
-// the peer's path management needs (type 2), and drops everything else it is
-// handed.
+// Answers the two GTP-U messages a UPF is handed on a TEID that names no
+// session, and drops everything else it is given (TS 29.281 7.2 and 7.3.1).
 //
-// The graph hands it one kind of packet: whatever the rule table in front of it
-// routes to this gate. A G-PDU's TEID is a session's rule; the only other
-// message that reaches a UPF on TEID 0 is an Echo Request, which names no
-// session and which the table would otherwise drop. A peer that gets no reply
-// reads the N3 path as down, with no packet loss to point at.
+// The graph hands it whatever the rule table in front of it routes to the
+// default gate. A G-PDU's TEID is a session's rule; two messages reach a UPF
+// outside one: an Echo Request, always on TEID 0, whose reply the peer's path
+// management needs -- a peer that gets none reads the N3 path as down, with no
+// packet loss to point at -- and a G-PDU whose TEID no session names, which
+// 7.3.1 answers with an Error Indication so the peer learns the tunnel is
+// gone instead of sending into it.
 //
-// The reply is the request with its Ethernet, IPv4 and UDP addresses swapped,
-// the type set to 2, the S-flag field kept (5.1: an echo sets it), the
-// payload replaced by the two IEs 7.2.2 names -- the mandatory Recovery IE
-// with a zero restart counter, and this node's Recovery Time Stamp -- and the
-// lengths recomputed: 20 bytes of IPv4, 8 of UDP, 8 of GTP-U and 17 after it.
-// It copies nothing but those 17 bytes, allocates nothing, and reads no
-// session state.
+// Both replies are the request with its Ethernet, IPv4 and UDP addresses
+// swapped, the type replaced, and the lengths recomputed. An Echo Response
+// keeps the S-flag field (5.1: an echo sets it), sends TEID 0, and carries the
+// two IEs 7.2.2 names: the mandatory Recovery IE with a zero restart counter,
+// and this node's Recovery Time Stamp -- 17 bytes after the header. An Error
+// Indication has S clear, TEID 0 (the peer knows no tunnel toward this node),
+// and one TEID IE naming the TEID it used -- 5 bytes after the header. Both
+// copy nothing but their tail, allocate nothing, and read no session state.
 class GtpuEcho final : public Module {
  public:
   static const gate_idx_t kNumOGates = 1;
@@ -39,7 +41,7 @@ class GtpuEcho final : public Module {
   std::string GetDesc() const override;
 
  private:
-  uint16_t port_ = 0;  // the UDP port an Echo Request must arrive on
+  uint16_t port_ = 0;  // the UDP port the messages must arrive on
   uint32_t stamp_ = 0; // seconds from 1900 to this entity's start (8.7)
 };
 

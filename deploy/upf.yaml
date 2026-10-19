@@ -137,11 +137,12 @@ modules:
 
   # -- ingress -----------------------------------------------------------------
   # A G-PDU arrives on N3: the TEID table is the F-TEID match (one rule per
-  # session, written by the controller). Its default gate is the echo module,
-  # not a drop: the only message that reaches a UPF on a TEID no session names
-  # is an Echo Request (TS 29.281 7.2, TEID 0), which a peer's path management
-  # needs answered. The module answers those and drops everything else, so a
-  # G-PDU no session names is still dropped. Its output is the decap.
+  # session, written by the controller). Its default gate is the responder,
+  # not a drop: TEID 0 is an Echo Request (TS 29.281 7.2), which a peer's path
+  # management needs answered, and any other unnamed TEID is a G-PDU for a
+  # tunnel this node does not have, which 7.3.1 answers with an Error
+  # Indication (the module drops every other message type it is handed). Its
+  # output is the decap.
   - name: teid
     mclass: WildcardMatch
     arg:
