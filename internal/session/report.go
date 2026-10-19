@@ -233,7 +233,7 @@ func (t Trigger) flags() (octet5, octet6 uint8) {
 // numbers, so the n4 layer sends what it is given and nothing else has to know
 // which bit means which trigger.
 func (r Report) IEs() []*ie.IE {
-	// What this message carries decides its Report Type (8.2.18): a usage
+	// What this message carries decides its Report Type (8.2.21): a usage
 	// report for the URR it leads with -- not an event report and not a
 	// downlink-data report -- an Error Indication Report for a tunnel the peer
 	// could not reach (5.10), and both when one tick owes both.

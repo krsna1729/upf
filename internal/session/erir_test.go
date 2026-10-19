@@ -117,7 +117,7 @@ func TestAPeerErrorIndicationBecomesAnERIRReport(t *testing.T) {
 }
 
 // TestAReportCanCarryUsageAndAnErrorIndication is the one-tick case where an
-// SMF is owed both: the Report Type says so in one message (8.2.18), and the
+// SMF is owed both: the Report Type says so in one message (8.2.21), and the
 // usage the URR's window measured is still there -- an error about one tunnel
 // is no reason to drop the report beside it.
 func TestAReportCanCarryUsageAndAnErrorIndication(t *testing.T) {
