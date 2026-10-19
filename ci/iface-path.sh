@@ -228,6 +228,10 @@ contains "egress: the session's UE address is answered over ARP" \
 # The data network's frame is matched on the Core side and leaves by the
 # instance's plain hop: the frame the interface received, rewritten with hop 1's
 # L2 pair, and nothing through the encap.
+# S6's PDI names Source Interface 2 (the service LAN's interface), so the rule
+# that matches this frame is the proof that the value lands on the subscriber
+# side: before that, a rule with this PDI went to the uplink chain and matched
+# nothing.
 contains "down: the data network's frame left by the data network's exit" \
       "$DN_N6" "08 08 08 08 0a 2d 00 07"
 contains "down: it carries that exit's L2 pair" \

@@ -27,6 +27,17 @@ import sys
 
 src, out, if_n3, if_n6, n3_ip, n6_mac, dn_mac, dn_gw, marker = sys.argv[1:10]
 
+# The marker is a socket path, and bessd binds it as given: a relative path (or
+# a value that is not a path at all, which is what an argument list that slipped
+# one position produces) would have the daemon bind a socket named after that
+# value wherever it happens to run -- once a MAC address in the checkout's root.
+# Every path this script writes must be absolute.
+for name, value in (("marker", marker), ("out", out)):
+    if not value.startswith("/"):
+        sys.exit(f"graph.py: {name} must be an absolute path, got {value!r} "
+                 f"(check the argument order: <if_n3> <if_n6> <n3_ip> <n6_mac> "
+                 f"<dn_mac> <dn_gw> <marker_path>)")
+
 
 def mac(s):
     return base64.b64encode(bytes(int(x, 16) for x in s.split(':'))).decode()

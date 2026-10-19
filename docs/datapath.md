@@ -573,6 +573,25 @@ one with several instances adds `route_domain`, which the graph's interface
 writes. The LPM the earlier design expected is needed only for an IPv6 UE
 *prefix* or a framed route (8.2.62), neither of which this UP serves yet.
 
+## Where a run's scratch goes
+
+Nothing a lane or the interop rig runs writes into the checkout's own tree. A
+lane renders what it must change (a socket path, a graph's port names) into its
+run directory, `build/run/<lane>-XXXXXX`, and removes it on success; the
+interop rig keeps its state, logs and rendered graph under `build/run/interop`
+and starts every process it detaches with that directory as the cwd, so a path a
+script gets wrong lands there rather than beside the sources. Both directories
+are gitignored. One-off, hand-made artifacts -- a scratch note, a throwaway
+script -- belong in `.scratch/`, also gitignored; the repository root holds only
+tracked files.
+
+That rule has a scar: an argument list that slipped one position handed bessd a
+*MAC address* where a socket path belongs, and a root-run daemon bound a unix
+socket named `02:7f:00:00:06:02` in the repository root. The graph builder now
+refuses a relative path ("marker must be an absolute path, got ...", with the
+argument order in the message) and the rig's daemons run inside their own
+directory, so the same mistake fails loudly instead of littering the tree.
+
 ## Building and loading it
 
 ```sh
