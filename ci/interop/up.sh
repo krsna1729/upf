@@ -132,7 +132,12 @@ else
   fi
   : >"$LOGS/upfd.log"
   echo "${N4_UPFD##*:}" >"$STATE/n4_backend_port"
+  # The deployed graph's uplink key: the inner 5-tuple, the tunnel the packet
+  # arrived on, and its QFI (deploy/upf.yaml's pdr_ul). The flag must list the
+  # graph's fields in the graph's order; a mismatch writes rules the table
+  # cannot read.
   UPFD_ARGS=(-n4 "$N4_UPFD" -node-id "$UPF_IP" -bess "127.0.0.1:$BESS_PORT" -n3-addr "$UPF_N3"
+    -pdr-fields-ul src,dst,proto,sport,dport,teid,qfi
     -log-level "${UPFD_LOG_LEVEL:-debug}")
   # The evaluation loop: without it no URR is ever read, so a real SMF's URRs
   # (the stock config's period 10 s and volume threshold 1000 bytes) are never
