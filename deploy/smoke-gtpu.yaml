@@ -98,6 +98,22 @@ modules:
       templates:
         - "AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4BChQeAghoCGgANQAAMP8AJVVmd4hFAAAlAAFAAEARJLoKAAACCAgEBBDhADUAEQAAaGVsbG8tdXBm"
 
+  # A third uplink frame on the same TEID: the same G-PDU with **no** PDU
+  # Session Container -- the E flag clear (octet 1's 0x34 becomes 0x30), so no
+  # optional tail and no extension header, and the three lengths eight bytes
+  # shorter (IPv4 0x49, UDP 0x35, GTP-U 0x25) with the IPv4 checksum moved with
+  # them. What the decap writes into `qfi` for it is the check that matters:
+  # 255, the "no container" value, because 0 is a real QFI (TS 38.415 5.5.3.3
+  # ranges 0..63) and a rule a PDI keys on QFI 0 must not select this packet.
+  - name: src_nocont
+    mclass: Source
+    arg: {pkt_size: 87, burst: 1}
+  - name: rewrite_nocont
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4BChQeAghoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARILcKAAABCAgICATSADUAEQAAaGVsbG8tdXBm"
+
   - name: src_echo
     mclass: Source
     arg: {pkt_size: 65, burst: 1}
@@ -204,6 +220,8 @@ connections:
   - {upstream: rewrite_up, downstream: teid}
   - {upstream: src_drop, downstream: rewrite_drop}
   - {upstream: rewrite_drop, downstream: teid}
+  - {upstream: src_nocont, downstream: rewrite_nocont}
+  - {upstream: rewrite_nocont, downstream: teid}
   - {upstream: teid, downstream: dump_teid}
   - {upstream: dump_teid, downstream: decap0}
   - {upstream: decap0, downstream: mt_md}

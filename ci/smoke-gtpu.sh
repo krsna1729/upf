@@ -89,6 +89,18 @@ check_next() { # check_next <description> <fixed string> <fixed string in the ne
   fi
 }
 
+# refute_metadata is refute within the metadata blocks only: a packet's own
+# hexdump can carry the same bytes (the QFI frame's packet does), so a
+# whole-log refute would fail for the wrong reason.
+refute_metadata() { # refute_metadata <description> <fixed string>
+  if grep -A 5 "Metadata buffer" "$LOG" | grep -q -- "$2"; then
+    echo "smoke: FAIL  $1 ('$2' is in a metadata block of $LOG)" >&2
+    FAIL=1
+  else
+    echo "smoke: ok    $1"
+  fi
+}
+
 refute() { # refute <description> <fixed string the log must not contain>
   if grep -q -- "$2" "$LOG"; then
     echo "smoke: FAIL  $1 ('$2' is in $LOG)" >&2
@@ -114,6 +126,17 @@ check_metadata "decap wrote upf_teid into metadata" "11 22 33 44"
 # the write inert (core/metadata.cc) and this line would be `11 22 33 44 00`.
 check "decap read the PDU Session Container's QFI into metadata" \
       "00000000: 11 22 33 44 05"
+
+# The same TEID with no PDU Session Container at all (src_nocont's frame, E
+# flag clear) must leave 255 in the QFI byte: 0 is a real QFI (TS 38.415
+# 5.5.3.3's range is 0..63, and TS 29.244 8.2.89's IE takes it), so a rule a
+# PDI keys on QFI 0 has to be able to tell that packet from this one. A writer
+# that wrote 0 for "no container" would make the two the same packet to the
+# rule table.
+check_metadata "a G-PDU with no container leaves qfi at 255, not 0" \
+      "11 22 33 44 FF"
+refute_metadata "no packet leaves 0 in the QFI byte of a container-less G-PDU" \
+      "11 22 33 44 00"
 
 # The session table is what makes a TEID ours: the second uplink chain's frame
 # carries TEID 0x55667788, which no entry names, so the decap dropped it -- its

@@ -220,10 +220,14 @@ the one-byte `qfi` attribute — the GTP-U extension header of type 0x85
 content octet (TS 38.415 5.5.2.1). That is the QoS flow the gNB put the uplink
 packet on, and it is what tells two uplink PDRs that share one F-TEID apart.
 The module walks the extension header chain for it (the tunnel library reports
-the chain's first type and skips the rest) and writes `0` for a G-PDU with no
-container; the zero is written rather than skipped because a packet's metadata
-is reused buffer space that nothing clears, so a skipped write would let one
-packet's QFI reach the next packet's rule lookup. The reader is the uplink rule
+the chain's first type and skips the rest) and writes `255` for a G-PDU with no
+container at all -- above the six-bit range, because `0` is a QFI a gNB sends
+(TS 38.415 5.5.3.3 ranges 0..63 and TS 29.244 8.2.89's IE takes it), so a rule
+a PDI keys on QFI 0 must not select a packet whose container is missing
+(`datapath/pdu_session_qfi.h` is the shared contract; `ci/smoke-gtpu.sh` checks
+both values in a metadata dump). The byte is written rather than skipped because
+a packet's metadata is reused buffer space that nothing clears, so a skipped
+write would let one packet's QFI reach the next packet's rule lookup. The reader is the uplink rule
 table: `pdr_ul`'s match `fields` name the attribute, and a rule's mask is
 `0xff` when its PDR named a QFI and `0x00` when it did not.
 
