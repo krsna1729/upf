@@ -42,6 +42,7 @@ struct Entry {
 class EntriesResource final : public bess::dataplane::Resource {
  public:
   EntriesResource(std::string name, size_t max_entries);
+  ~EntriesResource() override;
 
   // The entry for an address, or nullptr: the packet path's whole lookup (one
   // acquire load of a published pointer).
@@ -100,23 +101,43 @@ class EntriesResource final : public bess::dataplane::Resource {
 
   class UpsertOp final : public bess::dataplane::StagedOp {
    public:
-    UpsertOp(EntriesResource &owner, size_t slot,
+    UpsertOp(EntriesResource &owner, uint32_t ip,
              std::unique_ptr<const Entry> entry)
-        : owner_(owner), slot_(slot), entry_(std::move(entry)) {}
+        : owner_(owner), ip_(ip), entry_(std::move(entry)) {}
 
     void Publish(bess::dataplane::Retirer &retirer) noexcept override {
+      // The key, claimed again *now*: Reserve's claim of it is not the one this
+      // op can publish into. A sibling op of the same transaction -- another
+      // address of the same session, whose probe passes a slot this op claimed
+      // and left value-less -- may have taken it as a tombstone and stored its
+      // own key there (`Claim`), so publishing into the slot Reserve recorded
+      // would put both addresses in one slot and lose one of them (and retire
+      // one entry more than the transaction declared room for, which the
+      // engine treats as a fatal footprint violation). Re-claiming by key is
+      // what pdr_match_resource.h's own op does, and it repairs exactly this:
+      // a key the table no longer holds gets a fresh slot, and its value is
+      // published where the key is. Both phases run under the engine's lock, so
+      // nothing else moves in between.
+      const size_t slot = owner_.Claim(ip_);
+      if (slot == kNoSlot) {
+        // Every slot holds a key and none is a tombstone: Reserve established
+        // room, so this is unreachable -- and if it ever happens, the entry
+        // must still be freed, which retiring it does (nothing has seen it).
+        retirer.Retire(std::move(entry_));
+        return;
+      }
       // The slot owns the entry from here, so this op gives it up: its
       // destructor would otherwise free what the packet path is about to read,
       // and a later erase would retire the same pointer twice.
-      const Entry *old = owner_.Publish(slot_, entry_.release());
-      if (old != nullptr) {
+      if (const Entry *old = owner_.Publish(slot, entry_.release());
+          old != nullptr) {
         retirer.Retire(std::unique_ptr<const Entry>(old));
       }
     }
 
    private:
     EntriesResource &owner_;
-    size_t slot_;
+    uint32_t ip_;
     std::unique_ptr<const Entry> entry_;
   };
 
@@ -152,6 +173,17 @@ class EntriesResource final : public bess::dataplane::Resource {
   size_t live_ = 0;
 };
 
+inline EntriesResource::~EntriesResource() {
+  // Frees the entries the slots still hold: module teardown, after the workers
+  // have stopped reading them (the destructor pdr_match_resource.h carries, and
+  // the fork's own SlotTable). A table destroyed with live entries is expected
+  // -- ReleaseForTeardown is the path that tolerates them -- so what a
+  // retirement would have freed is freed here.
+  for (const Slot &slot : slots_) {
+    delete slot.value.load(std::memory_order_relaxed);
+  }
+}
+
 inline EntriesResource::EntriesResource(std::string name, size_t max_entries)
     : Resource(std::move(name)) {
   size_t slots = 2;
@@ -173,7 +205,16 @@ inline const Entry *EntriesResource::Lookup(uint32_t ip) const noexcept {
       return nullptr;
     }
     if (key == ip) {
-      return slots_[i].value.load(std::memory_order_acquire);
+      const Entry *entry = slots_[i].value.load(std::memory_order_acquire);
+      // The entry carries its own address, and the packet path reads it (the
+      // reply's sender address): between the two loads a later transaction may
+      // reuse this slot for another address -- a key that held no value is what
+      // a claim takes -- so an entry for a *different* address is not this
+      // key's and the probe goes on. Both loads are acquire: the value a worker
+      // gets is either this key's entry or the next transaction's.
+      if (entry != nullptr && entry->ip == ip) {
+        return entry;
+      }
     }
     i = (i + 1) & mask_;
   }
@@ -287,10 +328,14 @@ EntriesResource::Reserve(const bess::dataplane::Op &op) {
   const bool existed =
       slots_[slot].value.load(std::memory_order_acquire) != nullptr;
   auto entry = std::make_unique<const Entry>(Entry{ip, *mac});
-  Reservation reservation{
-      std::make_unique<UpsertOp>(*this, slot, std::move(entry)),
-      {},
-      {.retires = existed ? 1u : 0u}};
+  // Room for one replacement, always: what an upsert publishes over is only
+  // known when it publishes (a sibling op of the same transaction may have put
+  // a value under this key first), and a transaction that retires more than it
+  // declared is a fatal footprint violation, while one that retires less
+  // simply reserved what it did not use.
+  Reservation reservation{std::make_unique<UpsertOp>(*this, ip, std::move(entry)),
+                          {},
+                          {.retires = 1}};
   reservation.existed = existed;
   return reservation;
 }
