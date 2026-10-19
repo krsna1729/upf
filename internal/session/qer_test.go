@@ -212,3 +212,86 @@ func TestAQERThatCapsOneDirectionWritesOneMeter(t *testing.T) {
 		t.Error("the downlink meter was not written for a QER that caps it")
 	}
 }
+
+// TestAPDRNamingNoQERTheSessionSharesKeepsItsOwn is the fallback half of the
+// shared-QER rule: a PDR that names no QER the session shares is policed by its
+// own last rate-bearing QER -- the enforcement it would have had before the
+// shared one was preferred -- and not left unmetered.
+func TestAPDRNamingNoQERTheSessionSharesKeepsItsOwn(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x9207, "10.45.0.9")
+	// QER 1 is the session's (two PDRs name it); QER 2 belongs to one flow.
+	req.CreatePDR = []*ie.IE{
+		flowPDR(1, 200, "10.45.0.9", 0x11223344, 0, 1),
+		flowPDR(2, 150, "10.45.0.9", 0x11223344, 5, 1),
+		flowPDR(3, 100, "10.45.0.9", 0x11223344, 9, 2),
+	}
+	req.CreateQER = []*ie.IE{
+		ie.NewCreateQER(ie.NewQERID(1), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen), ie.NewMBR(1000, 2000)),
+		ie.NewCreateQER(ie.NewQERID(2), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen), ie.NewMBR(3000, 4000)),
+	}
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	up := testConfig().Up
+	// The flow naming only QER 2 keeps QER 2's meter: the 3000 MBR's meter, not
+	// the session's 1000 and not none.
+	meterID := func(r rule) uint32 {
+		v, _ := find(t, rec.last(), actionsRes(up), "id", r.actionID()).Value["meter_id"].(uint32)
+		return v
+	}
+	peak := func(id uint32) uint64 {
+		trtcm, _ := find(t, rec.last(), metersRes(up), "id", id).Value["tr_tcm"].(map[string]any)
+		v, _ := trtcm["peak_rate"].(uint64)
+		return v
+	}
+	own := meterID(uplinkRule(t, rec.last(), 9))
+	if own == 0 {
+		t.Fatal("the PDR naming no shared QER is unmetered")
+	}
+	if got, want := peak(own), uint64(3000*1000/8); got != want {
+		t.Errorf("its meter's peak is %d, want its own QER's MBR (%d)", got, want)
+	}
+	if shared := meterID(uplinkRule(t, rec.last(), 0)); shared == own {
+		t.Error("the session's flows and the flow that names only its own QER share one meter")
+	}
+}
+
+// TestADuplicateQERReferenceCountsOnce: a PDR that lists the same QER twice
+// names one rule, and counting the duplication would let it decide which QER
+// polices the session. Here QER 2 is listed three times by one PDR and QER 1
+// once by another: without the deduplication QER 2 would win on references,
+// with it the two are even and the lower id -- QER 1, the session's -- wins.
+func TestADuplicateQERReferenceCountsOnce(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	dup := ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(200),
+		ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+			ie.NewFTEID(0x01, 0x11223344, net.ParseIP("192.0.2.1"), nil, 0),
+			ie.NewUEIPAddress(0x02, "10.45.0.9", "", 0, 0)),
+		ie.NewFARID(1), ie.NewQERID(2), ie.NewQERID(2), ie.NewQERID(2), ie.NewQERID(1))
+	req := establishment(0x9208, "10.45.0.9")
+	req.CreatePDR = []*ie.IE{dup, flowPDR(2, 100, "10.45.0.9", 0x11223344, 5, 1)}
+	req.CreateQER = []*ie.IE{
+		ie.NewCreateQER(ie.NewQERID(1), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen), ie.NewMBR(1000, 2000)),
+		ie.NewCreateQER(ie.NewQERID(2), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen), ie.NewMBR(3000, 4000)),
+	}
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	up := testConfig().Up
+	meterID := func(r rule) uint32 {
+		v, _ := find(t, rec.last(), actionsRes(up), "id", r.actionID()).Value["meter_id"].(uint32)
+		return v
+	}
+	peak := func(id uint32) uint64 {
+		trtcm, _ := find(t, rec.last(), metersRes(up), "id", id).Value["tr_tcm"].(map[string]any)
+		v, _ := trtcm["peak_rate"].(uint64)
+		return v
+	}
+	got := peak(meterID(uplinkRule(t, rec.last(), 0)))
+	if want := uint64(1000 * 1000 / 8); got != want {
+		t.Errorf("the session is policed at %d, want the QER the PDRs share even once each (%d)", got, want)
+	}
+}

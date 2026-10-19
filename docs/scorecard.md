@@ -115,15 +115,35 @@ N6 and N9 per packet, which is what branching is, and `docs/router.md` names the
 seam (a FIB lookup on the packet path). The mean is unchanged: 750 / 11 = 68.18
 -> **68**.
 
+**2026-10-19 (serial metering proven; finding 6's shared rule hardened): no cell
+moves.** A nine-module probe (`deploy/meter-compose.yaml`, `ci/meter-compose.sh`)
+settled the one question the composition turned on: two ActionTables may both write
+`meter_id` -- the framework merges same-name attributes and only insists on equal
+sizes -- so two Meters in series each police with their own policy, no BESS change.
+The probe also found the constraint that comes with it: an attribute a module writes
+is given no offset unless something downstream reads it, so a chain needs a reader
+per stage. The shared-QER rule itself gained two corrections: a PDR that lists the
+same QER twice now counts as one association (a duplication decided the session's
+policy before), and the tie-break is documented for what it is -- where two QERs are
+associated with the same PDRs, the message does not say which is the aggregate, so
+the lower id wins. Evidence: `TestADuplicateQERReferenceCountsOnce` (fail-first:
+375000 B/s enforced before, 125000 after), `TestAPDRNamingNoQERTheSessionSharesKeepsItsOwn`,
+and the new lane in `build/run/lanes.sh`.
+
 **2026-10-19 (finding 6's rate half, and Packet Rate split out as its own): no cell
 moves.** The QER mapping caught up with the meters the stage already had. The GBR
 is the committed rate and the MBR the peak of the two-rate three-colour meter, so
 the guarantee's band exists at all: every graph now forwards the meter's yellow
 gate beside green (red stays the drop), the averaging window is the burst, a
 zero-capped direction writes no meter, and a GBR above the MBR is refused before
-anything is written. The compliance row records what one action's single meter id
-still cannot do -- enforce two rate-bearing QERs of one PDR at once -- and it is
-now a named fork seam rather than a silent last-wins. Evidence: five unit tests,
+anything is written. The compliance row recorded what one action's single meter id
+could not do -- enforce two rate-bearing QERs of one PDR at once. That turned out
+not to need a fork change after all: an ActionTable rewrites `meter_id` without
+consuming the action id, so a chain of two tables and two meters gives each meter
+its own id, and `ci/meter-compose.sh` now proves it on the stage (the second meter
+policies with its own id; without the rewrite it would find no entry and drop
+fail-closed). Finding 23 is what remains: the compiler and the graph, with a
+reader per stage and a defined order. Evidence: five unit tests,
 and the lane proving the colours live (`TestLiveGBRSplitsTheMeter`: yellow empty
 with no GBR, 250 packets on it once one is set). Packet Rate turned out to be a
 procedure of its own (a status the CP queries), so it became finding 22 instead of

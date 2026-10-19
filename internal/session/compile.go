@@ -141,9 +141,17 @@ func qersInOrder(s *Session) []*qer {
 // The gates are not this helper's business: every QER of a PDR is folded into
 // the rule (a closed gate of any of them stops it).
 func sharedRateQER(s *Session) (uint32, bool) {
+	// One association per (PDR, QER): a PDR that names the same QER twice names
+	// one rule, and counting it twice would let a duplication decide which
+	// QER polices the session.
 	refs := make(map[uint32]int, len(s.QERs))
 	for _, p := range pdrsInOrder(s) {
+		seen := make(map[uint32]bool, len(p.qerIDs))
 		for _, qid := range p.qerIDs {
+			if seen[qid] {
+				continue
+			}
+			seen[qid] = true
 			refs[qid]++
 		}
 	}
@@ -152,6 +160,10 @@ func sharedRateQER(s *Session) (uint32, bool) {
 		if !q.hasRate {
 			continue
 		}
+		// Ties fall to the lower id (the walk is in id order): where two QERs
+		// are associated with the same PDRs -- a one-PDR session naming both,
+		// say -- the message says nothing about which one the CP function meant
+		// as the aggregate, and this is the only deterministic choice left.
 		if refs[q.id] > bestRefs || !found {
 			best, bestRefs, found = q.id, refs[q.id], true
 		}
