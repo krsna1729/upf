@@ -115,6 +115,25 @@ N6 and N9 per packet, which is what branching is, and `docs/router.md` names the
 seam (a FIB lookup on the packet path). The mean is unchanged: 750 / 11 = 68.18
 -> **68**.
 
+**2026-10-19 (finding 6's rate half, and Packet Rate split out as its own): no cell
+moves.** The QER mapping caught up with the meters the stage already had. The GBR
+is the committed rate and the MBR the peak of the two-rate three-colour meter, so
+the guarantee's band exists at all: every graph now forwards the meter's yellow
+gate beside green (red stays the drop), the averaging window is the burst, a
+zero-capped direction writes no meter, and a GBR above the MBR is refused before
+anything is written. The compliance row records what one action's single meter id
+still cannot do -- enforce two rate-bearing QERs of one PDR at once -- and it is
+now a named fork seam rather than a silent last-wins. Evidence: five unit tests,
+and the lane proving the colours live (`TestLiveGBRSplitsTheMeter`: yellow empty
+with no GBR, 250 packets on it once one is set). Packet Rate turned out to be a
+procedure of its own (a status the CP queries), so it became finding 22 instead of
+a QER sub-feature. The sweep's eleven lanes are green on the changed graphs
+(`build/run/lanes.sh`), as are `ci/veth-port.sh` and the generic `ci/buffer-path.sh`.
+`PROFILE=custom ci/buffer-path.sh` fails in its startup sweep -- `no resource
+'pdr_match_dl/rules'`, a module `deploy/pdrmatch-buffer-path.yaml` does not declare --
+on inputs this change did not touch (`git diff` there is the two meter connections):
+a pre-existing gap in that lane and graph, recorded rather than papered over.
+
 **2026-10-19 (finding 15 closed: the Error Indication Report): no cell moves.**
 The spec cross-check's list lost another entry -- the last one whose fix was a
 *receive* path rather than a rule. The GTP-U responder behind the TEID table's

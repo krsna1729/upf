@@ -909,6 +909,22 @@ type qer struct {
 	mbDL    uint64
 	hasRate bool
 
+	// gbUL and gbDL are the QER's GBR (8.2.7), the guaranteed rate, in the same
+	// unit as the MBR. A meter that polices the MBR alone -- which is what this
+	// one did -- drops everything above the ceiling and says nothing about the
+	// band between the two: with both named, the meter's committed rate is the
+	// GBR and that band is yellow, so the deployment can treat it as the
+	// guarantee 8.2.7 means rather than policing it flat. A GBR above the MBR
+	// is refused (merge): no two-rate meter holds it.
+	gbUL, gbDL uint64
+	hasGBR     bool
+
+	// window is the QER's Averaging Window (8.2.115): the duration the rates
+	// are measured over, which the meter takes as its burst. Zero means the SMF
+	// named none, and this UP's own tenth of a second applies.
+	window    time.Duration
+	hasWindow bool
+
 	// hasQFI and qfi are the QER's QFI (TS 29.244 8.2.89): the QoS flow this
 	// QER polices, which is also the one the downlink encap must write into the
 	// PDU Session Container of the packets it tunnels (resolve takes it into

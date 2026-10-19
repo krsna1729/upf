@@ -124,6 +124,41 @@ func qersInOrder(s *Session) []*qer {
 	return out
 }
 
+// sharedRateQER is the one QER a PDR's rates are enforced from: among the
+// session's QERs that carry a rate, the one the most PDRs name -- ties going to
+// the lower id, since the ids are walked in order.
+//
+// A PDR may name several QERs (7.5.2.2-1), each with its own gate and rates,
+// but one rule's action carries one meter id: enforcing every QER's own bucket
+// over one packet needs the dataplane to hold a bucket per QER and measure the
+// packet against all of them, which this meter cannot do yet (finding 6,
+// docs/compliance.md). So the session picks one, and it picks deliberately:
+// 5.2.1 attaches the session's own rate to a QER "associated to all the DL/UL
+// PDRs of the PDU session", so the most-referenced QER is the aggregate cap --
+// the one whose absence would let a session exceed its subscription -- while
+// the last one the SMF happened to list is a rule nobody can predict.
+//
+// The gates are not this helper's business: every QER of a PDR is folded into
+// the rule (a closed gate of any of them stops it).
+func sharedRateQER(s *Session) (uint32, bool) {
+	refs := make(map[uint32]int, len(s.QERs))
+	for _, p := range pdrsInOrder(s) {
+		for _, qid := range p.qerIDs {
+			refs[qid]++
+		}
+	}
+	best, bestRefs, found := uint32(0), 0, false
+	for _, q := range qersInOrder(s) {
+		if !q.hasRate {
+			continue
+		}
+		if refs[q.id] > bestRefs || !found {
+			best, bestRefs, found = q.id, refs[q.id], true
+		}
+	}
+	return best, found
+}
+
 // pdrReq is a Create PDR or an Update PDR, as the SMF sent it.
 type pdrReq struct {
 	// hasID says the PDR ID IE was there: 0 is a legal PDR ID (8.2.73's
@@ -262,6 +297,15 @@ type qerReq struct {
 	mbUL    uint64
 	mbDL    uint64
 	hasRate bool
+
+	// hasGBR and hasWindow say the message named 8.2.7's guaranteed rate and
+	// 8.2.115's averaging window: both are optional, and an Update QER that
+	// names neither keeps the session's.
+	hasGBR    bool
+	gbUL      uint64
+	gbDL      uint64
+	hasWindow bool
+	window    time.Duration
 
 	// hasQFI and qfi are the QER's QFI (TS 29.244 8.2.89): the QoS flow this
 	// QER polices. It is optional -- Gate Status is the QER's one mandatory IE
@@ -790,6 +834,25 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 
 	for _, q := range qers {
 		entry := s.QERs[q.id]
+		// A GBR above the MBR is not a policy this side can hold: the committed
+		// rate of a two-rate meter may not exceed its peak, and the SMF would
+		// have asked for a guarantee above the ceiling (8.2.7, 8.2.8). The
+		// comparison is against what the session would hold after this message,
+		// because an Update QER that names only one of the two keeps the other.
+		gbUL, gbDL, hasGBR := q.gbUL, q.gbDL, q.hasGBR
+		mbUL, mbDL, hasRate := q.mbUL, q.mbDL, q.hasRate
+		if entry != nil {
+			if !hasGBR {
+				gbUL, gbDL, hasGBR = entry.gbUL, entry.gbDL, entry.hasGBR
+			}
+			if !hasRate {
+				mbUL, mbDL, hasRate = entry.mbUL, entry.mbDL, entry.hasRate
+			}
+		}
+		if hasGBR && hasRate && (gbUL > mbUL || gbDL > mbDL) {
+			return fmt.Errorf("%w: the QER %d's GBR is above its MBR, which no meter holds",
+				errNotExpressible, q.id)
+		}
 		if entry == nil {
 			entry = &qer{id: q.id}
 			s.QERs[q.id] = entry
@@ -803,6 +866,12 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// holds: a QER that stopped naming its flow would quietly stop
 			// marking the packets of it.
 			entry.hasQFI, entry.qfi = true, q.qfi
+		}
+		if q.hasGBR {
+			entry.gbUL, entry.gbDL, entry.hasGBR = q.gbUL, q.gbDL, true
+		}
+		if q.hasWindow {
+			entry.window, entry.hasWindow = q.window, true
 		}
 		if q.hasRate {
 			entry.mbUL, entry.mbDL, entry.hasRate = q.mbUL, q.mbDL, true
@@ -1148,6 +1217,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 // must follow the model as it is now rather than as the last message left it.
 // The caller holds the lock.
 func (c *Compiler) resolve(s *Session) error {
+	// The one QER each PDR's rates come from, chosen for the session (finding
+	// 6: one rule's action carries one meter id, so a PDR naming several
+	// rate-bearing QERs is policed by one of them -- sharedRateQER says which
+	// and why).
+	shared, hasShared := sharedRateQER(s)
 	linkedTo := make(map[uint32]bool, len(s.URRs))
 	for _, uid := range urrIDsInOrder(s) {
 		for _, lid := range s.URRs[uid].linked {
@@ -1229,6 +1303,7 @@ func (c *Compiler) resolve(s *Session) error {
 		p.meterID = 0
 		p.tunnels = nil
 		p.encapQFI = 0
+		var sharedUL, ownUL, sharedDL, ownDL uint32
 		for _, qid := range p.qerIDs {
 			entry := s.QERs[qid]
 			if entry == nil {
@@ -1243,18 +1318,35 @@ func (c *Compiler) resolve(s *Session) error {
 			if p.srcIfc == ie.SrcInterfaceAccess {
 				if entry.gateUL == ie.GateStatusClosed {
 					// A closed gate is an instruction to stop, not to hold: it
-					// outranks the FAR's BUFF for this PDR.
+					// outranks the FAR's BUFF for this PDR. Every QER the PDR
+					// names is folded this way -- a gate that is closed in any
+					// of them stops the traffic, whichever one's rates win.
 					p.drop, p.buffer = true, false
 				}
-				if entry.hasRate {
-					p.meterID = entry.meterUL
+				if entry.hasRate && entry.mbUL != 0 {
+					// The direction's own rate: a QER that caps nothing
+					// uplink (an MBR of zero there) leaves the PDR unmetered
+					// rather than writing a meter no profile can hold. The
+					// session's shared QER wins when the PDR names it; a PDR
+					// that names only its own flow's QER keeps that QER's
+					// meter, which is the enforcement it would have had
+					// before the shared one was preferred.
+					if hasShared && qid == shared {
+						sharedUL = entry.meterUL
+					} else {
+						ownUL = entry.meterUL
+					}
 				}
 			} else {
 				if entry.gateDL == ie.GateStatusClosed {
 					p.drop, p.buffer = true, false
 				}
-				if entry.hasRate {
-					p.meterID = entry.meterDL
+				if entry.hasRate && entry.mbDL != 0 {
+					if hasShared && qid == shared {
+						sharedDL = entry.meterDL
+					} else {
+						ownDL = entry.meterDL
+					}
 				}
 				if entry.hasQFI {
 					// The QER's QFI (8.2.89) is the flow the gNB reads out of
@@ -1265,6 +1357,23 @@ func (c *Compiler) resolve(s *Session) error {
 					// one, as the meter is the last that polices).
 					p.encapQFI = entry.qfi
 				}
+			}
+		}
+		// The meter this PDR is policed by: the session's shared QER when the
+		// PDR names it, else the last rate-bearing QER of its own (which is
+		// what a PDR that names only a flow QER had before).
+		switch {
+		case downSide(p.srcIfc):
+			if sharedDL != 0 {
+				p.meterID = sharedDL
+			} else {
+				p.meterID = ownDL
+			}
+		default:
+			if sharedUL != 0 {
+				p.meterID = sharedUL
+			} else {
+				p.meterID = ownUL
 			}
 		}
 		if far != nil && far.hasOuter {
@@ -2051,11 +2160,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if !q.hasRate {
 			continue
 		}
-		if q.meterUL != 0 {
-			changes = append(changes, meterChange(metersRes(c.cfg.Up), q.meterUL, q.mbUL))
+		// One entry per policed direction, and only where the SMF capped
+		// something: a zero rate is not a profile any meter holds (the
+		// module refuses a zero committed rate), and a direction with no cap
+		// is exactly that -- nothing to enforce.
+		if q.meterUL != 0 && q.mbUL != 0 {
+			changes = append(changes, meterChange(metersRes(c.cfg.Up), q.meterUL, q.gbUL, q.mbUL, q.window))
 		}
-		if q.meterDL != 0 {
-			changes = append(changes, meterChange(metersRes(c.cfg.Down), q.meterDL, q.mbDL))
+		if q.meterDL != 0 && q.mbDL != 0 {
+			changes = append(changes, meterChange(metersRes(c.cfg.Down), q.meterDL, q.gbDL, q.mbDL, q.window))
 		}
 	}
 
@@ -4054,6 +4167,22 @@ func parseQER(i *ie.IE) (qerReq, error) {
 			q.mbUL = uint40(payload[0:5])
 			q.mbDL = uint40(payload[5:10])
 			q.hasRate = true
+		case ie.GBR:
+			// 8.2.7: two octet-aligned five-octet fields, uplink then
+			// downlink, in the same unit the MBR carries.
+			payload, err := c.GBR()
+			if err != nil || len(payload) < 10 {
+				return qerReq{}, errors.New("GBR: malformed")
+			}
+			q.gbUL = uint40(payload[0:5])
+			q.gbDL = uint40(payload[5:10])
+			q.hasGBR = true
+		case ie.AveragingWindow:
+			// 8.2.115: the duration in milliseconds the rates are calculated
+			// over. Zero is no window at all, and the meter's own burst stands.
+			if v, err := c.AveragingWindow(); err == nil && v > 0 {
+				q.window, q.hasWindow = time.Duration(v)*time.Millisecond, true
+			}
 		}
 	}
 	if !seenID {
@@ -4062,19 +4191,39 @@ func parseQER(i *ie.IE) (qerReq, error) {
 	return q, nil
 }
 
-// meterChange is the resource for one policed direction: a two-rate three-colour
-// meter at `rate` bytes per second, with a tenth of a second of burst.
-func meterChange(resource string, id uint32, rate uint64) bess.Change {
-	burst := rate / 10
+// meterChange is the resource for one policed direction: a two-rate
+// three-colour meter whose peak is the QER's MBR (8.2.8, the ceiling) and
+// whose committed rate is its GBR (8.2.7, the guarantee) -- the band between
+// the two is yellow, which is what a QER with both rates means. A QER with no
+// GBR, or a GBR not below the MBR, gets the flat meter this tree always wrote:
+// committed rate = peak, so nothing is yellow and the ceiling is the only
+// policy. The burst is the rate over the QER's Averaging Window (8.2.115) when
+// the SMF named one, and a tenth of a second when it named none.
+func meterChange(resource string, id uint32, committed, peak uint64, window time.Duration) bess.Change {
+	if committed == 0 || committed > peak {
+		committed = peak
+	}
+	burst := func(rate uint64) uint64 {
+		if window > 0 {
+			if b := rate * uint64(window/time.Millisecond) / 1000; b > 0 {
+				return b
+			}
+			return 1
+		}
+		if b := rate / 10; b > 0 {
+			return b
+		}
+		return 1
+	}
 	return bess.Change{
 		Resource: resource,
 		Key:      map[string]any{"id": id},
 		Value: map[string]any{
 			"tr_tcm": map[string]any{
-				"committed_rate":  rate,
-				"committed_burst": burst,
-				"peak_rate":       rate,
-				"peak_burst":      burst,
+				"committed_rate":  committed,
+				"committed_burst": burst(committed),
+				"peak_rate":       peak,
+				"peak_burst":      burst(peak),
 			},
 		},
 	}

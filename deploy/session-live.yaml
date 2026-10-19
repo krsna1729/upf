@@ -100,12 +100,17 @@ connections:
   - {upstream: decap0, downstream: pdr_ul}
   - {upstream: pdr_ul, downstream: at_ul}
   - {upstream: at_ul, downstream: mt_ul}
+  # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
+  # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
+  # changes when that band should be marked or shed rather than passed.
   - {upstream: mt_ul, downstream: cnt_ul}
+  - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
   - {upstream: cnt_ul, downstream: ttl_ul}
   - {upstream: ttl_ul, downstream: rt}
   - {upstream: pdr_dl, downstream: at_dl}
   - {upstream: at_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
+  - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
   - {upstream: cnt_dl, downstream: ttl_dl}
   - {upstream: ttl_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
