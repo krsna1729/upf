@@ -568,16 +568,27 @@ subscriber pool), the compiler resolves the Network Instance of a PDI and of a
 FAR's forwarding parameters against them -- refusing a name the deployment does
 not serve, and an address outside the interface's pool -- puts the interface's
 domain in the rule's key wherever the graph declares it (`domain` in
-`-pdr-fields-*`) and sends a forward out by the FAR's instance. The packet-side
+`-pdr-fields-*`) and sends a forward out by the FAR's instance. An interface carries one hop
+*per egress* since 2026-10-19: the FAR's **Destination Interface** (8.2.24)
+chooses between the instance's plain hop, a tunnel out of it (an Outer Header
+Creation: N9 and indirect data forwarding), the service LAN's and the 5G VN
+re-injection, the `-instances` keys and `-access-next-hop` name them, and an
+egress the instance does not declare is refused with cause 73 rather than
+served by whatever hop the direction had. The interface's ARP identity (the
+module and the MAC) is where a session's UE address is answered from. The packet-side
 half is the vif's `route_domain` -- a rule's key can carry the domain only where
 something writes it into the packet -- and it is in: `deploy/veth-port.yaml`
 declares the three interfaces on one port and the tables that read what they
 write. The deployed graph wires the same module for its one N6 port: `vif_n6`
-matches the data network's frames by `(VLAN, MAC)` and answers ARP for its
-address, and `l2_sort` keeps the interface's own frames -- the ARP answer, which
-is not IP -- on the port instead of the downlink chain; nothing there reads the
-domain it writes (`deploy/upf.yaml`; `ci/session-path.sh` sends the frames
-through it). A deployment that has no vif still tells two instances apart by what the
+matches the data network's frames by `(VLAN, MAC)`, and `l2_sort` sorts by
+EtherType ahead of it -- an ARP request names the broadcast MAC that no `Vif`
+matches, so it is diverted to `arp_n6` (`upf_arp_responder`, this repo's own
+module, `docs/datapath.md`), which answers for the interface's own address *and*
+for every live session's UE address, while the IP frames continue to the
+interface and its downlink chain. The `Vif`'s own ARP answer is inert in that
+graph (the graphs that put a `Vif` first still use it), and nothing there reads
+the domain it writes (`deploy/upf.yaml`; `ci/session-path.sh` and
+`ci/iface-path.sh` send the frames through it). A deployment that has no vif still tells two instances apart by what the
 ingress writes on its own: on the uplink the tunnel the G-PDU arrived on
 (`upf_teid`, the decap's own attribute), which is
 what `deploy/session-instances.yaml` declares and `ci/session-instances.sh`
@@ -1327,3 +1338,16 @@ missing, or a starved box and a slow UPF look alike.
   layer made (an F-TEID keyed as a dense id).
 - `ci/bench-chain.sh` — the plugin's arms for the perf tool: a GTP-U decap or
   encap arm is not BESS's number to take.
+- `ci/iface-path.sh` + `ci/ifacepath` (`deploy/iface-path.yaml`) — the interface
+  grammar, one arm per case and each window sliced out of the daemon's own log:
+  every Source Interface value a PDI can name and every Destination Interface
+  value a FAR can name, checked against the exit its packet left by, byte for
+  byte (the plain hop with its L2 pair, a tunnel out of the instance, the
+  service LAN, the access side through the encap, the 5G VN re-injection into
+  the subscriber-side table), and every value this UP refuses against the cause
+  the SMF reads -- 73 for a value it does not serve or an egress the instance
+  does not declare, 66 for the IEs Tables 7.5.2.3-1/-2 make mandatory. The same
+  lane holds the subscriber ARP answer: a request for a live session's UE
+  address is answered with the interface's MAC and the session's address, one
+  session's two colliding addresses ride one transaction and both survive, and a
+  deleted session's address stops being answered.
