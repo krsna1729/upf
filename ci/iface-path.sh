@@ -303,6 +303,17 @@ contains "arp: the reply left by the port's exit" \
       "$ARP_N6" "08 06 00 01 08 00 06 04 00 02"
 contains "arp: the driver read the entry back from the daemon" \
       "$DRIVER" "the responder holds 10.45.0.2 -> 02:00:00:00:06:01"
+# One session's two addresses ride one transaction, and their hashes collide in
+# the responder's table: the readback must hold both, the second must be
+# answered over ARP too (its reply carries 10.44.0.2 as the sender address, a
+# byte string no request in this window produces), and both must go with the
+# session.
+contains "arp: both addresses of one transaction are held" \
+      "$DRIVER" "one transaction published both entries: 10.44.0.2 and 10.46.0.2"
+contains "arp: the pair's second address was answered too" \
+      "$ARP_ARP" "0a 2c 00 02"
+contains "arp: both addresses went with the session" \
+      "$DRIVER" "one transaction erased both entries: 10.44.0.2 and 10.46.0.2"
 
 # --- the entry goes with the session ----------------------------------------
 empty "gone: the deleted session's address is not answered" "$GONE_ARP$GONE_N6"

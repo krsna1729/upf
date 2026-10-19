@@ -150,7 +150,7 @@ downstream is keyed by.
 | graph | used by | what differs |
 |---|---|---|
 | `deploy/upf.yaml` | the deployment | PMD ports `n3`/`n6` (one rx queue each), the N6 ingress' first stop (`l2_sort`: an ARP frame is diverted to `arp_n6` before any interface sees it, because a request names the broadcast MAC no `Vif` matches, and the IP frames go on to the interface), the responder that answers for the interface's own address and for every live session's UE address (`arp_n6`, our `UpfArpResponder`), the N6 interface (`vif_n6`), the hop count (`ttl_ul`/`ttl_dl`), the uplink tunnel and the 5G VN re-injection as `rt` gates 2 and 4, `MetadataTest` after the decap, the marker port; **no buffering branch** |
-| `deploy/iface-path.yaml` | `ci/iface-path.sh` | no NIC: Sources, Rewrites, Dumps and Sinks, one stream per interface-grammar case. Both chains, the five egress gates (`rt/next_hops` 1-5: the data network's hop with its L2 pair, the access side's, a tunnel out of an instance, the service LAN's, the 5G VN re-injection), the ARP branch (`l2_sort` -> `arp_n6` -> a Dump) and the re-injection (`rt` gate 4 -> `pdr_dl`). Its instances are the lane's own: `internet` (plain, tunnel and service-LAN hops) and `vn` (the re-injection) |
+| `deploy/iface-path.yaml` | `ci/iface-path.sh` | no NIC: Sources, Rewrites, Dumps and Sinks, one stream per interface-grammar case. Both chains, the five egress gates (`rt/next_hops` 1-5: the data network's hop with its L2 pair, the access side's, a tunnel out of an instance, the service LAN's, the 5G VN re-injection), the ARP branch (`l2_sort` -> `arp_n6` -> a Dump) and the re-injection (`rt` gate 4 -> `pdr_dl`). One session carries *two* addresses (its downlink PDRs' hashes collide in the responder's table), both answered and both erased. Its instances are the lane's own: `internet` (plain, tunnel and service-LAN hops) and `vn` (the re-injection) |
 | `deploy/session-path.yaml` | `ci/session-path.sh`, `ci/n4-path.sh`, `ci/session-report.sh` | Sources `src_up`/`src_dn`, `Rewrite`, `Dump`, `Sink`; the deployment's N6 side and hop count (`vif_n6`, `l2_sort`, `sink_other`, `merge_n6`, `dump_n6`, `ttl_ul`/`ttl_dl`); frames fixed so a test can byte-check them; no buffering branch |
 | `deploy/buffer-path.yaml` | `ci/buffer-path.sh` | `session-path.yaml` **plus** `cnt_buf`/`buf` and the `pdr_dl` ogate-1 connection; needs a daemon with BESS's packet store key attribute |
 | `deploy/pdrmatch-buffer-path.yaml` | `PROFILE=custom ci/buffer-path.sh` | `pdrmatch-path.yaml` **plus** the same buffering branch as `buffer-path.yaml`, in the same place (the placement is TS 29.244 5.2.4.2's, so both profiles share it) |
@@ -338,6 +338,18 @@ is `pdr_match_resource.h`'s).
   table is sized at construction, at twice the entries asked for). A write that
   finds no room is refused with nothing visible, not grown under a running
   packet path.
+* **The publish phase claims each key again**, and every upsert reserves room
+  for one replacement. One session's change carries one entry per downlink
+  PDR's address (two addresses of one session are two ops of one transaction,
+  and their hashes can land in one probe slot): an op that publishes into the
+  slot it claimed at Reserve would write both into that slot -- losing one, with
+  the establishment still answered as accepted -- and would retire one entry
+  more than it declared, which the engine treats as a fatal footprint violation
+  (`dataplane/resource.h`), from an ordinary session message. Re-claiming by key
+  at publish is what the resource this was modelled on does
+  (`pdr_match_resource.h`), and it is what makes the pair safe. The table also
+  frees the entries its slots still hold when the module goes away: a table
+  destroyed with live entries is the teardown path, not an error.
 
 ## Modules and drivers we take from BESS
 

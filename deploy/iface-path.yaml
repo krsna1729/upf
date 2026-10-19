@@ -13,6 +13,7 @@
 #                                                                                                 rt -> pdr_dl       (ogate 4, the 5G VN re-injection)
 #   downlink  src_dn -> rewrite_dn -> l2_sort -> vif_n6 -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> ttl_dl -> rt
 #             src_arp -> rewrite_arp -> l2_sort -> arp_n6 -> dump_arp -> merge_n6 -> dump_n6 -> sink_n6
+#             (src_arp2 -> rewrite_arp2, the pair of addresses one session holds)
 #
 # The exits are the deployment's egress table, one hop id each (rt/next_hops
 # below), and the driver's session.Config names the same numbers: hop 1 is the
@@ -46,6 +47,8 @@
 #   rewrite_dn   the data network's answer 8.8.8.8:5000 -> 10.45.0.7:53, to the
 #                interface's MAC (02:00:00:00:06:01 from 02:00:00:00:06:02)
 #   rewrite_arp  an ARP request for 10.45.0.2 from 192.0.2.2
+#   rewrite_arp2 the same for 10.44.0.2 (the sibling of 10.46.0.2: one
+#                session's two addresses, one transaction, one probe slot)
 #
 # Metadata attributes are laid out in module registration order, so the module
 # that declares "upf_teid" is listed first and the reader that makes it real (a
@@ -178,6 +181,18 @@ modules:
     arg:
       templates:
         - "////////AgAAAAYCCAYAAQgABgQAAQIAAAAGAsAAAgIAAAAAAAAKLQAC"
+  # The same request for the second address of one session's pair (10.44.0.2;
+  # the responder's table has 131072 slots for the graph's 65536 entries, and
+  # two addresses a multiple of 131072 apart start their probe in one slot, so
+  # these two are one transaction's collision case).
+  - name: src_arp2
+    mclass: Source
+    arg: {pkt_size: 42, burst: 32}
+  - name: rewrite_arp2
+    mclass: Rewrite
+    arg:
+      templates:
+        - "////////AgAAAAYCCAYAAQgABgQAAQIAAAAGAsAAAgIAAAAAAAAKLAAC"
   # The deployment's own ARP entry (arp_n6/entries below): the interface, so the
   # data network can resolve the link's gateway before any session exists.
   - name: arp_n6
@@ -261,6 +276,8 @@ connections:
   - {upstream: rewrite_dn, downstream: l2_sort}
   - {upstream: src_arp, downstream: rewrite_arp}
   - {upstream: rewrite_arp, downstream: l2_sort}
+  - {upstream: src_arp2, downstream: rewrite_arp2}
+  - {upstream: rewrite_arp2, downstream: l2_sort}
   # l2_sort's ARP rule (gate 0) is the responder's; everything else (the
   # default gate) is the interface's, and what no interface matches is dropped.
   - {upstream: l2_sort, downstream: arp_n6}

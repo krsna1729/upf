@@ -87,7 +87,8 @@ const (
 const (
 	internet = "internet"
 	vn       = "vn"
-	pool     = "10.45.0.0/16"
+	// One pool, wide enough for the collision pair the arp arm establishes.
+	pool = "10.44.0.0/14"
 
 	n3Addr = "192.0.2.1"
 	n6Addr = "192.0.2.2"
@@ -120,6 +121,7 @@ const (
 	seidS4 = 0x4104
 	seidS5 = 0x4105
 	seidS6 = 0x4106
+	seidS7 = 0x4107
 
 	upTEID1 = 0x11223344
 	upTEID2 = 0x11223345
@@ -127,6 +129,7 @@ const (
 	upTEID4 = 0x11223347
 	upTEID5 = 0x11223348
 	upTEID6 = 0x11223349
+	upTEID7 = 0x1122334a
 
 	dlTEID1 = 0x55667781
 	dlTEID2 = 0x55667782
@@ -134,6 +137,7 @@ const (
 	dlTEID4 = 0x55667784
 	dlTEID5 = 0x55667789
 	dlTEID6 = 0x55667786
+	dlTEID7 = 0x55667787
 
 	// The tunnel S1's FAR is moved to (the `forward` arm): the far end of an
 	// indirect forward.
@@ -147,6 +151,15 @@ const (
 	ueS4 = "10.45.0.5"
 	ueS5 = "10.45.0.6"
 	ueS6 = "10.45.0.7"
+
+	// One session's two addresses, and why they are a pair: the responder's
+	// table has 131072 slots for the graph's 65536 entries and
+	// Hash(ip) = (ip * 2654435761) & 131071, so two addresses a multiple of
+	// 131072 apart start their probe in one slot. One transaction publishing
+	// both into the slot each claimed at Reserve loses one of them; only a pair
+	// like this shows it.
+	siblingA = "10.44.0.2"
+	siblingB = "10.46.0.2"
 
 	gnbAddr = "10.20.30.9"
 
@@ -174,6 +187,7 @@ var streams = []struct {
 	{"src_vn", 87},
 	{"src_dn", 51},
 	{"src_arp", 42},
+	{"src_arp2", 42},
 }
 
 func main() {
@@ -243,7 +257,7 @@ func run(target, handshake string) error {
 	if err := pass(handshake, "refuse"); err != nil {
 		return err
 	}
-	if err := arp(ctx, client, ueS1); err != nil {
+	if err := arp(ctx, client, c, ueS1); err != nil {
 		return err
 	}
 	if err := pass(handshake, "arp"); err != nil {
@@ -595,7 +609,7 @@ func refusals(c *session.Compiler) error {
 
 // arp is the subscriber's ARP identity: the session's address is in the
 // responder's entries, and an ARP request for it is answered.
-func arp(ctx context.Context, client *bess.Client, ue string) error {
+func arp(ctx context.Context, client *bess.Client, c *session.Compiler, ue string) error {
 	if err := arpPresent(ctx, client, ue, "the session's UE address"); err != nil {
 		return err
 	}
@@ -613,6 +627,63 @@ func arp(ctx context.Context, client *bess.Client, ue string) error {
 		return err
 	}
 	fmt.Printf("ifacepath: arp: the reply for %s left the responder\n", ue)
+
+	// One transaction's two entries. The pair's addresses collide in the
+	// responder's table (the graph sizes it 65536, the constructor doubles it,
+	// and the hash is `ip * 2654435761 & mask`), so both ride one transaction's
+	// publish phase: publishing each into the slot it claimed at Reserve would
+	// put them in one slot and lose one. Both must therefore be held, the
+	// second must be answered over ARP too, and both must go with the session
+	// (the erases are one transaction as well).
+	cs := sessionCase{
+		name:     "S7: two addresses of one session, one transaction",
+		instance: internet, seid: seidS7, upTEID: upTEID7,
+		up:   pdrCase{srcIfc: ie.SrcInterfaceAccess, ue: siblingA, sdf: port53Query, far: forward(ie.DstInterfaceCore)},
+		down: pdrCase{srcIfc: ie.SrcInterfaceCore, ue: siblingA, sdf: port53Filter, far: forward(ie.DstInterfaceAccess, tunnel(dlTEID7))},
+		down2: &pdrCase{srcIfc: ie.SrcInterfaceCore, ue: siblingB,
+			sdf: port53Filter, far: forward(ie.DstInterfaceAccess, tunnel(dlTEID7))},
+	}
+	seid, err := establish(c, cs)
+	if err != nil {
+		return err
+	}
+	for _, addr := range []string{siblingA, siblingB} {
+		if err := arpPresent(ctx, client, addr, "one address of the session's pair"); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("ifacepath: arp: one transaction published both entries: %s and %s\n", siblingA, siblingB)
+	// The Dump prints one packet per interval (a second, here) and the S1 reply
+	// above took the current interval's one packet, so the pair's reply must
+	// arrive after the next tick to be readable at all: the wait is the dump's
+	// own policy, not the responder's.
+	time.Sleep(1200 * time.Millisecond)
+	before, err = snapshot(ctx, client)
+	if err != nil {
+		return err
+	}
+	if err := inject(ctx, client, "src_arp2"); err != nil {
+		return err
+	}
+	if _, err := waitFor(ctx, client, arpModule, arpGate, value(before, exit{module: arpModule, gate: arpGate})); err != nil {
+		return fmt.Errorf("the request for %s was never answered: %w", siblingA, err)
+	}
+	if err := stopAll(ctx, client); err != nil {
+		return err
+	}
+	resp, ok := c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 1, 0)).(*message.SessionDeletionResponse)
+	if !ok {
+		return errors.New("the pair's deletion answered no session-level response")
+	}
+	if got := cause(resp.Cause); got != ie.CauseRequestAccepted {
+		return fmt.Errorf("the pair's deletion answered cause %d", got)
+	}
+	for _, addr := range []string{siblingA, siblingB} {
+		if err := arpAbsent(ctx, client, addr, "the pair's deletion leaves"); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("ifacepath: arp: one transaction erased both entries: %s and %s\n", siblingA, siblingB)
 	return nil
 }
 
@@ -627,7 +698,7 @@ func gone(ctx context.Context, client *bess.Client, c *session.Compiler, seid ui
 	if got := cause(resp.Cause); got != ie.CauseRequestAccepted {
 		return fmt.Errorf("the deletion answered cause %d", got)
 	}
-	if err := arpAbsent(ctx, client, ue); err != nil {
+	if err := arpAbsent(ctx, client, ue, "after the deletion"); err != nil {
 		return err
 	}
 	before, err := snapshot(ctx, client)
@@ -670,11 +741,14 @@ type sessionCase struct {
 	seid     uint64
 	upTEID   uint32
 	up, down pdrCase
+	// down2 is a second subscriber-side PDR of the same session -- another UE
+	// address, the responder's collision case -- or nil.
+	down2 *pdrCase
 }
 
 // message is the Session Establishment Request a case sends.
 func (cs sessionCase) message() *message.SessionEstablishmentRequest {
-	return message.NewSessionEstablishmentRequest(0, 0, cs.seid, 1, 0,
+	ies := []*ie.IE{
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(cs.seid, nil, nil),
 		ie.NewCreatePDR(
@@ -702,7 +776,24 @@ func (cs sessionCase) message() *message.SessionEstablishmentRequest {
 			ie.NewFARID(2),
 		),
 		ie.NewCreateFAR(append([]*ie.IE{ie.NewFARID(2)}, cs.down.far...)...),
-	)
+	}
+	if cs.down2 != nil {
+		ies = append(ies,
+			ie.NewCreatePDR(
+				ie.NewPDRID(3),
+				ie.NewPrecedence(100),
+				ie.NewPDI(
+					ie.NewSourceInterface(cs.down2.srcIfc),
+					ie.NewNetworkInstance(cs.instance),
+					ie.NewUEIPAddress(0x02, cs.down2.ue, "", 0, 0),
+					ie.NewSDFFilter(cs.down2.sdf, "", "", "", 0),
+				),
+				ie.NewFARID(3),
+			),
+			ie.NewCreateFAR(append([]*ie.IE{ie.NewFARID(3)}, cs.down2.far...)...),
+		)
+	}
+	return message.NewSessionEstablishmentRequest(0, 0, cs.seid, 1, 0, ies...)
 }
 
 // forward is a FAR that forwards: the Apply Action, the Destination Interface
@@ -824,19 +915,22 @@ func arpPresent(ctx context.Context, client *bess.Client, ue, what string) error
 
 // arpAbsent requires the responder to hold no entry for `ue`, and prints what
 // it does hold: the other sessions' entries must have survived.
-func arpAbsent(ctx context.Context, client *bess.Client, ue string) error {
+func arpAbsent(ctx context.Context, client *bess.Client, ue, what string) error {
 	entries, err := arpEntriesOf(ctx, client)
 	if err != nil {
 		return err
 	}
 	if mac, ok := entries[ue]; ok {
-		return fmt.Errorf("the deleted session's address %s is still held (%s -> %s): %v", ue, ue, mac, entries)
+		return fmt.Errorf("%s: the address %s is still held (%s): %v", what, ue, mac, entries)
 	}
 	line, err := json.Marshal(entries)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("ifacepath: after the deletion %s holds %s\n", arpEntries, line)
+	// The label is the caller's, so the line that belongs to one check is not
+	// the line another check greps (the shell reads its evidence out of this
+	// log by prefix).
+	fmt.Printf("ifacepath: %s %s holds %s\n", what, arpEntries, line)
 	return nil
 }
 

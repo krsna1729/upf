@@ -46,12 +46,6 @@ class UpfArpResponder final : public Module {
 
   std::string GetDesc() const override;
 
-  // The entry for an address, or nullptr: what the packet path looks up, for
-  // tests and introspection.
-  const upf::arp::Entry *Lookup(uint32_t ip) const noexcept {
-    return resource_ == nullptr ? nullptr : resource_->Lookup(ip);
-  }
-
  private:
   std::unique_ptr<upf::arp::EntriesResource> resource_;
   bess::framework::ResourceBinding binding_;  // after resource_ (D-044)
