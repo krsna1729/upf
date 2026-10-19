@@ -13,11 +13,11 @@
 # session's TEID; the uplink packet leaves by the exit its instance's next hop
 # names -- N6 for the internet instance, the campus network's gate for campus.
 #
-# The uplink's *Ethernet* header is not evidence here: the graph names each
-# exit's L2 pair, but a stage built before the fork's D-153 rewrite stores the
-# pair and leaves the frame's addresses alone (docs/interop.md), so this lane
-# proves per-instance egress by which exit's Dump saw the frame. The claim
-# holds without the rewrite; a rebuilt stage only adds the header.
+# The uplink's Ethernet header is evidence too: each exit's hop carries its own
+# L2 pair, which the Router writes into the frame it forwards (BESS D-153), so
+# the two instances' uplink frames differ in both the exit they left by and
+# their addresses. (The pair's own trap: the *downlink* G-PDU's outer header
+# carries the N3 hop's addresses, so a byte check must name the Dump it read.)
 #
 # Why windows rather than one run: with both data networks' streams running at
 # once, "both TEIDs appeared" would also pass if the two sessions' rules were
@@ -199,10 +199,13 @@ absent "A: the campus session's TEID does not appear (its session does not exist
       "$A_D" "55 66 77 89"
 # The uplink: the internet session's packet leaves by N6 (the router's gate 0,
 # where dump_n6 sits) and not by the campus exit, and the frame that left is
-# this window's -- the UE's address to 8.8.8.8, "hello-upf".
+# this window's -- the UE's address to 8.8.8.8, "hello-upf" -- with the next
+# hop's addresses written into it (deploy/pdrmatch-2dn.yaml hop 1; BESS D-153).
 contains "A: the internet session's uplink left by the internet exit" \
       "$A_N6" "0a 2d 00 02 08 08 08 08"
 contains "A: the frame that left is the uplink stream's" "$A_N6" "68 65 6c 6c 6f 2d 75 70 66"
+contains "A: the frame carries the internet exit's L2 pair, not the tunnel's" \
+      "$A_N6" "02 00 00 00 0a 02 02 00 00 00 0a 01"
 empty "A: nothing left by the campus exit" "$A_N9"
 
 # --- window B: the campus instance only, the same subscriber address --------
@@ -214,6 +217,8 @@ absent "B: the internet session's TEID does not appear (its stream is stopped)" 
 contains "B: the campus session's uplink left by the campus exit" \
       "$B_N9" "0a 2d 00 02 08 08 08 08"
 contains "B: the frame that left is the uplink stream's" "$B_N9" "68 65 6c 6c 6f 2d 75 70 66"
+contains "B: the frame carries the campus exit's L2 pair" \
+      "$B_N9" "02 00 00 00 0b 02 02 00 00 00 0b 01"
 empty "B: nothing left by the internet exit" "$B_N6"
 
 # --- window C: both sessions live, the internet instance's streams ----------
@@ -227,6 +232,8 @@ contains "C: with both sessions live, the internet frame still leaves for the in
 absent "C: the campus session does not take the internet frame" "$C_D" "55 66 77 89"
 contains "C: the internet instance's uplink still leaves by the internet exit" \
       "$C_N6" "0a 2d 00 02 08 08 08 08"
+contains "C: with both sessions live it still carries the internet exit's L2 pair" \
+      "$C_N6" "02 00 00 00 0a 02 02 00 00 00 0a 01"
 empty "C: nothing left by the campus exit" "$C_N9"
 
 # The selector's rules, as the driver printed them from sel_dl/rules: one per
