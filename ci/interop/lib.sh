@@ -106,7 +106,13 @@ alive() { # alive <pidfile>: the recorded process still runs
 detach() {
   local name=$1; shift
   rm -f "$STATE/$name.exit"
+  # The rig's own directory is the cwd of everything it starts: a path a script
+  # gets wrong (a relative one, or a value that is not a path) then lands there
+  # instead of in the checkout -- which is how a socket named after a MAC
+  # address once appeared in the repository root. Hand-made throwaways belong in
+  # .scratch/, the two are gitignored and nothing else is written into the tree.
   setsid bash -c '
+    cd "'"$IX"'" || exit 1
     "$@" >>"'"$LOGS/$name.log"'" 2>&1 &
     echo $! >"'"$STATE/$name.pid"'"
     wait $!

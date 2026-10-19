@@ -17,7 +17,8 @@
 //	egress    S1 (Core, no outer header), S2 (Core, one: a tunnel out of the
 //	          instance), S3 (the service LAN, with the Forwarding Policy it
 //	          requires): each leaves by its own hop
-//	down      S6 (a subscriber-side PDR whose FAR names Core): the data
+//	down      S6 (a PDR whose PDI names the service LAN's interface and whose
+//	          FAR names Core): the data
 //	          network's frame leaves by the instance's plain hop
 //	forward   S1's FAR moves to the access side, and its uplink frame now leaves
 //	          through the encap (indirect data forwarding, 8.2.2 NOTE 2): the
@@ -422,16 +423,18 @@ func egress(ctx context.Context, client *bess.Client, c *session.Compiler) (uint
 	return seid1, nil
 }
 
-// down establishes S6 -- a subscriber-side PDR whose FAR names Destination
+// down establishes S6 -- a PDR whose PDI names the service LAN's interface
+// (Source Interface 2: the side toward the subscriber, whichever ingress the
+// deployment gives the service fabric) and whose FAR names Destination
 // Interface Core with no outer header -- and starts the data network's frame:
 // it must leave by the instance's plain hop (gate 0), which is the N6 exit the
 // uplink's own case uses from the other direction.
 func down(ctx context.Context, client *bess.Client, c *session.Compiler) error {
 	cs := sessionCase{
-		name:     "S6: a subscriber-side PDR forwarding to Core",
+		name:     "S6: a PDR whose PDI names Source Interface 2 (SGi-LAN/N6-LAN), forwarding to Core",
 		instance: internet, seid: seidS6, upTEID: upTEID6,
 		up:   pdrCase{srcIfc: ie.SrcInterfaceAccess, ue: ueS6, sdf: port53Query, far: forward(ie.DstInterfaceCore)},
-		down: pdrCase{srcIfc: ie.SrcInterfaceCore, ue: ueS6, sdf: port53Filter, far: forward(ie.DstInterfaceCore)},
+		down: pdrCase{srcIfc: ie.SrcInterfaceSGiLANN6LAN, ue: ueS6, sdf: port53Filter, far: forward(ie.DstInterfaceCore)},
 	}
 	before, err := snapshot(ctx, client)
 	if err != nil {
