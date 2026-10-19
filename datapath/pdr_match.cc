@@ -19,6 +19,7 @@
 #include "dataplane/resource_registry.h"
 #include "framework/plugin.h"
 #include "framework/resource_codec.h"
+#include "pdu_session_qfi.h"
 #include "utils/endian.h"
 
 using bess::utils::be32_t;
@@ -235,8 +236,10 @@ void PdrMatch::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   // there is nothing to resolve the action for, and nothing to write.
   const bool publish_action = bess::metadata::IsValidOffset(action_offset);
   // The QFI is read only for a session that has a rule naming one; with no
-  // writer the attribute has no offset and a packet is of no QFI (0), which
-  // no rule names.
+  // writer the attribute has no offset, and a packet is of no QFI at all --
+  // kNoPduSessionQfi, the value no container can carry, so a rule naming a
+  // real QFI (0 included) cannot select a packet whose container is missing
+  // (pdu_session_qfi.h).
   const bess::metadata::mt_offset_t qfi_offset = attr_offset(qfi_attr_);
   const bool qfi_valid = bess::metadata::IsValidOffset(qfi_offset);
 
@@ -266,8 +269,9 @@ void PdrMatch::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     // some rule names it, else the rules that name none.
     const pdr_match::QfiRules *list = &rules->any;
     if (!rules->named.empty()) [[unlikely]] {
-      const uint8_t qfi =
-          qfi_valid ? get_attr_with_offset<uint8_t>(qfi_offset, pkt) : 0;
+      const uint8_t qfi = qfi_valid
+                              ? get_attr_with_offset<uint8_t>(qfi_offset, pkt)
+                              : upf::kNoPduSessionQfi;
       for (const auto &[q, named] : rules->named) {
         if (q == qfi) {
           list = &named;

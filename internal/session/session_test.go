@@ -348,6 +348,10 @@ func testConfig() Config {
 			Meters:    "mt_ul",
 			Counters:  "cnt_ul",
 			NextHop:   1,
+			// An uplink forward can add an outer header of its own (indirect
+			// data forwarding, the uplink of an N9 tunnel): its record goes in
+			// the deployment's one encap module, the same the downlink uses.
+			Tunnels: "enc",
 		},
 		Down: Direction{
 			PDRTable:  "pdr_dl",
@@ -1792,16 +1796,45 @@ func TestThePrecedenceIsInvertedIntoTheClassifiersPriority(t *testing.T) {
 	}
 }
 
-// TestAQFIThatIsNotAQFIIsRefused: a QFI is one of 1..63 (8.2.89). 0 is not a
-// QFI, and a byte with the spare bits set is a flow no packet carries, so a
-// rule keyed on either would match nothing -- or, for 0, the packets of a
-// session's flows that carry no container at all. Both are refused with the
-// cause the SMF can fix, and nothing reaches the dataplane.
-func TestAQFIThatIsNotAQFIIsRefused(t *testing.T) {
-	for _, qfi := range []uint8{0, 64, 255} {
+// TestAQFIIsInRangeOrRefused: a QFI is one of 0..63 (38.415 5.5.3.3, which
+// 8.2.89 refers to), so 0 is a flow like any other -- the decap writes 255 for
+// a G-PDU with no container at all (datapath/pdu_session_qfi.h), so a PDI
+// naming 0 selects only a packet that really carried QFI 0. Above the range a
+// rule would match nothing: the session would stand while its uplink
+// blackholed, so those values are refused with the cause the SMF can fix.
+func TestAQFIIsInRangeOrRefused(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x9103, "10.45.0.2")
+	// The QFI IE with a zero in it: uplinkPDR's own qfi=0 means "the PDI names
+	// no QFI at all", which is the other test's arm.
+	req.CreatePDR[0] = ie.NewCreatePDR(
+		ie.NewPDRID(1),
+		ie.NewPrecedence(100),
+		ie.NewPDI(
+			ie.NewSourceInterface(ie.SrcInterfaceAccess),
+			ie.NewFTEID(0x01, 0x11223344, net.ParseIP("192.0.2.1"), nil, 0),
+			ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0),
+			ie.NewQFI(0),
+		),
+		ie.NewFARID(1),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a PDI naming QFI 0 answered cause %d, want accepted: 0 is in the spec's range", got)
+	}
+	i := qfiField(t)
+	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	if got := r.value(i); !bytes.Equal(got, []byte{0}) {
+		t.Errorf("the rule's QFI value is %v, want the PDI's 0", got)
+	}
+	if got := r.mask(i); !bytes.Equal(got, []byte{0xff}) {
+		t.Errorf("the rule's QFI mask is %v, want all ones: the PDI named the flow", got)
+	}
+
+	for _, qfi := range []uint8{64, 255} {
 		rec := &recorder{}
 		c := New(testConfig(), rec, quietLogger())
-		req := establishment(0x9103, "10.45.0.2")
+		req := establishment(0x9104, "10.45.0.2")
 		req.CreatePDR[0] = ie.NewCreatePDR(
 			ie.NewPDRID(1),
 			ie.NewPrecedence(100),

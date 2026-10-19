@@ -28,6 +28,10 @@ func liveConfig() Config {
 		Meters:    "mt_ul",
 		Counters:  "cnt_ul",
 		NextHop:   1,
+		// The deployed daemon names the encap module for both directions
+		// (upfd -tunnels/-tunnels-ul default to one module): an uplink forward
+		// that adds an outer header writes its record there too.
+		Tunnels: "enc",
 	}
 	cfg.Down = Direction{
 		PDRTable:  "pdr_dl",

@@ -88,13 +88,15 @@ func TestParseInstancesReadsTheDeployment(t *testing.T) {
 		t.Errorf("ims is %+v (found %v), want domain 1 and next hop 3", ims, ok)
 	}
 	// No pool is an interface that serves every address until the deployment
-	// says otherwise: the flag's omission is not an outage.
-	bare, err := parseInstances("name=n9,domain=3", 4)
+	// says otherwise: the flag's omission is not an outage. No next-hop is an
+	// instance whose forwards all tunnel, or that only re-injects: it needs an
+	// egress of some kind, not that one.
+	bare, err := parseInstances("name=n9,domain=3,tunnel-next-hop=3", 4)
 	if err != nil {
 		t.Fatalf("an interface with no pool was refused: %v", err)
 	}
 	if ifc, ok := bare.Lookup("n9"); !ok || ifc.NextHop != 0 || !ifc.Serves(netip.MustParseAddr("10.45.0.2")) {
-		t.Errorf("n9 is %+v, want a nameless hop and an unconstrained pool", ifc)
+		t.Errorf("n9 is %+v, want no plain hop (the egress is a tunnel) and an unconstrained pool", ifc)
 	}
 }
 
@@ -123,7 +125,8 @@ func TestParseInstancesRefuses(t *testing.T) {
 		{"an ARP MAC that is not a MAC", "name=internet,domain=0,arp=arp_n6,arp-mac=arp", 2,
 			"arp-mac \"arp\""},
 		{"a pool that is not a prefix", "name=internet,domain=0,pool=10.0.0.0", 2, "pool \"10.0.0.0\""},
-		{"a domain beyond the router's", "name=internet,domain=2", 2, "beyond the router's 2"},
+		{"a domain beyond the router's", "name=internet,domain=2,next-hop=1", 2, "beyond the router's 2"},
+		{"an interface with no egress", "name=internet,domain=0,pool=10.45.0.0/16", 2, "needs an egress"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := parseInstances(c.spec, c.max)

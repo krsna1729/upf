@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 
 	"github.com/krsna1729/upf/internal/bess"
 )
@@ -75,8 +76,10 @@ func (c *Compiler) resources() []string {
 			add(countersRes(d))
 		}
 	}
-	if c.cfg.Down.Tunnels != "" {
-		add(tunnelsRes(c.cfg.Down))
+	for _, d := range []Direction{c.cfg.Up, c.cfg.Down} {
+		if d.Tunnels != "" {
+			add(tunnelsRes(d))
+		}
 	}
 	if c.BufferingConfigured() {
 		// The BUFF branch's counter entries are the session layer's too: an
@@ -89,6 +92,55 @@ func (c *Compiler) resources() []string {
 		add(flowsRes(c.cfg.Buffering))
 	}
 	return names
+}
+
+// inPools reports whether an address is one the interface's pools serve: the
+// pool's own containment, with the mapped form of an IPv4-in-IPv6 address
+// unmapped first, because the compiler writes subscriber addresses that way
+// (resolve) and the responder's keys come from the same values.
+func inPools(addr netip.Addr, pools []netip.Prefix) bool {
+	addr = addr.Unmap()
+	for _, p := range pools {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// arpSweep is the ARP responder table of one deployment interface, and the
+// pools whose addresses are this process's to erase from it.
+//
+// The table is not only the session layer's: the deployment's own entry (the
+// interface's address, and the MAC that answers for it) is written by the
+// graph and shares the resource, so a whole-table erase would stop the
+// interface answering for itself until the graph is applied again. A session's
+// entries are its subscribers' addresses, and the compiler refuses one outside
+// the interface's pools (resolve) -- so the pools are exactly the line between
+// the two writers. An interface that declares no pool serves every address, so
+// its entries cannot be told apart from the deployment's and the sweep leaves
+// them: the caller logs it, and the operator's remedy is the pool that names
+// which addresses are the subscribers' (the flag says so).
+type arpSweep struct {
+	resource string
+	pools    []netip.Prefix
+}
+
+// arpSweeps lists the ARP tables the deployment declared, one per interface.
+func (c *Compiler) arpSweeps() []arpSweep {
+	if c.cfg.Instances == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []arpSweep
+	for _, ifc := range c.cfg.Instances.Interfaces() {
+		if ifc.ARP == "" || seen[ifc.ARP] {
+			continue
+		}
+		seen[ifc.ARP] = true
+		out = append(out, arpSweep{resource: ifc.ARP + "/entries", pools: ifc.Pool})
+	}
+	return out
 }
 
 // Sweep empties the session tables (docs/design.md's restart wall): a
@@ -147,6 +199,12 @@ func (c *Compiler) Sweep(ctx context.Context) error {
 		return errors.New("session: this dataplane cannot be read back, so an earlier run's sessions cannot be swept")
 	}
 	names := c.resources()
+	// The ARP responder tables are read with the rest but erased selectively
+	// (arpSweep): the deployment's own entry shares them.
+	arps := c.arpSweeps()
+	for _, a := range arps {
+		names = append(names, a.resource)
+	}
 	// One resource per call, never one naming them all. The daemon packs every
 	// resource named into one response, and a response above its 64 MiB message
 	// limit is refused (RESOURCE_EXHAUSTED, "name fewer resources" --
@@ -183,8 +241,31 @@ func (c *Compiler) Sweep(ctx context.Context) error {
 			firewalls[firewallRes(d)] = true
 		}
 	}
+	// Which resources are ARP tables, and whose addresses are the session
+	// layer's to erase.
+	arpPools := make(map[string][]netip.Prefix, len(arps))
+	for _, a := range arps {
+		arpPools[a.resource] = a.pools
+	}
 	changes := make([]bess.Change, 0, len(contents))
 	for name, entries := range contents {
+		if pools, isARP := arpPools[name]; isARP {
+			if len(pools) == 0 {
+				// Every address is served (the pool's omission means that), so
+				// nothing tells a session's entry from the deployment's own:
+				// the sweep leaves the table and says so.
+				c.log.Warn("session: the ARP table of an interface that declares no pool is left as it was: an earlier run's subscriber entries may answer until the graph is applied again",
+					"resource", name)
+				continue
+			}
+			for _, e := range entries {
+				ip, _ := e.Key["ip"].(string)
+				if addr, err := netip.ParseAddr(ip); err == nil && inPools(addr, pools) {
+					changes = append(changes, bess.Change{Resource: name, Key: e.Key})
+				}
+			}
+			continue
+		}
 		if firewalls[name] {
 			for _, e := range entries {
 				if rules, _ := e.Value["rules"].([]any); len(rules) > 0 {
