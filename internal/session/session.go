@@ -266,6 +266,15 @@ type Direction struct {
 	Actions string
 	// Meters is the Meter module its QER meters live in.
 	Meters string
+	// MeterLevels is how many meter ids one action carries: 0 and 1 are the
+	// historical single-meter record. With 2, the flow's own rate-bearing QER
+	// goes in the first slot and the session's shared one after it, and the
+	// Meter polices them in that order -- a packet the flow's bucket drops is
+	// not charged to the session's. It requires a Meter and ActionTable built
+	// with `levels: 2` (MeterArg.levels); the framework refuses a pair of
+	// modules that disagree, and the action table refuses a list longer than
+	// its levels.
+	MeterLevels uint32
 	// NextHop is the Router next hop a forward leaves by, for either
 	// direction: the uplink's is the N6 route, the downlink's the N3 one.
 	// Every chain that holds an ActionTable must route on the id it writes --
@@ -767,11 +776,17 @@ type pdr struct {
 	// forwards toward the data network (resolve).
 	nextHop uint32
 
-	teid     uint32   // uplink: the TEID we advertised (0 when not ours)
-	actionID uint32   // the action record this PDR's rule names
-	meterID  uint32   // the meter record a QER resolved to, in this chain's Meter
-	tunnels  []string // per-session tunnel records to write (downlink)
-	drop     bool     // the FAR drops, or the QER's gate is closed this way
+	teid     uint32 // uplink: the TEID we advertised (0 when not ours)
+	actionID uint32 // the action record this PDR's rule names
+	meterID  uint32 // the meter record a QER resolved to, in this chain's Meter
+	// ownMeterID and sharedMeterID are that choice's halves: the PDR's own
+	// last rate-bearing QER, and the session's shared QER (0 when the PDR
+	// names none). A direction with MeterLevels 2 writes both into the action
+	// in that order.
+	ownMeterID    uint32
+	sharedMeterID uint32
+	tunnels       []string // per-session tunnel records to write (downlink)
+	drop          bool     // the FAR drops, or the QER's gate is closed this way
 	// buffer says the FAR asks for the packets to be held (Apply Action BUFF
 	// without FORW) and the deployment has a store: the rule delivers on the
 	// buffering branch instead, and the flow's key is the ActionId the rule
@@ -1273,9 +1288,26 @@ func selectorRes(d Direction) string { return d.Selector + "/rules" }
 // session ids live in and the direction's own action table does not.
 func selectorActionsRes(d Direction) string { return d.SelectorActions + "/actions" }
 
-func (c *Compiler) teidRes() string  { return c.cfg.TEIDTable + "/rules" }
-func actionsRes(d Direction) string  { return d.Actions + "/actions" }
-func metersRes(d Direction) string   { return d.Meters + "/meters" }
+func (c *Compiler) teidRes() string { return c.cfg.TEIDTable + "/rules" }
+func actionsRes(d Direction) string { return d.Actions + "/actions" }
+func metersRes(d Direction) string  { return d.Meters + "/meters" }
+
+// actionValue is the action record's resource value: the next hop, and the
+// meter or meters its chain polices. One level is the historical single
+// `meter_id`; two name the flow's own rate-bearing QER first and the session's
+// shared one after it, so the Meter stops a red packet before the session's
+// bucket is charged. The list needs a Meter and ActionTable built with
+// `levels: 2`; a table with fewer levels refuses a longer list when the action
+// is written.
+func actionValue(d Direction, p *pdr) map[string]any {
+	v := map[string]any{"next_hop_id": p.nextHop}
+	if d.MeterLevels <= 1 {
+		v["meter_id"] = p.meterID
+		return v
+	}
+	v["meter_ids"] = []uint32{p.ownMeterID, p.sharedMeterID}
+	return v
+}
 func tunnelsRes(d Direction) string  { return d.Tunnels + "/tunnels" }
 func countersRes(d Direction) string { return d.Counters + "/counters" }
 

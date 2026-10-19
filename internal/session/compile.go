@@ -1373,15 +1373,20 @@ func (c *Compiler) resolve(s *Session) error {
 		}
 		// The meter this PDR is policed by: the session's shared QER when the
 		// PDR names it, else the last rate-bearing QER of its own (which is
-		// what a PDR that names only a flow QER had before).
+		// what a PDR that names only a flow QER had before). The two are kept
+		// apart as well, for a chain with two levels: the action names the
+		// flow's first, so the Meter stops a red packet before the session's
+		// bucket is charged.
 		switch {
 		case downSide(p.srcIfc):
+			p.ownMeterID, p.sharedMeterID = ownDL, sharedDL
 			if sharedDL != 0 {
 				p.meterID = sharedDL
 			} else {
 				p.meterID = ownDL
 			}
 		default:
+			p.ownMeterID, p.sharedMeterID = ownUL, sharedUL
 			if sharedUL != 0 {
 				p.meterID = sharedUL
 			} else {
@@ -1805,9 +1810,12 @@ func writeBufferCounter(b *Buffering, p *pdr) []bess.Change {
 // belongs to a QER the session holds. compile writes a meter for every QER with
 // a rate whether or not a PDR names it, so erasing one of those in the same
 // transaction would be a second operation on its key -- the engine rejects it.
-func qerHoldsMeter(s *Session, removed *pdr) bool {
+// qerHoldsMeter says a session's QERs still resolve to a meter id: the
+// removal's erase of a PDR's meters is guarded by it, so a meter another PDR's
+// QER still polices stays.
+func qerHoldsMeter(s *Session, id uint32) bool {
 	for _, q := range s.QERs {
-		if q.meterUL == removed.meterID || q.meterDL == removed.meterID {
+		if q.meterUL == id || q.meterDL == id {
 			return true
 		}
 	}
@@ -2084,8 +2092,16 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if p.teid != 0 && !teidNamed(s, p.teid) {
 			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
 		}
-		if p.meterID != 0 && !qerHoldsMeter(s, p) {
-			erase(bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": p.meterID}})
+		// A removed PDR's meters go only when no QER of the session still holds
+		// them. With two levels the action names both; the chosen one may be
+		// the own one (a PDR naming no shared QER), so a repeat is skipped
+		// rather than erased twice.
+		prev := uint32(0)
+		for _, id := range []uint32{p.meterID, p.ownMeterID} {
+			if id != 0 && id != prev && !qerHoldsMeter(s, id) {
+				erase(bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": id}})
+			}
+			prev = id
 		}
 		counterErase(p)
 		bufferCounterErase(p)
@@ -2320,7 +2336,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				changes = append(changes, bess.Change{
 					Resource: actionsRes(dir),
 					Key:      map[string]any{"id": p.actionID},
-					Value:    map[string]any{"meter_id": p.meterID, "next_hop_id": p.nextHop},
+					Value:    actionValue(dir, p),
 				})
 			}
 			if dir.Firewall == "" && dir.PdrMatch == "" {
@@ -2359,7 +2375,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		changes = append(changes, bess.Change{
 			Resource: actionsRes(dir),
 			Key:      map[string]any{"id": p.actionID},
-			Value:    map[string]any{"meter_id": p.meterID, "next_hop_id": p.nextHop},
+			Value:    actionValue(dir, p),
 		})
 
 		// A PDR a URR measures carries one counter entry, keyed by the same

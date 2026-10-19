@@ -137,6 +137,15 @@ func run() error {
 			"sport, dport) is refused")
 	actionsUL := flag.String("actions-ul", "at_ul", "the uplink ActionTable module")
 	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
+	meterLevelsUL := flag.Uint("meter-levels-ul", 0,
+		"how many meter ids one uplink action carries: 0 and 1 are the historical single `meter_id` "+
+			"record (the default); 2 names the flow's own rate-bearing QER first and the session's "+
+			"shared QER after it, so the Meter stops a red packet before the session's bucket is "+
+			"charged. It needs the graph's Meter and ActionTable to be built with levels: 2 (the "+
+			"multi-level meter, the meter-stack fork), and an action table refuses a longer list than "+
+			"its own levels")
+	meterLevelsDL := flag.Uint("meter-levels-dl", 0,
+		"the downlink's level count, as -meter-levels-ul is the uplink's")
 	actionsDL := flag.String("actions-dl", "at_dl", "the downlink ActionTable module")
 	metersDL := flag.String("meters-dl", "mt_dl", "the downlink Meter module")
 	countersUL := flag.String("counters-ul", "cnt_ul",
@@ -326,10 +335,12 @@ func run() error {
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
 			gtpuErrors: *gtpuErrors,
-			endMarker: *endMarker,
-			actionsUL: *actionsUL, metersUL: *metersUL,
-			actionsDL: *actionsDL, metersDL: *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
-			countersUL: *countersUL, countersDL: *countersDL,
+			endMarker:  *endMarker,
+			actionsUL:  *actionsUL, metersUL: *metersUL,
+			meterLevelsUL: uint32(*meterLevelsUL),
+			actionsDL:     *actionsDL, metersDL: *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
+			meterLevelsDL: uint32(*meterLevelsDL),
+			countersUL:    *countersUL, countersDL: *countersDL,
 			bufferStore: *bufferStore, bufferCounter: *bufferCounter, bufferGate: uint32(*bufferGate),
 		}))
 		if err != nil {
@@ -788,6 +799,8 @@ type graphArgs struct {
 	countersDL         string
 	tunnels            string
 	tunnelsUL          string
+	meterLevelsUL      uint32
+	meterLevelsDL      uint32
 	endMarker          string
 }
 
@@ -841,6 +854,15 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		return session.Config{}, fmt.Errorf(
 			"the downlink has one rule home: -firewall-dl %q and -pdr-match-dl %q both name one",
 			a.firewallDL, a.pdrMatchDL)
+	}
+	// A level is a meter id slot in one action. The Meter's and ActionTable's
+	// modules declare how many there are (`levels` in their args) and the
+	// framework refuses a pair that disagrees; 16 is the meter_id attribute's
+	// own bound (64 bytes / 4), and 0 and 1 are the single-meter record.
+	if a.meterLevelsUL > 16 || a.meterLevelsDL > 16 {
+		return session.Config{}, fmt.Errorf(
+			"-meter-levels-ul %d and -meter-levels-dl %d: at most 16 meter ids fit in one meter_id "+
+				"attribute", a.meterLevelsUL, a.meterLevelsDL)
 	}
 	// The selector's key is the session's, so only the fields a session has can
 	// be in it: the UE address, and the route domain the deployment classified
@@ -896,7 +918,11 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			PdrMatch: a.pdrMatchUL,
 			Actions:  a.actionsUL,
 			Meters:   a.metersUL,
-			Counters: a.countersUL,
+			// How many meter ids one action carries: 0/1 is the single
+			// meter_id the graphs had; 2 names the flow's own QER and the
+			// session's shared one, and needs the meter stack's modules.
+			MeterLevels: a.meterLevelsUL,
+			Counters:    a.countersUL,
 			// An uplink forward can add an outer header of its own: indirect
 			// data forwarding (Destination Interface Access) and the uplink of
 			// an N9 tunnel (Destination Interface Core with an Outer Header
@@ -920,6 +946,7 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			SelectorFields:  selectFields,
 			Actions:         a.actionsDL,
 			Meters:          a.metersDL,
+			MeterLevels:     a.meterLevelsDL,
 			Counters:        a.countersDL,
 			NextHop:         a.n3NextHop,
 			Tunnels:         a.tunnels,
