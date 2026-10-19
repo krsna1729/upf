@@ -149,7 +149,8 @@ downstream is keyed by.
 
 | graph | used by | what differs |
 |---|---|---|
-| `deploy/upf.yaml` | the deployment | PMD ports `n3`/`n6` (one rx queue each), the N6 interface (`vif_n6` + `l2_sort`: the data network's frames are the interface's, its own -- the ARP answer -- leave by the port), the hop count (`ttl_ul`/`ttl_dl`), `MetadataTest` after the decap, the marker port; **no buffering branch** |
+| `deploy/upf.yaml` | the deployment | PMD ports `n3`/`n6` (one rx queue each), the N6 ingress' first stop (`l2_sort`: an ARP frame is diverted to `arp_n6` before any interface sees it, because a request names the broadcast MAC no `Vif` matches, and the IP frames go on to the interface), the responder that answers for the interface's own address and for every live session's UE address (`arp_n6`, our `UpfArpResponder`), the N6 interface (`vif_n6`), the hop count (`ttl_ul`/`ttl_dl`), the uplink tunnel and the 5G VN re-injection as `rt` gates 2 and 4, `MetadataTest` after the decap, the marker port; **no buffering branch** |
+| `deploy/iface-path.yaml` | `ci/iface-path.sh` | no NIC: Sources, Rewrites, Dumps and Sinks, one stream per interface-grammar case. Both chains, the five egress gates (`rt/next_hops` 1-5: the data network's hop with its L2 pair, the access side's, a tunnel out of an instance, the service LAN's, the 5G VN re-injection), the ARP branch (`l2_sort` -> `arp_n6` -> a Dump) and the re-injection (`rt` gate 4 -> `pdr_dl`). Its instances are the lane's own: `internet` (plain, tunnel and service-LAN hops) and `vn` (the re-injection) |
 | `deploy/session-path.yaml` | `ci/session-path.sh`, `ci/n4-path.sh`, `ci/session-report.sh` | Sources `src_up`/`src_dn`, `Rewrite`, `Dump`, `Sink`; the deployment's N6 side and hop count (`vif_n6`, `l2_sort`, `sink_other`, `merge_n6`, `dump_n6`, `ttl_ul`/`ttl_dl`); frames fixed so a test can byte-check them; no buffering branch |
 | `deploy/buffer-path.yaml` | `ci/buffer-path.sh` | `session-path.yaml` **plus** `cnt_buf`/`buf` and the `pdr_dl` ogate-1 connection; needs a daemon with BESS's packet store key attribute |
 | `deploy/pdrmatch-buffer-path.yaml` | `PROFILE=custom ci/buffer-path.sh` | `pdrmatch-path.yaml` **plus** the same buffering branch as `buffer-path.yaml`, in the same place (the placement is TS 29.244 5.2.4.2's, so both profiles share it) |
@@ -182,7 +183,7 @@ path, unchanged — which is the only path an older daemon had.
 
 ## Modules we own
 
-Four modules, one `.so` (`BESS_PLUGIN` + `ADD_MODULE`, `datapath/meson.build`),
+Five modules, one `.so` (`BESS_PLUGIN` + `ADD_MODULE`, `datapath/meson.build`),
 built only against the installed `bess-dev` stage.
 
 | module | mclass | resource it owns (key) | state it holds | workers |
@@ -191,9 +192,14 @@ built only against the installed `bess-dev` stage.
 | `gtpu_encap.{h,cc}` | `gtpu_encap` | `<module>/tunnels` (`TunnelKey{action_id}`) | `src_ip_`, `max_tunnels_` | all |
 | `gtpu_echo.{h,cc}` | `gtpu_echo` | none | `port_`, a Recovery Time Stamp | all |
 | `urr_count.{h,cc}` | `urr_count` | `<module>/counters` (`CounterKey{action_id}`) | per-worker cell planes, per-rule stamp pairs | all |
+| `arp_responder.{h,cc}` | `upf_arp_responder` | `<module>/entries` (IPv4, host order) | the slot table's mask and its live count | all |
 
-Two resources, then: the encap's tunnels and the counters — one instance of the
-latter per direction, plus one on the buffering branch.
+Three resources, then: the encap's tunnels, the counters — one instance per
+direction, plus one on the buffering branch — and the responder's entries. Of
+the three, the entries is the only one written per session: the tunnels and the
+counters are keyed by an action id the compiler hands out, and an ARP entry's
+key is the subscriber's own address, which two sessions of one deployment must
+not both hold (`internal/session/arp.go` claims it like a rule key).
 
 ### `gtpu_decap` — the N3 entry
 
@@ -299,6 +305,40 @@ the arrival signal the Downlink Data Report is decided from on the BUFF branch.
   is copied on every publish, so a count kept in it would be zeroed by a
   handover).
 
+### `upf_arp_responder` — the interface's addresses, answered while the session lives
+
+The fork's `ArpResponder` keeps its table in a `std::map` whose resource
+*requires paused workers* (`core/modules/arp_responder.cc`: "Workers read the
+map without synchronization, so this runs with them paused"), and so does every
+other per-address identity in a graph (`Vif`'s `interfaces`, `Rewrite`'s
+`templates`). A UPF provisions a subscriber's address when the session is
+established, with the dataplane running: a module that refuses that write cannot
+answer for a subscriber at all. This module keeps the fork's wire shape -- the
+same `entries` map resource, keyed by the address as a string, valued by
+`mac_addr` -- and makes it live: an open-addressed slot table whose slots are
+atomic, a worker's lookup one acquire load, a transaction claiming its slot
+under the engine's lock, and a replaced entry retired, not freed, while a reader
+may still hold it (`arp_responder_resource.h` carries the reasoning; the idiom
+is `pdr_match_resource.h`'s).
+
+* **The packet path** rewrites the request in place into the reply (the fork's
+  own, `core/modules/arp_responder.cc`): the opcode flips, the Ethernet
+  addresses swap, the requester's hardware address and address become the
+  reply's target, and the entry's become its sender. It answers a request only;
+  a non-ARP frame, a reply, and a request whose target address no entry holds
+  are dropped, so **the module belongs on an ARP branch and nowhere else** --
+  `deploy/upf.yaml`'s `l2_sort` is that branch, ahead of the `Vif`.
+* **The entries** are the deployment's own address (one resource line in the
+  graph) and one per live session per UE address, written and erased in the
+  session's own transaction (`internal/session/arp.go`), so a refused message
+  leaves no entry and a deleted session's address stops being answered. The key
+  is claimed against a live session's, like a rule key: two sessions cannot
+  answer for one address.
+* **Capacity** is the module's argument (`max_entries`, default 65536; the
+  table is sized at construction, at twice the entries asked for). A write that
+  finds no room is refused with nothing visible, not grown under a running
+  packet path.
+
 ## Modules and drivers we take from BESS
 
 Used as they are; the configuration is ours and is what the compiler assumes.
@@ -314,7 +354,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | `UnixSocketPort` | `cp_marker` | `SOCK_SEQPACKET`: one write from `upfd` is one End Marker frame |
 | `PortInc`/`PortOut`, `Sink`, `Source`, `Rewrite`, `Dump`, `MetadataTest` | graphs | plumbing and lab only; a `Sink` has no output gate, so it appears in no metric — the counters that prove behaviour sit on modules' *output* gates |
 | `PacketStore` | the buffering branch (`buffer-path.yaml`) | `key_attrs: ["action_id"]`, `max_packets`, `max_packets_per_flow`, `timeout_ms`; one owner task, any number of workers. `release`/`drop`/`clear` are commands that enqueue into the store's own request ring (`Command::THREAD_SAFE` since BESS `cdeb4e77`), and its `flows` table is live configuration (`requires_paused_workers: false`), so neither a command nor a flow write is refused with EBUSY or RESOURCE_BUSY and nothing stops the datapath; a command is **accepted, not completed** -- the store's owner task applies it on a later run -- so a caller that needs the effect reads it back (`ps/flows`, the drop and release counters, `GetDesc`). A flow the store holds nothing for is a no-op (ENOENT is gone; the only refusal left is ENOSPC, a full request ring), an upsert or an erase moves no packet, and an erase removes configuration only -- `drop` is what frees what a flow holds (BESS's note: `packet_store: the flow key is a configured attribute, not a fixed pair`, 96d22a8f). The `flows` entries are the SMF's own numbers: `internal/session` writes one per buffering rule (`writeFlowEntry`), keyed by the rule's ActionId, with `timeout_ns` from 8.2.29's DL Buffering Duration and `max_packets_per_flow` from 8.2.30's Suggested Packet Count, each left out where the SMF named none; a modification's Update BAR rewrites it, a deletion erases it, and the startup sweep names the table. BESS's `LimitsFor` resolves it per flow; the store then enforces the cap on every arrival (`StoreBatch`) and, when `total_packets_` reaches `max_packets`, ages each flow's packets past its `timeout_ns` out with `bess::PacketFree` in `EvictExpired` -- a silent discard (no gate, no metric; only `GetDesc`'s stored count falls), distinct from the `drop` command's counted free and from the gate-1 eviction the cap uses |
-| `Vif` | `deploy/upf.yaml` (the N6 interface), `deploy/veth-port.yaml` | the module that splits one port into the reference points: an interface per reference point (`(VLAN, destination MAC)`, ARP answered for its address), each writing `vif_id`/`route_domain` into the packet and sending it out its own gate, so a PDR key can carry the domain the frame arrived with (`docs/design.md`, "N3, N6, N9"; `ci/veth-port.sh` proves the split and the rule selected by it). The deployment uses it for its one N6 port (`vif_n6`): the data network's frames are the interface's, and the interface's own frames -- its ARP answer, which is not IP -- leave by the port through `l2_sort` instead of entering the downlink chain (`ci/session-path.sh` runs the frames through it; the answer itself is covered by BESS's `core/modules/vif_test.cc`) |
+| `Vif` | `deploy/upf.yaml` (the N6 interface), `deploy/veth-port.yaml` | the module that splits one port into the reference points: an interface per reference point (`(VLAN, destination MAC)`, ARP answered for its address), each writing `vif_id`/`route_domain` into the packet and sending it out its own gate, so a PDR key can carry the domain the frame arrived with (`docs/design.md`, "N3, N6, N9"; `ci/veth-port.sh` proves the split and the rule selected by it). The deployment uses it for its one N6 port (`vif_n6`): the data network's frames are the interface's, and the interface's own frames leave by the port through `l2_sort` instead of entering the downlink chain (`ci/session-path.sh` runs the frames through it). The interface's *own* ARP answer is inert in `deploy/upf.yaml`, where `l2_sort` diverts ARP to `arp_n6` first -- that module answers for the interface's address and for every live session's, so the Vif's answer is left to the graphs that put it first (`core/modules/vif_test.cc` covers it) |
 
 ## Framework and library surface we use
 
