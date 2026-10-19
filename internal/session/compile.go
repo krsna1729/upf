@@ -40,6 +40,10 @@ const (
 	applyDrop = 0x01
 	applyForw = 0x02
 	applyBuff = 0x04
+	// applyNOCP is "Notify CP function when the first downlink packet is
+	// buffered": BUFF without it is an instruction to hold the packets and say
+	// nothing, so the report is owed only when the SMF asked for it.
+	applyNOCP = 0x08
 )
 
 // The bytes a rule whose FAR drops leaves on.
@@ -118,11 +122,19 @@ func qersInOrder(s *Session) []*qer {
 
 // pdrReq is a Create PDR or an Update PDR, as the SMF sent it.
 type pdrReq struct {
+	// hasID says the PDR ID IE was there: 0 is a legal PDR ID (8.2.73's
+	// sixteen-bit field has no reserved value), so the flag and the value are
+	// two fields, the way the PDR's FAR reference is below.
+	hasID      bool
 	id         uint16
 	precedence uint32
 	srcIfc     uint8
 	ueIP       netip.Addr
 	sdfs       []*sdfFilter // the PDI's SDF filters, any of which matches
+	// hasFarID says the FAR ID IE was there; the FAR it names is mandatory in
+	// a Create PDR (Table 7.5.2.2-1), and FAR 0 is a legal FAR, so a PDR that
+	// named none must not resolve to it.
+	hasFarID   bool
 	farID      uint32
 	qerIDs     []uint32
 	urrIDs     []uint32
@@ -151,6 +163,9 @@ type pdrReq struct {
 }
 
 type farReq struct {
+	// hasID says the FAR ID IE was there; 0 is a legal FAR ID (8.2.74), so the
+	// flag and the value are two fields.
+	hasID    bool
 	id       uint32
 	apply    uint8
 	destIfc  uint8
@@ -204,7 +219,9 @@ type farReq struct {
 // barReq is a Create BAR or Update BAR as the message carried it (TS 29.244
 // 7.5.2.6): the session's buffering instruction for the FARs that name it.
 type barReq struct {
-	id uint8
+	// hasID says the BAR ID IE was there; 0 is a legal BAR ID (8.2.75).
+	hasID bool
+	id    uint8
 
 	// hasDuration says the message carried the DL Buffering Duration IE
 	// (8.2.29). The IE is a timer: a unit in bits 8-6 and a value in bits 5-1.
@@ -242,7 +259,9 @@ type qerReq struct {
 }
 
 type urrReq struct {
-	id uint32
+	// hasID says the URR ID IE was there; 0 is a legal URR ID (8.2.76).
+	hasID bool
+	id    uint32
 
 	// create is a Create URR (7.5.2.4), whose Measurement Method and Reporting
 	// Triggers are mandatory; an Update URR carries only what changes, so the
@@ -407,7 +426,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		BARs:      map[uint8]*bar{},
 		chids:     map[uint8]uint32{},
 	}
-	if err := c.merge(s, pdrs, fars, bars, qers, urrs, nil, nil, nil, nil); err != nil {
+	if err := c.merge(s, pdrs, fars, bars, qers, urrs, removals{}); err != nil {
 		c.log.Warn("session: cannot carry the establishment request",
 			"cp_seid", cpSEID, "error", err)
 		// merge allocates as it goes (the F-TEID among them) and refuses when a
@@ -503,7 +522,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		c.log.Warn("session: cannot read the modification request", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, parseCause(err), nil)
 	}
-	removePDRs, removeFARs, removeBARs, removeURRs := parseRemovals(ies)
+	rm := parseRemovals(ies)
 
 	// Table 7.5.5.1-1: a Created PDR rides on a Modification Response only for
 	// a PDI that asked the UP function to choose its F-TEID. The compile
@@ -527,7 +546,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	reportAt := time.Now()
 	if !c.restoring {
 		var err error
-		if queried, removed, err = c.requestedWindows(context.Background(), req, s, removeURRs, reportAt); err != nil {
+		if queried, removed, err = c.requestedWindows(context.Background(), req, s, rm.urrs, reportAt); err != nil {
 			c.log.Warn("session: cannot report the usage the modification asked for", "seid", seid, "error", err)
 			return modifyResponse(req, hdr, ie.CauseRuleCreationModificationFailure, nil)
 		}
@@ -569,7 +588,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	c.mu.Lock()
 	before := s.snapshot()
 	c.mu.Unlock()
-	if err := c.merge(s, pdrs, fars, bars, qers, urrs, removePDRs, removeFARs, removeBARs, removeURRs); err != nil {
+	if err := c.merge(s, pdrs, fars, bars, qers, urrs, rm); err != nil {
 		c.mu.Lock()
 		c.rollback(s, before)
 		c.mu.Unlock()
@@ -753,8 +772,7 @@ func mergeBars(s *Session, bars []barReq) {
 
 // merge folds a request's objects into the session's model.
 func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq, qers []qerReq,
-	urrs []urrReq, removePDRs []uint16, removeFARs []uint32, removeBARs []uint8,
-	removeURRs []uint32) error {
+	urrs []urrReq, rm removals) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -927,7 +945,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			entry.enforcing = false
 		}
 	}
-	for _, id := range removePDRs {
+	for _, id := range rm.pdrs {
 		if old := s.PDRs[id]; old != nil {
 			// The records stay in the dataplane until the next compile erases
 			// them: it is the transaction that carries the removal out, so a
@@ -936,10 +954,10 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 		delete(s.PDRs, id)
 	}
-	for _, id := range removeFARs {
+	for _, id := range rm.fars {
 		delete(s.FARs, id)
 	}
-	for _, id := range removeBARs {
+	for _, id := range rm.bars {
 		for _, f := range s.FARs {
 			if f.hasBAR && f.barID == id {
 				// The FAR still asks to buffer under a BAR the SMF has taken
@@ -1046,7 +1064,36 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 		s.PDRs[p.id] = pdr
 	}
-	for _, id := range removeURRs {
+	createdQERs := make(map[uint32]bool, len(qers))
+	for _, q := range qers {
+		createdQERs[q.id] = true
+	}
+	for _, id := range rm.qers {
+		if createdQERs[id] {
+			// The message also brings this QER (a replacement): the removal
+			// says nothing about the QER that is live now, the way a PDR
+			// removed and created again is not a removal (forgetRemoval).
+			continue
+		}
+		if qerHeldByAPDR(s, id) {
+			// A PDR of the session names this QER, so its traffic is gated and
+			// metered by it: the CP function disassociates the PDRs first (an
+			// Update PDR that does not name the QER), the order the URR removal
+			// takes below and a dangling reference is refused in (resolve).
+			return fmt.Errorf("%w: the QER %d is still named by a PDR of the session",
+				errNotExpressible, id)
+		}
+		if entry := s.QERs[id]; entry != nil {
+			// The QER goes, and its meters go with the session's other ids at
+			// teardown (releaseSession): releasing them here would hand an id
+			// back to the pool that a refused modification restores the QER
+			// to -- and that another session would then police with while this
+			// one still names it.
+			s.removedQERs = append(s.removedQERs, entry)
+			delete(s.QERs, id)
+		}
+	}
+	for _, id := range rm.urrs {
 		if urrHeldByAPDR(s, id) {
 			// The URR measures the traffic of the PDRs that name it, and a
 			// report for a URR whose PDRs are still programmed would name a
@@ -1140,6 +1187,9 @@ func (c *Compiler) resolve(s *Session) error {
 		// rather than gating to a branch that is not in its chain.
 		p.buffer = c.cfg.Buffering != nil && far != nil && p.srcIfc != ie.SrcInterfaceAccess &&
 			far.apply&applyForw == 0 && far.apply&applyBuff != 0
+		// The report is the SMF's to ask for: NOCP is set with BUFF (8.2.26),
+		// and without it the held packets are reported to nobody.
+		p.notify = p.buffer && far.apply&applyNOCP != 0
 		p.drop = far == nil || (far.apply&applyForw == 0 && !p.buffer)
 		if !p.buffer {
 			// The episode is over: this PDR no longer holds packets, so a later
@@ -1167,7 +1217,13 @@ func (c *Compiler) resolve(s *Session) error {
 		for _, qid := range p.qerIDs {
 			entry := s.QERs[qid]
 			if entry == nil {
-				continue
+				// A PDR naming a QER the session does not hold: the SMF named
+				// something that is not there, and carrying the rule on without
+				// it would give the flow no gate and no meter -- enforcement
+				// the CP function asked for and silently did not get. Refused
+				// the way a dangling URR or BAR reference is.
+				return fmt.Errorf("%w: PDR %d's QER %d is not in the session",
+					errNotExpressible, p.id, qid)
 			}
 			if p.srcIfc == ie.SrcInterfaceAccess {
 				if entry.gateUL == ie.GateStatusClosed {
@@ -1426,6 +1482,21 @@ func egressName(ifc routing.Interface, d *routing.Domains) string {
 		return "the network instance"
 	}
 	return fmt.Sprintf("the network instance %q", ifc.Instance)
+}
+
+// qerHeldByAPDR reports whether a PDR the session still has names this QER.
+// Removing a QER the traffic of a live PDR is gated and metered by would leave
+// that PDR with no gate and no meter -- enforcement the SMF asked for and
+// silently did not get.
+func qerHeldByAPDR(s *Session, id uint32) bool {
+	for _, p := range s.PDRs {
+		for _, qid := range p.qerIDs {
+			if qid == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // urrHeldByAPDR reports whether a PDR the session still has names this URR.
@@ -3053,11 +3124,20 @@ func (c *Compiler) requestedWindows(ctx context.Context, req *message.SessionMod
 	return queried, removed, nil
 }
 
-func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint8, []uint32) {
-	var pdrs []uint16
-	var fars []uint32
-	var bars []uint8
-	var urrs []uint32
+// removals is the objects a Session Modification Request removes: the four
+// kinds of rule the session holds, each by its own id. A struct rather than a
+// list of returns because a message may remove any mixture of them, and the
+// order they are folded in is merge's business, not the parser's.
+type removals struct {
+	pdrs []uint16 // Remove PDR (7.5.4.1)
+	fars []uint32 // Remove FAR (7.5.4.3)
+	bars []uint8  // Remove BAR (7.5.4.5)
+	qers []uint32 // Remove QER (7.5.4.6)
+	urrs []uint32 // Remove URR (7.5.4.4)
+}
+
+func parseRemovals(ies []*ie.IE) removals {
+	var rm removals
 	for _, i := range ies {
 		switch i.Type {
 		case ie.RemovePDR:
@@ -3070,7 +3150,7 @@ func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint8, []uint32) {
 					continue
 				}
 				if id, err := c.PDRID(); err == nil {
-					pdrs = append(pdrs, id)
+					rm.pdrs = append(rm.pdrs, id)
 				}
 			}
 		case ie.RemoveFAR:
@@ -3083,7 +3163,7 @@ func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint8, []uint32) {
 					continue
 				}
 				if id, err := c.FARID(); err == nil {
-					fars = append(fars, id)
+					rm.fars = append(rm.fars, id)
 				}
 			}
 		case ie.RemoveBAR:
@@ -3096,7 +3176,20 @@ func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint8, []uint32) {
 					continue
 				}
 				if id, err := c.BARID(); err == nil {
-					bars = append(bars, id)
+					rm.bars = append(rm.bars, id)
+				}
+			}
+		case ie.RemoveQER:
+			children, err := i.RemoveQER()
+			if err != nil {
+				continue
+			}
+			for _, c := range children {
+				if c.Type != ie.QERID {
+					continue
+				}
+				if id, err := c.QERID(); err == nil {
+					rm.qers = append(rm.qers, id)
 				}
 			}
 		case ie.RemoveURR:
@@ -3109,12 +3202,12 @@ func parseRemovals(ies []*ie.IE) ([]uint16, []uint32, []uint8, []uint32) {
 					continue
 				}
 				if id, err := c.URRID(); err == nil {
-					urrs = append(urrs, id)
+					rm.urrs = append(rm.urrs, id)
 				}
 			}
 		}
 	}
-	return pdrs, fars, bars, urrs
+	return rm
 }
 
 func parsePDR(i *ie.IE) (pdrReq, error) {
@@ -3132,7 +3225,7 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 		switch c.Type {
 		case ie.PDRID:
 			if id, err := c.PDRID(); err == nil {
-				p.id = id
+				p.id, p.hasID = id, true
 			}
 		case ie.Precedence:
 			if v, err := c.Precedence(); err == nil {
@@ -3140,7 +3233,7 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 			}
 		case ie.FARID:
 			if id, err := c.FARID(); err == nil {
-				p.farID = id
+				p.farID, p.hasFarID = id, true
 			}
 		case ie.QERID:
 			if id, err := c.QERID(); err == nil {
@@ -3163,8 +3256,17 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 			}
 		}
 	}
-	if p.id == 0 {
+	if !p.hasID {
 		return pdrReq{}, errors.New("PDR without a PDR ID")
+	}
+	if !p.hasFarID {
+		// The PDR's FAR ID is mandatory (Table 7.5.2.2-1), and it is read as a
+		// flag because FAR 0 is a legal FAR: a PDR that carried none would
+		// otherwise resolve to the session's FAR 0 and forward, drop or buffer
+		// by another rule's instruction.
+		return pdrReq{}, fmt.Errorf(
+			"%w: PDR %d names no FAR, and the FAR ID is mandatory (Table 7.5.2.2-1)",
+			errMandatoryIE, p.id)
 	}
 	return p, nil
 }
@@ -3427,7 +3529,7 @@ func parseBAR(i *ie.IE) (barReq, error) {
 		switch c.Type {
 		case ie.BARID:
 			if id, err := c.BARID(); err == nil {
-				b.id = id
+				b.id, b.hasID = id, true
 			}
 		case ie.DLBufferingDuration:
 			d, err := c.DLBufferingDuration()
@@ -3454,7 +3556,7 @@ func parseBAR(i *ie.IE) (barReq, error) {
 			b.hasCount, b.count = true, uint32(n)
 		}
 	}
-	if b.id == 0 {
+	if !b.hasID {
 		return barReq{}, errors.New("BAR without a BAR ID")
 	}
 	return b, nil
@@ -3475,7 +3577,7 @@ func parseFAR(i *ie.IE) (farReq, error) {
 		switch c.Type {
 		case ie.FARID:
 			if id, err := c.FARID(); err == nil {
-				f.id = id
+				f.id, f.hasID = id, true
 			}
 		case ie.ApplyAction:
 			flags, err := c.ApplyAction()
@@ -3518,7 +3620,7 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			}
 		}
 	}
-	if f.id == 0 {
+	if !f.hasID {
 		return farReq{}, errors.New("FAR without a FAR ID")
 	}
 	return f, nil
@@ -3640,7 +3742,7 @@ func parseURR(i *ie.IE) (urrReq, error) {
 		switch c.Type {
 		case ie.URRID:
 			if id, err := c.URRID(); err == nil {
-				u.id = id
+				u.id, u.hasID = id, true
 			}
 		case ie.MeasurementMethod:
 			flags, err := c.MeasurementMethod()
@@ -3756,7 +3858,7 @@ func parseURR(i *ie.IE) (urrReq, error) {
 			u.linked = append(u.linked, id)
 		}
 	}
-	if u.id == 0 {
+	if !u.hasID {
 		return urrReq{}, errors.New("URR without a URR ID")
 	}
 	if u.create && (!u.hasMethod || !u.hasTriggers) {

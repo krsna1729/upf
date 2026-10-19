@@ -115,6 +115,24 @@ N6 and N9 per packet, which is what branching is, and `docs/router.md` names the
 seam (a FIB lookup on the packet path). The mean is unchanged: 750 / 11 = 68.18
 -> **68**.
 
+**2026-10-19 (four findings closed in the rule grammar): no cell moves.** The
+spec cross-check's list lost four entries, all of them grammar rather than
+sub-features. (1) A PDR naming a QER the session does not hold is refused with
+cause 73 (the `qerIDs` loop skipped it, so the flow ran ungated and unmetered);
+(2) NOCP is read (8.2.26), so a Downlink Data Report is owed only when the FAR
+asked for one -- block 7's DDN sub-feature *gains evidence* and its cell stays
+100: `ci/buffer-path.sh` is green with its stand-in SMF asking (BUFF\|NOCP), and
+its N4 arm said "want a Session Report Request" on the BUFF-only form first;
+(3) Remove QER is read and honoured (refused while a PDR of the session still
+names it, the URR removal's order), its meters held until teardown so a refused
+modification cannot hand a live meter to another session; (4) 0 is a legal PDR,
+FAR, BAR and URR id -- the IE's presence is tracked, not inferred from a zero --
+and a PDR that names no FAR is a missing mandatory IE (cause 69). Block 5's
+three sub-features are the gate, the MBR and GBR semantics, so its 100 stands
+untouched; block 7's recorded deviation (the DDN trigger is a poll at
+`-urr-interval`) is untouched too, since what changed is *when* a report is
+owed, not how soon the tick finds it. The mean is unchanged: **68**.
+
 ## What each number is made of
 
 | project | its mean rests on | weakest blocks |

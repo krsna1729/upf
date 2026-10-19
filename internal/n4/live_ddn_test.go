@@ -17,13 +17,16 @@ const ddnPDRID = 2
 
 // bufferedReportEstablishment is the session an SMF asks for when an idle UE has
 // downlink data waiting: the uplink PDR forwards, and the downlink PDR's FAR
-// asks for the packets to be *held* -- Apply Action BUFF and nothing else
-// (TS 29.244 8.2.26) -- with the BAR the CP function provisions and associates
-// to it (5.2.4.1, 7.5.2.6). No forwarding parameters on that FAR: there is no
-// tunnel for the UE while it is idle, which is exactly why the packets wait.
+// asks for the packets to be *held* -- Apply Action BUFF, and NOCP because this
+// SMF wants to hear about the first one (TS 29.244 8.2.26: BUFF without NOCP is
+// an instruction to hold the packets and say nothing, and this case's whole
+// subject is the report) -- with the BAR the CP function provisions and
+// associates to it (5.2.4.1, 7.5.2.6). No forwarding parameters on that FAR:
+// there is no tunnel for the UE while it is idle, which is exactly why the
+// packets wait.
 func bufferedReportEstablishment(seq uint32, cpSEID uint64) *message.SessionEstablishmentRequest {
 	const (
-		buff = 0x04 // Apply Action: BUFF (TS 29.244 8.2.26, octet 5 bit 3)
+		buff = 0x0c // Apply Action: BUFF (octet 5 bit 3) | NOCP (bit 4)
 		forw = 0x02 // Apply Action: FORW
 	)
 	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, seq, 0,

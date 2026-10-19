@@ -649,11 +649,33 @@ func TestTheDownlinkReportIsOwedOncePerBufferingEpisode(t *testing.T) {
 		t.Fatalf("a reading with no packet stamp owes %d reports: %+v", len(got), got)
 	}
 
-	// A packet arrived: one report, naming the PDR whose flow is holding it.
+	// A packet arrived and the FAR asked for no notification: the flow holds it
+	// and the CP function hears nothing. NOCP is the SMF's own field for this
+	// (8.2.26), so a Downlink Data Report sent without it is a message the SMF
+	// did not ask for -- and it is the arm this establishment exists in, its FAR
+	// carrying BUFF alone.
 	arrived := time.Now()
 	rec.counts = map[string][]bess.RuleCount{
 		"cnt_buf": {{ActionID: flow, Packets: 3, Octets: 153, First: arrived, Last: arrived}},
 	}
+	if got := c.EvaluateDownlinks(context.Background()); len(got) != 0 {
+		t.Fatalf("a BUFF FAR that named no NOCP owed %d reports: %+v", len(got), got)
+	}
+
+	// Then the SMF asks to be told. The episode is the same one -- the packets
+	// are still held -- so the report is owed now, and it carries the packet
+	// that arrived while nobody was listening: what the reading is windowed by
+	// is the counter's own stamp, and that window is still open.
+	ask := message.NewSessionModificationRequest(0, 0, seid, 6, 0,
+		ie.NewUpdateFAR(
+			ie.NewFARID(2),
+			ie.NewApplyAction(applyBuff|applyNOCP),
+			ie.NewBARID(1),
+		))
+	if got := cause(t, c.Modify(ask)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification that set NOCP answered cause %d", got)
+	}
+
 	owed := c.EvaluateDownlinks(context.Background())
 	if len(owed) != 1 || len(owed[0].PDRs) != 1 || owed[0].PDRs[0] != 2 || owed[0].SEID != seid {
 		t.Fatalf("the report is %+v, want one naming PDR 2 of session %d", owed, seid)
@@ -700,7 +722,7 @@ func TestTheDownlinkReportIsOwedOncePerBufferingEpisode(t *testing.T) {
 	mod = message.NewSessionModificationRequest(0, 0, seid, 8, 0,
 		ie.NewUpdateFAR(
 			ie.NewFARID(2),
-			ie.NewApplyAction(applyBuff),
+			ie.NewApplyAction(applyBuff|applyNOCP),
 			ie.NewBARID(1),
 		))
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
