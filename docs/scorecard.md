@@ -96,6 +96,25 @@ above: 100+100+100+100+100+100+100+0+0+50+0 = **750**, 750 / 11 = 68.18 →
 `ci/buffer-path.sh` that carries such a rule end to end — the work is named in
 each block below.
 
+**2026-10-19 (the PFCP interface grammar, and the subscriber's ARP answer):
+no cell moves.** Two things landed, both live-armed in `ci/iface-path.sh`, and
+neither is one of the blocks' sub-features. (1) A PDI's Source Interface now
+chooses the chain and a FAR's Destination Interface the egress, from the
+deployment's own table (`-instances` keys), every value served or refused with
+its cause: block 4's five sub-features are precedence, F-TEID, UE IP, SDF and
+NI/QFI -- the interface values are not scored, so the cell stays 80. (2) A live
+session's UE address is answered over ARP by our own `upf_arp_responder` (the
+fork's `ArpResponder` refuses the write a session needs: its resource requires
+paused workers), which is a datapath fact, not a block: block 8's five are decap,
+encap, echo, end marker and the DSCP copy. Block 11 *gains evidence* -- the lane
+byte-checks a session's FAR leaving by a tunnel out of its instance (the N9
+egress) rather than by the plain hop, and the 5G VN re-injection into the
+subscriber-side table -- but its cell stays **50**, because the egress is
+resolved at installation, one hop per instance: a packet cannot choose between
+N6 and N9 per packet, which is what branching is, and `docs/router.md` names the
+seam (a FIB lookup on the packet path). The mean is unchanged: 750 / 11 = 68.18
+-> **68**.
+
 ## What each number is made of
 
 | project | its mean rests on | weakest blocks |
@@ -459,7 +478,14 @@ domains (the graph's `Vif` writes the domain, the selector's key is (route
 domain, UE address)), both directions reaching their own network, and the
 fail-first that names the key: with `route_domain` dropped, the two sessions'
 rules are one engine key, so the campus establishment is refused with cause 73
-(finding 21) instead of silently taking the internet frame.
+(finding 21) instead of silently taking the internet frame. Since 2026-10-19 an instance's egresses are the deployment's
+own table, and `ci/iface-path.sh` byte-checks that each FAR's Destination
+Interface leaves by the exit it names -- the data network's hop with its L2
+pair, a tunnel out of the instance (N9: the G-PDU carries the FAR's TEID), the
+service LAN's, and the 5G VN re-injection into the subscriber-side table -- and
+refuses a value the instance does not declare (cause 73). What is still not
+there: per-packet branching (the egress is resolved when the session is
+installed) and a peer UPF on the far end of the N9 tunnel.
 
 **Field.** OMEC has ULCL/N9 (50); nothing else claims it.
 
