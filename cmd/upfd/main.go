@@ -144,6 +144,13 @@ func run() error {
 	countersDL := flag.String("counters-dl", "cnt_dl",
 		"the downlink UrrCount module (per-rule usage counters); empty: the graph charges nothing")
 	tunnels := flag.String("tunnels", "enc", "the GtpuEncap module (per-session downlink parameters)")
+	tunnelsUL := flag.String("tunnels-ul", "enc",
+		"the GtpuEncap module for uplink forwards that add an outer header of their own "+
+			"(Destination Interface Access or Core with an Outer Header Creation: indirect "+
+			"forwarding and the uplink of an N9 tunnel). A deployment with one encap module "+
+			"names it in both flags, which is what the defaults say; empty means the uplink "+
+			"has none, and a FAR that needs one is then refused with cause 73 rather than "+
+			"compiled to a rule the encap drops for want of a session record")
 	bufferStore := flag.String("buffer-store", "",
 		"the packet store module a FAR whose Apply Action is BUFF holds its packets in: with "+
 			"-buffer-counter and -buffer-gate, buffering is served end to end -- the first "+
@@ -313,7 +320,7 @@ func run() error {
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
 			endMarker: *endMarker,
 			actionsUL: *actionsUL, metersUL: *metersUL,
-			actionsDL: *actionsDL, metersDL: *metersDL, tunnels: *tunnels,
+			actionsDL: *actionsDL, metersDL: *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
 			countersUL: *countersUL, countersDL: *countersDL,
 			bufferStore: *bufferStore, bufferCounter: *bufferCounter, bufferGate: uint32(*bufferGate),
 		}))
@@ -771,6 +778,7 @@ type graphArgs struct {
 	bufferGate         uint32
 	countersDL         string
 	tunnels            string
+	tunnelsUL          string
 	endMarker          string
 }
 
@@ -877,7 +885,14 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			Actions:  a.actionsUL,
 			Meters:   a.metersUL,
 			Counters: a.countersUL,
-			NextHop:  a.n6NextHop,
+			// An uplink forward can add an outer header of its own: indirect
+			// data forwarding (Destination Interface Access) and the uplink of
+			// an N9 tunnel (Destination Interface Core with an Outer Header
+			// Creation). Its record goes in the same encap module the downlink
+			// uses unless the graph has a second one -- the action ids are the
+			// session's, so one table holds both directions' records.
+			Tunnels: a.tunnelsUL,
+			NextHop: a.n6NextHop,
 		},
 		Down: session.Direction{
 			PDRTable:  a.pdrTableDL,

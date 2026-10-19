@@ -265,7 +265,12 @@ type Direction struct {
 	// correct for a graph whose chain has no ActionTable at all.
 	NextHop uint32
 	// Tunnels is the GtpuEncap module whose per-session records the direction
-	// writes (downlink only; empty for the uplink).
+	// writes: the downlink's GTP-U tunnel toward the gNB, and an uplink forward
+	// that adds an outer header of its own (indirect data forwarding, or the
+	// uplink of an N9 tunnel). One deployment usually has one encap module and
+	// names it in both directions -- the action ids are the session's, so one
+	// module holds both directions' records. A direction with no module refuses
+	// such a forward rather than compiling a rule the encap would drop.
 	Tunnels string
 	// Counters is the UrrCount module this direction's per-rule counters live
 	// in ("cnt_ul", "cnt_dl"; empty for a graph with no usage reporting). A

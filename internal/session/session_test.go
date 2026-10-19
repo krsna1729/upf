@@ -348,6 +348,10 @@ func testConfig() Config {
 			Meters:    "mt_ul",
 			Counters:  "cnt_ul",
 			NextHop:   1,
+			// An uplink forward can add an outer header of its own (indirect
+			// data forwarding, the uplink of an N9 tunnel): its record goes in
+			// the deployment's one encap module, the same the downlink uses.
+			Tunnels: "enc",
 		},
 		Down: Direction{
 			PDRTable:  "pdr_dl",
