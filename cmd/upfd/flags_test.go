@@ -7,8 +7,58 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/krsna1729/upf/internal/routing"
 	"github.com/krsna1729/upf/internal/session"
 )
+
+// TestParseInstancesReadsTheEgresses: each *-next-hop key is one egress of the
+// instance, keyed by the FAR Destination Interface value and by whether the
+// forward adds an outer header, and the ARP pair is the interface's identity
+// on the data network.
+func TestParseInstancesReadsTheEgresses(t *testing.T) {
+	d, err := parseInstances(
+		"name=internet,domain=1,next-hop=1,tunnel-next-hop=3,sgi-lan-next-hop=4,arp=arp_n6,arp-mac=02:00:00:00:06:01;"+
+			" name=vn,domain=2,vn-next-hop=5", 4)
+	if err != nil {
+		t.Fatalf("the deployment was refused: %v", err)
+	}
+	internet, ok := d.Lookup("internet")
+	if !ok {
+		t.Fatal("internet did not resolve")
+	}
+	for _, c := range []struct {
+		name string
+		e    routing.Egress
+		want uint32
+	}{
+		{"a plain forward toward the data network", routing.Egress{DestIfc: 1}, 1},
+		{"a tunnel out of the instance", routing.Egress{DestIfc: 1, Tunnel: true}, 3},
+		{"a forward to the service LAN", routing.Egress{DestIfc: 2}, 4},
+	} {
+		if hop, ok := internet.Hop(c.e); !ok || hop != c.want {
+			t.Errorf("%s: hop %d (found %v), want %d", c.name, hop, ok, c.want)
+		}
+	}
+	if internet.NextHop != 1 {
+		t.Errorf("the instance's own next hop is %d, want next-hop=1", internet.NextHop)
+	}
+	if internet.ARP != "arp_n6" || internet.ARPMAC != [6]byte{0x02, 0, 0, 0, 6, 1} {
+		t.Errorf("the ARP identity is %q %x, want arp_n6 and 02:00:00:00:06:01", internet.ARP, internet.ARPMAC)
+	}
+	if hop, ok := internet.Hop(routing.Egress{DestIfc: 5}); ok || hop != 0 {
+		t.Errorf("internet declares a 5G VN egress it did not ask for: %d (found %v)", hop, ok)
+	}
+	vn, ok := d.Lookup("vn")
+	if !ok {
+		t.Fatal("vn did not resolve")
+	}
+	if hop, ok := vn.Hop(routing.Egress{DestIfc: 5}); !ok || hop != 5 {
+		t.Errorf("the 5G VN instance's re-injection hop is %d (found %v), want 5", hop, ok)
+	}
+	if hop, ok := vn.Hop(routing.Egress{DestIfc: 1}); ok || hop != 0 {
+		t.Errorf("vn declares a data-network egress it did not ask for: %d (found %v)", hop, ok)
+	}
+}
 
 // TestParseInstancesReadsTheDeployment: the flag is the deployment's interfaces,
 // and what it builds is what the compiler resolves a PDI's Network Instance
@@ -61,9 +111,17 @@ func TestParseInstancesRefuses(t *testing.T) {
 		{"no name", "domain=0", 2, "needs name="},
 		{"no domain", "name=internet", 2, "needs domain="},
 		{"a field that is not key=value", "name=internet,domain", 2, "is not key=value"},
-		{"an unknown field", "name=internet,domain=0,vif=1", 2, "is not name, domain, next-hop or pool"},
+		{"an unknown field", "name=internet,domain=0,vif=1", 2, "is not name, domain, next-hop"},
 		{"a domain that is not a number", "name=internet,domain=one", 2, "domain \"one\""},
 		{"a next hop that is not a number", "name=internet,domain=0,next-hop=two", 2, "next-hop \"two\""},
+		{"a tunnel hop that is not a number", "name=internet,domain=0,tunnel-next-hop=x", 2, "tunnel-next-hop \"x\""},
+		{"an egress whose hop is 0", "name=internet,domain=0,sgi-lan-next-hop=0", 2,
+			"next hop for destination interface 2 is 0"},
+		{"an ARP responder with no MAC", "name=internet,domain=0,arp=arp_n6", 2, "needs arp-mac"},
+		{"an ARP MAC with no responder", "name=internet,domain=0,arp-mac=02:00:00:00:06:01", 2,
+			"no arp=<module> to answer"},
+		{"an ARP MAC that is not a MAC", "name=internet,domain=0,arp=arp_n6,arp-mac=arp", 2,
+			"arp-mac \"arp\""},
 		{"a pool that is not a prefix", "name=internet,domain=0,pool=10.0.0.0", 2, "pool \"10.0.0.0\""},
 		{"a domain beyond the router's", "name=internet,domain=2", 2, "beyond the router's 2"},
 	} {
