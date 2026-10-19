@@ -4743,3 +4743,37 @@ func TestRuleKeysAreCanonical(t *testing.T) {
 		}
 	}
 }
+
+// TestAPDIsDestinationAndTheSDFsMustAgree: for an Access PDR the SMF's filter
+// is swapped (5.2.1A.2A), so its source is the side the packet's destination
+// carries -- and a PDI whose UE IP address IE (8.2.62 bit 3) says its address
+// is the destination names the same field. When the two agree (the prefix
+// contains the address), the tighter of them, the address, is the field; when
+// the filter names a source outside it, the SMF described a packet the rule
+// cannot carry, and the session is refused rather than compiled from one of the
+// two readings.
+func TestAPDIsDestinationAndTheSDFsMustAgree(t *testing.T) {
+	establish := func(sdf string) message.Message {
+		t.Helper()
+		c := New(testConfig(), &recorder{}, quietLogger())
+		req := message.NewSessionEstablishmentRequest(0, 0, 0x5564, 1, 0,
+			ie.NewFSEID(0x5564, nil, nil),
+			ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+					ie.NewFTEID(0x01, 0x55667788, net.ParseIP("192.0.2.1"), nil, 0),
+					// V4 | S/D: the address is the packet's destination.
+					ie.NewUEIPAddress(0x06, "192.0.2.9", "", 0, 0),
+					ie.NewSDFFilter(sdf, "", "", "", 0)),
+				ie.NewFARID(1)),
+			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		)
+		return c.Establish(req)
+	}
+	if got := cause(t, establish("permit out udp from 192.0.2.9 67 to any")); got != ie.CauseRequestAccepted {
+		t.Errorf("a filter naming the PDI's destination answered cause %d, want accepted", got)
+	}
+	if got := cause(t, establish("permit out udp from 198.51.100.1 67 to any")); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a filter naming another destination answered cause %d, want a rule failure", got)
+	}
+}

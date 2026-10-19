@@ -703,11 +703,14 @@ type pdr struct {
 	// PDR's whole new form -- and read wherever a PDR is put in a chain (the
 	// direction), keyed for a look-up (the downlink selector) or proxied for
 	// (the subscriber ARP answer).
-	down   bool
-	ueIP   netip.Addr
-	farID  uint32
-	qerIDs []uint32
-	urrIDs []uint32
+	down bool
+	ueIP netip.Addr
+	// ueIPDst is 8.2.62's bit 3 as the PDI carried it: set, the address is the
+	// packet's destination (ueAddr says what that means for the session).
+	ueIPDst bool
+	farID   uint32
+	qerIDs  []uint32
+	urrIDs  []uint32
 
 	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
 	// empty when the SMF named none: resolve turns it into the deployment's

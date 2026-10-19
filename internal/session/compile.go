@@ -130,7 +130,13 @@ type pdrReq struct {
 	precedence uint32
 	srcIfc     uint8
 	ueIP       netip.Addr
-	sdfs       []*sdfFilter // the PDI's SDF filters, any of which matches
+	// ueIPDst is 8.2.62's bit 3 (S/D) as this PDI carries it: set, the UE IP
+	// address IE names the packet's *destination*. Clear is the source -- and
+	// what every other request here sends, whose side therefore stays the
+	// direction's own (an Access packet's UE is its source, a Core one's its
+	// destination), which is also what an SMF that omits the bit means.
+	ueIPDst bool
+	sdfs    []*sdfFilter // the PDI's SDF filters, any of which matches
 	// hasFarID says the FAR ID IE was there; the FAR it names is mandatory in
 	// a Create PDR (Table 7.5.2.2-1), and FAR 0 is a legal FAR, so a PDR that
 	// named none must not resolve to it.
@@ -981,7 +987,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		pdr := &pdr{
 			id: p.id, precedence: p.precedence, srcIfc: p.srcIfc,
 			down: downSide(p.srcIfc),
-			ueIP: p.ueIP, sdfs: p.sdfs, farID: p.farID,
+			ueIP: p.ueIP, ueIPDst: p.ueIPDst, sdfs: p.sdfs, farID: p.farID,
 			qerIDs: p.qerIDs, urrIDs: p.urrIDs,
 			instance: p.instance, qfis: p.qfis,
 		}
@@ -1055,7 +1061,10 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				pdr.teid = id
 			}
 		}
-		if p.ueIP.IsValid() {
+		// The session's UE address is named by a PDI whose address is on the
+		// UE's side of the packet (ueAddr); an Access PDI's destination is
+		// some other node's address.
+		if p.ueIP.IsValid() && (p.srcIfc != ie.SrcInterfaceAccess || !p.ueIPDst) {
 			s.UEIP = p.ueIP
 		}
 		if old != nil {
@@ -1311,7 +1320,7 @@ func (c *Compiler) resolve(s *Session) error {
 			// session's decapsulated packets at that precedence.
 			p.ueIP = s.UEIP
 		}
-		if c.cfg.Instances != nil && p.ueIP.IsValid() && !ifc.Serves(p.ueIP) {
+		if c.cfg.Instances != nil && p.ueAddr() && !ifc.Serves(p.ueIP) {
 			// The deployment says what each interface serves: an address
 			// outside its pool is a session this UPF places nowhere, and
 			// answering a success would leave the SMF believing in a path no
@@ -2510,6 +2519,21 @@ func ones(n int) []byte {
 	return b
 }
 
+// ueAddr reports whether this PDR's UE IP address IE names the session's UE
+// address rather than another node's. 8.2.62's bit 3 says which side of the
+// packet the address appears on, and the UE is on the access side of an uplink
+// packet (its source) and on the core side of a downlink one (its
+// destination). An Access PDR whose bit says destination -- the CP function's
+// address for DHCP or RADIUS, 5.2.1's own example -- carries some other node
+// there: it is a rule key, not what the session's UE address is, so it neither
+// becomes the session's address nor is asked of the interface's pool.
+func (p *pdr) ueAddr() bool {
+	if !p.ueIP.IsValid() {
+		return false
+	}
+	return p.srcIfc != ie.SrcInterfaceAccess || !p.ueIPDst
+}
+
 // host is a field constrained to one IPv4 address: the UE's, where a PDI names
 // it. Both ways of not having one are inexpressible. An address the table's
 // four bytes cannot carry would otherwise be *unconstrained*, and a masked-out
@@ -2587,12 +2611,23 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 				m, err := pref(sd.src)
 				return m, err == nil, err
 			}
+			if p.ueIPDst {
+				// 8.2.62's bit 3: this PDI's address is a destination, so
+				// this side is whatever the filter names or open -- the
+				// address belongs in the other field.
+				return match{}, false, nil
+			}
 			return host(p.ueIP)
 		}
 		if sd != nil && sd.srcAssigned {
 			// "from assigned": the UE is the flow's source. On the uplink that
 			// is the fallback above; on the downlink it must be said here,
 			// because the SDF carries no address of its own for this side.
+			if p.ueIPDst {
+				return match{}, false, fmt.Errorf(
+					"%w: the PDI's UE IP address %s is the destination and the SDF filter makes it the source",
+					errNotExpressible, p.ueIP)
+			}
 			return host(p.ueIP)
 		}
 		if sd != nil && sd.srcOK {
@@ -2602,6 +2637,21 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 		return match{}, false, nil
 	case DstIP:
 		if p.srcIfc == ie.SrcInterfaceAccess {
+			// The address this PDI named as its destination (8.2.62 bit 3) is
+			// this field's, and a filter naming another destination is a
+			// contradiction one key cannot carry.
+			if p.ueIPDst {
+				// A filter that names a destination containing this address
+				// says nothing the exact address does not (the tighter of the
+				// two is the address); one naming a destination outside it
+				// describes a packet the key has no room for.
+				if sd != nil && sd.dstOK && !sd.dstAssigned && !sd.dst.Contains(p.ueIP) {
+					return match{}, false, fmt.Errorf(
+						"%w: the PDI's UE IP address %s is the destination and the SDF filter names %s",
+						errNotExpressible, p.ueIP, sd.dst)
+				}
+				return host(p.ueIP)
+			}
 			// The uplink is chosen by its UE address (the source); its
 			// destination is whatever the swapped filter names -- the peer on
 			// the data network -- or open.
@@ -2726,13 +2776,25 @@ func firewallRule(p *pdr) (map[string]any, error) {
 		// filter names -- the peer on the data network -- or open.
 		if sd != nil && sd.srcOK && !sd.srcAssigned {
 			src = sd.src
-		} else {
+		} else if !p.ueIPDst {
+			// The address's side is the destination (8.2.62 bit 3), so it is
+			// not this rule's source; an unnamed source stays open.
 			var err error
 			if src, err = firewallHost(p.ueIP); err != nil {
 				return nil, err
 			}
 		}
 		switch {
+		case p.ueIPDst:
+			if sd != nil && sd.dstOK && !sd.dstAssigned && !sd.dst.Contains(p.ueIP) {
+				return nil, fmt.Errorf(
+					"%w: the PDI's UE IP address %s is the destination and the SDF filter names %s",
+					errNotExpressible, p.ueIP, sd.dst)
+			}
+			var err error
+			if dst, err = firewallHost(p.ueIP); err != nil {
+				return nil, err
+			}
 		case sd != nil && sd.dstAssigned:
 			var err error
 			if dst, err = firewallHost(p.ueIP); err != nil {
@@ -2747,6 +2809,11 @@ func firewallRule(p *pdr) (map[string]any, error) {
 			// "from assigned": the UE is the flow's source, which an SDF
 			// filter can only say with that word -- it carries no address of
 			// its own for that side.
+			if p.ueIPDst {
+				return nil, fmt.Errorf(
+					"%w: the PDI's UE IP address %s is the destination and the SDF filter makes it the source",
+					errNotExpressible, p.ueIP)
+			}
 			var err error
 			if src, err = firewallHost(p.ueIP); err != nil {
 				return nil, err
@@ -3420,6 +3487,9 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if err != nil {
 				return fmt.Errorf("UE IP address: %w", err)
 			}
+			// 8.2.62's bit 3 names the side the address appears on; it is only
+			// read here, in the PDI (the spec says to set it 0 elsewhere).
+			p.ueIPDst = c.HasSD()
 			if c.HasCHV4() || c.HasCHV6() {
 				// CHV4/CHV6 (TS 29.244 8.2.62): the SMF asks the UP function to
 				// choose an address of that family -- the UEIP feature, which
