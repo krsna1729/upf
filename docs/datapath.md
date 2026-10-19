@@ -36,7 +36,7 @@ downstream is keyed by.
                                         |                     +---------------------+
                                         v                     | mt_ul_read          |
                               +-------------------+           |  MetadataTest       |  (a write-only attribute
-                              | echo0  GtpuEcho   |           |  reads upf_teid     |   gets no offset unless
+                              | echo0  GtpuResponder   |           |  reads upf_teid     |   gets no offset unless
                               |  type 1 -> type 2 |
                               |  G-PDU -> type 26 |           +----------+----------+   something reads it)
                               +---------+---------+                      | 0
@@ -192,7 +192,7 @@ built only against the installed `bess-dev` stage.
 |---|---|---|---|---|
 | `gtpu_decap.{h,cc}` | `gtpu_decap` | none | `port_`, two attribute ids | all |
 | `gtpu_encap.{h,cc}` | `gtpu_encap` | `<module>/tunnels` (`TunnelKey{action_id}`) | `src_ip_`, `max_tunnels_` | all |
-| `gtpu_echo.{h,cc}` | `gtpu_echo` | none | `port_`, a Recovery Time Stamp | all |
+| `gtpu_responder.{h,cc}` | `gtpu_responder` | none | `port_`, a Recovery Time Stamp | all |
 | `urr_count.{h,cc}` | `urr_count` | `<module>/counters` (`CounterKey{action_id}`) | per-worker cell planes, per-rule stamp pairs | all |
 | `arp_responder.{h,cc}` | `upf_arp_responder` | `<module>/entries` (IPv4, host order) | the slot table's mask and its live count | all |
 
@@ -272,7 +272,7 @@ second), and no further extension header. That is 8 bytes of the packet's
 headroom, sized before the prepend; a record with `qfi == 0` writes none of it,
 so the wire is byte for byte what it was before the field existed.
 
-### `gtpu_echo` — path management, and the tunnels that are gone
+### `gtpu_responder` — path management, and the tunnels that are gone
 
 Answers the two GTP-U messages a UPF sees on a TEID that names no session:
 

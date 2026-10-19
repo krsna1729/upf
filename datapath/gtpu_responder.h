@@ -25,16 +25,16 @@
 // Indication has S clear, TEID 0 (the peer knows no tunnel toward this node),
 // and one TEID IE naming the TEID it used -- 5 bytes after the header. Both
 // copy nothing but their tail, allocate nothing, and read no session state.
-class GtpuEcho final : public Module {
+class GtpuResponder final : public Module {
  public:
   static const gate_idx_t kNumOGates = 1;
 
   // No resource table: an echo belongs to the path, not to a session.
   static const ResourceTables resource_tables;
 
-  GtpuEcho() : Module() { max_allowed_workers_ = Worker::kMaxWorkers; }
+  GtpuResponder() : Module() { max_allowed_workers_ = Worker::kMaxWorkers; }
 
-  CommandResponse Init(const upf::pb::GtpuEchoArg &arg);
+  CommandResponse Init(const upf::pb::GtpuResponderArg &arg);
 
   void ProcessBatch(Context *ctx, bess::PacketBatch *batch) override;
 

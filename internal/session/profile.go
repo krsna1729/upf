@@ -131,7 +131,7 @@ func ProfileFor(name string) (Profile, error) {
 		return Profile{
 			Name:    GenericProfile,
 			Graph:   "deploy/upf.yaml",
-			Modules: []string{"GtpuDecap", "GtpuEncap", "GtpuEcho", "UrrCount"},
+			Modules: []string{"GtpuDecap", "GtpuEncap", "GtpuResponder", "UrrCount"},
 			Up:      Strategy{Table: "pdr_ul"},
 			Down:    Strategy{Table: "pdr_dl"},
 		}, nil
@@ -147,7 +147,7 @@ func ProfileFor(name string) (Profile, error) {
 		return Profile{
 			Name:    CustomProfile,
 			Graph:   "deploy/custom-pdrmatch.yaml",
-			Modules: []string{"GtpuDecap", "GtpuEncap", "GtpuEcho", "UrrCount", "PdrMatch"},
+			Modules: []string{"GtpuDecap", "GtpuEncap", "GtpuResponder", "UrrCount", "PdrMatch"},
 			Up:      Strategy{PdrMatch: "pdr_match_ul"},
 			Down: Strategy{
 				PdrMatch:        "pdr_match_dl",

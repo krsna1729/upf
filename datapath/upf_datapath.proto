@@ -50,10 +50,10 @@ message UpfArpResponderEntryValue {
   string mac_addr = 1;
 }
 
-// GtpuEchoArg configures the GTP-U echo responder (TS 29.281 7.2). The reply
+// GtpuResponderArg configures the GTP-U echo responder (TS 29.281 7.2). The reply
 // is the request with its addresses and ports swapped and its payload dropped,
 // so the module needs no other argument.
-message GtpuEchoArg {
+message GtpuResponderArg {
   // The UDP port an Echo Request must arrive on. 0 means the standard GTP-U
   // port 2152; the codec compares the field exactly.
   uint32 port = 1;
@@ -91,7 +91,7 @@ message GtpuEncapArg {
 // writes them as part of the session's single transaction, in the order
 // docs/design.md gives (resources, then the action record, then the rule that
 // names it). Neither resource references another, so a session change is one
-// flat transaction. GtpuDecap and GtpuEcho own no resource: a session's TEID is
+// flat transaction. GtpuDecap and GtpuResponder own no resource: a session's TEID is
 // a rule of the classifier in front of the decap, and an echo belongs to the
 // path. The packet store's per-flow resource is BESS's own module, not this
 // plugin's, and is documented there.

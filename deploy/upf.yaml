@@ -151,7 +151,7 @@ modules:
       default_gate: 1
 
   - name: echo0
-    mclass: GtpuEcho
+    mclass: GtpuResponder
     # No argument: the standard GTP-U port 2152. It declares no metadata
     # attribute, so it does not move the layout of the ones above.
 
