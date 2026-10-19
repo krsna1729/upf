@@ -14,6 +14,7 @@
 
 #include "commands.h"
 #include "framework/plugin.h"
+#include "pdu_session_qfi.h"
 #include "tunnel/tunnel.h"
 #include "utils/endian.h"
 #include "utils/ether.h"
@@ -28,8 +29,14 @@ namespace {
 // 5.2.2.7-1): what the chain below is walked for.
 constexpr uint8_t kPduSessionContainer = 0x85;
 
-// The QFI a G-PDU's next-extension-header chain carries, or 0 when the chain
-// holds no PDU Session Container. The tunnel library walks and validates the
+// The `qfi` attribute's contract (pdu_session_qfi.h): what this module writes
+// when the chain carried no PDU Session Container at all.
+using upf::kNoPduSessionQfi;
+
+// The QFI a G-PDU's next-extension-header chain carries, or kNoPduSessionQfi
+// when the chain holds no PDU Session Container (pdu_session_qfi.h: the
+// attribute's contract, and why the "no container" value cannot be 0). The
+// tunnel library walks and validates the
 // chain but reports only the first header's type, so the walk is repeated here
 // for the one byte the container carries: the QFI sits in the low six bits of
 // its second content octet (TS 38.415 5.5.2.1: PPP and RQI above it in the
@@ -40,11 +47,11 @@ uint8_t PduSessionQfi(std::span<const uint8_t> frame, size_t gtpu, size_t end) n
   // names the first extension header -- is present only if a flag of octet 1
   // is set (TS 29.281 5.1); without the E flag there is no chain to walk.
   if ((frame[gtpu] & 0x04) == 0) {
-    return 0;
+    return kNoPduSessionQfi;
   }
   const size_t limit = std::min(end, frame.size());
   if (gtpu + bess::tunnel::kGtpuBaseBytes + 4 > limit) {
-    return 0;
+    return kNoPduSessionQfi;
   }
   uint8_t next = frame[gtpu + bess::tunnel::kGtpuBaseBytes + 3];
   size_t off = gtpu + bess::tunnel::kGtpuBaseBytes + 4;
@@ -53,11 +60,11 @@ uint8_t PduSessionQfi(std::span<const uint8_t> frame, size_t gtpu, size_t end) n
     // in that octet and the next-type octet that ends the header -- then the
     // content, then the next header's type.
     if (n > 16 || off + 4 > limit) {
-      return 0;
+      return kNoPduSessionQfi;
     }
     const size_t len = size_t{frame[off]} * 4;
     if (len == 0 || off + len > limit) {
-      return 0;
+      return kNoPduSessionQfi;
     }
     if (next == kPduSessionContainer) {
       // The length is in 4-octet units, so a non-zero one covers at least the
@@ -67,7 +74,8 @@ uint8_t PduSessionQfi(std::span<const uint8_t> frame, size_t gtpu, size_t end) n
     next = frame[off + len - 1];
     off += len;
   }
-  return 0;
+  // The chain ended without a PDU Session Container.
+  return kNoPduSessionQfi;
 }
 
 }  // namespace
@@ -89,8 +97,9 @@ CommandResponse GtpuDecap::Init(const upf::pb::GtpuDecapArg &arg) {
     return CommandFailure(-teid_attr_, "add_metadata_attr() failed");
   }
 
-  // The QFI of the PDU Session Container, one byte: 0 (no container) to 63
-  // (TS 38.415 5.5.3.3's six-bit field). Like the TEID above it is written,
+  // The QFI of the PDU Session Container, one byte: 0..63 (TS 38.415 5.5.3.3's
+  // six-bit field) or kNoPduSessionQfi when the G-PDU carried no container
+  // (pdu_session_qfi.h). Like the TEID above it is written,
   // not read: the modules that consume it -- the uplink PDR table's match
   // fields -- own the reader side of the attribute.
   qfi_attr_ = AddMetadataAttr("qfi", sizeof(uint8_t), AccessMode::kWrite);
@@ -136,13 +145,15 @@ void GtpuDecap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     set_attr_with_offset<bess::utils::be32_t>(
         teid_offset, pkt, bess::utils::be32_t(info.tunnel.id));
 
-    // The QFI of the PDU Session Container the chain carries, 0 when it
-    // carries none. The zero is written, not skipped: a packet's metadata
-    // area is reused mbuf space that nothing clears between packets, so a
-    // G-PDU without a container would otherwise hand the previous packet's
-    // QFI to the table that matches on it -- the reason WildcardMatch writes
-    // its action id on a miss too (core/modules/wildcard_match.cc). 0 is the
-    // safe "no container" value: it is the QFI no flow uses.
+    // The QFI of the PDU Session Container the chain carries, or
+    // kNoPduSessionQfi when it carries none. The write happens either way: a
+    // packet's metadata area is reused mbuf space that nothing clears between
+    // packets, so a G-PDU without a container would otherwise hand the
+    // previous packet's QFI to the table that matches on it -- the reason
+    // WildcardMatch writes its action id on a miss too
+    // (core/modules/wildcard_match.cc). The "no container" value sits above
+    // the QFI range, because 0 is a flow a real gNB sends
+    // (pdu_session_qfi.h).
     const uint8_t qfi = PduSessionQfi(
         frame, size_t{outer.l4_offset} + bess::tunnel::kUdpBytes,
         info.tunnel.inner_offset);
@@ -196,5 +207,5 @@ BESS_PLUGIN("upf_datapath", "0.2.0");
 ADD_MODULE(GtpuDecap, "gtpu_decap",
            "decapsulates GTP-U (outer Eth/IP/UDP/GTP-U) to a frame holding the "
            "inner IP packet, writing the TEID to `upf_teid` and the QFI of a "
-           "PDU Session Container to `qfi` (0 when none was carried); the "
+           "PDU Session Container to `qfi` (255 when none was carried); the "
            "F-TEID match is the classifier in front of it")

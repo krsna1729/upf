@@ -144,10 +144,12 @@ type pdrReq struct {
 	instance string
 
 	// qfis are the PDI's QFIs (TS 29.244 8.2.89): the QoS flows this rule
-	// selects, each one of 1..63, any of which matches. A PDI that names none
+	// selects, each one of 0..63, any of which matches. A PDI that names none
 	// is the session's general rule for the flow, and the uplink table's qfi
 	// field is masked out of its key -- so it keeps matching where a
-	// QFI-specific rule does not.
+	// QFI-specific rule does not. A named 0 is a flow like any other: the
+	// decap writes a value above the range for a packet with no container
+	// (datapath/pdu_session_qfi.h).
 	qfis []uint8
 
 	// An uplink PDR's PDI names an F-TEID: the TEID the SMF expects us to
@@ -3273,23 +3275,20 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 
 // qfiIE reads a QFI IE (TS 29.244 8.2.89): the six-bit QoS Flow Identifier a
 // PDI or a QER names. The spec's value range is 0..63 (TS 38.415 5.5.3.3, to
-// which 8.2.89 refers); this UP takes 1..63, because the decap writes 0 into
-// the `qfi` attribute for a packet with no PDU Session Container, so a rule
-// keyed on 0 could not be told from "no container" -- a limit of this
-// implementation, not of the spec. A byte above 63 is a flow no packet
-// carries: a rule keyed on one would match nothing, and the session would
-// stand while its uplink blackholed. Both are refused with the cause the SMF
-// can fix rather than carried into a key. For a QER's QFI (the value the
-// encap writes into the downlink container) the decap's sentinel is not in
-// play, and a QER's QFI 0 is carried as "mark nothing" (parseQER), so only
-// the PDI's keeps the refusal.
+// which 8.2.89 refers), and 0 is a flow a gNB can send, so it is taken like
+// any other: the decap writes 255 into the `qfi` attribute for a packet whose
+// G-PDU carries no PDU Session Container (datapath/pdu_session_qfi.h), which
+// is above the range, so a rule keyed on 0 matches only a packet that really
+// carried QFI 0. A byte above 63 is a flow no packet can carry: a rule keyed
+// on one would match nothing, and the session would stand while its uplink
+// blackholed. Both refusals carry the cause the SMF can fix.
 func qfiIE(c *ie.IE, what string) (uint8, error) {
 	v, err := c.QFI()
 	if err != nil {
 		return 0, fmt.Errorf("QFI: %w", err)
 	}
-	if v == 0 || v > 63 {
-		return 0, fmt.Errorf("%w: %s QFI is %d; this UP takes 1..63 (the spec's range is 0..63, and 0 is the decap's \"no container\")",
+	if v > 63 {
+		return 0, fmt.Errorf("%w: %s QFI is %d; the spec's range is 0..63",
 			errNotExpressible, what, v)
 	}
 	return v, nil
