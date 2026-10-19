@@ -91,7 +91,7 @@ func (c *Compiler) EvaluateDownlinks(ctx context.Context) []Downlink {
 	for seid, s := range c.sessions {
 		var ids []uint32
 		for _, p := range pdrsInOrder(s) {
-			if p.buffer && p.actionID != 0 && !p.ddnSent {
+			if p.buffer && p.notify && p.actionID != 0 && !p.ddnSent {
 				ids = append(ids, p.actionID)
 			}
 		}

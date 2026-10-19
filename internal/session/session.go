@@ -537,6 +537,14 @@ type Session struct {
 	// key from being written and erased at once (the engine rejects that).
 	stale []*pdr
 
+	// removedQERs holds the QERs a modification took out of the model. Their
+	// meters were allocated with the QER (one per policed direction) and are
+	// released with the session's other ids (releaseSession) rather than at the
+	// removal: a refused modification puts the QER back, and a meter already
+	// returned to the pool would be one another session may police with while
+	// this one still names it.
+	removedQERs []*qer
+
 	// ending holds the flows whose buffering episode this model has ended: the
 	// PDRs a modification took out of buffering, by their ActionId. Their held
 	// packets are released once the transaction that ended the episode has
@@ -570,6 +578,7 @@ type modelSnapshot struct {
 
 	removed, stale []*pdr
 	ending         []uint32
+	removedQERs    []*qer
 }
 
 func cloneEntries[K comparable, V any](m map[K]*V) map[K]*V {
@@ -588,6 +597,7 @@ func (s *Session) snapshot() modelSnapshot {
 		pdrs: cloneEntries(s.PDRs), fars: cloneEntries(s.FARs), qers: cloneEntries(s.QERs),
 		urrs: cloneEntries(s.URRs), bars: cloneEntries(s.BARs),
 		removed: slices.Clone(s.removed), stale: slices.Clone(s.stale), ending: slices.Clone(s.ending),
+		removedQERs: slices.Clone(s.removedQERs),
 	}
 }
 
@@ -605,6 +615,7 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 	s.UEIP = snap.ueIP
 	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars
 	s.removed, s.stale, s.ending = snap.removed, snap.stale, snap.ending
+	s.removedQERs = snap.removedQERs
 
 	held := map[uint32]bool{}
 	for _, teid := range s.chids {
@@ -740,6 +751,12 @@ type pdr struct {
 	// packet", 5.2.4.1), and resolve clears the flag when the PDR stops
 	// buffering -- the instruction that ends the episode.
 	ddnSent bool
+	// notify says the FAR's Apply Action carried NOCP (8.2.26): the CP
+	// function asked to be told when the first downlink packet is buffered.
+	// BUFF without NOCP is an instruction to hold the packets and report
+	// nothing, and a Downlink Data Report sent anyway is a message the SMF did
+	// not ask for (its own NOCP field says so).
+	notify bool
 }
 
 // far is one compiled FAR.
@@ -1343,8 +1360,10 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	// direction whether or not a PDR names it, so a deletion erases them from
 	// the same list. Erasing them per PDR instead would miss the meter of a
 	// direction no PDR of this session uses, and would name the QER's meter
-	// once per PDR.
-	for _, q := range qersInOrder(s) {
+	// once per PDR. A QER a modification removed is on the list too: its record
+	// is in the daemon, and a record nobody names goes on holding the rate it
+	// was written with until another session reuses the id.
+	for _, q := range append(qersInOrder(s), s.removedQERs...) {
 		if !q.hasRate {
 			continue
 		}
@@ -1569,8 +1588,10 @@ func (c *Compiler) releaseSession(s *Session) {
 		}
 	}
 	// The meters are the QERs': one per policed direction, allocated with the
-	// QER and not with the PDRs that happen to name it.
-	for _, q := range qersInOrder(s) {
+	// QER and not with the PDRs that happen to name it. A QER a modification
+	// removed is one of them: the removal took it out of the model, so this is
+	// where its ids come back.
+	for _, q := range append(qersInOrder(s), s.removedQERs...) {
 		if q.meterUL != 0 && !meters[q.meterUL] {
 			meters[q.meterUL] = true
 			c.meters.release(q.meterUL)

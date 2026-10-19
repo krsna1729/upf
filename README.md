@@ -189,8 +189,10 @@ build/bess/stage/bin/bessctl apply deploy/upf.yaml
   Apply Action is BUFF and not FORW delivers its rule on the graph's buffering
   gate (`upfd -buffer-store`, `-buffer-counter`, `-buffer-gate`), BESS's own
   packet store holds the packets keyed by the rule's ActionId, the first one is
-  reported to the SMF as a Downlink Data Report on the reporting tick, and the
-  instruction that moves the path releases what was held into the action path.
+  reported to the SMF as a Downlink Data Report on the reporting tick when the
+  same FAR also carries NOCP (8.2.26: BUFF alone is an instruction to hold the
+  packets and say nothing), and the instruction that moves the path releases
+  what was held into the action path.
   The SMF's own numbers are the flow's, not the graph's: 8.2.29's duration and
   8.2.30's count reach the store's live per-flow `flows` entry, so a buffering
   flow's cap and its expiry are per-BAR; both are measured — the scorecard's

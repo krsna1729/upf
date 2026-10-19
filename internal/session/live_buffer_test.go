@@ -43,7 +43,10 @@ func bufferEstablishmentFor(cpSEID uint64, ueIP string, duration time.Duration) 
 	return pathEstablishmentWith(cpSEID, ueIP, "permit out udp from any to assigned 53",
 		ie.NewCreateFAR(
 			ie.NewFARID(2),
-			ie.NewApplyAction(applyBuff),
+			// BUFF with NOCP: the packets are held and the CP function is told
+			// about the first one (8.2.26) -- the notification this case's
+			// Downlink Data Report is.
+			ie.NewApplyAction(applyBuff|applyNOCP),
 			ie.NewBARID(1),
 		),
 		ie.NewCreateBAR(

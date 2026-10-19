@@ -4335,6 +4335,183 @@ func TestAURRWithAnUnimplementedFieldIsRefused(t *testing.T) {
 	}
 }
 
+func TestAPDRNamingAnUnknownQERIsRefused(t *testing.T) {
+	// The PDR's QER ID is an association with a rule of the same session
+	// (7.5.2.2), like its URR ID: an id the session does not hold means the
+	// flow would carry on with no gate and no meter -- enforcement the SMF
+	// asked for and would never see.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x5f1c, "10.45.0.7")
+	req.CreatePDR[0] = ie.NewCreatePDR(
+		ie.NewPDRID(1),
+		ie.NewPrecedence(100),
+		ie.NewPDI(
+			ie.NewSourceInterface(ie.SrcInterfaceAccess),
+			ie.NewFTEID(0x01, 0, net.ParseIP("192.0.2.1"), nil, 0),
+			ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+		),
+		ie.NewFARID(1),
+		ie.NewQERID(9),
+	)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a PDR naming an unprovisioned QER answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+// TestZeroIsALegalRuleID is finding 19: 0 is a value of every one of the four
+// ids (8.2.73's PDR ID, 8.2.74's FAR ID, 8.2.75's BAR ID, 8.2.76's URR ID),
+// and what tells an id of 0 from an absent IE is the IE having been read -- the
+// flag, not the value. The session below numbers all five rules 0 and must
+// serve it; the second half is the other side of the same rule: a PDR that
+// named no FAR at all is a missing mandatory IE, not a reference to FAR 0.
+func TestZeroIsALegalRuleID(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0, "10.45.0.7")
+	req.CreatePDR[0] = ie.NewCreatePDR(
+		ie.NewPDRID(0),
+		ie.NewPrecedence(100),
+		ie.NewPDI(
+			ie.NewSourceInterface(ie.SrcInterfaceAccess),
+			ie.NewFTEID(0x01, 0, net.ParseIP("192.0.2.1"), nil, 0),
+			ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+		),
+		ie.NewFARID(0),
+		ie.NewQERID(0),
+	)
+	req.CreateFAR[0] = ie.NewCreateFAR(
+		ie.NewFARID(0),
+		ie.NewApplyAction(applyForw),
+		ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
+	)
+	req.CreateQER[0] = ie.NewCreateQER(
+		ie.NewQERID(0),
+		ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+		ie.NewMBR(1000, 2000),
+	)
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("a session whose rules are numbered 0 answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	s := c.sessions[seid]
+	if s.PDRs[0] == nil {
+		t.Fatal("the session holds no PDR 0")
+	}
+	// The uplink PDR's FAR is FAR 0's, and its QER is QER 0's: the ids are the
+	// SMF's references, and a wrong one would be a rule the SMF did not send.
+	if s.PDRs[0].farID != 0 || s.PDRs[0].meterID != s.QERs[0].meterUL {
+		t.Errorf("PDR 0 resolved to FAR %d and meter %d, want FAR 0 and QER 0's meter %d",
+			s.PDRs[0].farID, s.PDRs[0].meterID, s.QERs[0].meterUL)
+	}
+	if s.PDRs[0].drop {
+		t.Error("the PDR drops although its FAR 0 forwards")
+	}
+
+	// A PDR with no FAR ID: Table 7.5.2.2-1 makes it mandatory, and with FAR 0
+	// in the session an absent IE must not read as a reference to it.
+	rec2 := &recorder{}
+	c2 := New(testConfig(), rec2, quietLogger())
+	req2 := establishment(0x5f1d, "10.45.0.7")
+	req2.CreatePDR[0] = ie.NewCreatePDR(
+		ie.NewPDRID(0),
+		ie.NewPrecedence(100),
+		ie.NewPDI(
+			ie.NewSourceInterface(ie.SrcInterfaceAccess),
+			ie.NewFTEID(0x01, 0, net.ParseIP("192.0.2.1"), nil, 0),
+			ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+		),
+		ie.NewQERID(0),
+	)
+	if got := cause(t, c2.Establish(req2).(*message.SessionEstablishmentResponse)); got != ie.CauseMandatoryIEMissing {
+		t.Errorf("a PDR with no FAR ID answered cause %d, want a missing mandatory IE", got)
+	}
+	if len(rec2.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+func TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown(t *testing.T) {
+	// 7.5.4.6: a Remove QER takes the QER out of the session, and a PDR's QER
+	// ID is a reference to it. The order is the SMF's: it re-points the PDRs
+	// first (an Update PDR that does not name the QER), and the removal then
+	// takes the QER and the meters it was given.
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(establishment(0x5f1e, "10.45.0.7")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	meter := c.sessions[seid].QERs[1].meterUL
+	if meter == 0 {
+		t.Fatal("the QER of the establishment has no uplink meter")
+	}
+
+	// PDR 1 still names QER 1: the removal is refused and the session stands.
+	mod := message.NewSessionModificationRequest(0, 0, seid, 2, 0, ie.NewRemoveQER(ie.NewQERID(1)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a QER a PDR still names answered cause %d, want a rule failure", got)
+	}
+	if c.sessions[seid].QERs[1] == nil || c.meters.released[meter] {
+		t.Error("the refused removal took the QER or its meter with it")
+	}
+
+	// The SMF re-points PDR 1 and removes the QER in one message: the PDR is
+	// the request's new form (its QER list is what the message carries), and
+	// the removal then finds nothing that names the QER.
+	mod = message.NewSessionModificationRequest(0, 0, seid, 3, 0,
+		ie.NewUpdatePDR(
+			ie.NewPDRID(1),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+			),
+			ie.NewFARID(1),
+		),
+		ie.NewRemoveQER(ie.NewQERID(1)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification that re-pointed the PDR answered cause %d", got)
+	}
+	s := c.sessions[seid]
+	if s.QERs[1] != nil {
+		t.Error("the removed QER is still in the session")
+	}
+	if s.PDRs[1].meterID != 0 {
+		t.Errorf("the PDR still meters under %d, and the QER that owned it is gone", s.PDRs[1].meterID)
+	}
+
+	// A removal of a QER the session never held says nothing and changes
+	// nothing: the request is not refused for naming a number that is gone.
+	mod = message.NewSessionModificationRequest(0, 0, seid, 4, 0, ie.NewRemoveQER(ie.NewQERID(9)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Errorf("removing a QER the session never held answered cause %d", got)
+	}
+
+	// The QER's meter is the session's until the session is gone: a
+	// modification that is refused puts the QER back, so an id returned at the
+	// removal would be one another session could meter with while this one
+	// still names it. The deletion is where the pool gets it back, which is
+	// what releaseSession does for every id the session holds.
+	if c.meters.released[meter] {
+		t.Error("the removed QER's meter was returned to the pool while the session lives")
+	}
+	del := message.NewSessionDeletionRequest(0, 0, seid, 5, 0)
+	if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	if !c.meters.released[meter] {
+		t.Error("the removed QER's meter was not returned to the pool with the session")
+	}
+}
+
 func TestAPDRNamingAnUnknownURRIsRefused(t *testing.T) {
 	// The PDR's URR ID is an association with a rule of the same session: an id
 	// the session does not hold means the traffic would be counted by nothing
