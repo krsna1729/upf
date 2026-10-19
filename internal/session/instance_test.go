@@ -516,3 +516,82 @@ func TestAnUpdateThatRenamesTheInstanceMovesTheRule(t *testing.T) {
 			len(changes), erased, written)
 	}
 }
+
+// TestAPDIsDestinationAddressGoesInTheDestinationField: 8.2.62's bit 3 (S/D)
+// names the side the UE IP address IE's address appears on. Set, the address is
+// a destination -- an Access PDR matching the CP function's address for DHCP or
+// RADIUS (5.2.1's own example) -- and compiling it as the source (the side the
+// Source Interface implies) writes a rule that matches nothing the SMF
+// described. The address is also outside the interface's pool, which is asked
+// about the session's UE address alone: this one is another node's.
+func TestAPDIsDestinationAddressGoesInTheDestinationField(t *testing.T) {
+	rec := &recorder{}
+	c := New(instancedConfig(t), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5561, 1, 0,
+		ie.NewFSEID(0x5561, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(100),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewNetworkInstance("internet"),
+				ie.NewFTEID(0x01, 0x11223344, net.ParseIP("192.0.2.1"), nil, 0),
+				// V4 | S/D: the address is the packet's destination.
+				ie.NewUEIPAddress(0x06, "192.0.2.9", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewNetworkInstance("internet"),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0),
+				ie.NewSDFFilter("permit out ip from any to assigned", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a PDI whose address is a destination answered cause %d, want accepted", got)
+	}
+	ul := ruleIn(t, rec.last(), "pdr_ul")
+	if got := ul.value(1); !bytes.Equal(got, []byte{192, 0, 2, 9}) {
+		t.Errorf("the uplink key's destination is %v, want the PDI's destination address", got)
+	}
+	if got := ul.mask(1); !bytes.Equal(got, []byte{0xff, 0xff, 0xff, 0xff}) {
+		t.Errorf("the uplink key's destination mask is %v, want a /32", got)
+	}
+	if got := ul.mask(0); !bytes.Equal(got, []byte{0, 0, 0, 0}) {
+		t.Errorf("the uplink key's source mask is %v, want unconstrained: the PDI named no source", got)
+	}
+}
+
+// TestADestinationAddressIsNotTheSessionsUEAddress: the bit that makes an
+// Access PDR's address a destination also says it is not the subscriber's, so
+// a PDI that names no address does not inherit it -- and a session with no UE
+// address anywhere is refused rather than keyed on another node's address. The
+// address here is inside the interface's pool, so it is the split (not the
+// pool) that decides: read as the UE's, the session would stand with the
+// downlink keyed on it.
+func TestADestinationAddressIsNotTheSessionsUEAddress(t *testing.T) {
+	rec := &recorder{}
+	c := New(instancedConfig(t), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5563, 1, 0,
+		ie.NewFSEID(0x5563, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(100),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewNetworkInstance("internet"),
+				ie.NewFTEID(0x01, 0x11223344, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.9", "", 0, 0)),
+			ie.NewFARID(1)),
+		// The downlink names no address of its own: it would inherit the
+		// session's, and there is none.
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewNetworkInstance("internet"),
+				ie.NewSDFFilter("permit out ip from 203.0.113.7 to any", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a session whose only address is a destination's answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}

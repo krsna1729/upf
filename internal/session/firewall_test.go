@@ -10,6 +10,7 @@ package session
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -451,5 +452,64 @@ func TestTheSweepReplacesAStaleFirewallPolicy(t *testing.T) {
 	}
 	if len(f.changes) != 0 {
 		t.Errorf("the sweep wrote %d transactions over an empty policy, want none", len(f.changes))
+	}
+}
+
+// TestAFirewallRulesUESideFollowsThePDIsSD: the firewall path places the UE IP
+// address by the same rule as the WildcardMatch key -- 8.2.62 bit 3 says which
+// side it is -- and its unconstrained side is an omitted field, so a PDI that
+// names a destination constrains dst_ip alone.
+func TestAFirewallRulesUESideFollowsThePDIsSD(t *testing.T) {
+	rec := &recorder{}
+	c := New(firewallConfig("fw_ul", ""), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5f11, 1, 0,
+		ie.NewFSEID(0x5f11, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0x5f115f11, net.ParseIP("192.0.2.1"), nil, 0),
+				// V4 | S/D: the address is the packet's destination.
+				ie.NewUEIPAddress(0x06, "192.0.2.9", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a destination-flagged PDI on the firewall path answered cause %d, want accepted", got)
+	}
+	policy := firewallPolicy(t, rec.last(), "fw_ul/rules")
+	if len(policy) != 1 {
+		t.Fatalf("the policy holds %d rules, want 1", len(policy))
+	}
+	if got, ok := policy[0]["src_ip"]; ok {
+		t.Errorf("the rule constrains src_ip to %v, want it omitted: the PDI named a destination", got)
+	}
+	if got := policy[0]["dst_ip"]; got != "192.0.2.9/32" {
+		t.Errorf("the rule's dst_ip is %v, want the PDI's destination address", got)
+	}
+}
+
+// TestAFirewallRuleRefusesTheSDContradiction: a downlink PDI whose filter names
+// the UE as the flow's source ("from assigned") while its UE IP address IE says
+// that address is the destination are two readings of one IE pair, and the
+// firewall path refuses them as the key path does.
+func TestAFirewallRuleRefusesTheSDContradiction(t *testing.T) {
+	rec := &recorder{}
+	c := New(firewallConfig("", "fw_dl"), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x5f12, 1, 0,
+		ie.NewFSEID(0x5f12, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				// V4 | S/D: the UE's address is the destination.
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out ip from assigned to any", "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("the contradiction answered cause %d, want a rule failure", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
 	}
 }
