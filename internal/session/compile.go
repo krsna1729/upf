@@ -4136,11 +4136,11 @@ type sdfFilter struct {
 // bidirectional flow this way: the downlink PDR carries the flow description
 // and the ID, the uplink PDR carries the ID. The copy is the filter as
 // written; the PDR's own orientation (oriented) then reads it the way it
-// reads any other. A reference resolves once, when its PDR is created or
-// updated: a later change to the definition in another PDR is not carried
-// into a PDR the message does not touch (the spec's "apply to all PDRs that
-// use it"), and a definition that goes with its PDR leaves the copies as
-// they are.
+// reads any other. Every request's merge re-resolves the references, so a definition
+// that changed in another PDR reaches the PDRs that use it (5.2.1A.3: the ID
+// "shall be provided in the PDI of the PDR(s) that use the same filter"); a
+// reference whose copy changed also leaves its previous form in stale, so the
+// rule it no longer describes is erased with the rewrite.
 func resolveSDFIDs(s *Session) error {
 	defs := map[uint32]*sdfFilter{}
 	for _, p := range pdrsInOrder(s) {
@@ -4157,7 +4157,11 @@ func resolveSDFIDs(s *Session) error {
 	}
 	for _, p := range pdrsInOrder(s) {
 		for i, f := range p.sdfs {
-			if !f.bare {
+			// A reference is a bare filter or the copy a previous compile
+			// resolved it to (via): the copy is re-resolved every compile, so
+			// a definition that changed in another PDR reaches the PDRs that
+			// use it (5.2.1A.3's "the PDR(s) that use the same filter").
+			if !f.bare && !f.via {
 				continue
 			}
 			d, ok := defs[f.id]
@@ -4167,6 +4171,16 @@ func resolveSDFIDs(s *Session) error {
 			}
 			c := *d
 			c.via = true
+			if f.via && *f != c {
+				// The definition changed under a PDR this message does not
+				// touch. Its rule was written from the copy it carried, so
+				// that rule is stale: the previous form joins the removed and
+				// replaced ones, and compile erases its key unless the new
+				// copy writes the same one.
+				old := *p
+				old.sdfs = append([]*sdfFilter(nil), p.sdfs...)
+				s.stale = append(s.stale, &old)
+			}
 			p.sdfs[i] = &c
 		}
 	}
