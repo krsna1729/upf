@@ -164,6 +164,15 @@ type Report struct {
 	RawUp, RawDown Usage
 	DecidedAt      time.Time
 
+	// Errors are the peer's Error Indications this report tells the SMF about:
+	// tunnels this UPF sends into that the peer could not reach (TS 29.244
+	// 5.10). A report that carries them and no URR is an Error Indication
+	// Report -- the Report Type's ERIR bit and one Error Indication Report IE
+	// per remote F-TEID, with no Usage Report IE -- and a URR report may carry
+	// both, one message per tick. It is what the peer sent and this side has
+	// not reported yet (erir.go).
+	Errors []ErrorIndication
+
 	// Linked is the rest of a linked group, when this report is the group's:
 	// each is its own Usage Report IE, and every one of them -- this report's
 	// URR included -- carries this report's UR-SEQN, which is what 8.2.71 means
@@ -224,9 +233,27 @@ func (t Trigger) flags() (octet5, octet6 uint8) {
 // numbers, so the n4 layer sends what it is given and nothing else has to know
 // which bit means which trigger.
 func (r Report) IEs() []*ie.IE {
-	// A usage report for the URR this report leads with, not an event report
-	// and not a downlink-data report: what the counters measured (8.2.18).
-	ies := []*ie.IE{ie.NewReportType(0, 0, 1, 0)}
+	// What this message carries decides its Report Type (8.2.18): a usage
+	// report for the URR it leads with -- not an event report and not a
+	// downlink-data report -- an Error Indication Report for a tunnel the peer
+	// could not reach (5.10), and both when one tick owes both.
+	erir, usar := 0, 0
+	if len(r.Errors) > 0 {
+		erir = 1
+	}
+	if r.URRID != 0 || len(r.Errors) == 0 {
+		usar = 1
+	}
+	ies := []*ie.IE{ie.NewReportType(0, erir, usar, 0)}
+	for _, e := range r.Errors {
+		// One Error Indication Report per remote F-TEID (7.5.8.4): the F-TEID
+		// the peer named, built the way this UPF advertises one, so the SMF
+		// matches it to the FAR it provisioned.
+		ies = append(ies, ie.NewErrorIndicationReport(createdFTEID(e.TEID, e.Addr)))
+	}
+	if usar == 0 {
+		return ies
+	}
 	ies = append(ies, usageReportIE(ie.UsageReportWithinSessionReportRequest, r.URRID, r.Seqn, r.Trigger, r.Up, r.Down, r.Duration, r.First, r.Last))
 	// A linked group is reported whole: each of the rest is its own Usage
 	// Report IE, and every one of them carries this report's UR-SEQN -- the one
@@ -298,17 +325,23 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	c.mu.Unlock()
 	slices.Sort(seids)
 
-	if len(modules) == 0 {
+	readsErrors := c.cfg.GTPUErrors != ""
+	if len(modules) == 0 && !readsErrors {
 		// No session measures anything: nothing to read, and nothing owed --
 		// the per-session path returns before its own read on exactly this
 		// fact.
 		return nil
 	}
-	reader := c.counters
-	if reader == nil {
+	counters, errorReader := c.counters, ErrorReader(nil)
+	if r, ok := c.counters.(ErrorReader); ok {
+		errorReader = r
+	}
+	if counters == nil || (readsErrors && errorReader == nil) {
 		// The graph has no counting module this control plane can read, and
 		// every session's URRs would report nothing: the caller's log is where
-		// an operator sees it.
+		// an operator sees it. The error table is read through the same
+		// dataplane, so a responder this control plane cannot ask is one whose
+		// reports would be owed forever.
 		for _, seid := range seids {
 			c.log.Warn("session: usage evaluation", "seid", seid, "error", errNoCounters)
 		}
@@ -326,13 +359,31 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	failed := make([]string, 0, len(names))
 	failures := make(map[string]error, len(names))
 	for _, module := range names {
-		read, err := reader.RuleCounts(ctx, module)
+		read, err := counters.RuleCounts(ctx, module)
 		if err != nil {
 			failed = append(failed, module)
 			failures[module] = fmt.Errorf("reading %s: %w", module, err)
 			continue
 		}
 		counts[module] = readingsOf(read)
+	}
+
+	// The peer's Error Indications (5.10), read once for the whole tick: one
+	// responder module holds the counts of every TEID it has seen, and the
+	// sessions below compare them against what each has already reported. A
+	// reading that fails is the tick's other half failing alone: the usage
+	// reports are still decided, and the same counts are read again next tick.
+	var indications map[uint32]uint64
+	if readsErrors {
+		read, err := errorReader.ErrorCounts(ctx, c.cfg.GTPUErrors)
+		if err != nil {
+			c.log.Warn("session: error indications", "module", c.cfg.GTPUErrors, "error", err)
+		} else {
+			indications = make(map[uint32]uint64, len(read))
+			for _, e := range read {
+				indications[e.TEID] = e.Count
+			}
+		}
 	}
 
 	var out []Report
@@ -371,6 +422,11 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 			c.log.Warn("session: usage evaluation", "seid", seid, "error", err)
 		}
 		out = append(out, reports...)
+		if len(indications) > 0 {
+			// The session's own tunnels the peer reported, which is a report
+			// of its own rather than part of the usage (erir.go).
+			out = append(out, c.errorReports(seid, s, indications)...)
+		}
 	}
 	return out
 }

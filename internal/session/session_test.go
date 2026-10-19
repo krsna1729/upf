@@ -35,6 +35,9 @@ type recorder struct {
 	// RuleCounts answers, and the failure it answers with when readFail is set.
 	counts   map[string][]bess.RuleCount
 	readFail error
+	// errorCounts is the fake dataplane's GTP-U responders, by module name:
+	// what ErrorCounts answers (finding 15).
+	errorCounts map[string][]bess.ErrorCount
 	// calls is every counter reading the compiler made, in order: what the
 	// usage-report tick's cost is measured by (one read per module rather than
 	// one per session, report_test.go).
@@ -164,6 +167,31 @@ func (r *recorder) RuleCounts(_ context.Context, module string, actionIDs ...uin
 		count := held[id]
 		count.ActionID = id
 		out = append(out, count)
+	}
+	return out, nil
+}
+
+// ErrorCounts answers a GtpuResponder's error table (ErrorReader): the counts
+// the test seeded, keyed by module, and only the TEIDs asked for when some are
+// named -- the module's own answer omits a TEID it never saw rather than
+// reporting a zero (gtpu_responder.cc).
+func (r *recorder) ErrorCounts(_ context.Context, module string, teids ...uint32) ([]bess.ErrorCount, error) {
+	if r.readFail != nil {
+		return nil, r.readFail
+	}
+	held := r.errorCounts[module]
+	if len(teids) == 0 {
+		return held, nil
+	}
+	wanted := make(map[uint32]bool, len(teids))
+	for _, teid := range teids {
+		wanted[teid] = true
+	}
+	out := make([]bess.ErrorCount, 0, len(teids))
+	for _, e := range held {
+		if wanted[e.TEID] {
+			out = append(out, e)
+		}
 	}
 	return out, nil
 }

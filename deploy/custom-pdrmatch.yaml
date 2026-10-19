@@ -86,6 +86,7 @@ modules:
       default_gate: 1
   - name: echo0
     mclass: GtpuResponder
+    arg: {track_errors: true}
 
   # -- the uplink's matcher ----------------------------------------------------
   # The session is the metadata the decap wrote, not a field of the packet: the

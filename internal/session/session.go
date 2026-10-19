@@ -67,6 +67,15 @@ type WindowReader interface {
 	PeekRuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error)
 }
 
+// ErrorReader is the GTP-U responder's error table as a dataplane capability:
+// the Error Indications the peer sent this UPF, by the TEID each named (TS
+// 29.244 5.10). It is a capability of its own for the same reason the counter
+// reader is -- a graph whose responder does not track them never asks, and one
+// whose responder is a different module from its counters still answers.
+type ErrorReader interface {
+	ErrorCounts(ctx context.Context, module string, teids ...uint32) ([]bess.ErrorCount, error)
+}
+
 // StoreCommands is the dataplane as a command sender for the packet store: the
 // release and drop of what one flow holds (TS 29.244 5.2.4.1). It is a
 // capability of its own for the same reason CounterReader is -- a graph with no
@@ -291,6 +300,14 @@ type Config struct {
 	TEIDTable string
 	// TEIDGate is the gate a TEID rule delivers on: the decap's output gate.
 	TEIDGate uint32
+
+	// GTPUErrors is the GTP-U responder module whose error table the report
+	// loop reads ("echo0": the responder behind the TEID table's default gate,
+	// which is where an Error Indication the peer sends this UPF arrives).
+	// Empty means the graph's responder does not track them and the SMF is
+	// told of no tunnel loss; a session whose FAR sends with a TEID the peer
+	// reported is reported as an Error Indication Report (TS 29.244 5.10).
+	GTPUErrors string
 
 	// Up and Down are the two chains.
 	Up, Down Direction
@@ -526,6 +543,13 @@ type Session struct {
 	// it holds (settle drops the rest), so the map never carries a value the
 	// pool has taken back -- which would put two sessions on one TEID rule.
 	chids map[uint8]uint32
+
+	// erirSent is the count of each TEID this session's SMF has already been
+	// told about: the responder's error counts only grow (bess.ErrorCounts),
+	// so a report is due when a reading is above the high-water mark kept
+	// here. The mark moves when the report is decided, not when the SMF
+	// answers it -- the report queue holds it until the SMF does (5.10).
+	erirSent map[uint32]uint64
 
 	// removed holds the PDRs a modification took out of the model: their
 	// records are still in the dataplane, and the next transaction that

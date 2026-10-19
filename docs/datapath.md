@@ -307,6 +307,13 @@ the arrival signal the Downlink Data Report is decided from on the BUFF branch.
   worker's, so it is shared and written once per batch that counted a packet —
   never once per packet, and by design a store lost to a concurrent reader costs
   one packet's stamp rather than a count (`urr_count.h`).
+* **The responder's own reading** is `get_errors` on the `GtpuResponder`
+  (`upf.pb.GtpuResponderCommandGetErrorsArg` → `…Response`): the Error
+  Indications the peer sent, one count per TEID it named, with the names it was
+  asked for or the whole table when it was asked for none. The counts only grow
+  — nothing clears them, and a read races no packet — so the reporting side
+  keeps its own high-water mark per session (`internal/session/erir.go`) and
+  one reading serves every session of a tick (`-gtpu-errors`).
 * **Reads** are the `get_counts` command
   (`upf.pb.UrrCountCommandGetCountsArg` → `…Response`), which is also how the
   control side asks for a *window*: with `restart_window` the module clears each
@@ -390,7 +397,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 |---|---|
 | control_v2, one transaction per session change | `internal/session` writes a session's rules, actions, meters, counters and tunnels together or not at all, with a request id that survives retries |
 | resources and codecs (D-129) | the tables above: configuration written in a transaction, a codec that validates the key, and a readback the startup sweep uses. The store's `flows` is one of them (one entry per flow id, each field optional, absent meaning the module-wide argument), written by the session compiler with the SMF's own numbers (8.2.29's duration as `timeout_ns`, 8.2.30's count as `max_packets_per_flow`) in the same transaction as the rule: an upsert or an erase moves no packet and stops no worker, and an erase is configuration only — `drop` is what frees what a flow holds |
-| module commands | `get_counts` (counters), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
+| module commands | `get_counts` (counters), `get_errors` (the responder's Error Indication table: monotonic counts, no clear, read by the report tick), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
 | metadata attributes | `action_id` (written by `WildcardMatch`, read by counters, the encap and the store), `upf_teid` (written by the decap), `qfi` (written by the decap, one byte: the uplink PDU Session Container's QoS flow, read by `pdr_ul`'s match fields), `route_domain`/`vif_id` (written by the `Vif`, and read by `deploy/veth-port.yaml`'s tables -- which is what gives them an offset at all) |
 | slot tables (`dataplane/slot_table.h`) | every per-rule table: ids are 1..capacity, an erased key retires for a grace period, and publishing into a retiring slot is refused — which is why released ids wait their walk (`docs/design.md`, the id pool) |
 | packet ownership | `bess::PacketRef` and the store's explicit free/release path; our modules copy no packet and allocate none |

@@ -150,8 +150,10 @@ modules:
   # has a Dump to itself.
   - name: echo0
     mclass: GtpuResponder
+    arg: {track_errors: true}
   - name: echo_err
     mclass: GtpuResponder
+    arg: {track_errors: true}
   - name: dump_err
     mclass: Dump
     arg: {interval: 1}
@@ -162,6 +164,19 @@ modules:
     arg: {interval: 1}
   - name: sink_echo
     mclass: Sink
+
+  # The peer's Error Indication (TS 29.281 7.3.1): GTP-U type 26, header TEID
+  # 0, and the TEID IE naming the tunnel it could not reach (0x55667788). It
+  # takes the table's default gate, the responder records its count, and
+  # nothing is replied.
+  - name: src_err
+    mclass: Source
+    arg: {pkt_size: 55, burst: 1}
+  - name: rewrite_err
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAACCABFAAApAAAAAEARKpoKFB4CChQeAQhoCGgAFQAAMBoABQAAAAAQVWZ3iA=="
 
   - name: src_down
     mclass: Source
@@ -268,6 +283,8 @@ connections:
   - {upstream: dump_err, downstream: sink_err}
   - {upstream: src_echo, downstream: rewrite_echo}
   - {upstream: rewrite_echo, downstream: teid}
+  - {upstream: src_err, downstream: rewrite_err}
+  - {upstream: rewrite_err, downstream: teid}
   - {upstream: echo0, downstream: dump_echo}
   - {upstream: dump_echo, downstream: sink_echo}
 

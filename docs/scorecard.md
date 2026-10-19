@@ -115,6 +115,20 @@ N6 and N9 per packet, which is what branching is, and `docs/router.md` names the
 seam (a FIB lookup on the packet path). The mean is unchanged: 750 / 11 = 68.18
 -> **68**.
 
+**2026-10-19 (finding 15 closed: the Error Indication Report): no cell moves.**
+The spec cross-check's list lost another entry -- the last one whose fix was a
+*receive* path rather than a rule. The GTP-U responder behind the TEID table's
+default gate now counts the peer's Error Indications per TEID (`track_errors`),
+the report tick reads that table through the module's `get_errors`, and a count
+above a session's high-water mark leaves as a Session Report Request with the
+ERIR bit and the remote F-TEID (5.10, 7.5.8.4). No cell moves: the smoke lane
+gains the datapath check (the frame, its TEID IE, the count) and the path lane
+gains a live arm that reads the same table over gRPC and asserts the report the
+SMF would receive -- evidence for block 7's reporting surface, but every block
+with a cell already counted its reports. `ci/smoke-gtpu.sh` green (20 checks),
+`ci/session-path.sh` green in all three profiles (12 byte-checks and the live
+tests each), `ci/n4-path.sh` green.
+
 **2026-10-19 (four findings closed in the rule grammar): no cell moves.** The
 spec cross-check's list lost four entries, all of them grammar rather than
 sub-features. (1) A PDR naming a QER the session does not hold is refused with

@@ -166,6 +166,13 @@ func run() error {
 		"the WildcardMatch module whose rules are the F-TEID match")
 	teidGate := flag.Uint("teid-gate", 0,
 		"the gate a TEID rule delivers on: the decap's output gate")
+	gtpuErrors := flag.String("gtpu-errors", "",
+		"the GtpuResponder module whose error table is read once per -urr-interval "+
+			"tick: the responder behind the TEID table's default gate, which is where "+
+			"the peer's GTP-U Error Indications arrive (TS 29.281 7.3.1). A session "+
+			"whose FAR sends with a TEID the peer reported is reported to the SMF as "+
+			"an Error Indication Report (TS 29.244 5.10). Empty: the graph's responder "+
+			"does not track them (its track_errors argument) and no such report is sent")
 	metricsAddr := flag.String("metrics", "",
 		"serve this node's own numbers (Prometheus text format) on host:port; "+
 			"empty: no endpoint")
@@ -318,6 +325,7 @@ func run() error {
 			pdrFieldsUL:    *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
+			gtpuErrors: *gtpuErrors,
 			endMarker: *endMarker,
 			actionsUL: *actionsUL, metersUL: *metersUL,
 			actionsDL: *actionsDL, metersDL: *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
@@ -768,6 +776,7 @@ type graphArgs struct {
 	pdrFieldsDL        string
 	teidTable          string
 	teidGate           uint32
+	gtpuErrors         string
 	actionsUL          string
 	metersUL           string
 	actionsDL          string
@@ -860,6 +869,9 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	graph := session.Config{
 		TEIDTable: a.teidTable,
 		TEIDGate:  a.teidGate,
+		// The responder that counts the peer's Error Indications, when the
+		// graph's has tracking on (TS 29.244 5.10).
+		GTPUErrors: a.gtpuErrors,
 		// The socket an End Marker packet is written to, when the deployment
 		// has one (TS 29.244 5.3.2).
 		EndMarker: a.endMarker,

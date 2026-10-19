@@ -68,6 +68,15 @@ check() { # check <description> <fixed string the log must contain>
     FAIL=1
   fi
 }
+# check_file greps a file that is not the log (a command's answer).
+check_file() { # check_file <description> <file> <fixed string>
+  if grep -q -- "$3" "$2" 2>/dev/null; then
+    echo "smoke: ok    $1"
+  else
+    echo "smoke: FAIL  $1 (no '$3' in $2)" >&2
+    FAIL=1
+  fi
+}
 # check_metadata greps the metadata blocks Dump prints (four lines of hexdump
 # per packet) rather than the packet hexdump: the two share byte strings.
 check_metadata() { # check_metadata <description> <fixed string>
@@ -214,6 +223,13 @@ refute "echo replaced the request's stamp instead of echoing it" "de ad be ef"
 # would leave the peer sending into a tunnel that no longer exists.
 check "an unnamed TEID is answered with an Error Indication" "30 1a 00 05 00 00"
 check "the Error Indication names the TEID the peer used" "10 55 66 77 88"
+
+# The peer's own Error Indication (type 26 into the table's default gate) is
+# recorded, not answered: the count is what the controller's ERIR report reads.
+# 0x55667788 is 1432778632.
+ERRORS=$(mktemp /tmp/upf-smoke-errors-XXXXXX.txt)
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" action echo0 get_errors '{}' >"$ERRORS" 2>&1 || true
+check_file "the responder counted the peer's Error Indication" "$ERRORS" "1432778632"
 
 check_clean_shutdown "$DAEMON" || FAIL=1
 if [ "$FAIL" = 0 ]; then

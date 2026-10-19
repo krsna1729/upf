@@ -55,6 +55,24 @@ ports:
     arg: {path: /tmp/upf-end-marker.sock}
 
 modules:
+  # The peer's GTP-U Error Indication (TS 29.281 7.3.1): type 26, header TEID
+  # 0, and the TEID IE naming the tunnel it cannot reach -- the one this
+  # session's downlink FAR sends with (0x55667788, pathDownTEID in the live
+  # test). It takes the rule table's default gate, the responder behind it
+  # records the count (its track_errors argument), and the SMF hears about it
+  # as an Error Indication Report (TS 29.244 5.10).
+  - name: echo_err
+    mclass: GtpuResponder
+    arg: {track_errors: true}
+  - name: src_err
+    mclass: Source
+    arg: {pkt_size: 55, burst: 1}
+  - name: rewrite_err
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAACCABFAAApAAAAAEARKpoKFB4CChQeAQhoCGgAFQAAMBoABQAAAAAQVWZ3iA=="
+
   - name: decap0
     mclass: GtpuDecap
   - name: mt_md
@@ -78,8 +96,11 @@ modules:
       fields:
         # The G-PDU's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's
         # flags, type and length (4). One rule per session; a TEID no rule
-        # names is dropped by the default gate.
+        # names takes the default gate, whose responder answers a G-PDU for a
+        # tunnel this node does not have with an Error Indication (7.3.1) and
+        # records the Error Indications the peer sends (5.10).
         - {offset: 46, num_bytes: 4}
+      default_gate: 1
   # The stock firewall in place of the WildcardMatch table: its policy is one
   # ordered rule list (the compiler writes every live session's rules of this
   # direction), a rule names its PDR's ActionId, and the ActionTable behind it
@@ -174,6 +195,9 @@ connections:
   - {upstream: src_up, downstream: rewrite_up}
   - {upstream: rewrite_up, downstream: teid}
   - {upstream: teid, downstream: decap0}
+  - {upstream: teid, downstream: echo_err, ogate: 1}
+  - {upstream: src_err, downstream: rewrite_err}
+  - {upstream: rewrite_err, downstream: teid}
   - {upstream: decap0, downstream: mt_md}
   - {upstream: mt_md, downstream: dump_u}
   - {upstream: dump_u, downstream: fw_ul}

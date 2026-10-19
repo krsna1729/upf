@@ -56,6 +56,12 @@ constexpr uint64_t kEpoch1900 = 2208988800ULL;
 
 const ResourceTables GtpuResponder::resource_tables = {};
 
+const Commands GtpuResponder::cmds = {
+    {"get_errors", "upf.pb.GtpuResponderCommandGetErrorsArg",
+     MODULE_CMD_FUNC(&GtpuResponder::CommandGetErrors), Command::THREAD_SAFE,
+     "upf.pb.GtpuResponderCommandGetErrorsResponse"},
+};
+
 namespace {
 
 // One 16-bit field at `p`, network order.
@@ -99,7 +105,66 @@ CommandResponse GtpuResponder::Init(const upf::pb::GtpuResponderArg &arg) {
     return CommandFailure(EINVAL, "invalid 'recovery_time_stamp' field");
   }
   stamp_ = static_cast<uint32_t>(seconds);
+  if (arg.track_errors()) {
+    errors_ = std::make_unique<ErrorSlot[]>(kErrorSlots);
+  }
   return CommandSuccess();
+}
+
+// RecordError adds one to the slot of a TEID the peer could not reach. A
+// relaxed load-add-store: an Error Indication is a rare message, and a count
+// lost to a concurrent reader would be one indication, not a count of packets
+// -- the same price urr_count pays for a stamp. A slot is claimed with a
+// compare-exchange from 0, so two workers that race on a new TEID agree on one
+// slot and the loser adds to the same entry.
+void GtpuResponder::RecordError(uint32_t teid) {
+  for (size_t i = 0; i < kErrorSlots; i++) {
+    ErrorSlot &slot = errors_[(teid + i) % kErrorSlots];
+    uint32_t held = slot.teid.load(std::memory_order_acquire);
+    if (held == 0) {
+      uint32_t empty = 0;
+      if (!slot.teid.compare_exchange_strong(empty, teid, std::memory_order_acq_rel)) {
+        held = empty;
+      } else {
+        held = teid;
+      }
+    }
+    if (held == teid) {
+      slot.count.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  }
+  untracked_.fetch_add(1, std::memory_order_relaxed);
+}
+
+CommandResponse GtpuResponder::CommandGetErrors(
+    const upf::pb::GtpuResponderCommandGetErrorsArg &arg) {
+  upf::pb::GtpuResponderCommandGetErrorsResponse response;
+  auto report = [&](size_t i) {
+    const uint32_t teid = errors_[i].teid.load(std::memory_order_acquire);
+    if (teid == 0) {
+      return;
+    }
+    auto *entry = response.add_errors();
+    entry->set_teid(teid);
+    entry->set_count(errors_[i].count.load(std::memory_order_relaxed));
+  };
+  if (arg.teids_size() == 0) {
+    for (size_t i = 0; i < kErrorSlots; i++) {
+      report(i);
+    }
+  } else {
+    for (uint32_t teid : arg.teids()) {
+      for (size_t i = 0; i < kErrorSlots; i++) {
+        if (errors_[i].teid.load(std::memory_order_acquire) == teid) {
+          report(i);
+          break;
+        }
+      }
+    }
+  }
+  response.set_untracked(untracked_.load(std::memory_order_relaxed));
+  return CommandSuccess(response);
 }
 
 void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
@@ -147,6 +212,31 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     // Echo Request (7.1, TEID 0) and a G-PDU whose TEID no session names
     // (7.3.1). The second is answered with an Error Indication when its TEID is
     // not 0 -- TEID 0 is the echo path, and no G-PDU carries it.
+    // An Error Indication (7.3.1): the peer could not reach the TEID it names,
+    // which is the TEID this UPF sent to. Record it for the controller's
+    // report; there is no reply to send.
+    if (g[1] == kErrorIndication) {
+      if (errors_ != nullptr) {
+        // Offsets are from g, which is the GTP-U header: the tail follows the
+        // mandatory 8 octets, plus the S-flag field when the peer set S.
+        size_t at = bess::tunnel::kGtpuBaseBytes;
+        if ((g[0] & 0x02) != 0) {
+          at += 4;
+        }
+        const size_t end = bess::tunnel::kGtpuBaseBytes + Get16(g + 2);
+        while (at + 5 <= end) {  // a TV IE is type(1) + value(4)
+          if (g[at] == kTeidIe) {
+            uint32_t teid = Get32(g + at + 1);
+            if (teid != 0) {
+              RecordError(teid);
+            }
+            break;
+          }
+          at += 5;
+        }
+      }
+      continue;  // no reply: ogates[i] stays DROP_GATE
+    }
     const bool echo = g[1] == kEchoRequest;
     if (!echo && g[1] != kGtpdu) [[unlikely]] {
       continue;  // a message type this module does not answer

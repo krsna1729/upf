@@ -3,6 +3,10 @@
 #ifndef UPF_DATAPATH_GTPU_ECHO_H_
 #define UPF_DATAPATH_GTPU_ECHO_H_
 
+#include <atomic>
+#include <cstddef>
+#include <memory>
+
 #include "module.h"
 #include "upf_datapath.pb.h"
 
@@ -34,15 +38,39 @@ class GtpuResponder final : public Module {
 
   GtpuResponder() : Module() { max_allowed_workers_ = Worker::kMaxWorkers; }
 
+  static const Commands cmds;
+
   CommandResponse Init(const upf::pb::GtpuResponderArg &arg);
 
   void ProcessBatch(Context *ctx, bess::PacketBatch *batch) override;
 
   std::string GetDesc() const override;
 
+  // The Error Indications the peer sent (7.3.1), one monotonic count per TEID.
+  // A reading is what the controller's report compares with the count it last
+  // reported, so nothing here is cleared: the writes are relaxed adds and the
+  // read never takes a lock.
+  CommandResponse CommandGetErrors(
+      const upf::pb::GtpuResponderCommandGetErrorsArg &arg);
+
  private:
+  // One entry: 0 is empty (an Error Indication never names TEID 0 -- that is
+  // the echo path), and the count only grows.
+  struct ErrorSlot {
+    std::atomic<uint32_t> teid{0};
+    std::atomic<uint64_t> count{0};
+  };
+  // Small on purpose: a flood of distinct TEIDs is a scan, not a tunnel loss.
+  // 64 slots are 1 KiB, and a full table is counted rather than dropped
+  // silently.
+  static constexpr size_t kErrorSlots = 64;
+
+  void RecordError(uint32_t teid);
+
   uint16_t port_ = 0;  // the UDP port the messages must arrive on
   uint32_t stamp_ = 0; // seconds from 1900 to this entity's start (8.7)
+  std::unique_ptr<ErrorSlot[]> errors_;
+  std::atomic<uint64_t> untracked_{0};
 };
 
 #endif  // UPF_DATAPATH_GTPU_ECHO_H_

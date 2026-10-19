@@ -551,3 +551,52 @@ type (
 	DaemonRestartedError  = sdk.DaemonRestartedError
 	StaleResourceError    = sdk.StaleResourceError
 )
+
+// ErrorCount is one TEID's Error Indication count, as a GTP-U responder
+// recorded it. The count only grows: the module never clears it, so the
+// reporting side keeps its own baseline per TEID (TS 29.244 5.10).
+type ErrorCount struct {
+	TEID  uint32
+	Count uint64
+}
+
+// ErrorCounts reads a GTP-U responder's error table through its own get_errors
+// action (datapath/upf_datapath.proto): the Error Indications the peer sent
+// this UPF, one count per TEID they named. Naming no TEID reads every entry
+// the table holds. It is the counterpart of RuleCounts and a reading of its
+// own: the table belongs to the responder behind the TEID table's default
+// gate, and a graph may have that module without a URR counter (or the other
+// way), so a session layer that measured usage but read errors out of the
+// counter module would read the wrong module's answer.
+func (c *Client) ErrorCounts(ctx context.Context, module string, teids ...uint32) ([]ErrorCount, error) {
+	arg, err := c.Message("upf.pb.GtpuResponderCommandGetErrorsArg",
+		map[string]any{"teids": teids})
+	if err != nil {
+		return nil, err
+	}
+	result, err := c.sdk.InvokeAction(ctx, module, "get_errors", arg)
+	if err != nil {
+		return nil, fmt.Errorf("bess: %s get_errors: %w", module, err)
+	}
+	response, err := c.Message("upf.pb.GtpuResponderCommandGetErrorsResponse", nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := result.UnmarshalTo(response); err != nil {
+		return nil, fmt.Errorf("bess: %s get_errors answered %s: %w", module, result.GetTypeUrl(), err)
+	}
+	fields := response.ProtoReflect().Descriptor().Fields()
+	// A plugin built before this command has no such field, and uintField
+	// answers zero there: the reading is empty rather than a panic on a nil
+	// descriptor, the same way the counter reading treats its own stamps.
+	list := response.ProtoReflect().Get(fields.ByName("errors")).List()
+	out := make([]ErrorCount, 0, list.Len())
+	for i := range list.Len() {
+		entry := list.Get(i).Message()
+		out = append(out, ErrorCount{
+			TEID:  uint32(uintField(entry, "teid")),
+			Count: uintField(entry, "count"),
+		})
+	}
+	return out, nil
+}
