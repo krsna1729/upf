@@ -34,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 
 	"github.com/krsna1729/upf/internal/bess"
@@ -299,6 +300,14 @@ type Config struct {
 	// deployment configures more than one.
 	Instances *routing.Domains
 
+	// AccessNextHop is the Router next hop a forward whose FAR names
+	// Destination Interface Access (TS 29.244 8.2.24, value 0) leaves by,
+	// whichever direction the PDR is on: the encap on a downlink forward, and
+	// the indirect-forwarding tunnel an uplink forward leaves through (8.2.2
+	// NOTE 2). 0 leaves every such forward to the downlink direction's own
+	// Down.NextHop, which is what a deployment without uplink forwarding wants.
+	AccessNextHop uint32
+
 	// NodeID is this UP function's Node ID as the association advertised it
 	// (IP address or FQDN), and N4Addr its N4 IPv4 address: the Session
 	// Establishment Response names the one and the UP F-SEID carries the other.
@@ -339,10 +348,23 @@ type Config struct {
 	IDReuseDelay time.Duration
 }
 
+// downSide reports whether a Source Interface value (TS 29.244 8.2.2) names
+// the side toward the subscriber: Access is the uplink side (8.2.2 NOTE 1: it
+// "corresponds to the access side"), and Core, the service LAN's interface and
+// the 5G VN's internal interface are the side a packet toward the subscriber is
+// matched on.
+//
+// The value names a side and not a direction: for indirect data forwarding both
+// the Source Interface and the Destination Interface are Access (8.2.2 NOTE 2),
+// and what makes that an uplink forward is the Destination Interface, which the
+// FAR's egress decision reads. The value this function is given is one the
+// parser accepted, so it is one of the four (parsePDI).
+func downSide(srcIfc uint8) bool { return srcIfc != ie.SrcInterfaceAccess }
+
 // direction of a PDR: the uplink chain for a packet the UE sends, the downlink
 // chain for one it receives.
 func (c *Compiler) direction(srcIfc uint8) Direction {
-	if srcIfc == 1 { // SrcInterfaceCore: from the network, toward the UE
+	if downSide(srcIfc) {
 		return c.cfg.Down
 	}
 	return c.cfg.Up
@@ -659,10 +681,17 @@ type pdr struct {
 	id         uint16
 	precedence uint32
 	srcIfc     uint8
-	ueIP       netip.Addr
-	farID      uint32
-	qerIDs     []uint32
-	urrIDs     []uint32
+	// down says the PDR's packets come from the side toward the subscriber:
+	// the Source Interface value is not Access (downSide). It is set where the
+	// value is parsed -- the value cannot change later, an Update PDR being the
+	// PDR's whole new form -- and read wherever a PDR is put in a chain (the
+	// direction), keyed for a look-up (the downlink selector) or proxied for
+	// (the subscriber ARP answer).
+	down   bool
+	ueIP   netip.Addr
+	farID  uint32
+	qerIDs []uint32
+	urrIDs []uint32
 
 	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
 	// empty when the SMF named none: resolve turns it into the deployment's
@@ -725,6 +754,19 @@ type far struct {
 	// when the SMF named none: the interface a forward out of this FAR leaves
 	// by (resolve).
 	instance string
+
+	// hasFwd, hasDestIfc, hasPolicy and policy are what the FAR's forwarding
+	// parameters named, as they stand after every message that touched this
+	// FAR: the IE itself (mandatory for a FAR that forwards, Table
+	// 7.5.2.3-1), the Destination Interface inside it (mandatory, Table
+	// 7.5.2.3-2), and the Forwarding Policy (mandatory for a forward toward
+	// SGi-LAN/N6-LAN, Table 7.5.2.3-2). An Update FAR that names none of them
+	// leaves them as the session has them, which is why the checks read the
+	// record and not the message.
+	hasFwd     bool
+	hasDestIfc bool
+	policy     string
+	hasPolicy  bool
 
 	// hasBAR and barID are the FAR's BAR ID (8.2.55): the buffering instruction
 	// this FAR's buffered packets live under. resolve refuses a reference to a
@@ -1166,7 +1208,7 @@ func selectorRes(d Direction) string { return d.Selector + "/rules" }
 // session ids live in and the direction's own action table does not.
 func selectorActionsRes(d Direction) string { return d.SelectorActions + "/actions" }
 
-func (c *Compiler) teidRes() string { return c.cfg.TEIDTable + "/rules" }
+func (c *Compiler) teidRes() string  { return c.cfg.TEIDTable + "/rules" }
 func actionsRes(d Direction) string  { return d.Actions + "/actions" }
 func metersRes(d Direction) string   { return d.Meters + "/meters" }
 func tunnelsRes(d Direction) string  { return d.Tunnels + "/tunnels" }
@@ -1251,6 +1293,16 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	if erased, err := c.selectorErases(s); err == nil {
 		for _, ch := range erased {
 			add(ch)
+		}
+	}
+	// And the ARP entries the session's subscriber addresses hold: the address
+	// is the session's, so a deletion that left the entry behind would keep
+	// answering for a UE this UPF no longer carries. `all` holds a moved
+	// address's old form too, and the dedupe above is what keeps one entry from
+	// being named twice.
+	for _, p := range all {
+		if e, ok := c.arpEntryOf(p); ok {
+			add(e.erasure())
 		}
 	}
 	for _, p := range all {
@@ -1396,6 +1448,13 @@ func (c *Compiler) settle(s *Session) {
 			}
 		}
 	}
+	// The ARP claims of the session's own subscriber addresses, held with the
+	// entries they write (arpEntry.claim).
+	for _, p := range s.PDRs {
+		if e, ok := c.arpEntryOf(p); ok {
+			live[e.claim()] = true
+		}
+	}
 	for _, p := range gones {
 		dir := c.direction(p.srcIfc)
 		if dir.Firewall != "" {
@@ -1442,6 +1501,18 @@ func (c *Compiler) settle(s *Session) {
 				delete(c.rules, claim)
 				s.forgetRuleKey(claim)
 			}
+		}
+	}
+	// And an ARP claim the same way: the entry a PDR of the session still names
+	// is live, and one that moved or went is not.
+	for _, p := range gones {
+		e, ok := c.arpEntryOf(p)
+		if !ok {
+			continue
+		}
+		if claim := e.claim(); !live[claim] && c.rules[claim] == s.LocalSEID {
+			delete(c.rules, claim)
+			s.forgetRuleKey(claim)
 		}
 	}
 	s.removed, s.stale, s.ending = nil, nil, nil

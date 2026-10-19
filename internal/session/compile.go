@@ -63,6 +63,15 @@ var errNotExpressible = errors.New("the rule cannot be expressed by a mask")
 // answer for a *busy* UPF, not for one whose id space is empty.)
 var errNoResources = errors.New("no resources available")
 
+// errMandatoryIE marks a request that omits an IE the spec makes mandatory in
+// the shape it was sent: a FAR that forwards must carry forwarding parameters
+// and those must name a Destination Interface (Tables 7.5.2.3-1 and
+// 7.5.2.3-2), and a forward toward SGi-LAN/N6-LAN must carry a Forwarding
+// Policy. The SMF is told cause 61 ("mandatory IE missing"), which names the
+// fault the way cause 73 does not: the message is incomplete, and the SMF can
+// send it again whole.
+var errMandatoryIE = errors.New("a mandatory IE is missing")
+
 // idsOf returns a table's keys in order. Every transaction this compiler
 // writes is built from these: a map's iteration order must never decide what
 // the dataplane is told, or which id an object gets.
@@ -148,6 +157,19 @@ type farReq struct {
 	teid     uint32
 	peer     netip.Addr
 	hasOuter bool
+
+	// hasFwd says the message named the Forwarding Parameters IE at all: a
+	// FAR that forwards must carry it (Table 7.5.2.3-1), and an IE with
+	// nothing in it is still the IE -- the record it fills is what the checks
+	// read.
+	hasFwd bool
+
+	// policy is the Forwarding Policy identifier (TS 29.244 8.2.23, IE type 41) the
+	// forwarding parameters carried, and hasPolicy says they named one: it is
+	// mandatory for a forward toward SGi-LAN/N6-LAN (Table 7.5.2.3-2), and it
+	// is what the service fabric applies to the flow.
+	policy    string
+	hasPolicy bool
 
 	// hasApply, hasDestIfc and hasInstance say which fields the message
 	// carried. An Update FAR carries what changes (7.5.4.3), so a field it
@@ -794,6 +816,18 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				entry.instance = f.instance
 			}
 		}
+		// What the forwarding parameters named, whether this message carried
+		// the IE or an earlier one did: a forward's record is complete only
+		// once something named each part of it.
+		if f.hasFwd {
+			entry.hasFwd = true
+		}
+		if f.hasDestIfc {
+			entry.hasDestIfc = true
+		}
+		if f.hasPolicy {
+			entry.hasPolicy, entry.policy = true, f.policy
+		}
 		if f.hasOuter {
 			entry.teid, entry.peer, entry.hasOuter = f.teid, f.peer, true
 		}
@@ -804,6 +838,40 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// The Transport Level Marking (8.2.12) merges like the instance: an
 			// Update FAR that names none keeps the value the session has.
 			entry.hasMarking, entry.marking = true, f.marking
+		}
+	}
+	// What a FAR that forwards must carry (Tables 7.5.2.3-1 and 7.5.2.3-2),
+	// read from the merged record: an Update FAR carries what changed, so a FAR
+	// that forwards because of this message and named its forwarding
+	// parameters in an earlier one is a complete FAR. A FAR that does not
+	// forward is not checked -- there is no forward for the parameters to
+	// describe, and a dropping FAR is how this UP is told to stop.
+	for _, f := range fars {
+		entry := s.FARs[f.id]
+		if entry == nil || entry.apply&applyForw == 0 {
+			continue
+		}
+		switch {
+		case !entry.hasFwd:
+			return fmt.Errorf(
+				"%w: FAR %d's Apply Action forwards, and the Forwarding Parameters IE is mandatory then (Table 7.5.2.3-1)",
+				errMandatoryIE, entry.id)
+		case !entry.hasDestIfc:
+			return fmt.Errorf(
+				"%w: FAR %d's forwarding parameters name no Destination Interface, which is mandatory (Table 7.5.2.3-2)",
+				errMandatoryIE, entry.id)
+		case entry.destIfc > ie.DstInterface5GVNInternal:
+			// The value is a 4-bit integer of which 0..5 are defined and 6..15
+			// are Spare (Table 8.2.24-1): a forward toward a value no interface
+			// names is a rule this UP cannot place, and the SMF is told so
+			// rather than handed the direction's own hop.
+			return fmt.Errorf(
+				"%w: FAR %d names Destination Interface value %d, which the spec leaves spare (Table 8.2.24-1)",
+				errNotExpressible, entry.id, entry.destIfc)
+		case entry.destIfc == ie.DstInterfaceSGiLANN6LAN && !entry.hasPolicy:
+			return fmt.Errorf(
+				"%w: FAR %d forwards toward SGi-LAN/N6-LAN, and the Forwarding Policy IE is mandatory then (Table 7.5.2.3-2)",
+				errMandatoryIE, entry.id)
 		}
 	}
 	mergeBars(s, bars)
@@ -892,6 +960,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		s.forgetRemoval(p.id)
 		pdr := &pdr{
 			id: p.id, precedence: p.precedence, srcIfc: p.srcIfc,
+			down: downSide(p.srcIfc),
 			ueIP: p.ueIP, sdfs: p.sdfs, farID: p.farID,
 			qerIDs: p.qerIDs, urrIDs: p.urrIDs,
 			instance: p.instance, qfis: p.qfis,
@@ -1052,29 +1121,11 @@ func (c *Compiler) resolve(s *Session) error {
 			return err
 		}
 		p.domain = ifc.Domain
-		p.nextHop = dir.NextHop
-		if c.cfg.Instances != nil && far != nil && far.destIfc != ie.DstInterfaceAccess {
-			// A forward toward the data network leaves by the instance's own
-			// next hop -- the deployment's N6, or the peer UPF an N9 instance
-			// names -- rather than by the direction's. The access side is the
-			// exception: a forward toward the UE leaves through the encap, and
-			// that is the direction's hop whatever instance was named.
-			egress := ifc
-			if far.instance != "" {
-				// The FAR's own Network Instance (8.2.4) is where the traffic
-				// leaves by, and it need not be the one the PDI selected: an
-				// uplink rule can select a flow in one instance and send it out
-				// of N9 toward another.
-				found, ok := c.cfg.Instances.Lookup(far.instance)
-				if !ok {
-					return fmt.Errorf(
-						"%w: the FAR's forwarding parameters name the network instance %q, and this deployment serves %s",
-						errNotExpressible, far.instance, strings.Join(c.cfg.Instances.Names(), ", "))
-				}
-				egress = found
-			}
-			p.nextHop = egress.NextHop
+		hop, err := c.egressHop(far, ifc, dir)
+		if err != nil {
+			return err
 		}
+		p.nextHop = hop
 		// A FAR that asks for buffering and not for forwarding (Apply Action
 		// BUFF, 8.2.26) is the idle-UE downlink case: the packets are held and
 		// the SMF is told they arrived. Where the deployment has a store
@@ -1220,6 +1271,161 @@ func (c *Compiler) interfaceFor(p *pdr) (routing.Interface, error) {
 		ifc = found
 	}
 	return ifc, nil
+}
+
+// forwardEgress is the interface a forward leaves by: the FAR's own Network
+// Instance when it names one (TS 29.244 8.2.4 inside the Forwarding
+// Parameters), and the PDI's interface otherwise. The two need not agree -- an
+// uplink rule may select a flow in one instance and send it out of N9 toward
+// another -- and a deployment that resolves no instances at all (no -instances)
+// has the one interface, whose hop is the direction's own.
+func (c *Compiler) forwardEgress(far *far, ifc routing.Interface) (routing.Interface, error) {
+	if far.instance == "" || c.cfg.Instances == nil {
+		return ifc, nil
+	}
+	found, ok := c.cfg.Instances.Lookup(far.instance)
+	if !ok {
+		return routing.Interface{}, fmt.Errorf(
+			"%w: the FAR's forwarding parameters name the network instance %q, and this deployment serves %s",
+			errNotExpressible, far.instance, strings.Join(c.cfg.Instances.Names(), ", "))
+	}
+	return found, nil
+}
+
+// egressHop is where a PDR's forward leaves by: the deployment's egress table
+// (internal/routing), read by the FAR's Destination Interface value (TS 29.244
+// 8.2.24, Table 8.2.24-1) and by whether the FAR adds an outer header. It
+// replaces the direction's own hop, which is what every forward took before the
+// value was read at all: an uplink forward toward the access side used to leave
+// for N6, and a forward toward the service LAN or the 5G VN silently took the
+// data network's exit.
+//
+// The deployment declares what each egress is (the -instances flag's
+// *-next-hop keys); a forward whose egress it declares nothing for is refused
+// with the rule-failure cause, because sending it anywhere else would be
+// forwarding traffic toward an interface the deployment never built.
+//
+// A FAR that does not forward -- a drop, or a BUFF-only FAR -- makes no egress
+// decision: there is no forward to place, and the hop returned here is unused
+// (its rule delivers on the drop gate and names no action record).
+func (c *Compiler) egressHop(far *far, ifc routing.Interface, dir Direction) (uint32, error) {
+	if far == nil || far.apply&applyForw == 0 {
+		return dir.NextHop, nil
+	}
+	switch far.destIfc {
+	case ie.DstInterfaceAccess:
+		// The access side: whichever direction the PDR is on, the forward
+		// leaves through the encap, and a deployment that names no
+		// -access-next-hop takes the downlink direction's own hop, which is the
+		// encap's gate in every deployed graph.
+		//
+		// An uplink PDR forwarding toward the access side is indirect data
+		// forwarding (TS 29.244 8.2.2 NOTE 2): the packets go back out of N3,
+		// in a tunnel, toward the target gNB.
+		if c.cfg.AccessNextHop != 0 {
+			return c.cfg.AccessNextHop, nil
+		}
+		return c.cfg.Down.NextHop, nil
+
+	case ie.DstInterfaceCore:
+		egress, err := c.forwardEgress(far, ifc)
+		if err != nil {
+			return 0, err
+		}
+		if far.hasOuter {
+			// An outer header and the core side is a tunnel out of the
+			// instance: the far end of an N9 link, or the tunnel of an
+			// indirect forward.
+			if hop, ok := egress.Hop(routing.Egress{DestIfc: ie.DstInterfaceCore, Tunnel: true}); ok {
+				return hop, nil
+			}
+			return 0, fmt.Errorf(
+				"%w: the forward adds a tunnel out of %s, and this deployment declares no tunnel egress for it",
+				errNotExpressible, egressName(egress, c.cfg.Instances))
+		}
+		// Plain IP out of the instance: the instance's own next hop is the
+		// fallback, so a deployment that declares one egress per instance needs
+		// no more keys than it always did.
+		return egress.HopOr(routing.Egress{DestIfc: ie.DstInterfaceCore}, c.baseHop(egress, dir)), nil
+
+	case ie.DstInterfaceSGiLANN6LAN:
+		egress, err := c.forwardEgress(far, ifc)
+		if err != nil {
+			return 0, err
+		}
+		if hop, ok := egress.Hop(routing.Egress{DestIfc: ie.DstInterfaceSGiLANN6LAN, Tunnel: far.hasOuter}); ok {
+			return hop, nil
+		}
+		if far.hasOuter {
+			return 0, fmt.Errorf(
+				"%w: the forward adds a tunnel toward SGi-LAN/N6-LAN, and this deployment declares no tunneled service-LAN egress for %s",
+				errNotExpressible, egressName(egress, c.cfg.Instances))
+		}
+		return 0, fmt.Errorf(
+			"%w: the forward names Destination Interface 2 (SGi-LAN/N6-LAN), and this deployment declares no service-LAN egress for %s",
+			errNotExpressible, egressName(egress, c.cfg.Instances))
+
+	case ie.DstInterface5GVNInternal:
+		if far.hasOuter {
+			// A re-injection is this UPF's own path: the packet goes back into
+			// the subscriber-side chain, and there is no tunnel to add on the
+			// way.
+			return 0, fmt.Errorf(
+				"%w: a forward toward 5G VN Internal (Destination Interface 5) re-enters this UP's own chain and adds no outer header",
+				errNotExpressible)
+		}
+		egress, err := c.forwardEgress(far, ifc)
+		if err != nil {
+			return 0, err
+		}
+		if hop, ok := egress.Hop(routing.Egress{DestIfc: ie.DstInterface5GVNInternal}); ok {
+			return hop, nil
+		}
+		return 0, fmt.Errorf(
+			"%w: the forward names Destination Interface 5 (5G VN Internal), and this deployment declares no 5G VN egress for %s",
+			errNotExpressible, egressName(egress, c.cfg.Instances))
+
+	case ie.DstInterfaceCPFunction:
+		// The CP function's own path (Table 8.2.24-1, value 3): a user plane
+		// packet is not sent along it, and this UP has no such exit.
+		return 0, fmt.Errorf(
+			"%w: Destination Interface 3 (CP-function) is not one this UP serves", errNotExpressible)
+
+	case ie.DstInterfaceLIFunction:
+		// The lawful-interception exit (value 4): an X3 copy is a duplication
+		// action, which is a different instruction from the forward this FAR
+		// asks for.
+		return 0, fmt.Errorf(
+			"%w: Destination Interface 4 (LI Function) is not one this UP serves", errNotExpressible)
+
+	default:
+		// 6..15 are Spare (Table 8.2.24-1). merge refuses them for a FAR that
+		// forwards; this is the same refusal for a record that reached resolve
+		// by another path.
+		return 0, fmt.Errorf(
+			"%w: the FAR names Destination Interface value %d, which the spec leaves spare (Table 8.2.24-1)",
+			errNotExpressible, far.destIfc)
+	}
+}
+
+// baseHop is the hop an interface's plain egress falls back to when the
+// deployment declares none for it: the instance's own next hop, and -- for the
+// one-instance deployment, whose interface is the zero value -- the direction's.
+func (c *Compiler) baseHop(ifc routing.Interface, dir Direction) uint32 {
+	if c.cfg.Instances == nil {
+		return dir.NextHop
+	}
+	return ifc.NextHop
+}
+
+// egressName names where a forward was to leave by, for a refusal: the network
+// instance it resolved to, or the one-instance deployment when the deployment
+// resolves no instances at all.
+func egressName(ifc routing.Interface, d *routing.Domains) string {
+	if d == nil {
+		return "the network instance"
+	}
+	return fmt.Sprintf("the network instance %q", ifc.Instance)
 }
 
 // urrHeldByAPDR reports whether a PDR the session still has names this URR.
@@ -1469,6 +1675,16 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			}
 		}
 	}
+	// The ARP entries the session still holds: one per subscriber address its
+	// subscriber-side PDRs name, where the interface declares a responder. A
+	// replaced form whose address is in this set is not erased -- the entry is
+	// the same entry, written again.
+	liveARP := map[string]bool{}
+	for _, p := range s.PDRs {
+		if e, ok := c.arpEntryOf(p); ok {
+			liveARP[e.claim()] = true
+		}
+	}
 	// The counter entries the session still needs, as the transaction will write
 	// them: one per forwarding PDR a URR measures. A removal or a replaced form
 	// whose entry is in this set is not erased -- the write follows, and the
@@ -1607,6 +1823,12 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				}
 			}
 		}
+		if e, ok := c.arpEntryOf(p); ok && !liveARP[e.claim()] {
+			// The subscriber address this PDR answered for is gone from the
+			// session: the entry goes with it, or the segment would keep
+			// resolving an address this UPF no longer carries.
+			erase(e.erasure())
+		}
 		if p.actionID != 0 {
 			erase(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
 		}
@@ -1682,6 +1904,11 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 					erase(bess.Change{Resource: selectorActionsRes(c.cfg.Down), Key: map[string]any{"id": id}})
 				}
 			}
+		}
+		if e, ok := c.arpEntryOf(old); ok && !liveARP[e.claim()] {
+			// A replaced form whose subscriber address moved: the entry it
+			// answered for goes, the same guard as the removed form above.
+			erase(e.erasure())
 		}
 		if old.teid != 0 && !teidNamed(s, old.teid) {
 			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(old.teid)})
@@ -2019,6 +2246,27 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		return nil, nil, err
 	}
 	changes = append(changes, selectorWrites...)
+	// The subscriber's ARP entries, claimed the same way: one per address the
+	// session's subscriber-side PDRs name, on the interface that declares a
+	// responder. An address another session answers for is refused here rather
+	// than written -- the second write would take the first session's traffic,
+	// and by the time the mistake showed, the SMF would have been told both
+	// sessions stand.
+	for _, e := range c.arpEntries(s) {
+		claim := e.claim()
+		if owner, taken := c.rules[claim]; taken && owner != s.LocalSEID {
+			return nil, nil, fmt.Errorf(
+				"%w: the subscriber address %s on %s is session %d's", errNotExpressible, e.addr, e.module, owner)
+		}
+		if _, held := c.rules[claim]; !held {
+			claimed = append(claimed, claim)
+			if !s.holdsRuleKey(claim) {
+				s.ruleKeys = append(s.ruleKeys, claim)
+			}
+		}
+		c.rules[claim] = s.LocalSEID
+		changes = append(changes, e.change())
+	}
 	// The per-session matcher's map last: one key per session, each that
 	// session's own rules. It follows the action records the loop above wrote,
 	// because a rule names one -- and it is the only change the opt-in path
@@ -2949,9 +3197,28 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 	for _, c := range children {
 		switch c.Type {
 		case ie.SourceInterface:
-			if v, err := c.SourceInterface(); err == nil {
-				p.srcIfc = v
+			v, err := c.SourceInterface()
+			if err != nil {
+				return fmt.Errorf("Source Interface: %w", err)
 			}
+			// The value names the side the packet came from (TS 29.244
+			// 8.2.2, Table 8.2.2-1): Access is the access side, and Core, the
+			// service LAN's interface and the 5G VN's internal interface are
+			// the sides toward the subscriber -- the last of them is where a
+			// packet re-injected by a FAR comes back in. CP-function is the CP
+			// function's own path, which is no user plane of this UP's, and
+			// 5..15 are Spare. A rule on one of those would be a rule the SMF
+			// asked for and nothing serves, so the value is refused rather
+			// than carried into a chain (an unread value used to become
+			// Access, which is what put CP-function traffic on the uplink).
+			switch v {
+			case ie.SrcInterfaceAccess, ie.SrcInterfaceCore,
+				ie.SrcInterfaceSGiLANN6LAN, ie.SrcInterface5GVNInternal:
+			default:
+				return fmt.Errorf("%w: the PDI's Source Interface value %d is not one this UP serves",
+					errNotExpressible, v)
+			}
+			p.srcIfc = v
 		case ie.NetworkInstance:
 			// The PDI's Network Instance (TS 29.244 8.2.4): the instance "to
 			// match for the incoming packet", read here and resolved in
@@ -3224,6 +3491,7 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			if err != nil {
 				return farReq{}, fmt.Errorf("Forwarding Parameters: %w", err)
 			}
+			f.hasFwd = true
 			if err := parseForwardingParameters(&f, fwd); err != nil {
 				return farReq{}, err
 			}
@@ -3244,6 +3512,7 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			if err != nil {
 				return farReq{}, fmt.Errorf("Update Forwarding Parameters: %w", err)
 			}
+			f.hasFwd = true
 			if err := parseForwardingParameters(&f, fwd); err != nil {
 				return farReq{}, err
 			}
@@ -3266,6 +3535,21 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 			if v, err := fp.DestinationInterface(); err == nil {
 				f.destIfc, f.hasDestIfc = v, true
 			}
+		case ie.ForwardingPolicy:
+			// The Forwarding Policy IE (TS 29.244 8.2.23, IE type 41, inside the
+			// Forwarding Parameters): the identifier of the policy the service
+			// fabric applies to this flow. It is mandatory for a forward
+			// toward SGi-LAN/N6-LAN (Table 7.5.2.3-2) and may be present
+			// otherwise; a graph carries no service-fabric classifier for it,
+			// so what this UP does with it is hold it -- the presence is the
+			// contract, and a message that omits it where it is mandatory is
+			// refused (merge) rather than forwarded into a fabric that would
+			// apply nothing.
+			id, err := fp.ForwardingPolicyIdentifier()
+			if err != nil {
+				return fmt.Errorf("Forwarding Policy: %w", err)
+			}
+			f.policy, f.hasPolicy = id, true
 		case ie.NetworkInstance:
 			// The forward's own Network Instance (TS 29.244 8.2.4 inside the
 			// Forwarding Parameters): the instance the traffic leaves by, which
@@ -3888,6 +4172,9 @@ func deleteResponse(req *message.SessionDeletionRequest, cpSEID uint64, cause ui
 // retransmission of it would hit again), while an unreadable message is a
 // rejection.
 func parseCause(err error) uint8 {
+	if errors.Is(err, errMandatoryIE) {
+		return ie.CauseMandatoryIEMissing
+	}
 	if errors.Is(err, errNotExpressible) {
 		return ie.CauseRuleCreationModificationFailure
 	}
@@ -3899,6 +4186,9 @@ func parseCause(err error) uint8 {
 // cause 75 ("no resources available"), which is what an SMF retries or
 // reconciles against.
 func compileCause(err error) uint8 {
+	if errors.Is(err, errMandatoryIE) {
+		return ie.CauseMandatoryIEMissing
+	}
 	if errors.Is(err, errNoResources) {
 		return ie.CauseNoResourcesAvailable
 	}
@@ -4030,14 +4320,13 @@ func (c *Compiler) pdrMatchChanges(s *Session) ([]bess.Change, error) {
 		return nil, nil
 	}
 	changes := make([]bess.Change, 0, 2)
-	// The two directions, each with the source interface whose PDRs it serves.
-	// direction() is the one mapping from a Source Interface to a chain, and it
-	// checks the value it was given; a Direction cannot be compared (its field
-	// list is a slice), so the loop carries the mapping's own two sides rather
-	// than comparing what direction() returned.
+	// The two directions, each with the side whose PDRs it serves. A Direction
+	// cannot be compared (its field list is a slice), so the loop carries the
+	// side itself -- downSide's answer, which is also what each PDR holds --
+	// rather than comparing what direction() returned.
 	for _, side := range []struct {
 		dir  Direction
-		core bool // SrcInterfaceCore: from the network, toward the UE
+		down bool // the side toward the subscriber (downSide)
 	}{{c.cfg.Up, false}, {c.cfg.Down, true}} {
 		dir := side.dir
 		if dir.PdrMatch == "" {
@@ -4055,7 +4344,7 @@ func (c *Compiler) pdrMatchChanges(s *Session) ([]bess.Change, error) {
 		// transaction is the same whatever the order, and an operator's log
 		// reads the same twice.
 		var downKey uint32
-		if side.core {
+		if side.down {
 			var err error
 			if downKey, err = selectorID(s); err != nil {
 				return nil, err
@@ -4064,13 +4353,16 @@ func (c *Compiler) pdrMatchChanges(s *Session) ([]bess.Change, error) {
 		rules := map[uint32][]pdrMatchEntry{}
 		order := make([]uint32, 0, 1)
 		for _, p := range pdrsInOrder(s) {
-			// A PDR of the other direction, or of a direction this module is
-			// not configured for: not this change's.
-			if (p.srcIfc == ie.SrcInterfaceCore) != side.core {
+			// A PDR of the other side, or of a direction this module is not
+			// configured for: not this change's. The side is the PDR's own
+			// (down), so a PDI whose Source Interface names the service LAN or
+			// the 5G VN's internal interface is keyed like any other
+			// subscriber-side PDR.
+			if p.down != side.down {
 				continue
 			}
 			key := downKey
-			if !side.core {
+			if !side.down {
 				if p.teid == 0 {
 					return nil, fmt.Errorf(
 						"%w: PDR %d names no F-TEID, and the PdrMatch path keys a session by it",

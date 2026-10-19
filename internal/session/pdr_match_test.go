@@ -53,13 +53,15 @@ func pdrMatchEstablishment(cpSEID uint64, ueIP string, teid, precedence uint32, 
 		ie.NewFSEID(cpSEID, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(precedence),
 			ie.NewPDI(uplink...), ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
 			ie.NewFARID(2)),
-		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 }
 
@@ -211,7 +213,8 @@ func TestTheSessionsRulesAreInPrecedenceOrder(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out tcp from any 80 to assigned", "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 		// A FAR that neither forwards nor buffers: its PDR drops, and a
 		// dropping rule names no action (the module refuses drop with one).
 		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(0)),
@@ -367,7 +370,8 @@ func TestAPdrMatchPDINamingAQFIIsCarriedOnItsRule(t *testing.T) {
 	req := message.NewSessionEstablishmentRequest(0, 0, 0x6f01, 1, 0,
 		ie.NewFSEID(0x6f01, nil, nil),
 		pdr(1, 300, -1), pdr(2, 100, 9), pdr(3, 200, 5),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a PDI naming a QFI answered cause %d", got)

@@ -39,7 +39,8 @@ func TestARefusedModificationLeavesTheSessionAsItWas(t *testing.T) {
 		t.Errorf("the refused update left PDR 1 naming URRs %v, want its own 7", ids)
 	}
 	benign := message.NewSessionModificationRequest(0, 0, seid, 3, 0,
-		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)))
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))))
 	if got := cause(t, c.Modify(benign)); got != ie.CauseRequestAccepted {
 		t.Errorf("the next modification answered cause %d, want it accepted: the refusal left nothing behind", got)
 	}

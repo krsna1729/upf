@@ -24,13 +24,15 @@ func bidirectional(cp uint64, downlinkFilter, uplinkFilter *ie.IE) *message.Sess
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				uplinkFilter),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				downlinkFilter),
 			ie.NewFARID(2)),
-		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 }
 

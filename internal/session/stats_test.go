@@ -55,7 +55,8 @@ func TestStatsCountWhatTheSMFAsked(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 1000-2000", "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw))))); got != ie.CauseRuleCreationModificationFailure {
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess)))))); got != ie.CauseRuleCreationModificationFailure {
 		t.Fatalf("the refused establishment answered cause %d", got)
 	}
 	if got := c.Stats(); got.Refused != 1 || got.Sessions != 1 {

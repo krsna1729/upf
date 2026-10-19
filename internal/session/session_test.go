@@ -715,7 +715,8 @@ func TestAnUpdateThatChangesTheKeyErasesTheOldRule(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
@@ -767,7 +768,8 @@ func TestADeletionErasesTheOldKeyOfARefusedUpdate(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
@@ -813,7 +815,8 @@ func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
@@ -827,7 +830,8 @@ func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(2)),
-		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
@@ -860,7 +864,8 @@ func TestACHRequestIsAllocatedWhateverItsFamilyFlag(t *testing.T) {
 				ie.NewFTEID(0x05, 0, nil, nil, 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 	)
 	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
@@ -1134,7 +1139,8 @@ func TestAModificationThatAsksForNoFTEIDIsAnsweredWithNone(t *testing.T) {
 	}
 
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
-		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(0x02)))
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(0x02),
+			ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))))
 	modified := c.Modify(mod).(*message.SessionModificationResponse)
 	if got := cause(t, modified); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
@@ -1199,7 +1205,8 @@ func TestACHOOSEForIPv6IsRefused(t *testing.T) {
 				ie.NewFTEID(0x06, 0, nil, nil, 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("an IPv6 CHOOSE request answered cause %d, want a rule failure", got)
@@ -1226,7 +1233,8 @@ func TestACHOOSEForBothFamiliesGetsTheIPv4FTEID(t *testing.T) {
 					ie.NewFTEID(flags, 0, nil, nil, 0),
 					ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
 				ie.NewFARID(1)),
-			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 		)
 		resp := c.Establish(req).(*message.SessionEstablishmentResponse)
 		if got := cause(t, resp); got != ie.CauseRequestAccepted {
@@ -1438,7 +1446,8 @@ func TestTwoUplinkPDRsWithOneFilterAreRefused(t *testing.T) {
 				ie.NewFTEID(0x01, 0x40000001, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("two PDRs with one filter answered cause %d, want a rule failure", got)
@@ -2392,7 +2401,8 @@ func TestPortRangeIsRefusedNotMatchedTooWidely(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 1000-2000", "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("a port range answered cause %d, want a rule failure", got)
@@ -2412,7 +2422,8 @@ func TestAnSDFPrefixIsAPrefixNotAnAddress(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16", "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
 		t.Fatalf("an SDF prefix answered cause %d", got)
@@ -2441,7 +2452,8 @@ func TestAnSDFPrefixIsAPrefixNotAnAddress(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.11.1.5/16", "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a filter with host bits answered cause %d", got)
@@ -2478,7 +2490,8 @@ func TestAUEIPAllocationRequestIsRefused(t *testing.T) {
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewUEIPAddress(0x12, "", "", 0, 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("a UE IP allocation request answered cause %d, want a rule failure", got)
@@ -2498,7 +2511,8 @@ func TestAUEIPAllocationRequestIsRefused(t *testing.T) {
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x23, "10.45.0.8", "", 0, 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("a V4 address with CHV6 answered cause %d, want a rule failure", got)
@@ -2513,7 +2527,8 @@ func TestAUEIPAllocationRequestIsRefused(t *testing.T) {
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x02, "", "", 0, 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("an empty V4 address answered cause %d, want a rule failure", got)
@@ -2535,7 +2550,8 @@ func TestAnSDFBeforeTheUEIPResolvesTheSameWay(t *testing.T) {
 				ie.NewSDFFilter("permit out udp from assigned to any", "", "", "", 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.9", "", 0, 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
 		t.Fatalf("an SDF before the UE IP IE answered cause %d", got)
@@ -2566,7 +2582,8 @@ func TestANonIPv4PDIIsRefusedNotWidened(t *testing.T) {
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 2001:db8::/32 53", "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("an IPv6 SDF answered cause %d, want a rule failure", got)

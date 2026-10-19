@@ -21,8 +21,6 @@ import (
 	"math"
 	"net/netip"
 
-	"github.com/wmnsk/go-pfcp/ie"
-
 	"github.com/krsna1729/upf/internal/bess"
 )
 
@@ -40,12 +38,17 @@ func (k selectorKey) String() string {
 }
 
 // selectorKeyOf is the selector key one PDR names, if it names one: a PDR from
-// the core side whose PDI carries an IPv4 UE address. The address is the
+// the subscriber side whose PDI carries an IPv4 UE address. The address is the
 // session's -- merge fills a PDI's address in from the session's when the PDI
 // names none -- and the domain is the interface the PDI's network instance
 // resolved to.
+//
+// The side is the PDR's own (down), not the one value it used to be: a PDI whose
+// Source Interface names the service LAN or the 5G VN's internal interface is
+// matched on the subscriber side too, and a downlink packet on one of those
+// instances must still be named by its session.
 func selectorKeyOf(p *pdr) (selectorKey, bool) {
-	if p.srcIfc != ie.SrcInterfaceCore || !p.ueIP.IsValid() || !p.ueIP.Unmap().Is4() {
+	if !p.down || !p.ueIP.IsValid() || !p.ueIP.Unmap().Is4() {
 		return selectorKey{}, false
 	}
 	return selectorKey{domain: p.domain, addr: p.ueIP.Unmap()}, true
@@ -60,7 +63,7 @@ func selectorKeys(s *Session) ([]selectorKey, error) {
 	var keys []selectorKey
 	seen := map[selectorKey]bool{}
 	for _, p := range pdrsInOrder(s) {
-		if p.srcIfc != ie.SrcInterfaceCore {
+		if !p.down {
 			continue
 		}
 		k, ok := selectorKeyOf(p)

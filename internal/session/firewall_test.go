@@ -58,7 +58,8 @@ func firewallEstablishment(cpSEID uint64, ueIP string, precedence uint32, sdf st
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 				ie.NewSDFFilter(sdf, "", "", "", 0)),
 			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 }
 
