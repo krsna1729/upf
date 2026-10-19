@@ -53,8 +53,9 @@ upf_proto = custom_target(
 # matching differently at run time.
 upf_datapath = shared_module(
   'upf_datapath',
-  ['gtpu_decap.cc', 'gtpu_echo.cc', 'gtpu_encap.cc', 'pdr_match.cc',
-   'pdr_match_scan.cc', 'urr_count.cc', upf_proto[0], upf_proto[1]],
+  ['arp_responder.cc', 'gtpu_decap.cc', 'gtpu_echo.cc', 'gtpu_encap.cc',
+   'pdr_match.cc', 'pdr_match_scan.cc', 'urr_count.cc', upf_proto[0],
+   upf_proto[1]],
   include_directories: include_directories('.'),
   dependencies: [bess_dep, protobuf_dep],
   install: true,
