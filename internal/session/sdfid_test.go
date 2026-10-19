@@ -111,3 +111,59 @@ func TestAnIDOnlyFilterNothingDefinesIsNeverACatchAllRule(t *testing.T) {
 		t.Errorf("cause %d, want a rule failure", got)
 	}
 }
+
+// TestADefinitionChangeRewritesTheReferencingPDRsRule: a PDR that names an SDF
+// Filter ID references another PDR's flow description (TS 29.244 5.2.1A.3),
+// and a modification that changes the definition updates every rule that
+// resolved it. The referencing PDR has no replaced form of its own -- the
+// message does not touch it -- so its old key must be erased with the rewrite,
+// or the session keeps a rule matching the description the SMF replaced.
+func TestADefinitionChangeRewritesTheReferencingPDRsRule(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(bidirectional(0x7c02,
+		ie.NewSDFFilter(udp53, "", "", "", 7),                                       // the definition
+		ie.NewSDFFilter("", "", "", "", 7))).(*message.SessionEstablishmentResponse) // the reference
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	written, erased := ulRules(rec.last())
+	if len(written) != 1 || len(erased) != 0 {
+		t.Fatalf("the establishment wrote %d uplink rules and erased %d, want 1 and 0", len(written), len(erased))
+	}
+	if port := written[0].value(4); len(port) != 2 || port[1] != 53 {
+		t.Fatalf("the uplink rule's destination port is %v, want 53", port)
+	}
+
+	// The SMF now describes a different peer port for the same filter ID, in
+	// the PDR the reference does not name.
+	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 5, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter("permit out udp from any 54 to assigned", "", "", "", 7)),
+			ie.NewFARID(2)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the modification answered cause %d", got)
+	}
+	written, erased = ulRules(rec.last())
+	if len(written) != 1 {
+		t.Fatalf("the modification wrote %d uplink rules, want 1 (wrote %d, erased %d)", len(written), len(written), len(erased))
+	}
+	if port := written[0].value(4); len(port) != 2 || port[1] != 54 {
+		t.Fatalf("the rewritten key's destination port is %v, want the new description's 54 (erased %d)", port, len(erased))
+	}
+	if len(erased) != 1 {
+		t.Fatalf("the modification erased %d uplink rules, want the referencing PDR's old one", len(erased))
+	}
+	if port := erased[0].value(4); len(port) != 2 || port[1] != 53 {
+		t.Errorf("the erased key's destination port is %v, want the old description's 53", port)
+	}
+	if len(written) != 1 {
+		t.Fatalf("the modification wrote %d uplink rules, want 1", len(written))
+	}
+	if port := written[0].value(4); len(port) != 2 || port[1] != 54 {
+		t.Errorf("the new key's destination port is %v, want the new description's 54", port)
+	}
+}
