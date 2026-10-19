@@ -44,6 +44,10 @@ const (
 	// buffered": BUFF without it is an instruction to hold the packets and say
 	// nothing, so the report is owed only when the SMF asked for it.
 	applyNOCP = 0x08
+	// applyDUPL is "Duplicate" (8.2.26 bit 5): the FAR names a second
+	// forwarding FAR and every packet goes out both. No chain here branches a
+	// packet to two actions, so the instruction cannot be honoured.
+	applyDUPL = 0x10
 )
 
 // The bytes a rule whose FAR drops leaves on.
@@ -3696,6 +3700,11 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			if len(flags) > 0 {
 				f.apply = flags[0]
 			}
+			if f.apply&applyDUPL != 0 {
+				return farReq{}, fmt.Errorf(
+					"%w: the Apply Action asks for DUPL, and this UP forwards to one action per packet",
+					errNotExpressible)
+			}
 		case ie.ForwardingParameters:
 			fwd, err := c.ForwardingParameters()
 			if err != nil {
@@ -3760,6 +3769,17 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 				return fmt.Errorf("Forwarding Policy: %w", err)
 			}
 			f.policy, f.hasPolicy = id, true
+		case ie.HeaderEnrichment, ie.RedirectInformation, ie.Proxying:
+			// Header Enrichment (8.2.67), Redirect Information (8.2.20) and
+			// Proxying (8.2.97) all instruct the UP to *write* something into
+			// the subscriber's traffic -- an HTTP header, a redirect, a proxy
+			// address. Nothing in this datapath reads or rewrites L7, so a
+			// FAR carrying one is refused rather than forwarded as if it were
+			// absent: the SMF would have no way to learn the instruction was
+			// not applied.
+			return fmt.Errorf(
+				"%w: the Forwarding Parameters carry an IE this UP does not apply (type %d: Header Enrichment, Redirect Information or Proxying)",
+				errNotExpressible, fp.Type)
 		case ie.NetworkInstance:
 			// The forward's own Network Instance (TS 29.244 8.2.4 inside the
 			// Forwarding Parameters): the instance the traffic leaves by, which
