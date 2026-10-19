@@ -25,6 +25,31 @@ message GtpuDecapArg {
   uint32 port = 1;
 }
 
+// UpfArpResponderArg configures the ARP responder for the subscriber
+// addresses the deployment holds. Its entries are a *live* resource: one per
+// session per UE address, written and erased with the session.
+message UpfArpResponderArg {
+  // How many entries the table holds. 0 means 65536. The table is sized once,
+  // at construction: a write that finds no room is refused, with nothing
+  // visible, rather than growing under a running packet path.
+  uint32 max_entries = 1;
+}
+
+// UpfArpResponderEntryKey is one address the responder answers for, and
+// UpfArpResponderEntryValue the Ethernet address its replies carry. The names
+// are the fork's ArpResponder's, so a controller that writes
+// {"ip": ..., "mac_addr": ...} writes this resource unchanged.
+message UpfArpResponderEntryKey {
+  // The address, dotted (0.0.0.0 is refused: it names no subscriber).
+  string ip = 1;
+}
+
+message UpfArpResponderEntryValue {
+  // The MAC the reply's sender hardware address carries: the interface's own,
+  // lower case and colon-separated.
+  string mac_addr = 1;
+}
+
 // GtpuEchoArg configures the GTP-U echo responder (TS 29.281 7.2). The reply
 // is the request with its addresses and ports swapped and its payload dropped,
 // so the module needs no other argument.
