@@ -15,6 +15,12 @@
 #     policed with it: gate 2 > 0. Had the rewrite not landed, `m2` would read
 #     id 1, find no entry, and drop fail-closed: no gate-2 count at all.
 #
+# The order is the compiler's to choose, and this graph wires the flow's meter
+# first: a meter only sees what the stage before it passed, so `m2` counts the
+# traffic `m1` policed through -- the aggregate's cap still holds over what
+# leaves, and its allowance is not spent on packets `m1` dropped. Wired the
+# other way, `m2` would charge those too (policing the offered rate instead).
+#
 # The constraint this graph also pins (found while building it, and recorded in
 # docs/compliance.md): an attribute a module *writes* is given no offset unless
 # something downstream *reads* it (core/metadata.cc, FillOffsetArrays: a scope
