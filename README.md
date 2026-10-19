@@ -33,7 +33,9 @@ session change. It holds no dataplane state of its own.
   transaction, pipeline bootstrap, restart handling.
 - `internal/session` — the session state machine: one PFCP session is one
   BESS transaction.
-- `internal/routing` — route domains (N3/N6/N9) and next-hop programming.
+- `internal/routing` — the deployment's network instances: their route domains,
+  their subscriber pools, one next hop per egress (a FAR's Destination Interface
+  decides which) and the interface's ARP identity.
 - `datapath/` — the UPF datapath as a Bess **plugin** (D-008: UPF-specific
   code stays in a plugin) — GTP-U decapsulation and encapsulation, on the
   installed header-only codec (`core/tunnel/tunnel.h`, experimental). It is
