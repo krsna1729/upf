@@ -56,6 +56,7 @@ fi
 "$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$ROOT/deploy/smoke-gtpu.yaml" >/dev/null
 "$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$ROOT/deploy/smoke-gtpu.yaml" >/dev/null
 "$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
+
 sleep "$SECONDS_RUN"
 
 FAIL=0
@@ -127,16 +128,16 @@ check_metadata "decap wrote upf_teid into metadata" "11 22 33 44"
 check "decap read the PDU Session Container's QFI into metadata" \
       "00000000: 11 22 33 44 05"
 
-# The same TEID with no PDU Session Container at all (src_nocont's frame, E
-# flag clear) must leave 255 in the QFI byte: 0 is a real QFI (TS 38.415
-# 5.5.3.3's range is 0..63, and TS 29.244 8.2.89's IE takes it), so a rule a
-# PDI keys on QFI 0 has to be able to tell that packet from this one. A writer
-# that wrote 0 for "no container" would make the two the same packet to the
-# rule table.
+# The frame with no PDU Session Container at all (src_nocont's, E flag clear,
+# TEID 0x11223345, its own decap and Dump) must leave 255 in the QFI byte: 0 is
+# a real QFI (TS 38.415 5.5.3.3's range is 0..63, and TS 29.244 8.2.89's IE
+# takes it), so a rule a PDI keys on QFI 0 has to be able to tell that packet
+# from this one. A writer that wrote 0 for "no container" would make the two
+# the same packet to the rule table.
 check_metadata "a G-PDU with no container leaves qfi at 255, not 0" \
-      "11 22 33 44 FF"
+      "11 22 33 45 FF"
 refute_metadata "no packet leaves 0 in the QFI byte of a container-less G-PDU" \
-      "11 22 33 44 00"
+      "11 22 33 45 00"
 
 # The session table is what makes a TEID ours: the second uplink chain's frame
 # carries TEID 0x55667788, which no entry names, so the decap dropped it -- its

@@ -57,8 +57,10 @@ func parsePDRFields(spec string) ([]session.Field, error) {
 // adds an outer header -- next-hop is a plain forward toward the data network
 // (N6), tunnel-next-hop one in a tunnel (N9, or indirect data forwarding),
 // sgi-lan-next-hop one toward the service LAN (2) and vn-next-hop one that
-// re-enters the subscriber-side chain (5). next-hop is where a deployment
-// without the others sends everything out of the instance.
+// re-enters the subscriber-side chain (5). At least one of the four is
+// required: an instance with no egress at all serves nothing. next-hop is
+// where a plain forward out of the instance goes, so an instance that serves
+// one needs it (a forward it cannot place is refused with cause 73).
 //
 // arp names the module whose "<module>/entries" resource answers ARP requests
 // for this instance's subscribers, and arp-mac is the Ethernet address those
@@ -77,6 +79,7 @@ func parseInstances(spec string, maxDomains uint32) (*routing.Domains, error) {
 		var (
 			ifc        routing.Interface
 			hasDomain  bool
+			hasEgress  bool
 			hasARPMAC  bool
 			arpMACText string
 		)
@@ -113,7 +116,7 @@ func parseInstances(spec string, maxDomains uint32) (*routing.Domains, error) {
 					ifc.Hops = map[routing.Egress]uint32{}
 				}
 				ifc.Hops[routing.Egress{DestIfc: ie.DstInterfaceCore}] = n
-				ifc.NextHop = n
+				ifc.NextHop, hasEgress = n, true
 			case "tunnel-next-hop":
 				if n, err = hop(key, value); err != nil {
 					return nil, err
@@ -122,6 +125,7 @@ func parseInstances(spec string, maxDomains uint32) (*routing.Domains, error) {
 					ifc.Hops = map[routing.Egress]uint32{}
 				}
 				ifc.Hops[routing.Egress{DestIfc: ie.DstInterfaceCore, Tunnel: true}] = n
+				hasEgress = true
 			case "sgi-lan-next-hop":
 				if n, err = hop(key, value); err != nil {
 					return nil, err
@@ -130,6 +134,7 @@ func parseInstances(spec string, maxDomains uint32) (*routing.Domains, error) {
 					ifc.Hops = map[routing.Egress]uint32{}
 				}
 				ifc.Hops[routing.Egress{DestIfc: ie.DstInterfaceSGiLANN6LAN}] = n
+				hasEgress = true
 			case "vn-next-hop":
 				if n, err = hop(key, value); err != nil {
 					return nil, err
@@ -138,6 +143,7 @@ func parseInstances(spec string, maxDomains uint32) (*routing.Domains, error) {
 					ifc.Hops = map[routing.Egress]uint32{}
 				}
 				ifc.Hops[routing.Egress{DestIfc: ie.DstInterface5GVNInternal}] = n
+				hasEgress = true
 			case "pool":
 				p, err := netip.ParsePrefix(value)
 				if err != nil {
@@ -171,6 +177,16 @@ func parseInstances(spec string, maxDomains uint32) (*routing.Domains, error) {
 		if ifc.ARP != "" && !hasARPMAC {
 			return nil, fmt.Errorf("%q: arp=%s needs arp-mac: a reply must carry the interface's own address",
 				entry, ifc.ARP)
+		}
+		if !hasEgress {
+			// An interface with no egress key at all is a configuration
+			// mistake: every forward out of it is a forward the deployment
+			// declares no way out of, and the SMF would hear cause 73 for a
+			// session the operator meant to serve. Which keys an instance
+			// needs is its own business -- one that only re-injects into the
+			// subscriber side (vn-next-hop) has no data-network exit, and one
+			// whose forwards all tunnel (tunnel-next-hop) needs no plain hop.
+			return nil, fmt.Errorf("%q: an interface needs an egress: next-hop=, tunnel-next-hop=, sgi-lan-next-hop= or vn-next-hop=", entry)
 		}
 		ifaces = append(ifaces, ifc)
 	}

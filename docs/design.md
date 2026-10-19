@@ -443,7 +443,11 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   emptying the session tables — the controller does it itself, **in chunks**,
   before its PFCP socket opens (`session.Compiler.Sweep`: it reads the session
   resources back with `bess.Client.Contents`, erases exactly the entries it
-  found, and leaves the graph's own resources alone) — or by a `bessd` restart,
+  found, and leaves the graph's own resources alone -- both directions' tunnel
+  records among them, and the subscriber entries of every interface's ARP
+  responder, which is the one table that has two writers: the graph writes the
+  interface's own entry there, so the sweep takes back only the addresses inside
+  the interface's declared pools, which is exactly what the compiler writes) — or by a `bessd` restart,
   and by the SMF re-establishing, which its own path management forces once the
   Recovery Time Stamp changes. The chunking is implemented on both halves:
   `Sweep` erases in transactions of at most 1000 changes each (`sweepBatch`),
@@ -574,7 +578,14 @@ chooses between the instance's plain hop, a tunnel out of it (an Outer Header
 Creation: N9 and indirect data forwarding), the service LAN's and the 5G VN
 re-injection, the `-instances` keys and `-access-next-hop` name them, and an
 egress the instance does not declare is refused with cause 73 rather than
-served by whatever hop the direction had. The interface's ARP identity (the
+served by whatever hop the direction had -- an interface whose forwards all
+tunnel, or that only re-injects, needs no plain hop, and a forward that needs
+one is then the thing refused. A forward that **adds an outer header** needs
+more than a hop: the tunnel's own parameters are a per-session record in the
+direction's encap module (`upfd -tunnels` for the downlink, `-tunnels-ul` for
+an uplink forward that carries one -- indirect data forwarding and the uplink
+of an N9 tunnel), and a direction with no module refuses the forward rather
+than compiling a rule the encap drops for want of a record. The interface's ARP identity (the
 module and the MAC) is where a session's UE address is answered from. The packet-side
 half is the vif's `route_domain` -- a rule's key can carry the domain only where
 something writes it into the packet -- and it is in: `deploy/veth-port.yaml`

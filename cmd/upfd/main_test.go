@@ -23,7 +23,9 @@ func validArgs() graphArgs {
 		teidTable:      "teid", teidGate: 0,
 		actionsUL: "at_ul", metersUL: "mt_ul",
 		actionsDL: "at_dl", metersDL: "mt_dl",
-		tunnels: "enc",
+		// One encap module, both directions: the deployed daemon writes an
+		// uplink forward's tunnel record there too.
+		tunnels: "enc", tunnelsUL: "enc",
 	}
 }
 
@@ -46,10 +48,20 @@ func TestGraphConfigMapsTheFlags(t *testing.T) {
 	if cfg.Up.Meters != "mt_ul" || cfg.Down.Meters != "mt_dl" {
 		t.Errorf("meters: up %q, down %q", cfg.Up.Meters, cfg.Down.Meters)
 	}
-	// The tunnels belong to the downlink chain: a session's uplink is decapped,
-	// its downlink is encapsulated.
-	if cfg.Down.Tunnels != "enc" || cfg.Up.Tunnels != "" {
+	// Both directions name the encap: the downlink's tunnel toward the gNB,
+	// and an uplink forward that adds an outer header of its own (indirect
+	// data forwarding, the uplink of an N9 tunnel). A direction with no module
+	// refuses such a forward rather than writing a record nobody holds.
+	if cfg.Down.Tunnels != "enc" || cfg.Up.Tunnels != "enc" {
 		t.Errorf("tunnels: up %q, down %q", cfg.Up.Tunnels, cfg.Down.Tunnels)
+	}
+	// The uplink's module is its own flag: a deployment with two encap modules
+	// names each, and one that names none for the uplink keeps the refusal.
+	ulArgs := validArgs()
+	ulArgs.tunnelsUL = ""
+	withoutUL, err := graphConfig(ulArgs)
+	if err != nil || withoutUL.Up.Tunnels != "" {
+		t.Errorf("an empty -tunnels-ul gave the uplink the module %q (err %v)", withoutUL.Up.Tunnels, err)
 	}
 	// The two next hops are the router's, one per direction, and the access
 	// side's is its own: a forward whose FAR names Destination Interface

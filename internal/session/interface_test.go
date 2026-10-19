@@ -421,8 +421,10 @@ func TestAFiveGVNInternalForwardTakesTheReInjectionGate(t *testing.T) {
 	cfg := egressConfig(t)
 	rec := &recorder{}
 	c := New(cfg, rec, quietLogger())
+	// The VN instance declares no data-network exit: both of this session's
+	// forwards are re-injections, which is what a 5G VN group session does.
 	resp := c.Establish(egressEstablishment(0x7430, "10.45.0.8", 0x67, "vn",
-		farTo(ie.DstInterfaceCore),
+		farTo(ie.DstInterface5GVNInternal),
 		farTo(ie.DstInterface5GVNInternal)))
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the 5G VN establishment answered cause %d", got)
@@ -437,10 +439,80 @@ func TestAFiveGVNInternalForwardTakesTheReInjectionGate(t *testing.T) {
 	rec = &recorder{}
 	c = New(cfg, rec, quietLogger())
 	resp = c.Establish(egressEstablishment(0x7431, "10.45.0.9", 0x68, "vn",
-		farTo(ie.DstInterfaceCore),
+		farTo(ie.DstInterface5GVNInternal),
 		farTo(ie.DstInterface5GVNInternal, tunnelTo(0x11223349, "10.20.30.9"))))
 	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("a re-injection with an outer header answered cause %d, want 73", got)
+	}
+}
+
+// TestAnUplinkForwardWithAnOuterHeaderWritesTheTunnelRecord: an uplink forward
+// that adds an outer header of its own (an N9 uplink, or indirect data
+// forwarding) leaves through the encap, and the encap forwards only a packet
+// whose ActionId it holds a record for -- a frame it has no session for is
+// dropped (datapath/gtpu_encap.cc). So the record is the *direction's*, and the
+// uplink needs one written as much as the downlink does.
+func TestAnUplinkForwardWithAnOuterHeaderWritesTheTunnelRecord(t *testing.T) {
+	cfg := egressConfig(t)
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	resp := c.Establish(egressEstablishment(0x7450, "10.45.0.2", 0x6b, "internet",
+		farTo(ie.DstInterfaceCore, tunnelTo(0x22334455, "10.20.30.9")),
+		farTo(ie.DstInterfaceAccess, tunnelTo(0x11223344, "10.20.30.2"))))
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	changes := rec.last()
+	ul := ruleIn(t, changes, cfg.Up.PDRTable)
+	// The rule delivers on the instance's tunnel egress ...
+	if got := nextHop(t, changes, actionsRes(cfg.Up), ul.actionID()); got != 3 {
+		t.Errorf("the uplink forward takes next hop %d, want the instance's tunnel egress 3", got)
+	}
+	// ... and the record the encap resolves by that action carries the FAR's
+	// own outer header.
+	record := find(t, changes, tunnelsRes(cfg.Up), "action_id", ul.actionID())
+	if got := record.Value["teid"]; got != uint32(0x22334455) {
+		t.Errorf("the uplink tunnel record's TEID is %v, want the FAR's 0x22334455", got)
+	}
+}
+
+// TestAnUplinkOuterHeaderWithNoTunnelModuleIsRefused: a deployment that names
+// no uplink tunnel module cannot carry that record, and compiling the rule
+// anyway would send its packets to an encap with no session for them. Cause 73
+// names the flag instead of blackholing the SMF's traffic.
+func TestAnUplinkOuterHeaderWithNoTunnelModuleIsRefused(t *testing.T) {
+	cfg := egressConfig(t)
+	cfg.Up.Tunnels = ""
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	resp := c.Establish(egressEstablishment(0x7451, "10.45.0.2", 0x6c, "internet",
+		farTo(ie.DstInterfaceCore, tunnelTo(0x22334455, "10.20.30.9")),
+		farTo(ie.DstInterfaceAccess, tunnelTo(0x11223344, "10.20.30.2"))))
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("an uplink tunnel forward with no tunnel module answered cause %d, want 73", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+// TestAPlainForwardOutOfAnInstanceWithNoNextHopIsRefused: an instance may
+// declare no plain egress -- its forwards all tunnel, or it only re-injects --
+// and then a forward that needs one has nowhere to go. Hop 0 is no Router next
+// hop: the action would name it and the Router would drop the packet, with the
+// SMF told the rule is in force.
+func TestAPlainForwardOutOfAnInstanceWithNoNextHopIsRefused(t *testing.T) {
+	cfg := egressConfig(t)
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	resp := c.Establish(egressEstablishment(0x7452, "10.45.0.2", 0x6d, "vn",
+		farTo(ie.DstInterfaceCore),
+		farTo(ie.DstInterface5GVNInternal)))
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a plain forward out of an instance with no next hop answered cause %d, want 73", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("a refused session wrote to the dataplane")
 	}
 }
 

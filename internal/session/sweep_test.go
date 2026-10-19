@@ -6,10 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/krsna1729/upf/internal/bess"
+	"github.com/krsna1729/upf/internal/routing"
 )
 
 // sweepFake is an applier that can also read its own contents back, the way a
@@ -108,6 +111,14 @@ func TestSweepNamesTheGraphsResources(t *testing.T) {
 		t.Errorf("the sweep names a resource twice: %v", c.resources())
 	}
 
+	// The uplink's tunnel module is a session resource too: an uplink forward
+	// that adds an outer header writes its record there, and an earlier run's
+	// record would name this run's ActionId with the wrong TEID.
+	cfg.Up.Tunnels = "enc_ul"
+	if got := New(cfg, &sweepFake{}, quietLogger()).resources(); !slices.Contains(got, "enc_ul/tunnels") {
+		t.Errorf("the sweep does not read an uplink tunnel module's records: %v", got)
+	}
+
 	// A graph that charges nothing declares no counter module: the sweep must
 	// leave it out rather than turn the empty name into "/counters".
 	cfg.Up.Counters = ""
@@ -115,6 +126,76 @@ func TestSweepNamesTheGraphsResources(t *testing.T) {
 	for _, n := range New(cfg, &sweepFake{}, quietLogger()).resources() {
 		if n == "/counters" || n == "cnt_ul/counters" || n == "cnt_dl/counters" {
 			t.Errorf("a graph without counters still sweeps %s", n)
+		}
+	}
+}
+
+// TestTheSweepTakesTheSubscribersARPEntriesAndLeavesTheDeployments is the ARP
+// half of the restart wall: the responder's table has two writers -- the graph
+// writes the interface's own entry, the session layer writes its subscribers'
+// -- and a restarted controller knows only the second. The line between them is
+// the interface's pool: the compiler refuses a subscriber address outside it,
+// so pool members are exactly what an earlier run's sessions could have
+// written, and the deployment's own address is not one.
+func TestTheSweepTakesTheSubscribersARPEntriesAndLeavesTheDeployments(t *testing.T) {
+	instances := func(t *testing.T, pools ...string) *routing.Domains {
+		t.Helper()
+		ifc := routing.Interface{
+			Instance: "internet", Domain: 0, NextHop: 1,
+			ARP: "arp_n6", ARPMAC: [6]byte{2, 0, 0, 0, 0, 1},
+		}
+		for _, p := range pools {
+			ifc.Pool = append(ifc.Pool, netip.MustParsePrefix(p))
+		}
+		d, err := routing.New([]routing.Interface{ifc}, 4)
+		if err != nil {
+			t.Fatalf("the deployment was refused: %v", err)
+		}
+		return d
+	}
+	entries := []bess.Entry{
+		{Key: map[string]any{"ip": "192.0.2.2"}, Value: map[string]any{"mac_addr": "02:00:00:00:06:01"}},
+		{Key: map[string]any{"ip": "10.45.0.2"}},
+		{Key: map[string]any{"ip": "10.45.0.7"}},
+	}
+
+	cfg := liveConfig()
+	cfg.Instances = instances(t, "10.45.0.0/16")
+	fake := &sweepFake{contents: map[string][]bess.Entry{"arp_n6/entries": entries}}
+	if err := New(cfg, fake, quietLogger()).Sweep(context.Background()); err != nil {
+		t.Fatalf("the sweep failed: %v", err)
+	}
+	erased := map[string]bool{}
+	for _, batch := range fake.changes {
+		for _, ch := range batch {
+			if ch.Resource == "arp_n6/entries" {
+				ip, _ := ch.Key["ip"].(string)
+				erased[ip] = true
+			}
+		}
+	}
+	for _, want := range []string{"10.45.0.2", "10.45.0.7"} {
+		if !erased[want] {
+			t.Errorf("the sweep left the earlier run's entry for %s: %v", want, erased)
+		}
+	}
+	if erased["192.0.2.2"] {
+		t.Error("the sweep erased the deployment's own ARP entry: the interface stops answering for itself")
+	}
+
+	// An interface that declares no pool serves every address, so an entry in
+	// its table cannot be told apart from the deployment's own: the sweep
+	// leaves the table alone (and says so in the log).
+	fake = &sweepFake{contents: map[string][]bess.Entry{"arp_n6/entries": entries}}
+	cfg.Instances = instances(t)
+	if err := New(cfg, fake, quietLogger()).Sweep(context.Background()); err != nil {
+		t.Fatalf("the sweep failed: %v", err)
+	}
+	for _, batch := range fake.changes {
+		for _, ch := range batch {
+			if ch.Resource == "arp_n6/entries" {
+				t.Errorf("the sweep erased %v from an interface that declares no pool", ch.Key)
+			}
 		}
 	}
 }

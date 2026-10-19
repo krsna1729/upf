@@ -134,10 +134,10 @@ type pdrReq struct {
 	// hasFarID says the FAR ID IE was there; the FAR it names is mandatory in
 	// a Create PDR (Table 7.5.2.2-1), and FAR 0 is a legal FAR, so a PDR that
 	// named none must not resolve to it.
-	hasFarID   bool
-	farID      uint32
-	qerIDs     []uint32
-	urrIDs     []uint32
+	hasFarID bool
+	farID    uint32
+	qerIDs   []uint32
+	urrIDs   []uint32
 
 	// instance is the PDI's Network Instance (TS 29.244 8.2.4): the deployment
 	// interface this rule belongs to, empty when the SMF named none.
@@ -1254,7 +1254,25 @@ func (c *Compiler) resolve(s *Session) error {
 				}
 			}
 		}
-		if dir.Tunnels != "" && far != nil && far.hasOuter {
+		if far != nil && far.hasOuter {
+			if dir.Tunnels == "" {
+				// The FAR adds an outer header, so the forward's packets must
+				// leave in a tunnel -- indirect data forwarding (Destination
+				// Interface Access) or an N9 uplink (Destination Interface Core
+				// with an Outer Header Creation). The tunnel's parameters are a
+				// per-session record in the direction's encap module, and this
+				// deployment names none: compiling the rule anyway would send
+				// the packets to an encap that has no session for them, which
+				// drops them (datapath/gtpu_encap.cc) -- a silent blackhole the
+				// SMF never hears about. Cause 73 names the flag instead.
+				flagName := "-tunnels-ul"
+				if downSide(p.srcIfc) {
+					flagName = "-tunnels"
+				}
+				return fmt.Errorf(
+					"%w: PDR %d's FAR adds an outer header, and this deployment's tunnel module for this direction is unset (%s)",
+					errNotExpressible, p.id, flagName)
+			}
 			p.tunnels = []string{tunnelsRes(dir)}
 		}
 		for _, uid := range p.urrIDs {
@@ -1404,7 +1422,28 @@ func (c *Compiler) egressHop(far *far, ifc routing.Interface, dir Direction) (ui
 		// Plain IP out of the instance: the instance's own next hop is the
 		// fallback, so a deployment that declares one egress per instance needs
 		// no more keys than it always did.
-		return egress.HopOr(routing.Egress{DestIfc: ie.DstInterfaceCore}, c.baseHop(egress, dir)), nil
+		hop, ok := egress.Hop(routing.Egress{DestIfc: ie.DstInterfaceCore})
+		if !ok {
+			hop = c.baseHop(egress, dir)
+		}
+		if hop == 0 {
+			// Nothing to forward by. An instance that declares no plain egress
+			// is legal -- one that only re-injects (vn-next-hop) or only
+			// tunnels has no data-network exit -- but a forward that needs one
+			// has nowhere to go, and 0 is no Router next hop: the action record
+			// would name a hop the Router drops, and the SMF's traffic would
+			// disappear with no cause at the interface that could have named
+			// the key. (For the one-instance deployment the hop is the
+			// direction's own flag, which the same reasoning applies to.)
+			what := "next-hop="
+			if c.cfg.Instances == nil {
+				what = "-n6-next-hop/-n3-next-hop"
+			}
+			return 0, fmt.Errorf(
+				"%w: the forward leaves %s as plain IP, and this deployment declares no next hop for it (%s)",
+				errNotExpressible, egressName(egress, c.cfg.Instances), what)
+		}
+		return hop, nil
 
 	case ie.DstInterfaceSGiLANN6LAN:
 		egress, err := c.forwardEgress(far, ifc)
