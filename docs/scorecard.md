@@ -451,7 +451,7 @@ working".
 DSCP copy.
 
 **Ours.** `ci/smoke-gtpu.sh` (decap, encap, DSCP, and the echo reply byte for
-byte: `gtpu_echo`, TS 29.281 7.2.2); `ci/session-path.sh` (the End Marker a
+byte: `gtpu_responder`, TS 29.281 7.2.2); `ci/session-path.sh` (the End Marker a
 handover sends, byte for byte: `internal/session/endmarker.go`, TS 29.244 5.3.2).
 
 **Field.** open5gs and OMEC have both markers (80); everyone decapsulates and

@@ -149,9 +149,9 @@ modules:
   # default gate sends a G-PDU on an unnamed TEID to echo_err, so each reply
   # has a Dump to itself.
   - name: echo0
-    mclass: GtpuEcho
+    mclass: GtpuResponder
   - name: echo_err
-    mclass: GtpuEcho
+    mclass: GtpuResponder
   - name: dump_err
     mclass: Dump
     arg: {interval: 1}

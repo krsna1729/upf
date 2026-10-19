@@ -142,7 +142,7 @@ build/bess/stage/bin/bessctl apply deploy/upf.yaml
   inner packet, the PDU Session Container a record's QFI adds, the outer TOS
   and checksum a record's Transport Level Marking (TS 29.244 8.2.12, the
   transport header's DSCP) produces,
-  and the four fields of an Echo Response (`gtpu_echo`: the swapped
+  and the four fields of an Echo Response (`gtpu_responder`: the swapped
   addresses, the lengths and checksum, the sequence number and the Recovery
   IE). Its first run found a real bug (an uninitialized UDP source port), which
   is the point of the check.
@@ -204,7 +204,7 @@ build/bess/stage/bin/bessctl apply deploy/upf.yaml
   change and, for the expiry check, the store's bounded sweep (`0bfd2783`),
   which is why its graph is `deploy/buffer-path.yaml` rather than the shared
   one).
-- The two GTP-U path messages are in. `gtpu_echo` answers an Echo Request
+- The two GTP-U path messages are in. `gtpu_responder` answers an Echo Request
   (type 1, TEID 0) with the reply TS 29.281 7.2.2 prescribes — the S flag, the
   request's sequence number, the mandatory Recovery IE and this node's Recovery
   Time Stamp — and `ci/smoke-gtpu.sh` checks the reply byte for byte. An End

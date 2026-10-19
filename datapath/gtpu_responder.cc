@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include "gtpu_echo.h"
+#include "gtpu_responder.h"
 
 #include <cstdint>
 #include <cstring>
@@ -54,7 +54,7 @@ constexpr size_t kErrorTail = 1 + 4;
 // the first four octets of an RFC 5905 timestamp.
 constexpr uint64_t kEpoch1900 = 2208988800ULL;
 
-const ResourceTables GtpuEcho::resource_tables = {};
+const ResourceTables GtpuResponder::resource_tables = {};
 
 namespace {
 
@@ -77,7 +77,7 @@ inline void Put32(uint8_t *p, uint32_t v) {
 
 }  // namespace
 
-CommandResponse GtpuEcho::Init(const upf::pb::GtpuEchoArg &arg) {
+CommandResponse GtpuResponder::Init(const upf::pb::GtpuResponderArg &arg) {
   if (arg.port() != 0) {
     if (arg.port() > 65535) {
       return CommandFailure(EINVAL, "invalid 'port' field");
@@ -102,7 +102,7 @@ CommandResponse GtpuEcho::Init(const upf::pb::GtpuEchoArg &arg) {
   return CommandSuccess();
 }
 
-void GtpuEcho::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
+void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
 
@@ -252,8 +252,8 @@ void GtpuEcho::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   EmitBatch(ctx, batch, ogates);
 }
 
-std::string GtpuEcho::GetDesc() const { return std::format("port {}", port_); }
+std::string GtpuResponder::GetDesc() const { return std::format("port {}", port_); }
 
-ADD_MODULE(GtpuEcho, "gtpu_echo",
+ADD_MODULE(GtpuResponder, "gtpu_responder",
            "answers GTP-U Echo Requests (type 1) with the reply (type 2): the "
            "graph routes TEID-0 messages here, and everything else is dropped")

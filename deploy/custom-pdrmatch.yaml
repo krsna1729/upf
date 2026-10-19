@@ -85,7 +85,7 @@ modules:
         - {offset: 46, num_bytes: 4}
       default_gate: 1
   - name: echo0
-    mclass: GtpuEcho
+    mclass: GtpuResponder
 
   # -- the uplink's matcher ----------------------------------------------------
   # The session is the metadata the decap wrote, not a field of the packet: the
