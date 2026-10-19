@@ -48,6 +48,56 @@ type Interface struct {
 	// interface may not serve a prefix twice: a rule on that interface would
 	// be ambiguous about which session its packets belong to.
 	Pool []netip.Prefix
+
+	// Hops is where a forward out of this interface leaves by, per egress:
+	// one Router next hop per Destination Interface value (TS 29.244 8.2.24)
+	// and per whether the FAR adds an outer header. Nil is the deployment
+	// where only the default egress exists -- every forward out of this
+	// interface takes NextHop, whatever its FAR names -- which is what a
+	// deployment without -instances has.
+	Hops map[Egress]uint32
+
+	// ARP is the module whose "<ARP>/entries" resource answers ARP requests
+	// for this interface's subscribers (a UE address on N6 is not the vif's
+	// own, so nothing else answers for it). Empty: this interface's
+	// subscribers are not proxied.
+	ARP string
+	// ARPMAC is the Ethernet address an ARP reply for a subscriber carries:
+	// the interface's own, because the answer comes from the UPF and not from
+	// the UE. It is read only where ARP names a module.
+	ARPMAC [6]byte
+}
+
+// Egress is what a forward out of an interface is: the FAR's Destination
+// Interface value (TS 29.244 8.2.24) and whether the FAR adds an outer header
+// (the Outer Header Creation IE is present).
+//
+// It is the key of Interface.Hops, because the same value can mean two
+// different exits: Destination Interface Core with no outer header is plain IP
+// out of the instance's port (N6), and with one it is a tunnel to a peer UPF
+// (N9, or the indirect-forwarding tunnel of 8.2.2 NOTE 2).
+type Egress struct {
+	DestIfc uint8
+	Tunnel  bool
+}
+
+// Hop is where a forward of this egress leaves by: the declared next hop, and
+// whether the deployment declared one. It is a plain map lookup -- the
+// deployment's table is read once, when it is constructed.
+func (i Interface) Hop(e Egress) (uint32, bool) {
+	hop, ok := i.Hops[e]
+	return hop, ok
+}
+
+// HopOr is Hop with the deployment's fallback: the hop a deployment that
+// declares nothing for this egress takes. That fallback is the instance's own
+// NextHop for a plain forward toward the data network, and the caller decides
+// what it is everywhere else.
+func (i Interface) HopOr(e Egress, fallback uint32) uint32 {
+	if hop, ok := i.Hop(e); ok {
+		return hop
+	}
+	return fallback
 }
 
 // Serves reports whether an address belongs to this interface's pool. An
@@ -107,6 +157,33 @@ func New(ifaces []Interface, maxDomains uint32) (*Domains, error) {
 		if other, dup := domains[i.Domain]; dup {
 			return nil, fmt.Errorf("network instances %q and %q share route domain %d, and their rules would be one domain's",
 				other, i.Instance, i.Domain)
+		}
+		for e, hop := range i.Hops {
+			switch {
+			case e.DestIfc > 5:
+				// The Destination Interface IE's own range is 0..15, of which
+				// 6..15 are spare (Table 8.2.24-1). An egress keyed on a
+				// spare value is an egress no FAR can name.
+				return nil, fmt.Errorf("network instance %q: a next hop is declared for destination interface %d, above the values the spec defines",
+					i.Instance, e.DestIfc)
+			case e.DestIfc == 0:
+				// Destination Interface Access is the deployment's own exit
+				// (the -access-next-hop flag), not an instance's: an instance's
+				// service LAN and 5G VN are what it declares hops for.
+				return nil, fmt.Errorf("network instance %q: a next hop is declared for destination interface 0 (access), which is the deployment's and not an instance's",
+					i.Instance)
+			case hop == 0:
+				return nil, fmt.Errorf("network instance %q: the next hop for destination interface %d is 0, which is no next hop",
+					i.Instance, e.DestIfc)
+			}
+		}
+		if i.ARP != "" && i.ARPMAC == ([6]byte{}) {
+			return nil, fmt.Errorf("network instance %q: the ARP responder %q is named with no ARP MAC, and a reply must carry the interface's own",
+				i.Instance, i.ARP)
+		}
+		if i.ARP == "" && i.ARPMAC != ([6]byte{}) {
+			return nil, fmt.Errorf("network instance %q: an ARP MAC is declared with no ARP responder module to answer for it",
+				i.Instance)
 		}
 		for n, p := range i.Pool {
 			if !p.IsValid() || !p.Addr().Unmap().Is4() {

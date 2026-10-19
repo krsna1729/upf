@@ -135,6 +135,107 @@ func TestADomainAtTheBoundIsAccepted(t *testing.T) {
 	}
 }
 
+// TestAnInterfacesEgressesAreItsOwn is the egress table: the same Destination
+// Interface value means two exits, plain and tunneled, and the deployment's
+// table tells them apart.
+func TestAnInterfacesEgressesAreItsOwn(t *testing.T) {
+	mac := [6]byte{0x02, 0, 0, 0, 6, 1}
+	d, err := New([]Interface{{
+		Instance: "internet", Domain: 0, NextHop: 1,
+		Hops: map[Egress]uint32{
+			{DestIfc: 1, Tunnel: false}: 1,
+			{DestIfc: 1, Tunnel: true}:  3,
+			{DestIfc: 2, Tunnel: false}: 4,
+			{DestIfc: 5, Tunnel: false}: 5,
+		},
+		ARP: "arp_n6", ARPMAC: mac,
+	}}, 4)
+	if err != nil {
+		t.Fatalf("the egress table was refused: %v", err)
+	}
+	ifc, ok := d.Lookup("internet")
+	if !ok {
+		t.Fatal("the instance did not resolve")
+	}
+	for _, c := range []struct {
+		e    Egress
+		want uint32
+	}{
+		{Egress{DestIfc: 1}, 1},
+		{Egress{DestIfc: 1, Tunnel: true}, 3},
+		{Egress{DestIfc: 2}, 4},
+		{Egress{DestIfc: 5}, 5},
+	} {
+		if hop, ok := ifc.Hop(c.e); !ok || hop != c.want {
+			t.Errorf("the hop for %+v is %d (found %v), want %d", c.e, hop, ok, c.want)
+		}
+		if got := ifc.HopOr(c.e, 99); got != c.want {
+			t.Errorf("HopOr(%+v, 99) is %d, want the declared %d", c.e, got, c.want)
+		}
+	}
+	if hop, ok := ifc.Hop(Egress{DestIfc: 3}); ok || hop != 0 {
+		t.Errorf("a destination interface the table does not declare resolved to %d (found %v)", hop, ok)
+	}
+	if got := ifc.HopOr(Egress{DestIfc: 3}, 7); got != 7 {
+		t.Errorf("HopOr of an undeclared egress is %d, want the fallback 7", got)
+	}
+	if got := ifc.HopOr(Egress{DestIfc: 2, Tunnel: true}, 7); got != 7 {
+		t.Errorf("a tunneled service-LAN egress the table does not declare is %d, want the fallback 7", got)
+	}
+	// An interface that declares no table at all: every lookup is the
+	// fallback, which is what a deployment with one egress per instance has.
+	plain, err := New([]Interface{{Instance: "n9", Domain: 0, NextHop: 2}}, 1)
+	if err != nil {
+		t.Fatalf("an interface with no egress table was refused: %v", err)
+	}
+	n9, _ := plain.Lookup("n9")
+	if hop, ok := n9.Hop(Egress{DestIfc: 1}); ok || hop != 0 {
+		t.Errorf("an interface with no egress table declares a hop: %d (found %v)", hop, ok)
+	}
+	if got := n9.HopOr(Egress{DestIfc: 1}, n9.NextHop); got != 2 {
+		t.Errorf("the fallback for a plain forward is %d, want the instance's own 2", got)
+	}
+	if _, err := New([]Interface{{Instance: "internet", Domain: 0, ARP: "arp_n6", ARPMAC: mac}}, 1); err != nil {
+		t.Fatalf("an interface with no pool was refused: %v", err)
+	}
+}
+
+// TestAnEgressTableTheDeploymentCannotHaveIsRefused: the table is the
+// deployment's own grammar, and a key or a value the dataplane could not carry
+// is refused where the operator can fix it.
+func TestAnEgressTableTheDeploymentCannotHaveIsRefused(t *testing.T) {
+	mac := [6]byte{0x02, 0, 0, 0, 6, 1}
+	for _, c := range []struct {
+		name string
+		ifc  Interface
+		want string
+	}{
+		{"a destination interface above the spec's values",
+			Interface{Instance: "internet", Hops: map[Egress]uint32{{DestIfc: 6}: 1}}, "above the values the spec defines"},
+		{"the access side",
+			Interface{Instance: "internet", Hops: map[Egress]uint32{{DestIfc: 0}: 1}}, "destination interface 0 (access)"},
+		{"a tunneled access side",
+			Interface{Instance: "internet", Hops: map[Egress]uint32{{DestIfc: 0, Tunnel: true}: 1}}, "destination interface 0 (access)"},
+		{"a next hop of 0",
+			Interface{Instance: "internet", Hops: map[Egress]uint32{{DestIfc: 1}: 0}}, "is 0, which is no next hop"},
+		{"an ARP responder with no MAC",
+			Interface{Instance: "internet", ARP: "arp_n6"}, "no ARP MAC"},
+		{"an ARP MAC with no responder",
+			Interface{Instance: "internet", ARPMAC: mac}, "no ARP responder module"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.ifc.Domain = 0
+			_, err := New([]Interface{c.ifc}, 4)
+			if err == nil {
+				t.Fatalf("%s was accepted", c.name)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("the refusal says %q, want it to mention %q", err, c.want)
+			}
+		})
+	}
+}
+
 // TestANilDeploymentResolvesNothing: the compiler asks a deployment it was not
 // given about its instances, and the answer is that it has none rather than a
 // panic.
