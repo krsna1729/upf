@@ -141,6 +141,16 @@ modules:
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
+  # The uplink is domain 0 by definition, and it has to be written: BESS gives
+  # an attribute a read offset only if every path to the reader writes it, and
+  # `pdr_dl` below reads `route_domain` on the downlink, where the Vif writes
+  # it. Without this writer the shared attribute is unreadable and the
+  # classifier's domain field is not matched.
+  - name: set_domain
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: route_domain, size: 4, value_int: 0}
   - name: at_dl
     mclass: ActionTable
     arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
@@ -199,7 +209,8 @@ connections:
   # changes when that band should be marked or shed rather than passed.
   - {upstream: mt_ul, downstream: cnt_ul}
   - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
-  - {upstream: cnt_ul, downstream: rt}
+  - {upstream: cnt_ul, downstream: set_domain}
+  - {upstream: set_domain, downstream: rt}
 
   - {upstream: pdr_dl, downstream: at_dl}
   - {upstream: at_dl, downstream: mt_dl}
