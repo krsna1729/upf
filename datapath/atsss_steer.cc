@@ -208,8 +208,12 @@ CommandResponse AtsssSteer::Init(const upf::pb::AtsssSteerArg &arg) {
   using AccessMode = bess::metadata::Attribute::AccessMode;
   policy_attr_ = AddMetadataAttr(arg.policy_attr(), sizeof(be32_t),
                                 AccessMode::kRead);
+  // kUpdate, not kWrite: the ActionTable upstream has already written this
+  // attribute for a non-MAR packet. A kWrite here would start a new metadata
+  // scope and cut that writer off, so the ActionTable would drop every packet
+  // before steering ran.
   next_hop_attr_ = AddMetadataAttr(arg.next_hop_attr(), sizeof(be32_t),
-                                  AccessMode::kWrite);
+                                  AccessMode::kUpdate);
   has_tunnel_ = !arg.tunnel_attr().empty();
   has_accounting_ = !arg.accounting_attr().empty();
   if (has_tunnel_) {
@@ -279,7 +283,15 @@ void AtsssSteer::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     const uint32_t policy_id =
         get_attr_with_offset<be32_t>(policy_offset, pkt).value();
     if (policy_id == 0) {
-      // Not steered: the action table's next hop and tunnel stand.
+      // Not steered: the action table's next hop and tunnel stand. Clear the
+      // override sentinels explicitly: packet metadata is reused storage, and
+      // a zero tunnel id is what makes GtpuEncap fall back to action_id.
+      if (bess::metadata::IsValidOffset(tunnel_offset)) {
+        _set_attr_with_offset<be32_t>(tunnel_offset, pkt, be32_t(0));
+      }
+      if (bess::metadata::IsValidOffset(accounting_offset)) {
+        _set_attr_with_offset<be32_t>(accounting_offset, pkt, be32_t(0));
+      }
       ogates[i] = 0;
       continue;
     }

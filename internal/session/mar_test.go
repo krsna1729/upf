@@ -15,6 +15,10 @@ import (
 // 3GPP access is active (FAR 2, a tunnel to the gNB) and the non-3GPP access
 // standby (FAR 3, plain IP toward the core).
 func marEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishmentRequest {
+	return marEstablishmentTEID(cpSEID, ueIP, 0x11223344)
+}
+
+func marEstablishmentTEID(cpSEID uint64, ueIP string, teid uint32) *message.SessionEstablishmentRequest {
 	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(cpSEID, nil, nil),
@@ -23,7 +27,7 @@ func marEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishmentR
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, 0x11223344, net.ParseIP("192.0.2.1"), nil, 0),
+				ie.NewFTEID(0x01, teid, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),
@@ -75,6 +79,7 @@ func marConfig() Config {
 	// The downlink matcher is keyed by the selector's session id: an N6 packet
 	// carries no tunnel to key it by.
 	cfg.Down.Selector = "sel_dl"
+	cfg.Down.SelectorFields = []Field{DstIP, RouteDomain}
 	return cfg
 }
 
@@ -108,8 +113,9 @@ func TestMARProgramsPolicyAndSteeringRule(t *testing.T) {
 		t.Fatalf("establishment with a MAR was refused with cause %d", got)
 	}
 	policy := changeWithResource(t, lastChanges(t, rec), "atsss/policies")
-	if policy.Key["policy_id"] != uint32(7) {
-		t.Errorf("policy key is %v, want policy 7", policy.Key)
+	policyID, ok := policy.Key["policy_id"].(uint32)
+	if !ok || policyID == 0 {
+		t.Fatalf("policy key is %v, want a nonzero global policy id", policy.Key)
 	}
 	value := policy.Value
 	if value["preferred"] != uint32(0) {
@@ -140,8 +146,9 @@ func TestMARProgramsPolicyAndSteeringRule(t *testing.T) {
 	if len(rulesValue) != 1 {
 		t.Fatalf("downlink matcher has %d rules, want one", len(rulesValue))
 	}
-	if rulesValue[0]["steering_policy_id"] != uint32(7) {
-		t.Errorf("matcher rule steering id is %v, want 7", rulesValue[0]["steering_policy_id"])
+	if rulesValue[0]["steering_policy_id"] != policyID {
+		t.Errorf("matcher rule steering id is %v, want the policy id %d",
+			rulesValue[0]["steering_policy_id"], policyID)
 	}
 }
 
@@ -158,9 +165,9 @@ func TestUpdateMARMovesThePreferredAccess(t *testing.T) {
 		ie.NewUpdateMAR(
 			ie.NewMARID(7),
 			ie.NewUpdateTGPPAccessForwardingActionInformation(
-				ie.NewFARID(2), ie.NewPriority(ie.PriorityStandby)),
+				ie.NewPriority(ie.PriorityStandby)),
 			ie.NewUpdateNonTGPPAccessForwardingActionInformation(
-				ie.NewFARID(3), ie.NewPriority(ie.PriorityActive)),
+				ie.NewPriority(ie.PriorityActive)),
 		),
 	)
 	if got := answerCause(c.Modify(mod)); got != ie.CauseRequestAccepted {
@@ -290,5 +297,57 @@ func TestMARAccessAvailabilityControlIsRefused(t *testing.T) {
 	c := New(marConfig(), &recorder{}, quietLogger())
 	if got := answerCause(c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("access availability control was answered with cause %d, want 73", got)
+	}
+}
+
+// TestMARPolicyIDsAreGlobal: MAR IDs are session-local, but the
+// AtsssSteer policy table is shared. Two sessions that both use MAR 7 must
+// get different policy ids, and their matcher rules must publish those ids.
+func TestMARPolicyIDsAreGlobal(t *testing.T) {
+	rec := &recorder{}
+	c := New(marConfig(), rec, quietLogger())
+	if got := answerCause(c.Establish(marEstablishment(0x7010, "10.45.0.20"))); got != ie.CauseRequestAccepted {
+		t.Fatalf("first establishment was refused with cause %d", got)
+	}
+	first := changeWithResource(t, lastChanges(t, rec), "atsss/policies")
+	firstID, ok := first.Key["policy_id"].(uint32)
+	if !ok || firstID == 0 {
+		t.Fatalf("first policy key is %v", first.Key)
+	}
+	if got := answerCause(c.Establish(marEstablishmentTEID(0x7011, "10.45.0.21", 0x55667788))); got != ie.CauseRequestAccepted {
+		t.Fatalf("second establishment was refused with cause %d", got)
+	}
+	second := changeWithResource(t, lastChanges(t, rec), "atsss/policies")
+	secondID, ok := second.Key["policy_id"].(uint32)
+	if !ok || secondID == 0 {
+		t.Fatalf("second policy key is %v", second.Key)
+	}
+	if firstID == secondID {
+		t.Fatalf("two sessions' MAR 7 share policy id %d", firstID)
+	}
+}
+
+// TestMARNoStandbyIsIneligible: a present access with Priority "No Standby"
+// is still active/standby, but it must never be selected as the standby.
+func TestMARNoStandbyIsIneligible(t *testing.T) {
+	req := marEstablishment(0x7012, "10.45.0.22")
+	req.CreateMAR[0] = ie.NewCreateMAR(
+		ie.NewMARID(7),
+		ie.NewSteeringFunctionality(ie.SteeringFunctionalityATSSSLL),
+		ie.NewSteeringMode(ie.SteeringModeActiveStandby),
+		ie.NewTGPPAccessForwardingActionInformation(
+			ie.NewFARID(2), ie.NewPriority(ie.PriorityActive)),
+		ie.NewNonTGPPAccessForwardingActionInformation(
+			ie.NewFARID(3), ie.NewPriority(ie.PriorityNoStandby)),
+	)
+	rec := &recorder{}
+	c := New(marConfig(), rec, quietLogger())
+	if got := answerCause(c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("a No Standby access was refused with cause %d", got)
+	}
+	value := changeWithResource(t, lastChanges(t, rec), "atsss/policies").Value
+	access := value["access"].([]map[string]any)
+	if access[1]["health_id"] != uint32(0) || access[1]["next_hop_id"] != uint32(0) {
+		t.Errorf("the No Standby access is %v, want an ineligible zero entry", access[1])
 	}
 }

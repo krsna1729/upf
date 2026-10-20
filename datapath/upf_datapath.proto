@@ -125,11 +125,12 @@ message GtpuEncapArg {
 // a MAR's Steering Mode 0: one access active, the other on standby).
 message AtsssSteerArg {
   // How many policies and health records the tables hold. 0 means 65536.
-  // MAR IDs are 16 bits, so a deployment's policies fit.
+  // A PFCP MAR ID is session-local; the compiler allocates a global policy id
+  // from this space for each live MAR.
   uint32 capacity = 1;
 
   // The metadata attribute carrying the policy id, 4 bytes, network order.
-  // The PDR matcher writes it from a rule's MAR ID; 0 means the packet is not
+  // The PDR matcher writes it from a rule's global policy id; 0 means the packet is not
   // steered and is passed through unchanged. Required.
   string policy_attr = 2;
 
@@ -176,7 +177,8 @@ message AtsssSteeringPolicy {
   repeated AtsssAccessAction access = 3;
 }
 
-// AtsssSteeringPolicyKey is one key of "<module>/policies": the MAR ID the PDR
+// AtsssSteeringPolicyKey is one key of "<module>/policies": the global policy
+// id the PDR
 // matcher wrote into the packet's policy attribute. 0 names no policy.
 message AtsssSteeringPolicyKey {
   uint32 policy_id = 1;
@@ -340,7 +342,7 @@ message PdrMatchArg {
   // programming time rather than silently dropped by the packet path.
   uint32 max_sessions = 2;
 
-  // The metadata attribute a matched rule's MAR ID is written to, 4 bytes,
+  // The metadata attribute a matched rule's global policy id is written to, 4 bytes,
   // network order. Empty writes none. A graph with an AtsssSteer module sets
   // this to the attribute AtsssSteerArg.policy_attr names; a rule without a
   // MAR writes 0, which steers nothing.
@@ -404,7 +406,8 @@ message PdrMatchRule {
   // first rule that matches the packet's tuple *and* its QFI wins.
   optional uint32 qfi = 10;
 
-  // The MAR ID this PDR names (TS 29.244 8.2.34), 0 for none. The module
+  // The global policy id the compiler allocated for this PDR's MAR (TS 29.244
+  // 8.2.34), 0 for none. The module
   // writes it into the graph's steering attribute, where AtsssSteer selects
   // the access. A rule that drops cannot carry one.
   uint32 steering_policy_id = 11;

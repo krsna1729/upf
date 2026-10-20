@@ -508,12 +508,14 @@ type Compiler struct {
 	byTEID   map[uint32]*Session // by the N3 TEID we advertised
 	nextSEID uint64
 	actions  *idPool
+	policies *idPool
 	meters   *idPool
 	teids    *idPool
-	// tunnels is the id space of the GtpuEncap records a MAR's two accesses
-	// name. It shares the action table's capacity: a deployment's graph sizes
-	// both tables from the same bound.
-	tunnels *idPool
+	// MAR policy and tunnel records are allocated from the same pools as
+	// action records: a tunnel key shares the GtpuEncap table with an ordinary
+	// PDR's action key, and a policy key must be unique across sessions. The
+	// pools are separate only where their resources are; the action pool
+	// supplies both action and tunnel keys.
 
 	// rules is the owner of every rule key a live session holds, by the key the
 	// engine sees (resource, then the WildcardMatch key). The PDR tables are
@@ -542,9 +544,9 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		rules:    map[string]uint64{},
 		nextSEID: 1,
 		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		policies: newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		meters:   newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
 		teids:    newIDPool(cfg.MaxTEIDs, 0),
-		tunnels:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 	}
 	if reader, ok := ap.(CounterReader); ok {
 		c.counters = reader
@@ -623,6 +625,11 @@ type Session struct {
 	// a refused modification can put the MAR back.
 	removedMARs []*mar
 
+	// retiredTunnels are MAR tunnel records an update replaced (an access
+	// stopped tunnelling, or became "no standby"). compile erases them and
+	// settle returns their ids after the transaction lands.
+	retiredTunnels []uint32
+
 	// stale holds the PDRs a modification replaced: an update keeps a PDR's
 	// action and its tunnel, but a new filter or a new UE address is a new rule
 	// key, and the old one would go on selecting that action. compile erases an
@@ -672,6 +679,7 @@ type modelSnapshot struct {
 
 	removed, stale []*pdr
 	removedMARs    []*mar
+	retiredTunnels []uint32
 	ending         []uint32
 	removedQERs    []*qer
 }
@@ -693,8 +701,9 @@ func (s *Session) snapshot() modelSnapshot {
 		urrs: cloneEntries(s.URRs), bars: cloneEntries(s.BARs),
 		mars:    cloneEntries(s.MARs),
 		removed: slices.Clone(s.removed), stale: slices.Clone(s.stale), ending: slices.Clone(s.ending),
-		removedMARs: slices.Clone(s.removedMARs),
-		removedQERs: slices.Clone(s.removedQERs),
+		removedMARs:    slices.Clone(s.removedMARs),
+		retiredTunnels: slices.Clone(s.retiredTunnels),
+		removedQERs:    slices.Clone(s.removedQERs),
 	}
 }
 
@@ -708,13 +717,55 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 	failedPDRs = append(failedPDRs, s.removed...)
 	failedPDRs = append(failedPDRs, s.stale...)
 	failedQERs := qersInOrder(s)
+	failedMARs := append(marsInOrder(s), s.removedMARs...)
+	failedRetired := slices.Clone(s.retiredTunnels)
 
 	s.UEIP = snap.ueIP
 	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs, s.MARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars, snap.mars
 	s.removed, s.stale, s.ending = snap.removed, snap.stale, snap.ending
 	s.removedMARs = snap.removedMARs
+	s.retiredTunnels = snap.retiredTunnels
 	s.removedQERs = snap.removedQERs
 
+	// MAR policy and tunnel ids allocated by the failed merge are not in the
+	// restored model (or its removal list); return them. An id the snapshot
+	// still holds is the same reservation, not a new one.
+	liveIDs := map[uint32]bool{}
+	for _, m := range append(marsInOrder(s), s.removedMARs...) {
+		if m.policyID != 0 {
+			liveIDs[m.policyID] = true
+		}
+		for _, id := range m.tunnelIDs {
+			if id != 0 {
+				liveIDs[id] = true
+			}
+		}
+	}
+	for _, id := range s.retiredTunnels {
+		if id != 0 {
+			liveIDs[id] = true
+		}
+	}
+	policies := map[uint32]bool{}
+	tunnels := map[uint32]bool{}
+	for _, m := range failedMARs {
+		if m.policyID != 0 && !liveIDs[m.policyID] && !policies[m.policyID] {
+			policies[m.policyID] = true
+			c.policies.release(m.policyID)
+		}
+		for _, id := range m.tunnelIDs {
+			if id != 0 && !liveIDs[id] && !tunnels[id] {
+				tunnels[id] = true
+				c.actions.release(id)
+			}
+		}
+	}
+	for _, id := range failedRetired {
+		if id != 0 && !liveIDs[id] && !tunnels[id] {
+			tunnels[id] = true
+			c.actions.release(id)
+		}
+	}
 	held := map[uint32]bool{}
 	for _, teid := range s.chids {
 		held[teid] = true
@@ -805,10 +856,11 @@ type pdr struct {
 	// hasMAR and marID are the MAR this PDR's packets are steered by (TS
 	// 29.244 8.2.34). A MAR PDR has no FAR of its own: the MAR's two access
 	// actions are its egress.
-	hasMAR bool
-	marID  uint16
-	qerIDs []uint32
-	urrIDs []uint32
+	hasMAR   bool
+	marID    uint16
+	policyID uint32 // the shared AtsssSteer policy this PDR's MAR compiled to
+	qerIDs   []uint32
+	urrIDs   []uint32
 
 	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
 	// empty when the SMF named none: resolve turns it into the deployment's
@@ -834,7 +886,8 @@ type pdr struct {
 	// (resolve), or 0 when no QER of the PDR named one: the QoS flow the encap
 	// writes into the PDU Session Container the gNB reads. 0 is not a QFI
 	// (8.2.89), so it is also the "none" the record is written without.
-	encapQFI uint8
+	encapQFI    uint8
+	hasEncapQFI bool
 
 	// nextHop is the Router next hop this PDR's forward leaves by: the
 	// deployment's for the direction, or the network instance's when the FAR
@@ -930,6 +983,9 @@ type mar struct {
 	// nextHops are the Router next hops the two accesses leave by, resolved
 	// at compile time from their FARs.
 	nextHops [2]uint32
+	// policyID is the AtsssSteer policy key, unique across sessions (a PFCP
+	// MAR ID is only session-local) and allocated once per MAR.
+	policyID uint32
 	// tunnelIDs are the GtpuEncap records the two accesses name, allocated
 	// when an access adds an outer header and kept for the session's life.
 	tunnelIDs [2]uint32
@@ -1542,14 +1598,20 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	// still in the dataplane until this transaction erases it.
 	if c.cfg.Atsss != "" {
 		for _, m := range append(marsInOrder(s), s.removedMARs...) {
-			add(bess.Change{Resource: c.cfg.Atsss + "/policies",
-				Key: map[string]any{"policy_id": uint32(m.id)}})
+			if m.policyID != 0 {
+				add(bess.Change{Resource: c.cfg.Atsss + "/policies",
+					Key: map[string]any{"policy_id": m.policyID}})
+			}
 			for _, id := range m.tunnelIDs {
 				if id != 0 {
 					add(bess.Change{Resource: tunnelsRes(c.cfg.Down),
 						Key: map[string]any{"action_id": id}})
 				}
 			}
+		}
+		for _, id := range s.retiredTunnels {
+			add(bess.Change{Resource: tunnelsRes(c.cfg.Down),
+				Key: map[string]any{"action_id": id}})
 		}
 	}
 	// Meters belong to QERs, not to PDRs: compile writes one per policed
@@ -1730,6 +1792,31 @@ func (c *Compiler) settle(s *Session) {
 			s.forgetRuleKey(claim)
 		}
 	}
+	// A MAR the transaction removed, and a tunnel record an update retired,
+	// are gone from the dataplane now; return their ids after the commit.
+	// Keeping them until session deletion would exhaust the pools on repeated
+	// create/remove or tunneled-to-plain updates.
+	policies := map[uint32]bool{}
+	tunnels := map[uint32]bool{}
+	for _, m := range s.removedMARs {
+		if m.policyID != 0 && !policies[m.policyID] {
+			policies[m.policyID] = true
+			c.policies.release(m.policyID)
+		}
+		for _, id := range m.tunnelIDs {
+			if id != 0 && !tunnels[id] {
+				tunnels[id] = true
+				c.actions.release(id)
+			}
+		}
+	}
+	for _, id := range s.retiredTunnels {
+		if id != 0 && !tunnels[id] {
+			tunnels[id] = true
+			c.actions.release(id)
+		}
+	}
+	s.retiredTunnels = nil
 	s.removed, s.stale, s.ending, s.removedMARs = nil, nil, nil, nil
 }
 
@@ -1757,6 +1844,7 @@ func (c *Compiler) releaseSession(s *Session) {
 	// for allocation.
 	teids := map[uint32]bool{}
 	actions := map[uint32]bool{}
+	policies := map[uint32]bool{}
 	meters := map[uint32]bool{}
 	all := pdrsInOrder(s)
 	// A PDR a modification removed still holds ids, and a replaced PDR's old
@@ -1788,11 +1876,21 @@ func (c *Compiler) releaseSession(s *Session) {
 	// removed is one of them: the removal took it out of the model, so this is
 	// where its ids come back.
 	for _, m := range append(marsInOrder(s), s.removedMARs...) {
+		if m.policyID != 0 && !policies[m.policyID] {
+			policies[m.policyID] = true
+			c.policies.release(m.policyID)
+		}
 		for _, id := range m.tunnelIDs {
 			if id != 0 && !actions[id] {
 				actions[id] = true
-				c.tunnels.release(id)
+				c.actions.release(id)
 			}
+		}
+	}
+	for _, id := range s.retiredTunnels {
+		if id != 0 && !actions[id] {
+			actions[id] = true
+			c.actions.release(id)
 		}
 	}
 	for _, q := range append(qersInOrder(s), s.removedQERs...) {

@@ -137,7 +137,7 @@ matcher's seam, not a module class: it is the only implementation of
 | `urr_count.{h,cc}` | `urr_count` | `<module>/counters` (`CounterKey{action_id}`) | per-worker cell planes, per-rule stamp pairs | all |
 | `arp_responder.{h,cc}` | `upf_arp_responder` | `<module>/entries` (IPv4, host order) | the slot table's mask and its live count | all |
 | `pdr_match.{h,cc}` + `pdr_match_scan.cc` | `pdr_match` | `<module>/rules` (session id → its rule list), `<module>/settings` | the key/action/QFI/steering attribute ids and the settings singleton | all |
-| `atsss_steer.{h,cc}` | `AtsssSteer` | `<module>/policies` (MAR ID), `<module>/health` (access) | the policy attribute id, the next-hop/tunnel/accounting attribute ids | all |
+| `atsss_steer.{h,cc}` | `AtsssSteer` | `<module>/policies` (global policy id), `<module>/health` (access) | the policy attribute id, the next-hop/tunnel/accounting attribute ids | all |
 
 `PdrMatch` is the custom profile's matcher (`deploy/custom-pdrmatch.yaml`): the
 session is the packet's key attribute (`upf_teid` on the uplink, the selector's
@@ -189,15 +189,15 @@ table: `pdr_ul`'s match `fields` name the attribute, and a rule's mask is
 A downlink PDR may name a MAR instead of a FAR (TS 29.244 7.5.2.2 and 7.5.2.8).
 The compiler resolves the MAR's 3GPP and non-3GPP access actions to Router next
 hops and, where an access adds an outer header, to its own GtpuEncap tunnel
-records; the PDR's matcher rule carries the MAR ID in `steering_policy_id`
-(the matcher's `steering_attr`). `AtsssSteer` reads that id after the action
+records; the PDR's matcher rule carries the compiler-allocated policy id in
+`steering_policy_id` (the matcher's `steering_attr`). `AtsssSteer` reads that id after the action
 table, selects an access, and writes `next_hop_id`, `tunnel_id` and the optional
 `accounting_id`. The encap reads `tunnel_id` when the graph declares it and
 falls back to `action_id` for a packet whose value is 0 (not steered), so a
 mixed deployment needs one encap module, not two.
 
-The policy is one immutable object keyed by MAR ID; the health table is keyed by
-access, so one access's status is shared by every policy that uses it. A
+The policy is one immutable object keyed by the compiler-allocated policy id;
+the health table is keyed by access, so one access's status is shared by every policy that uses it. A
 missing health record means "not monitored" and counts as available; a missing
 policy, or neither access usable, drops the packet. Policy id 0 means "not
 steered" and passes the packet through with the action table's own next hop and

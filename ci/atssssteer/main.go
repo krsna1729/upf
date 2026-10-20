@@ -73,13 +73,17 @@ func main() {
 	set(healthChange(2, false))
 	window("none", 1)
 
-	// A policy that is gone has no access to select.
-	set(policyChange(1, 0, 1))
+	// A policy that is gone has no access to select. Make both accesses
+	// healthy and publish the policy first, then erase it: if the erase is
+	// ignored (an upsert instead), the packet would go to dump_a and fail.
+	set(healthChange(1, true), healthChange(2, true), policyChange(1, 0, 1))
+	set(policyErase(1))
 	window("erased", 1)
 
-	// Republish the policy with the non-3GPP access preferred, both healthy:
-	// the same packet now leaves by the other dump.
-	set(healthChange(1, true), healthChange(2, true), policyChange(1, 1, 2))
+	// Republish the policy with the non-3GPP access preferred, both healthy.
+	// The access hops stay 1 and 2: only the preferred index changes, so a
+	// broken selector that always takes access 0 would still send to dump_a.
+	set(policyChange(1, 1, 1))
 	window("preferred2", 1)
 
 	// Back to the 3GPP preference, and the 3GPP access keeps working.
@@ -99,6 +103,13 @@ func healthChange(id int, available bool) bess.Change {
 		Resource: health,
 		Key:      map[string]any{"health_id": id},
 		Value:    map[string]any{"available": available},
+	}
+}
+
+func policyErase(id int) bess.Change {
+	return bess.Change{
+		Resource: policy,
+		Key:      map[string]any{"policy_id": id},
 	}
 }
 

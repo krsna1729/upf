@@ -18,11 +18,12 @@
 
 // Steers a downlink packet between the two accesses of an ATSSS session: the
 // 3GPP access and the non-3GPP access (TS 29.244 7.5.2.8). The PDR matcher
-// writes the packet's MAR ID into the policy attribute; this module selects the
+// writes the packet's global policy id into the policy attribute; this module selects the
 // access, writes the selected access's Router next hop, tunnel record and
 // (optionally) accounting record, and emits the packet on one gate.
 //
-// The policy is one immutable object in "<name>/policies", keyed by MAR ID. Its
+// The policy is one immutable object in "<name>/policies", keyed by the global
+// policy id the compiler allocates for one session's MAR. Its
 // two access actions are fixed at programming time, so a packet costs one
 // policy lookup and no control-plane relation. Health is a separate table,
 // "<name>/health", keyed by access: an access is shared by every policy that
