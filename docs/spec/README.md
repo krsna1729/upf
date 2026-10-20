@@ -7,7 +7,7 @@ at.
 
 The pinned release is **3GPP Release 16**, the newest release whose PFCP
 feature set this tree supports. The parser and compiler are exercised against
-this text. `go-pfcp` v0.0.24 implements the same release's PFCP IEs; its own
+this text. `go-pfcp` (our `v0.0.25-upf.4` fork) implements the same release's PFCP IEs; its own
 conformance statement names TS 29.244 V16.7.0, while the claims below cite the
 final V16.9.1 revision for the exact clauses. Later releases are not copied or
 cited: their clauses may add fields or change conditions this tree has not

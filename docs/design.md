@@ -354,8 +354,10 @@ that MBR allows for 51-byte packets plus a token bucket's slack.
 ## PFCP on the wire
 
 The codec is [`github.com/wmnsk/go-pfcp`](https://github.com/wmnsk/go-pfcp),
-pinned at v0.0.24, its newest release tag. It is pure Go, MIT, and the
-implementation the surrounding ecosystem builds on: OMEC's UPF and its many
+pinned to our fork at `v0.0.25-upf.4`: upstream main (typed IE types and
+readable names) plus the parser bounds and nesting limits this tree needs. It
+is pure Go, MIT, and the implementation the surrounding ecosystem builds on:
+OMEC's UPF and its many
 forks depend on it, while free5GC's SMF uses its own `free5gc/pfcp` +
 `free5gc/tlv` stack. We carry one codec, not two — a second one would be a
 second thing to get wrong on the interface that faces another vendor's SMF.

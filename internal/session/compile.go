@@ -458,7 +458,7 @@ func triggerName(octet byte, bit uint8) string {
 // failure it can act on. (The list is by IE name: the clause numbers of the
 // refused ones are not this milestone's, and a wrong number in a refusal is
 // worse than none.)
-var urrUnsupported = map[uint16]string{
+var urrUnsupported = map[ie.IEType]string{
 	ie.MonitoringTime:            "Monitoring Time",
 	ie.InactivityDetectionTime:   "Inactivity Detection Time",
 	ie.QuotaHoldingTime:          "Quota Holding Time",

@@ -4099,7 +4099,7 @@ func TestAReportIsAUsageReportTheSMFCanRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the usage report's own IEs: %v", err)
 	}
-	byType := map[uint16]*ie.IE{}
+	byType := map[ie.IEType]*ie.IE{}
 	for _, child := range children {
 		byType[child.Type] = child
 	}

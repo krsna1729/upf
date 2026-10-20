@@ -1,8 +1,10 @@
-// Code generated from go-pfcp v0.0.24 ie/ie.go IE type constants; DO NOT EDIT.
+// Code generated from go-pfcp (upstream main) ie/ie.go IE type constants; DO NOT EDIT.
 
 package main
 
-var ieNames = map[uint16]string{
+import "github.com/wmnsk/go-pfcp/ie"
+
+var ieNames = map[ie.IEType]string{
 	0:   "_",
 	1:   "CreatePDR",
 	2:   "PDI",

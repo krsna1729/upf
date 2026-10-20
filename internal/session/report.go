@@ -268,7 +268,7 @@ func (r Report) IEs() []*ie.IE {
 // the URR, the UR-SEQN it is reported under, the trigger, and the volume and
 // duration its window measured. Every Usage Report of one report shares that
 // report's UR-SEQN, which is what links a group's URRs to the SMF.
-func usageReportIE(typ uint16, urrID, seqn uint32, trigger Trigger, up, down Usage, duration time.Duration, first, last time.Time) *ie.IE {
+func usageReportIE(typ ie.IEType, urrID, seqn uint32, trigger Trigger, up, down Usage, duration time.Duration, first, last time.Time) *ie.IE {
 	total := up.add(down)
 	octet5, octet6 := trigger.flags()
 	usage := []*ie.IE{
@@ -953,7 +953,7 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 
 // usageReports is the windows as Usage Report IEs of the message type typ,
 // under one trigger.
-func usageReports(typ uint16, trigger Trigger, windows []urrWindow) []*ie.IE {
+func usageReports(typ ie.IEType, trigger Trigger, windows []urrWindow) []*ie.IE {
 	out := make([]*ie.IE, 0, len(windows))
 	for _, w := range windows {
 		out = append(out, usageReportIE(typ, w.uid, w.seqn, trigger, w.up, w.down, w.duration, w.first, w.last))

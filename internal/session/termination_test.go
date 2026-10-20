@@ -65,7 +65,7 @@ func TestTheDeletionResponseCarriesTheLastWindowOfEachURR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the usage report: %v", err)
 	}
-	byType := map[uint16]*ie.IE{}
+	byType := map[ie.IEType]*ie.IE{}
 	for _, ch := range children {
 		byType[ch.Type] = ch
 	}

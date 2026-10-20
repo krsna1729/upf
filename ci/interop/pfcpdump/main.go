@@ -223,7 +223,7 @@ var causes = map[uint8]string{
 var ifaces = map[uint8]string{0: "Access", 1: "Core", 2: "SGi-LAN/N6-LAN", 3: "CP-function", 4: "5G VN Internal"}
 
 // decode names a leaf IE's value; "" leaves only the hex.
-func decode(t uint16, v []byte) (out string) {
+func decode(t ie.IEType, v []byte) (out string) {
 	defer func() {
 		if recover() != nil {
 			out = "<short>"
