@@ -117,7 +117,12 @@ modules:
     arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
   - name: pdr_match_dl
     mclass: PdrMatch
-    arg: {key_attr: action_id, max_sessions: 65536}
+    arg:
+      key_attr: action_id
+      max_sessions: 65536
+      # The MAR ID of a matched rule, where the rule has one. AtsssSteer reads
+      # this attribute; a rule without a MAR writes 0 and is not steered.
+      steering_attr: steering_policy_id
 
   # -- the two chains ----------------------------------------------------------
   # The matcher writes the matched rule's ActionId into the packet's "action_id"
@@ -142,12 +147,23 @@ modules:
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
+  - name: atsss_dl
+    mclass: AtsssSteer
+    arg:
+      policy_attr: steering_policy_id
+      next_hop_attr: next_hop_id
+      tunnel_attr: tunnel_id
 
   - name: rt
     mclass: Router
   - name: enc
     mclass: GtpuEncap
-    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
+    arg:
+      src_ip: "192.0.2.1"
+      max_tunnels: 65536
+      # AtsssSteer writes tunnel_id; 0 means "not steered", and the encap
+      # falls back to action_id for those packets.
+      tunnel_attr: tunnel_id
 
   # -- egress ------------------------------------------------------------------
   - name: n6_out
@@ -179,7 +195,8 @@ connections:
   - {upstream: at_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
-  - {upstream: cnt_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: atsss_dl}
+  - {upstream: atsss_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: n3_out}
   - {upstream: cp_in, downstream: n3_out}

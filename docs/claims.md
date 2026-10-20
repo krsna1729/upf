@@ -5,28 +5,24 @@ requirement, the evidence it cites and the last run's verdict are one record.
 Edit the JSON and re-run; never this file. Named tests and the narrative sit in
 the JSON, not here.
 
-**49 claims · 45 ok · 2 gap · 2 skip · 0 fail**
+**50 claims · 47 ok · 1 gap · 2 skip · 0 fail**
 
 `ok` proved by the evidence named · `gap` a documented missing capability ·
 `skip` needs an environment this run lacks · `FAIL` a regression.
 
+Specs are pinned to 3GPP Release 16: every
+claim below names the specification, release version and clause it reads.
+The reference texts are in `docs/spec/`, with their official source URLs.
+
 ## Open
 
-### status-36 · 5.4.15 · gap
+### status-36 · TS 29.244 V16.9.1 §5.4.15 · gap
 
 Packet Rate: a QER capping packets per time unit, and its queryable status
 
 Packet Rate is a procedure of its own: a QER that caps packets per time unit, plus a status the CP function can query and the UP reports. None of it is read here -- go-pfcp does carry the IEs, so this is the tree's gap and not the library's -- and the substrate is now in the fork: a Meter's `cost: PACKETS` charges one a packet through the same buckets, bursts and colouring (BESS fork PR #45), and the ordered-id action (PR #44) lets a flow's packet rate and the session's bit rate share one lookup
 
 a serving-PLMN or APN rate control the SMF provisions is invisible to this UPF: a UE can exceed a packet rate the CP asked to cap. The remaining work is the compiler reading the QER's Packet Rate IEs into such a meter, and the Query Packet Rate Status exchange on the reporting side
-
-No evidence in this tree.
-
-### competition-10 · block 10 · gap
-
-MAR / ATSSS-LL (2)
-
-Scores: us **0** · OAI-CN5G 50 · open5gs 0 · free5GC 0 · UPG-VPP 50 · eUPF 0 · OMEC 0 · best 50 (OAI-CN5G).
 
 No evidence in this tree.
 
@@ -38,63 +34,64 @@ The code is not in question.
 
 ## Status claims
 
-### Error Indication and its report · 2 claims (2 ok)
+### Error Indication and its report · TS 29.244 V16.9.1 §5.10 · 2 claims (2 ok)
 
-- **status-28** · 5.10 — a peer Error Indication becomes an ERIR report to the SMF · test · live test · lane ×2
-- **status-22** · 7.3.1 — a G-PDU on an unknown TEID is discarded and an Error Indication returned · lane
+- **status-28** · TS 29.244 V16.9.1 §5.10 — a peer Error Indication becomes an ERIR report to the SMF · test · live test · lane ×2
+- **status-22** · TS 29.281 V16.2.0 §7.3.1 — a G-PDU on an unknown TEID is discarded and an Error Indication returned · lane
 
-### Session Establishment · 9 claims (9 ok)
+### Session Establishment · TS 29.244 V16.9.1 §7.5.2 · 10 claims (10 ok)
 
-- **status-25** · 5.2.1 — the uplink lookup names the tunnel the packet arrived on · lane ×2 · graph
-- **status-37** · 5.2.1 — the downlink selector is keyed byte-for-byte as the engine keys it · test · lane
-- **status-16** · 7.5.2.2 — several SDF Filter IEs are a list; a packet matches any · test
-- **status-17** · 7.5.2.2 — several QFI IEs are a list; a packet matches any · test
-- **status-20** · 7.5.2.2 — several QERs on one PDR: a closed gate in any of them stops the rule · test ×6 · live test · lane
-- **status-26** · 7.5.2.2 — a PDR naming a QER the session does not hold is refused (cause 73) · test
-- **status-32** · 7.5.2.2 — pfcpsim's zero TEID, QER 0, QFI 0 and inert period are accepted · test ×2 · lane
-- **status-35** · 7.5.2.2 — several QERs' rates are enforced together, not one of them · lane
-- **status-24** · 7.5.2.3 — FAR options: Forwarding Policy is held; L7 actions are refused (cause 73) · test ×3
+- **status-25** · TS 29.244 V16.9.1 §5.2.1 — the uplink lookup names the tunnel the packet arrived on · lane ×2 · graph
+- **status-37** · TS 29.244 V16.9.1 §5.2.1 — the downlink selector is keyed byte-for-byte as the engine keys it · test · lane
+- **status-16** · TS 29.244 V16.9.1 §7.5.2.2 — several SDF Filter IEs are a list; a packet matches any · test
+- **status-17** · TS 29.244 V16.9.1 §7.5.2.2 — several QFI IEs are a list; a packet matches any · test
+- **status-20** · TS 29.244 V16.9.1 §7.5.2.2 — several QERs on one PDR: a closed gate in any of them stops the rule · test ×6 · live test · lane
+- **status-26** · TS 29.244 V16.9.1 §7.5.2.2 — a PDR naming a QER the session does not hold is refused (cause 73) · test
+- **status-32** · TS 29.244 V16.9.1 §7.5.2.2 — pfcpsim's zero TEID, QER 0, QFI 0 and inert period are accepted · test ×2 · lane
+- **status-35** · TS 29.244 V16.9.1 §7.5.2.2 — several QERs' rates are enforced together, not one of them · lane
+- **status-24** · TS 29.244 V16.9.1 §7.5.2.3 — FAR options: Forwarding Policy is held; L7 actions are refused (cause 73) · test ×3
+- **status-38** · TS 29.244 V16.9.1 §7.5.2.8 — a MAR's two access actions are compiled to one steering policy and selected by health · test ×7 · lane
 
-### Session Modification · 5 claims (1 gap, 4 ok)
+### Session Modification · TS 29.244 V16.9.1 §7.5.4 · 5 claims (1 gap, 4 ok)
 
-- **status-15** · 5.2.1A — an uplink SDF filter is left as provisioned, not swapped · test ×2
-- **status-18** · 5.2.1A — an SDF Filter IE with no Flow Description is refused (cause 64) · test ×2
-- **status-36** · 5.4.15 — Packet Rate: a QER capping packets per time unit, and its queryable status · **gap**
-- **status-33** · 7.5.4 — Remove QER is applied; rule IDs may number from 0 · test ×2
-- **status-31** · no clause — a refused modification leaves the session exactly as it was · test ×2
+- **status-15** · TS 29.244 V16.9.1 §5.2.1A — an uplink SDF filter is left as provisioned, not swapped · test ×2
+- **status-18** · TS 29.244 V16.9.1 §5.2.1A — an SDF Filter IE with no Flow Description is refused (cause 64) · test ×2
+- **status-36** · TS 29.244 V16.9.1 §5.4.15 — Packet Rate: a QER capping packets per time unit, and its queryable status · **gap**
+- **status-33** · TS 29.244 V16.9.1 §7.5.4 — Remove QER is applied; rule IDs may number from 0 · test ×2
+- **status-31** · TS 29.244 V16.9.1 · no clause — a refused modification leaves the session exactly as it was · test ×2
 
-### Session Deletion · 1 claim (1 ok)
+### Session Deletion · TS 29.244 V16.9.1 §7.5.6 · 1 claim (1 ok)
 
-- **status-11** · no clause — a deleted session's id is not reused until the dataplane retires it · test · lane
+- **status-11** · TS 29.244 V16.9.1 · no clause — a deleted session's id is not reused until the dataplane retires it · test · lane
 
-### Session Report · 4 claims (3 ok, 1 skip)
+### Session Report · TS 29.244 V16.9.1 §7.5.8 · 4 claims (3 ok, 1 skip)
 
-- **status-34** · 5.2.2.2.1 — a usage report's window is the one the tick decided, not the send time · test ×2
-- **status-21** · 5.2.2.3.1 — the Session Deletion Response reports each URR's usage · live test · **skip**
-- **status-27** · 8.2.26 — NOCP decides the Downlink Data Report; BUFF alone buffers silently · test
-- **status-30** · 8.2.41 — the Usage Report Trigger is octets 5-7 of its IE · test
+- **status-34** · TS 29.244 V16.9.1 §5.2.2.2.1 — a usage report's window is the one the tick decided, not the send time · test ×2
+- **status-21** · TS 29.244 V16.9.1 §5.2.2.3.1 — the Session Deletion Response reports each URR's usage · live test · **skip**
+- **status-27** · TS 29.244 V16.9.1 §8.2.26 — NOCP decides the Downlink Data Report; BUFF alone buffers silently · test
+- **status-30** · TS 29.244 V16.9.1 §8.2.41 — the Usage Report Trigger is octets 5-7 of its IE · test
 
-### Shared information elements · 9 claims (9 ok)
+### Shared information elements · TS 29.244 V16.9.1 §8.2 · 9 claims (9 ok)
 
-- **status-1** · 8.2.3 — an F-TEID with the CH flag (no TEID) is assigned one · test ×3 · lane
-- **status-2** · 8.2.3 — PDIs sharing a CHOOSE ID share one F-TEID · test ×5 · live test · lane
-- **status-3** · 8.2.3 — a CHOOSE for an address family the UP has no address for is refused · test
-- **status-19** · 8.2.5 — a match field the parser does not handle is refused, never ignored · test
-- **status-6** · 8.2.5 — a port range in an SDF filter matches as a range · test ×2
-- **status-7** · 8.2.5 — a non-IPv4 address, or a prefix with host bits, is refused · test ×4
-- **status-23** · 8.2.62 — the UE IP S/D bit places the address on the right side of the key · test ×5
-- **status-9** · 8.2.62 — a PDI with no UE IP IE matches by its F-TEID · test
-- **status-29** · 5.5.3.3 — QFI 0 is legal; here it means 'no container' · test · lane
+- **status-1** · TS 29.244 V16.9.1 §8.2.3 — an F-TEID with the CH flag (no TEID) is assigned one · test ×3 · lane
+- **status-2** · TS 29.244 V16.9.1 §8.2.3 — PDIs sharing a CHOOSE ID share one F-TEID · test ×5 · live test · lane
+- **status-3** · TS 29.244 V16.9.1 §8.2.3 — a CHOOSE for an address family the UP has no address for is refused · test
+- **status-19** · TS 29.244 V16.9.1 §8.2.5 — a match field the parser does not handle is refused, never ignored · test
+- **status-6** · TS 29.244 V16.9.1 §8.2.5 — a port range in an SDF filter matches as a range · test ×2
+- **status-7** · TS 29.244 V16.9.1 §8.2.5 — a non-IPv4 address, or a prefix with host bits, is refused · test ×4
+- **status-23** · TS 29.244 V16.9.1 §8.2.62 — the UE IP S/D bit places the address on the right side of the key · test ×5
+- **status-9** · TS 29.244 V16.9.1 §8.2.62 — a PDI with no UE IP IE matches by its F-TEID · test
+- **status-29** · TS 38.415 V16.6.0 §5.5.3.3 — QFI 0 is legal; here it means 'no container' · test · lane
 
 ### Cross-cutting (no message) · 7 claims (7 ok)
 
-- **status-10** · no clause — a restarted controller empties the predecessor's dataplane state · test ×8 · live test · lane
-- **status-12** · no clause — one key is one rule: a live session's rule cannot be taken · test ×5
-- **status-13** · no clause — the management surface: metrics as text, the rest as flags · test ×4
-- **status-14** · no clause — a checkpointed run keeps its sessions across a restart · test ×6 · lane
-- **status-4** · no clause — a request with no session layer configured is refused with a Cause · test
-- **status-5** · no clause — a datapath refusal becomes a Cause, not a half-programmed session · test
-- **status-8** · no clause — an opt-in firewall path carries the match the wildcard key cannot · test ×10
+- **status-10** · TS 29.244 V16.9.1 · no clause — a restarted controller empties the predecessor's dataplane state · test ×8 · live test · lane
+- **status-12** · TS 29.244 V16.9.1 · no clause — one key is one rule: a live session's rule cannot be taken · test ×5
+- **status-13** · TS 29.244 V16.9.1 · no clause — the management surface: metrics as text, the rest as flags · test ×4
+- **status-14** · TS 29.244 V16.9.1 · no clause — a checkpointed run keeps its sessions across a restart · test ×6 · lane
+- **status-4** · TS 29.244 V16.9.1 · no clause — a request with no session layer configured is refused with a Cause · test
+- **status-5** · TS 29.244 V16.9.1 · no clause — a datapath refusal becomes a Cause, not a half-programmed session · test
+- **status-8** · TS 29.244 V16.9.1 · no clause — an opt-in firewall path carries the match the wildcard key cannot · test ×10
 
 ## Competition
 
@@ -114,10 +111,10 @@ run lacks.
 | **7** BAR + DDN: buffering, DDN, duration, drop-buffered (4) | **100** | 75 | 75 | 25 | 0 | 0 | 25 | test · lane |
 | **8** GTP-U: decap, encap, echo, end marker, DSCP copy (5) | **100** | 40 | 80 | 40 | 40 | 40 | 80 | lane ×2 |
 | **9** IPv6: PFCP UE IP, inner + outer, N9 (3) | 0 | 0 | 0 | 0 | 33 | 0 | 0 | test ×2 |
-| **10** MAR / ATSSS-LL (2) · gap | 0 | 50 | 0 | 0 | 50 | 0 | 0 | — |
+| **10** MAR / ATSSS-LL (2) | **50** | 50 | 0 | 0 | 50 | 0 | 0 | test ×2 · lane |
 | **11** ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 | lane ×2 |
 | **12** real-SMF interop (1) · skip | **100** | 0 | 100 | 0 | 0 | 0 | 0 | lane |
-| **mean (12 blocks)** | **78** | **56** | **65** | **43** | **46** | **31** | **42** | |
+| **mean (12 blocks)** | **82** | **56** | **65** | **43** | **46** | **31** | **42** | |
 
 ### Field notes
 

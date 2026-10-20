@@ -1,0 +1,22 @@
+3GPP TS 29.281 V16.2.0 — cited clauses (excerpt)
+
+Source archive: https://www.3gpp.org/ftp/Specs/archive/29_series/29.281/29281-g20.zip
+This file reproduces only the clauses the claims in docs/claims.json cite.
+It is not the complete specification. Clause headings and body text are
+from the official archive converted to UTF-8; page breaks, tables of
+contents and uncited clauses are omitted.
+
+Clauses: 7.3.1
+
+7.3.1	Error Indication
+When a GTP-U node receives a G-PDU for which no EPS Bearer context, PDP context, PDU Session, MBMS Bearer context, or RAB exists, the GTP-U node shall discard the G-PDU. If the TEID of the incoming G-PDU is different from the value 'all zeros' the GTP-U node shall also return a GTP error indication to the originating node. GTP entities may include the "UDP Port" extension header (Type 0x40), in order to simplify the implementation of mechanisms that can mitigate the risk of Denial-of-Service attacks in some scenarios.
+Handling of the received Error Indication is specified in 3GPP TS 23.007 [3] and 3GPP TS 23.527 [33].
+The information element Tunnel Endpoint Identifier Data I shall be the TEID fetched from the G-PDU that triggered this procedure.
+
+The information element GTP-U Peer Address shall be the destination address (e.g. destination IP address, MBMS Bearer Context) fetched from the original user data message that triggered this procedure. A GTP-U Peer Address can be a GGSN, SGSN, RNC, PGW, SGW, ePDG, eNodeB, TWAN, MME, gNB, N3IWF, or UPF address. The TEID and GTP-U peer Address together uniquely identify the related PDP context, RAB, PDU session or EPS bearer in the receiving node.
+The optional Private Extension contains vendor or operator specific information.
+Table 7.3.1-1: Information Elements in an Error Indication
+Information element	Presence requirement	Reference
+Tunnel Endpoint Identifier Data I	Mandatory	8.3
+GTP-U Peer Address	Mandatory	8.4
+Private Extension	Optional	8.6

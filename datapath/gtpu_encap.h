@@ -91,6 +91,8 @@ class GtpuEncap final : public Module {
   uint16_t src_port_ = 0;  // host order; 0 means a per-flow hash
   uint16_t dst_port_ = 0;  // host order
   int action_attr_ = -1;   // the "action_id" attribute id
+  int tunnel_attr_ = -1;   // the steering module's "tunnel_id", when configured
+  bool has_tunnel_ = false;
   std::unique_ptr<bess::dataplane::SlotTable<ActionId, Tunnel>> tunnels_;
   std::unique_ptr<bess::dataplane::SlotResource<ActionId, Tunnel>> resource_;
   bess::framework::ResourceBinding binding_;  // after resource_ (D-044)

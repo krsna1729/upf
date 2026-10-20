@@ -109,7 +109,8 @@ observes is not proven.
 
 - **A claim carries evidence.** `docs/claims.json` is the source; `ci/verify.sh`
   runs every cited test and lane and renders `docs/claims.md`. Never edit the
-  markdown by hand.
+  markdown by hand. Every claim names its specification, pinned release
+  version and clause; the texts are in `docs/spec/`.
 - **Fail first where practical.** Write the test that fails on the old code,
   then fix it; the commit that closes a gap says so.
 - **A lane that records a number uses its own graph**, so the number does not
@@ -131,12 +132,15 @@ observes is not proven.
 | `deploy/` | the deployment graph and the lanes' graphs |
 | `ci/` | the lanes, the claims contract, the interop rig |
 | `docs/` | design, datapath reference, claims register, interop record |
+| `docs/spec/` | the pinned Release 16 3GPP excerpts the claims cite, with source URLs and hashes |
 
 ## Status
 
-The last full evidence run: **49 claims — 45 ok, 2 gap, 2 skip, 0 fail**.
+The last full evidence run: **50 claims — 47 ok, 1 gap, 2 skip, 0 fail**.
 
-- Open: Packet Rate (QER packet caps and their query) and MAR/ATSSS-LL.
+- Open: Packet Rate (QER packet caps and their query). MAR/ATSSS-LL is
+  implemented for active/standby; the other Steering Modes and MPTCP remain
+  open (`status-38`).
 - Skipped here: two claims whose lanes need environments this host lacks.
 - Real-SMF interop: stock free5GC v4.3.0, unshimmed, through session deletion
   (`docs/interop.md`).

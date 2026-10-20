@@ -1,0 +1,14 @@
+3GPP TS 38.415 V16.6.0 — cited clauses (excerpt)
+
+Source archive: https://www.3gpp.org/ftp/Specs/archive/38_series/38.415/38415-g60.zip
+This file reproduces only the clauses the claims in docs/claims.json cite.
+It is not the complete specification. Clause headings and body text are
+from the official archive converted to UTF-8; page breaks, tables of
+contents and uncited clauses are omitted.
+
+Clauses: 5.5.3.3
+
+5.5.3.3	QoS Flow Identifier (QFI)
+Description: When present this parameter indicates the QoS Flow Identifier of the QoS flow to which the transferred packet belongs.
+Value range: {0..26-1}. 
+Field length: 6 bits.

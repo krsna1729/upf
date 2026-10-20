@@ -1,0 +1,1298 @@
+3GPP TS 29.244 V16.9.1 — cited clauses (excerpt)
+
+Source archive: https://www.3gpp.org/ftp/Specs/archive/29_series/29.244/29244-g91.zip
+This file reproduces only the clauses the claims in docs/claims.json cite.
+It is not the complete specification. Clause headings and body text are
+from the official archive converted to UTF-8; page breaks, tables of
+contents and uncited clauses are omitted.
+
+Clauses: 5.2.1, 5.2.1A, 5.2.2.2.1, 5.2.2.3.1, 5.4.15, 5.10, 7.5.2.2, 7.5.2.3, 7.5.2.8, 7.5.4, 8.2.3, 8.2.5, 8.2.26, 8.2.41, 8.2.62
+
+5.2.1	General
+The packet forwarding scenarios supported over the Sxa, Sxb and Sxc reference points are specified in 3GPP TS 23.214 [2].
+The packet forwarding scenarios supported over the N4 reference point are specified in 3GPP TS 23.501 [28] and 3GPP TS 23.502 [29].
+The CP function controls the packet processing in the UP function by establishing, modifying or deleting PFCP Session contexts and by provisioning (i.e. adding, modifying or deleting) PDRs, FARs, QERs, URRs, BAR and/or MAR or by activating/deactivating pre-defined PDRs, FARs, QERs, URRs, per PFCP session context, whereby a PFCP session context may correspond:
+-	for EPC, to an individual PDN connection, a TDF session, or a standalone session not tied to any PDN connection or TDF session used e.g. for forwarding Radius, Diameter or DHCP signalling between the PGW-C and the PDN.
+-	for 5GC, to an individual PDU session or a standalone PFCP session not tied to any PDU session.
+Each PDR shall contain a PDI, i.e. one or more match fields against which incoming packets are matched, and may be associated to the following rules providing the set of instructions to apply to packets matching the PDI:
+-	one or more FARs, which contains instructions related to the processing of the packets as follows:
+-	an Apply Action parameter, which indicates whether the UP function shall forward, duplicate, drop or buffer the packet with or without notifying the CP function about the arrival of a DL packet, or whether the UP function shall accept or deny UE requests to join an IP multicast group;
+-	forwarding, buffering and/or duplicating parameters, which the UP function shall use if the Apply Action parameter requests the packets to be forwarded, buffered or duplicated respectively. These parameters may remain configured in the FAR regardless of the Apply Action parameter value, to minimize the changes to the FAR during the transitions of the UE between the idle and connected modes. The buffering parameters, when present, shall be provisioned in a BAR created at the PFCP session level and referenced by the FAR.
+NOTE 1:	Buffering refers here to the buffering of the packet in the UP function. The UP function is instructed to forward DL packets to the CP function when applying buffering in the CP function. See clause 5.3.1.
+-	zero, one or more QERs, which contains instructions related to the QoS enforcement of the traffic;
+-	zero, one or more URRs, which contains instructions related to traffic measurement and reporting.
+-	zero or one MAR, which contains instructions related to Access Traffic Steering, Switching and Splitting (ATSSS) for the downlink traffic of a Multi-Access (MA) PDU session. See clause 5.2.7.
+NOTE 2:	A downlink PDR can be associated with two FARs for a N4 session established for a MA PDU session as a MAR contains two FARs for 3GPP and non-3GPP respectively.
+A FAR, a QER, a URR and a MAR shall only be associated to one or multiple PDRs of the same PFCP session context.
+The QoS Enforcement Rule Correlation ID shall be assigned by the CP function to correlate QERs from multiple PFCP session contexts. For instance, the enforcement of APN-AMBR in the PGW-U shall be achieved by setting the same QoS Enforcement Rule Correlation ID to the QERs from different PFCP sessions associated with all the PDRs corresponding to the non-GBR bearers of all the UE's PDN connections to the same APN. The QERs that are associated to the same QoS Enforcement Rule Correlation ID in multiple PFCP sessions shall be provisioned, with the same QER contents, in each of these PFCP sessions. The QoS Enforcement Rule Correlation ID shall be only used to enforce the APN-AMBR when the UE is in EPC, it may be provided by the CP function over N4 to the UP function for a PDU session may move to EPC in a later stage.
+The following principles shall apply for the provisioning of PDRs in the UP function:
+-	Every PDR provisioned for a PFCP session shall allow to identify the PFCP session, i.e. every PDR shall contain the information element(s) to identify the PFCP session, which is either a Traffic Endpoint Identifier (if the PDI Optimization feature is supported) or equivalent information, e.g. UE IP address, Local F-TEID, Frame-Route, in the PDI IE.
+-	The CP function shall not provision more than one PDR with the same match fields in the PDI (i.e. with the same set of match fields and with the same value). The CP function may provision PDRs with the same value for a subset of the match fields of the PDI but not all;
+-	different PDRs of a same PFCP session may overlap, e.g. the CP function may provision two PDRs which differ by having one match field set to a specific value in one PDR and the same match field not included in the other PDR (thus matching any possible value);
+-	different PDRs of different PFCP sessions, not including the Packet Replication and Detection Carry-On Information IE, shall not overlap, i.e. PDRs in each PFCP session shall differ by at least one different (and not wildcarded) match field in their PDI, such that any incoming user plane packet may only match PDRs of a single PFCP session;
+-	As an exception to the previous principle, the CP function may provision a PDR with all match fields wildcarded (i.e. all match fields omitted in the PDI) in a separate PFCP session, to control how the UP function shall process packets unmatched by any PDRs of any other PFCP session. The CP function may provision the UP function to send these packets to the CP function or to drop them. The UP function shall grant the lowest precedence to this PDR.
+-	different PDRs of different PFCP sessions, including the Packet Replication and Detection Carry-On Information IE, may overlap. The Detection Carry-On Indication indicates that the UP function shall proceed with the look-up of other PDRs of other PFCP sessions matching the packet. This is used for broadcast traffic forwarding in 5G VN Group Communication.
+-	different downlink PDRs of different PFCP sessions, with a PDI including the IP multicast IP address IE, may overlap. The UP function shall proceed with the look-up of other PDRs of other PFCP sessions matching the packet. This is used for downlink IP multicast traffic for IPTV service (see clause 5.25).
+On receipt of a user plane packet, the UP function shall perform a lookup of the provisioned PDRs in the UP function to identify only one PDR in a PFCP session according to the following steps:
+-	identify first the PFCP session to which the packet corresponds; and
+-	find the first PDR matching the incoming packet, among all the PDRs provisioned for this PFCP session, starting with the PDRs with the highest precedence and continuing then with PDRs in decreasing order of precedence. Only the highest precedence PDR matching the packet shall be selected, i.e. the UP function shall stop the PDRs lookup once a matching PDR is found.
+A packet matches a PDR if all the match fields which are identified with different IE type in the PDI of the PDR are matching the corresponding packet header fields unless specified otherwise. If a match field is not included in the PDI, it shall be considered as matching all possible values in the header field of the packet. If the match field is present and does not include a mask, the match field shall be considered as matching the corresponding header field of the packet if it has the same value. If the match field is present and includes a mask (e.g. IP address with a prefix mask), the match field shall be considered as matching the corresponding header field of the packet if it has the same value for the bits which are set in the mask. If a match field has multiple instances, i.e. there are several IEs with the same IE type, a packet matches this match field if any instance is matching the corresponding packet header field.
+The match fields of the PDI shall correspond to outer and/or inner packet header fields, e.g. uplink bearer binding verification in the PGW-U may be achieved by configuring a PDR with the PDI containing the local GTP-U F-TEID (for outer IP packet matching) and the SDF filters of the data flows mapped to the bearer (for inner IP packet matching).
+NOTE 3:	A DL PDR can be provisioned with a UE IP address together with a Framed-Route or a Framed-IPv6-Rotue either in the PDI IE or in the Create Traffic Endpoint IE; in such case, the PDR is matched if the packet matches either the UE IP address or the Framed-Route (Framed-IPv6-Route).
+When one or more pre-defined PDR(s) are activated for a given PDR (see clause 5.19), an incoming packet matches the PDR if it matches one of activated pre-defined PDR(s).
+The UP function should drop packets unmatched by any PDRs.
+The packet processing flow in the UP function is illustrated in Figure 5.2.1-1.
+
+Figure 5.2.1-1: Packet processing flow in the UP function
+At the deletion of a PFCP session, the UP function shall delete the PFCP session context and all the associated non-preconfigured rules.
+NOTE 4:	Deleting a QER in one PFCP session does not result in deleting another QER in another PFCP session even when these two QERs have the same QER ID and/or are associated with the same QER Correlation ID.
+A UP Function controlled by multiple CP functions shall handle Rule IDs from the different CP functions independently from each other.
+Rule ID used for PDR, FAR, BAR, QER, URR or MAR is uniquely identifying a rule of the corresponding rule type within a session.
+For an MA-PDU session, IP addresses translation for MPTCP traffic (see Annex E.3) is independent from the handling of URR/QER/BAR, but it shall be performed before applying the FAR (e.g. before creating the outer header and forwarding the packet).
+
+5.2.1A	Packet Detection Rule Handling
+5.2.1A.1	General
+When provisioning a PDR in the UP function, the CP function shall provide the PDI with the following information:
+-	the source interface of the incoming packets;
+-	a combination of the parameters, that incoming packets are requested to match, among: Local F-TEID, Network Instance, UE IP address(es), SDF Filter(s) and/or Application ID. For 5GC, the PDI may additionally contain one or more QFI(s) to detect traffic pertaining to specific QoS flow(s), Ethernet Packet Filter(s) and/or Ethernet PDU Session Information (see clause 5.13.1).
+The requirements for provisioning an SDF filter in the PDI are specified in clauses 5.2.1A.2A and 5.2.1A.3.
+The CP function may provision the parameters, that incoming packets are requested to match, in the UP function by:
+-	providing the parameters individually in each PDI of the PFCP session; or
+-	optionally, if the PDI Optimization feature is supported by the UP function, by providing the parameters which may be common to multiple PDIs of a same PFCP session in a Traffic Endpoint IE and by referencing this Traffic Endpoint in the PDI(s) of the PFCP session. See clause 5.2.1A.2. A Traffic Endpoint may include a Local F-TEID, Network Instance, UE IP address(es) and/or Ethernet PDU Session Information (see clause 5.13.1).
+NOTE:	A Traffic Endpoint can correspond to a GTP-u endpoint, an SGi or an N6 endpoint.
+5.2.1A.2	PDI Optimization
+PDI Optimization is an optional feature which may be supported by the CP and UP Functions. This feature allows the CP function to optimize the signaling towards the UP function by creating the information that are common to multiple PDRs as a Traffic Endpoint with a Traffic Endpoint ID and then referring to this common information from multiple PDRs. The Traffic Endpoint ID shall be unique within a PFCP session. If MTE feature is supported, one PDI may refer to more than one Traffic Endpoints. When a PDI refers to a Traffic Endpoint, the parameters that are in the Traffic Endpoint shall not be once again provided in the PDI. The CP function may update the Traffic Endpoint at any time.
+If a Traffic Endpoint is updated, all the PDRs that refer to this Traffic Endpoint in the UP function shall use the updated information.
+The UP function shall allocate and store the F-TEID associated to the Traffic Endpoint. When the UP function provides the allocated F-TEID to the CP function in the PFCP Session Establishment response or PFCP Session Modification response message, the CP function shall update the Traffic Endpoint information stored in the CP function with the received F-TEID.
+The CP function should use a Traffic Endpoint ID created in a different PFCP message only after getting the confirmation from the UP function of the Traffic Endpoint ID creation.
+If the CP function deletes a Traffic Endpoint, the UP Function shall delete all the PDRs that refer to this Traffic Endpoint.
+NOTE 1:	The requirements specified in clause 5.2.2.3.1 for reporting usage reports to the CP function also apply if the deletion of the Traffic Endpoint results in deleting the last PDR associated to a URR.
+NOTE2:	For EPC, the Remove Traffic Endpoint IE can be used to delete a bearer for which multiple PDRs exist (with the same Traffic Endpoint ID).
+5.2.1A.2A	Provisioning of SDF filters
+When provisioning an SDF Filter in a PDI, the CP function shall:
+-	copy the Flow Description if it is received from the PCRF (or PCF), in the corresponding PDI of a PDR regardless of whether the PDR is for matching uplink or downlink traffic;
+NOTE 1	The Flow Description received from the PCRF (or PCF) is set assuming downlink flows only, see clause 5.4.2 of 3GPP TS 29.212 [8]. The CP function uses the Flow-Direction AVP received from the PCRF (or PCF) to determine the actual direction and thus the source interface of the packet flows described in the Flow Description.
+-	for traffic from CP-function or SGi-LAN:
+-	If the traffic is intended to be forwarded to the UE, the CP function shall provision the Flow Description with IPFilterRule "source" parameters set to correspond to the CP function or SGi-LAN and the IPFilterRule "destination" parameters correspond to the UE;
+-	If the traffic is intended to be forwarded to the PDN, the CP function shall provision the Flow Description with IPFilterRule "source" parameters set to correspond to the CP function or SGi-LAN and the IPFilterRule "destination" parameters correspond to the PDN.
+The UP function shall apply the SDF filter based on the Source Interface of the PDR as follows (see also clause 8.2.5):
+-	when the Source Interface is CORE, this indicates that the filter is for downlink data flow, so the UP function shall apply the Flow Description as is;
+-	when the Source Interface is ACCESS, this indicates that the filter is for uplink data flow, so the UP function shall swap the source and destination address/port in the Flow Description;
+-	when the Source Interface is CP-function or SGi-LAN, the UP function shall use the Flow Description as is.
+5.2.1A.3	Bidirectional SDF Filters
+The CP function may provision bidirectional SDF Filters in the UP function (see clause 8.2.5), i.e. SDF Filters that may be associated to both uplink and downlink PDRs of a same PFCP/N4 session, as follows:
+-	when provisioning a bidirectional SDF Filter the first time for a PFCP/N4 session, the CP function shall provision the SDF filter definition together with a SDF Filter ID uniquely identifying the SDF Filter among all the SDF Filters provisioned for a given PFCP/N4 Session;
+-	the CP function may then provision a PDR for the same PFCP/N4 session but the opposite direction, by provisioning the SDF Filter ID in the SDF filter ID field of the PDI, without provisioning again the SDF filter definition;
+-	the UP function shall apply any modification of a bidirectional SDF Filter to all PDRs of the PFCP/N4 session making use of this SDF Filter;
+-	upon deletion of a PDR making use of a bidirectional SDF Filter, the UP function shall still apply the SDF Filter for any other PDR making use of the SDF Filter.
+The requirements specified for provisioning SDF filters in clause 5.2.1A.2A shall also apply when provisioning bidirectional SDF Filters.
+5.2.1A.4	Application detection with PFD
+The detection information for a given application may be provisioned by the CP function to the UP function via PFD management procedure. See clause 6.2.5.
+The PFDE (PFD Enhancement) feature may be optionally supported by the CP function and UP function. When the feature is supported in both the CP function and UP function, the CP function may provision a PFD Contents IE including a property (i.e. either flow description, or URL or Domain Name/Domain Name Protocol) with multiple values.
+NOTE 1:	It is assumed, when the PFDE feature is not supported, a PFD Contents can only include a property with one value.
+When the UP function attempts to detect the traffic pertaining to an application by using the application's PFDs (see clause 7.4.3.1 and 8.2.39), the UP function shall consider:
+-	the application is detected if the incoming traffic matches at least one PFD Contents;
+-	one PFD Contents is matched if the incoming traffic matches every property contained in the corresponding PFD Contents IE;
+-	the incoming traffic matches one property (i.e. flow description, URL and Domain Name/Domain Name Protocol) if it matches at least one value of the property.
+NOTE 2:	Interpretation of the Custom PFD Content is implementation specific.
+
+5.2.2.2.1	General
+When provisioning a URR, the CP function shall provide the reporting trigger(s) in the Reporting Triggers IE of the URR which shall cause the UP function to generate and send a Usage Report for this URR to the CP function. When adding or removing reporting trigger(s) to or from the URR, the CP function shall provide the new complete list of applicable reporting triggers in the Reporting Triggers IE in the PFCP Session Modification Request message.
+For the volume-based measurement method, the CP function may provision:
+-	the Volume Threshold IE, to request the UP function to generate a usage report when the measured traffic reaches the threshold;
+-	the Volume Quota IE, to request the UP function to stop forwarding packets (or only allow forwarding of some limited user plane traffic, based on operator policy in the UP function) and, if no Volume Threshold is provisioned, to also generate a usage report, when the measured traffic reaches the quota;
+-	the Dropped DL Traffic Threshold IE, to request the UP function to generate a usage report when the downlink traffic that is being dropped reaches the threshold; and/or
+NOTE 1:	For EPC, the Dropped DL Traffic Threshold can be armed in a SGW-U for triggering the PGW Pause of Charging feature (see 3GPP TS 23.401 [14]). For 5GC, the Dropped DL Traffic Threshold can be armed in a UPF for triggering the SMF Pause of Charging feature (see 3GPP TS 23.502 [29]).
+-	a Measurement Information with the 'Measurement Before QoS Enforcement' flag set to "1", to request the UP function to measure the traffic usage before any enforcement, e.g. bitrate enforcement for QoS, Gate control enforcement (as specified in clause 5.4.3) or packets dropped as requested by the FAR.
+-	a Measurement Information with the 'Measurement of Number of Packets' flag set to "1", to request the UP function to measure the number of packets be transferred in UL/DL/Total in addition to the measurement in octets, if the UP function supports the MNOP feature.
+For the time-based measurement method, the CP function may provision:
+-	a Time Threshold IE, to request the UP function to generate a usage report when the measured traffic reaches the threshold;
+-	a Time Quota, to request the UP function to stop forwarding packets (or only allow forwarding of some limited user plane traffic, based on operator policy in the UP function) and, if no Time Threshold is provisioned, to also generate a usage report, when the measured traffic reaches the quota;
+-	a Measurement Information with the "Immediate Start Time Metering" flag set to "1", to request the UP function to start time metering immediately at receiving the flag; otherwise, the UP function shall start time metering when the first packet is received; and/or
+-	an Inactivity Detection Time, to request the UP function to suspend the time measurement when no packets are received during the provisioned Inactivity Detection Time. The time measurement shall then be resumed by the UP function when subsequent traffic is received. If an Inactivity Detection Time value of zero is provided, or if no Inactivity Detection Time has been provided by the CP function, the time measurement shall be performed continuously until a new non-zero Inactivity Detection Time is received or the time-based usage measurement is stopped. See Figure 5.2.2.2-1:
+
+Figure 5.2.2.2-1: IDT based charging
+NOTE 2:	The Inactivity Detection Time can be set to the Quota Consumption Timer if received. The Inactivity Detection Time is not used to control when the time metering starts.
+-	For EPC, a Time Quota Mechanism, including a Base Time Interval Type, which is either Continuous Time Period (CTP) or Discrete Time Period (DTP), and a Base Time Interval (BTI), to the UP function. See clause 6.5.7 in 3GPP TS 32.299 [18].
+-	For CTP (Continuous Time Period), the time measurement starts from the time that traffic has occurred up to the first Base Time Interval (BTI) which contains no traffic. The time measurement shall include the last Base Time Interval, i.e. the one which contained no traffic. The time measurement resumes by the UP function when subsequent traffic is received. See Figure 5.2.2.2-2:
+
+Figure 5.2.2.2-2: CTP based charging
+-	For DTP (Descrete Time Period), the time measurement starts from the time that traffic has occurred up to the Base Time Interval end. The time measurement shall be resumed by the UP function when subsequent traffic is received. See Figure 5.2.2.2-3:
+
+Figure 5.2.2.2-3: DTP based charging
+When the time-based measurement method applies, and when the Envelope Reporting is required for EPC, the CP function shall request the UP function to report the usage by setting the reporting trigger to Envelope Closure in addition to other Reporting Trigger(s), in the Reporting Triggers IE. The CP function may indicate the UP function to report for just time, time and volume, time and events, or time and volume and number of events by setting Measurement Method accordingly. The CP function may set the Reduced Application Detection Information flag in the Measurement Information of the URR, when requesting the detection of start and stop of an application solely for the purpose of envelope reporting for EPC.
+The CP function may provision a Volume Threshold IE, a Volume Quota IE, or both (and/or respectively a Time/Event Threshold IE, a Time/Event Quota IE, or both). In such a case, the CP function may set the reporting trigger for threshold (VOLTH/TIMTH/EVETH) and/or the reporting trigger for quota (VOLQU/TIMQU/EVEQU)) in the Reporting Triggers IE.
+When both a Volume (or Time or Event) Threshold IE and a Volume (or Time or Event) Quota IE are provisioned and only the reporting trigger for threshold (VOLTH/TIMTH/EVETH) is set, the UP function shall send a usage report only when reaching the Volume (or Time or Event) Threshold. When subsequently reaching the Volume (or Time or Event) Quota, the UP function shall stop forwarding packets (or only allow forwarding of some limited user plane traffic, based on operator policy in the UP function) without sending a new usage report to the CP function.
+If both a Volume (or Time or Event) Threshold IE and a Volume (or Time or Event) Quota IE are provisioned and both of the respective Threshold and Quota reporting triggers are set, the UP function shall send a usage report when reaching the Volume (or Time or Event) Threshold and also later on when subsequently reaching the Volume (or Time or Event) Quota.
+NOTE 3:	A UP Function complying with Release 14 or Release 15 of the specification only sends one usage report when the threshold is reached, even if both reporting triggers (for the threshold and the quota) are set.
+NOTE 4:	After sending a usage report on reaching a threshold, the UP function typically gets a new quota before the earlier provisioned quota exhausts. This implies that the UP function typically sends a quota report when reaching the final quota.
+NOTE 5:	For online charging, the Volume Threshold (or Time Threshold) can be set in a PGW-U or TDF-U to the value of the granted volume (or time) quota minus the volume (or time) quota threshold, such as to get a usage report from the UP function when the volume (or time) based credit falls below the remaining quota thresholds provided by the OCS.
+NOTE 6:	The Volume Quota or Time Quota can be armed in a PGW-U or TDF-U for online charging to enable the traffic to be forwarded up to an intermediate or final quotas granted by the OCS. The CP function can provision both a Volume (or Time) Threshold and a Volume (or Time) Threshold to request the UP function to:
+-	send a usage report when the consumed resources reach the volume (or time) usage threshold provided by the OCS, and 
+-	to stop forwarding packets (or only allow forwarding of some limited user plane traffic, based on operator policy in the UP function), without sending a second usage report, when the granted volume (or time) quota is exhausted.
+For event based measurement method, the CP function may provision:
+-	the Event Threshold IE, to request the UP function to generate a usage report when the number of events reaches the event threshold;
+-	the Event Quota IE, to request the UP function to stop forwarding packets applicable to the event (or only allow forwarding of some limited user plane traffic, based on operator policy in the UP function) and, if no Event threshold is provisioned, to also generate a usage report, when the number of events reaches the event quota;
+NOTE 7:	An event is preconfigured with one or more event detection logic in the UPF. Each event detection logic is associated with an Application ID. The CP function activates the detection and reporting of an event by provisioning PDR(s) with the PDI set to an Application ID and by provisioning a URR with an event threshold or event quota reporting trigger. The CP function identifies an event reported in a Usage Report by the URR ID.
+For all the measurement methods (i.e. volume, time or event), the CP function may also provision:
+-	a Quota Holding Time, to request the UP function to send a usage report and to also stop forwarding packets (or only allow forwarding of some limited user plane traffic, based on operator policy in the UP function) when no packets have been received for the duration indicated in this parameter;
+NOTE 8:	A Quota Holding Time can be armed in a PGW-U or TDF-U for online charging to request the UP function to send a Usage Report when the Quota Holding Time provided by the OCS (see 3GPP TS 32.299 [18]) expires. The UP function can be instructed in the same Usage Reporting Rule with the Report Triggers – START to generate a new Usage Report upon receiving any subsequent packets associated with this URR.
+-	a Quota Validity Time, if the VTIME feature is supported by UP function, to request the UP function to send a usage report after the validity duration is over. After Quota validity timer expiry, if packets are received on UPF, the UPF shall stop forwarding packets or only allow forwarding of limited user plane traffic, based on operator's policy in the UP function;
+NOTE 9:	After sending the usage report triggered by the QUHTI or QUVTI (i.e. the Quota Holding Time or Quota Validity Time expires), any remaining quota for the URR is discarded in the UP function.
+-	a Monitoring Time IE and zero or more Additional Monitoring IEs, to request the UP function to measure the network resources usage before and after the monitoring time in separate counts and to re-apply the volume and/or time, and/or event thresholds at the monitoring time. The CP function may additionally provision a Subsequent Volume (or Time or Event) Threshold IE and/or a Subsequent Volume (or Time or Event) Quota IE, for a volume (or time or event) based measurement. When being provisioned with a Monitoring Time, the UP function shall:
+-	reset its usage thresholds at the monitoring time to the value provided in the Subsequent Volume (or Time or Event) Threshold IE, if provisioned in the URR, or to the remaining value of the Volume (or Time or Event) threshold used before the monitoring time (i.e. excluding the already accumulated volume or time usage);
+-	shall indicate the usage up to the Monitoring time and usage after the Monitoring time in the first usage report after the Monitoring Time is reached;
+-	an Measurement Period, indicating the period to generate periodic usage reports to the CP function.
+If the UP function indicated support of the Quota Action feature in the UP Function Features IE, when the CP function provisions a Volume Quota or Time Quota in a URR, the CP function may also provision the "FAR ID for Quota Action" IE identifying the substitute FAR the UP function shall apply, for the traffic identified by the PDR to which the URR is associated, when exhausting any of these quotas. This FAR may require the UP function to drop the packets or buffer the packets or redirect the traffic towards a redirect destination as specified in clause 5.4.7.
+NOTE 10:	A PDR can be associated with multiple URRs. If one of these URRs requires the UP function to drop the user data packets, e.g. when the Quota has been exhausted, the other URRs associated to the PDR need also to stop their measurements, except for URRs including the Measurement Information with the 'Measurement Before QoS Enforcement' flag set to "1".
+The CP function may request at any time the UP function to activate or deactivate a network resources usage measurement, using the Inactive Measurement flag of the Measurement Information IE of the URR.
+NOTE 11:	This can be used in a PGW-U for the PGW Pause of Charging procedure (see 3GPP TS 23.401 [14]).
+The CP function may request the UP function to measure network resources usage and generate the corresponding Usage Reports only for a number of times, by provisioning the "Number of Reports" IE in a URR, if the UP function supports the NORP feature (see clause 8.2.25-1). If so, the URR shall become inactive in the UP function after the requested "Number of Reports" have been reported.
+The CP function may resume the measurement for an inactive URR by setting the Inactive Measurement flag of the Measurement Information IE of the URR to "0" in the Update URR IE in a PFCP Session Modification Request message, with or without the Number of Report IE. If the CP function wishes the UP function to perform continuous measurement for a URR which was provisioned with a Number of Reports (i.e. to no longer limit the number of reports to be generated), the CP function shall provide the Number of Reports IE in the Update URR with a null length to delete the limit on the number of reports to be generated.
+NOTE 12:	The Number of Reports can be provisioned in a URR regardless which Measurement Method is used.
+
+5.2.2.3.1	General
+When detecting that a provisioned reporting trigger occurs, the UP function shall generate a Usage Report for the related URR and send it to the CP function by initiating the PFCP Session Report procedure.
+When providing usage report information for a URR in a message, the UP function shall include the UR-SEQN (Usage Report Sequence Number) identifying the order in which a Usage Report is generated for the given URR. The UR-SEQN (Usage Report Sequence Number) shall be set to "0" for the first Usage Report and incremented for every subsequent Usage Report generated by the UP function for the URR. The UP function shall also indicate the trigger that causes the usage report to be generated in the Usage Report Trigger IE.
+Upon generating a usage report for a URR towards the CP function, the UP function shall:
+-	reset its ongoing measurement counts for the related URR (i.e. the UP function shall report in a usage report the network resources usage measurement since the last usage report for that URR);
+-	re-apply all the thresholds (Volume/Time/Event Threshold) provisioned for the related URR, if the usage report was triggered due to one of the thresholds being reached, i.e. upon the reporting triggers VOLTH/TIMTH/EVETH; and
+-	adjust the threshold and/or quota for volume/time/event (if provisioned in the URR) respectively by subtracting the (volume/time/event) reported usage in the usage report to determine when to generate the next report, if the usage report trigger is set with PERIO/LIUSA/ENVCL/STOPT; and
+-	continue to apply the remaining provisioned parameters in the URR and perform the related network resources usage measurement(s), until getting any further instruction from the CP function.
+When receiving a new threshold or quota from the CP function for a measurement that is already ongoing in the UP function, the UP function shall consider its ongoing measurements counts for the related URR against the new threshold or quota to determine when to send its next usage report to the CP function.
+At receiving a quota with value set to zero, the UP function shall:
+-	apply the FAR identified in the FAR ID for Quota Action IE if the CP function has provisioned it, otherwise the UP function shall stop forwarding packets (or only allow forwarding of some limited user plane traffic, based on operator policy in the UP function); and
+-	report in a usage report the network resources usage measurement since the last usage report for that URR, if applicable.
+When the UP function receives a non-zero quota for the same URR in one subsequent PFCP Session Modification Request message, the UP function shall apply the (normal) FAR associated with the PDR (detecting the application traffic) for the buffered traffic if the FAR ID for Quota Action was set to buffer the application traffic at zero quota (either be provisioned with zero quota earlier or the quota has been exhausted).
+NOTE 1:	The UP function determines when to send its next usage report to the CP function by deducting from the newly provisioned threshold or quota the traffic it has forwarded since its last usage report. As an example, if the UP function has forwarded 10 Mbytes of traffic since it last usage report to the CP function and the CP function provisions a new volume threshold or quota of 100 Mbytes, the UP function sends its next usage report upon forwarding an additional 90 Mbytes traffic.
+NOTE 2:	When receiving a new threshold or quota from the CP function for a measurement that is already ongoing in the UP function and if the UP function has already generated the usage report but had not sent it, the UP function can send the usage report before performing the update of the URR.
+NOTE 3:	A URR with the quota set to 0 can be provisioned when a service data flow is not allowed to start before quota is allocated to the service. See clause 5.4.11.
+When reporting the network resources usage before and after a Monitoring Time, the UP function shall send two Usage Reports in the PFCP message (e.g. PFCP Session Report Request) for the same URR ID. Each Usage Report shall then include the Usage Information IE indicating whether the reported network resource usage was consumed before or after the Monitoring Time. Omission of this IE in a Usage Report indicates that no monitoring time has occurred. The UP function shall send Usage Reports soon after the occurrence of the Monitoring Time.
+NOTE 4:	The UP function needs to take care to smooth the signalling load towards the CP function if Usage Reports need to be generated for a large number of PFCP sessions after the occurrence of the Monitoring Time.
+For the volume-based measurement method, the UP function shall report the traffic usage after any QoS enforcement. Additionally, if the CP function requested to measure the traffic usage before QoS enforcement, the UP function shall also report corresponding measurements, when measurements needs to be reported for the traffic usage after QoS enforcement, by sending two Usage Reports in the PFCP message (e.g. PFCP Session Report Request) for the same URR ID. Each Usage Report shall then include the Usage Information IE indicating whether the reported network resource usage corresponds to the traffic before or after QoS enforcement. Thresholds provisioned in a URR shall apply to the traffic usage after any QoS enforcement.
+For the volume-based measurement method, the UP function shall include all the counters (Total, Uplink and Downlink) of the URR in the Volume Measurement IE in the Usage Report IE; the UP function shall also include the number of packets counted for Total, Uplink, Downlink in the Volume Measurement IE if requested by the CP function and if the UP function supports the MNOP feature.
+A usage report triggered only due to the Dropped DL Traffic Threshold (DROTH) or Start of Traffic (START), or MAC Address Reporting (MACAR), or IP Multicast Join/Leave (IPMJL) shall not contain any measurement information, i.e. either the Volume/Duration Measurement set to zero or Volume/Duration Measurement IE is not present.
+When being instructed to remove a URR or the last PDR associated to a URR, the UP function shall stop its ongoing measurements for the URR and include a Usage Report in the PFCP Session Modification Response or in an additional PFCP Session Report Request if there are non-null measurements to report for the URR. When being instructed to remove the last PDR associated to a URR, the UP function shall keep the URR and reset any measurement for the URR.
+NOTE 5:	A URR provisioned in a PFCP session can be provisioned/kept in the UP function without being associated with any PDR and the URR can be associated with a PDR in a later stage. The UP function will not remember any remaining quota and will consider the quota (if provisioned) as it was provisioned.
+When being instructed to deactivate a network resources usage measurement via the Inactive Measurement flag of the Measurement Information IE of the URR, the UP function shall stop measuring the network resources usage (against the volume/time/event threshold/quota) and store the current measurement counts which will be resumed when the URR is activated again. The UP function shall not generate a usage report upon the deactivation of the URR and it shall send a usage report during the period when the URR is deactivated for the following scenarios:
+-	if the Quota Holding Time is expired and if the reporting trigger QUHTI is set;
+NOTE 6:	The Quota Holding Time can have been started before the URR is deactivated or starts from the moment when the URR is deactivated since no quota will be consumed.
+-	if it is the time for a periodic reporting and if the reporting trigger PERIO is set;
+-	if it is required to send a usage report for this URR when a usage report is reported for a linked URR and if the reporting trigger LIUSA is set;
+-	if it is required to send an immeditate report upon a query for the URR, or the URR is removed, dissociated from the last PDR.
+NOTE 7:	Multiple usage reports can be required to be reported to the CP function when deleting a PDR that is the last one to be associated to multiple URRs.
+The CP function may request the UP function, in a PFCP Session Modification Request, to report its ongoing network resources measurement for one or multiple URRs of the PFCP session. In this case, the UP function shall:
+-	generate usage report(s) (based on the existing definition of any URR(s) included in the PFCP Session Modification Request message before any update) for the URR(s) being queried and for any associated linked usage reports (see clause 5.2.2.4) for which there are non-null measurements to report;
+-	include them in the PFCP Session Modification Response or in additional PFCP Session Report Request messages; and
+-	proceed as specified above upon generating a usage report for a URR towards the CP function, with the following additions:
+-	if the PFCP Session Modification Request includes the Update URR IE (for the URR being queried) with a Volume or Time Threshold, the UP function shall re-apply the threshold received in the request;
+-	otherwise, if a threshold and/or a quota had been set for the URR that is queried, since the usage report is not triggered due to the threshold being reached, the UP function shall adjust the threshold and/or quota by subtracting the time/volume reported in the usage report to determine when to generate the next report.
+NOTE 8:	Upon reaching a threshold that was adjusted due to a URR query as specified above, the UP function re-applies then the threshold that was provisioned in the URR (i.e. not the value of the adjusted threshold).
+NOTE 9:	The CP function can query a URR without including a Volume or Time Threshold in the PFCP Session Modification Request e.g. when it needs to close a traffic volume/service container (see clause 5.2.3.10.3 of 3GPP TS 32.251 [17]).
+NOTE 10:	The CP function can query a URR including a Volume or Time Threshold in the PFCP Session Modification Request e.g. when it needs to close a CDR (see clause 5.2.3.10.3 of 3GPP TS 32.251 [17]). In such a case, the CP function can include the same threshold for the URR being queried in the Update URR IE in the PFCP Session Modification Request message to trigger the UP function to re-apply the threshold.
+NOTE 11:	It is up to the CP function to request the UP function to generate an immediate report (or not) as specified above when the CP function modifies a URR or any other rules of the PFCP session. As an exception, the UP function always generates an immediate report when being instructed to remove a URR.
+When additional usage reports need to be sent in additional PFCP Session Report Request messages, i.e. when not all usage reports can be included in the PFCP Session Modification/Deletion Response message, the UP function shall indicate, in the PFCP Session Modification/Deletion Response message, either:
+-	that more usage reports will follow, by setting the AURI flag to 1 in the Additional Usage Reports Information IE (see clause 8.2.91); or
+-	the total number of additional usage reports that will be sent in all the additional PFCP Session Report Request messages (i.e. that will be sent after the PFCP Session Modification/Deletion Response message), by setting this value in the Additional Usage Reports Information IE (see clause 8.2.91).
+In the former case (i.e. if the UP function indicates in the PFCP Session Modification/Deletion Response message that more usage reports will follow), the UP function shall indicate, in one of the additional PFCP Session Report Request message, the total number of additional usage reports to be sent after the PFCP Session Modification/Deletion Response message, by setting this value in the Additional Usage Reports Information IE. In both cases, the UP function may set the AURI flag to 1 in every additional PFCP Session Report Request message but the last one, to indicate that more usage reports will follow.
+Besides, if the PFCP Session Modification Request included the Query URR Reference IE, usage reports sent in response to the query in the PFCP Session Modification Response and/or additional PFCP Session Report Request messages shall include the Query URR Reference IE set to the same value as received in the PFCP Session Modification Request.
+When the reporting trigger "Envelope Closure" is set in the corresponding Usage Reporting Rule, the UP function shall generate a usage report with the measurement of the time and/or volume as instructed in the Measurement Method:
+-	when the Inactivity Detection Time (if included) is expired;
+-	when detecting no usage for the first Base Time Interval if the Base Time Interval Type in the Time Quota Mechanism is set to CTP; or
+-	at the end of each of base time interval if the Base Time Interval Type in the Time Quota Mechanism is set to DTP.
+NOTE 12:	Events (e.g. application detection information) are reported individually and independently from the usage report sent for envelope closure.
+When the UP function supports the NORP feature and if a URR is provisioned with a "Number of Reports" IE, the number of Usage Reports generated according to the Reporting Trigger(s) defined in the URR shall not be more than the value of "Number of Reports". If the UP function is requested to resume the measurement for an inactive URR, the UP function shall generate a maximum number of Usage Reports equal to the new value of the Number of Reports IE received in the Update URR if any, or equal to the value of the Number of Reports IE previously provisioned in the URR if any; if no Number of Reports IE was provisioned before, there is no limit on the number of reports to send.
+At the PFCP session termination, the UP function shall indicate to the CP function, in the PFCP Session Deletion Response, the resources that have been consumed for each URR that was provisioned in the PFCP session since the last usage report (respective to each URR). A CP function may indicate support of Additional Usage Reports in PFCP Session Deletion Request by setting the ARDR flag in the CP Function Features IE (see clause 8.2.58). When additional PFCP Session Report Request messages need to be sent:
+-	the UP function shall:
+-	set the cause to "More Usage Report to send" in the PFCP Session Deletion Response;
+-	include the Additional Usage Reports Information IE in PFCP Session Deletion Response with either the AURI flag set to "1" or indicating the total number of additional usage reports that will be sent in all the additional PFCP Session Report Request messages; as described above:
+-	in the former case, the UP function shall indicate in one additional PFCP Session Report Request message the total number of additional usage reports that will be sent after the PFCP Session Deletion Response;
+-	in both cases, the UP function may set the AURI flag to 1 in every additional PFCP Session Report Request message but the last one, to indicate that more usage reports will follow.
+-	set the PSDBU flag to 1 in the last PFCP Session Report Request message.
+-	when the CP function receives a PFCP Session Deletion Response with the Cause set to "More Usage Report to send", the CP function shall not delete the PFCP session until it receives a PFCP Session Report Request message with the PSDBU flag set to "1" (that indicates this is the last report), or until an implementation specific timer expires otherwise.
+Upon receiving the Usage Report from the UP function, the CP function may initiate PFCP Session Modification procedure as result of the communication with the PCRF or OCS, as described in clause 5.3 of 3GPP TS 23.214 [2], e.g. by:
+-	modifying the URR (e.g. changing the Volume/Time threshold, Volume/Time quota, disabling the usage monitoring);
+-	creating a new FAR (e.g. for redirect) and/or modifying the existing FAR; or
+-	modifying the QER (s) in the PFCP session.
+
+5.4.15	Packet Rate enforcement
+5.4.15.1	General
+Packet rate enforcement refers to the process of limiting the rate of uplink and/or downlink packets allowed to be sent for a PDN connection or a PDU session.
+Packet rate enforcement shall be used to support:
+-	APN rate control for UE's all PDN connections for a given APN in EPC, see 3GPP TS 23.401 [14] and 3GPP TS 23.502 [29]. APN rate control is enforced across N4 interface only for 5GC interworking with EPC scenario (see clause 4.3 in 3GPP TS 23.501 [28]);
+-	Small data rate control for a PDU session in 5GC, see 3GPP TS 23.501 [28] and 3GPP TS 23.502 [29];
+-	Serving PLMN rate control, for downlink traffic, see 3GPP TS 23.401 [14] and 3GPP TS 23.501 [28].
+5.4.15.2	Packet rate enforcement over Sxb and N4 interfaces
+The CP function may instruct the UP function to perform packet rate enforcement, during the establishment or the modification of a PFCP session, over the Sxb and N4 reference points.
+The CP function shall control packet rate enforcement in the UP function by:
+1)	creating the necessary PDR(s) to represent the uplink or downlink traffic to be enforced, if not already existing;
+2)	creating QER(s) containing the Packet Rate IE with one or more of the following enforcement rules and information:
+-	Maximum Uplink/Downlink Packet Rates (i.e. Number of Uplink/Downlink Packets Allowed and Time units that determine the time periods for limiting the packet rates);
+-	Additional Maximum Uplink/Downlink Packet Rates (i.e. Number of Additional Uplink/Downlink Packets Allowed and Time units that determine the time periods for limiting the packet rates), if additional packets are allowed to be sent beyond the maximum Uplink/Downlink Packet Rates;
+The QER may also contain the Packet Rate Status IE to indicate remaining numbers of allowed packets until a given time.
+The QER may also contain the QER Control Indications IE with the Rate Control Status Reporting (RCSR) flag, indicating the UP function shall report to the CP function the status of the packet rate usage when the PFCP session is released.
+3)	associating the QER(s) to the UL and/or DL PDRs of the traffic for which packet rate enforcement is required.
+When so instructed, the UP function shall proceed as follows:
+1)	the UP function shall count UL/DL packets within the time period (e.g. per minute, per day, etc.) and if the 'maximum allowed rate' is reached, the UP function shall discard or delay further packets.
+2)	If 'Additional Maximum Uplink/Downlink Packet Rates' are provided, the UPF shall consider 'maximum allowed rate' is equal to the 'number of packets per time unit' plus the 'number of additional allowed exception report packets per time unit'. Otherwise, the UPF shall consider 'maximum allowed rate' is equal to the 'number of packets per time unit'.
+3)	If the CP function has requested to report the rate control status, the UP function shall send to the CP function the Packet Rate Status IE, when the PFCP session is released. Otherwise, the UP function shall not send the Packet Rate Status IE to the CP function during the release of the PFCP session.
+4)	If the CP function provided Packet Rate Status information, then the UP function shall first enforce the rules in the Packet Rate Status IE until either the packet rate limits are reached, or the validity time expires. Only after this shall the UP function enforce the rules in the Packet Rate IE.
+5.4.15.3	PGW and SMF behaviour
+A PGW, SMF or SMF/PGW shall apply APN rate control, Small Data Rate Control and Serving PLMN rate control by instructing the UP function to perform packet rate enforcement as described in clause 5.4.15.2 with the following additions:
+-	Serving PLMN rate control:
+-	the Maximum Downlink Packet Rate shall be set to the DL rate permitted by the Serving PLMN rate control parameters;
+-	the CP function shall indicate to the UP function to not report the status of the packet rate usage.
+NOTE 1:	Serving PLMN rate control applies only to control plane PDU sessions and PDN connections. Uplink rate for Serving PLMN rate control is enforced by the MME or SMF, so it does not require support from the UP function.
+-	Small Data Rate Control:
+-	the CP function shall indicate to the UP function to report the status of the packet rate usage;
+-	the QER shall be associated to all the DL/UL PDRs of the PDU session;
+-	APN rate control:
+-	the CP function shall indicate to the UP function to report the status of the packet rate usage;
+-	the QER shall be associated to all the PDRs of all the PDN connections of the UE to the same APN, using the QER Correlation ID (see clause 5.2.1).
+If both Serving PLMN rate control and Small Data Rate Control are applied in 5GS, or both Serving PLMN rate control and APN rate control are applied in EPS, the SMF/PGW-C may control packet rate enforcement in the UP function by provisioning:
+-	a QER for Small Data Rate Control/APN rate control, and by associating DL/UL PDRs to the QER; or
+-	alternatively, different QERs for Serving PLMN rate control and for Small Data Rate Control/APN rate control, and by associating DL PDRs to both of the QER(s).
+APN rate control and Small Data Rate Control are distinct functionalities that apply in EPS and 5GS respectively. For PDU sessions supporting interworking with EPC, the SMF/PGW-C shall start APN rate control (if required for the UE's PDN connections to the APN) and stop Small Data Rate Control (if this was performed for the PDU session) upon 5GS to EPS mobility, and vice-versa upon EPS to 5GS mobility, e.g. by:
+-	updating the information of the QER associated to the UL/DL PDRs with the packet rates and packet rate status (if available) applicable for APN rate control or Small Data Rate Control respectively, if the same QER is associated to UL/DL PDRs when the UE is in EPC and in 5GC; in this case, the SMF/PGW-C shall also request the UPF/PGW-U to report immediately the packet rate status at the time of the mobility between 5GS and EPS by including the Query Packet Rate Status IE in the PFCP Session Modification Request; or
+NOTE 2:	Requesting the UPF/PGW-U to report immediately the packet rate status enables to retrieve the current rate status applicable to the source system before the UPF/PGW-U overwrites the QER parameters with the packet rates and packet rate status (if available) applicable to the target system.
+-	provisioning different QERs for APN rate control and for Small Data Rate Control, and by associating UL/DL PDRs to the appropriate QER, when the UE is in EPC or in 5GC. In this case, when releasing the PFCP session, the UP function shall include the packet rate status for every QER for which this information has been requested in the corresponding QER Control Indications IE.
+Besides, if the SMF/PGW-C set up additional PDRs in the UP function for S5/S8 tunnels for a PDU session supporting interworking with EPS, these PDRs shall not be associated to the QER used to perform Small Data Rate Control.
+
+5.10	Error Indication Handling
+Upon receipt of a GTP-U Error Indication message, the UP function:
+-	shall identify the related PFCP session for which the message is received; and
+-	shall initiate a PFCP Session Report procedure, towards the CP function controlling this PFCP session, to send an Error Indication Report including the remote F-TEID signalled in the GTP-U Peer Address IE and the Tunnel Endpoint Identifier Data I IE of the GTP-U Error Indication (see clause 7.3.1 of 3GPP TS 29.281 [3]).
+For EPC, upon receipt of an Error Indication Report, the CP function shall then identify the bearer for which the Error Indication Report is received using the remote F-TEID included in the report and proceed as specified in clauses 21.7 and 21.8 of 3GPP TS 23.007 [24], i.e.:
+-	modify the PFCP session to instruct the UP function to buffer DL packets;
+-	modify the PFCP session to delete the PDR and FAR, when having to delete a bearer; or
+-	delete the PFCP session, when having to delete the PDN connection.
+For 5GC, upon receipt of an Error Indication Report, the SMF shall proceed as specified in clause 5.3 of 3GPP TS 23.527 [40].
+
+7.5.2.2	Create PDR IE within PFCP Session Establishment Request
+The Create PDR grouped IE shall be encoded as shown in Figure 7.5.2.2-1.
+Table 7.5.2.2-1: Create PDR IE within PFCP Session Establishment Request
+Octet 1 and 2		Create PDR IE Type = 1(decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+PDR ID	M	This IE shall uniquely identify the PDR among all the PDRs configured for that PFCP session.	X	X	X	X	PDR ID
+Precedence	M	This IE shall indicate the PDR's precedence to be applied by the UP function among all PDRs of the PFCP session, when looking for a PDR matching an incoming packet.	-	X	X	X	Precedence
+PDI	M	This IE shall contain the PDI against which incoming packets will be matched.
+See Table 7.5.2.2-2.	X	X	X	X	PDI
+Outer Header Removal 	C	This IE shall be present if the UP function is required to remove one or more outer header(s) from the packets matching this PDR.	X	X	-	X	Outer Header Removal
+FAR ID 	C	This IE shall be present if the Activate Predefined Rules IE is not included or if it is included but it does not result in activating a predefined FAR, and if the MAR ID is not included. This IE may be present if the CP function activated a predefined rule name with a predefined FAR but the CP function wishes to overwrite the predefined FAR by another FAR. (NOTE 2)
+When present this IE shall contain the FAR ID to be associated to the PDR.	X	X	X	X	FAR ID
+URR ID	C	This IE shall be present if a measurement action shall be applied to packets matching this PDR.
+When present, this IE shall contain the URR IDs to be associated to the PDR.
+Several IEs within the same IE type may be present to represent a list of URRs to be associated to the PDR.	X	X	X	X	URR ID
+QER ID 	C	This IE shall be present if a QoS enforcement or QoS marking action shall be applied to packets matching this PDR.
+When present, this IE shall contain the QER IDs to be associated to the PDR. Several IEs within the same IE type may be present to represent a list of QERs to be associated to the PDR.	-	X	X	X	QER ID
+Activate Predefined Rules 	C	This IE shall be present if Predefined Rule(s) shall be activated for this PDR. When present this IE shall contain one Predefined Rules name.
+Several IEs with the same IE type may be present to represent multiple "Activate Predefined Rules" names.	-	X	X	X	Activate Predefined Rules 
+Activation Time	O	This IE may be present if the PDR activation shall be deferred. (NOTE 1)	-	X	X	X	Activation Time
+Deactivation Time	O	This IE may be present if the PDR deactivation shall be deferred. (NOTE 1)	-	X	X	X	Deactivation Time
+MAR ID	C	This IE shall be present if the PDR is provisioned to match the downlink traffic of non-GBR QoS flows towards the UE for a PFCP session established for a MA PDU session.	-	-	-	X	MAR ID
+Packet Replication and Detection Carry-On Information	C	This IE shall be present if the PDR is provisioned to match a broadcast packet. When present, it contains the information to instruct the UPF to replicate the packet and to carry-on the look-up of other PDRs of other PFCP sessions matching the packet (see clause 5.2.1).	-	-	-	X	Packet Replication and Detection Carry-On Information
+IP Multicast Addressing Info	O	This IE may be present in an UL PDR controlling UL IGMP/MLD traffic (see 5.25).
+When present, it shall contain a (range of) IP multicast address(es), and optionally source specific address(es), identifying a set of IP multicast flows. See Table 7.5.2.2-4.
+Several IEs with the same IE type may be present to represent multiple IP multicast flows. 	-	-	-	X	IP Multicast Addressing Info
+UE IP address Pool Identity	O	This IE may be present if UE IP Addresses Pools are configured in the UPF.
+
+When present, this IE shall contain the identity of a UE IP address Pool configured in the UPF.
+Two IEs with the same IE type shall be present to represent UE IPv4 Address Pool Identity and UE IPv6 Address Pool Identity if different pool identities are used for UE IPv4 address and UE IPv6 address and both an UE IPv4 and an UE IPv6 address are requested to be assigned for the PFCP session. In this case, the UE IPv4 Address Pool Identity shall be encoded before the UE IPv6 Address Pool Identity.	-	X	-	X	UE IP address Pool Identity
+MPTCP Applicable Indication	C	This IE shall be present if the PDR is used to detect UL user plane traffic for which MPTCP is applicable.	-	-	-	X	MPTCP Applicable Indication
+Transport Delay Reporting	C	This IE shall be present to request the UPF to add the delay of the GTP-U path with the preceding uplink GTP-U entity to the "N3/N9 Delay Result received in the GTP-U PDU Session Container extension header (see 3GPP TS 38.415 [34]) of the uplink packet, when monitoring the QoS of a PDU session based on GTP-U path monitoring (see clause 5.24.5.3). See Table 7.5.2.2-6.	-	-	-	X	Transport Delay Reporting
+NOTE 1:	When the Activation Time and Deactivation Time are not present, the PDR shall be activated immediately at receiving the message.
+NOTE 2:	If a predefined FAR is or has been activated using a predefined rule name, it is UP function implementation specific whether this predefined FAR can be overwritten by a FAR ID pointing to another predefined FAR (i.e. with the most significant bit set to 1). If not, the UP function shall reject such a request if received from the CP function.
+
+Table 7.5.2.2-2: PDI IE within PFCP Session Establishment Request
+Octet 1 and 2		PDI IE Type = 2 (decimal)	
+Octets 3 and 4		Length = n	
+Information elements	P	Condition / Comment	Appl.	IE Type	
+			Sxa	Sxb	Sxc	N4		
+Source Interface	M	This IE shall identify the source interface of the incoming packet.	X	X	X	X	Source Interface	
+Local F-TEID 	O	This IE shall not be present if Traffic Endpoint ID is present.
+If present, this IE shall identify the local F-TEID to match for an incoming packet.
+The CP function shall set the CHOOSE (CH) bit to 1 if the CP function requests the UP function to assign a local F-TEID to the PDR.	X	X	-	X	F-TEID	
+Network Instance	O	This IE shall not be present if Traffic Endpoint ID is present. It shall be present if the CP function requests the UP function to allocate a UE IP address/prefix and the Traffic Endpoint ID is not present.
+If present, this IE shall identify the Network instance to match for the incoming packet. See NOTE 1, NOTE2.	X	X	X	X	Network Instance	
+Redundant Transmission Detection Parameters	O	If present, this IE shall contain the information used for the reception of redundant uplink packets on N3/N9 interfaces.	-	-	-	X	Redundant Transmission Detection Parameters	
+UE IP address 	O	This IE shall not be present if Traffic Endpoint ID is present.
+If present, this IE shall identify the source or destination IP address to match for the incoming packet. (NOTE 5).
+
+The CP function shall set the CHOOSE IPV4 (CHV4) and/or the CHOOSE IPV6 (CHV6) bits to 1 if the UP function supports the allocation of UE IP address/ prefix and the CP function requests the UP function to assign a UE IP address/prefix to the PDR.
+
+In the 5GC, several IEs with the same IE type may be present to represent multiple UE IP addresses, if the UPF indicated support of the IP6PL feature (see clause 5.21).	-	X	X	X	UE IP address	
+Traffic Endpoint ID	C	This IE may be present if the UP function has indicated the support of PDI optimization.
+If present, this IE shall uniquely identify the Traffic Endpoint for that PFCP session.
+
+Several IEs with the same IE type may be present to provision several Traffic Endpoints with different Traffic Endpoint IDs, from which the UPF may receive packets pertaining to the same service data flow, which is subject for the same FAR, QER and URR, if the UPF has indicated it supports MTE feature as specified in clause 8.2.25. See NOTE 6.	X	X	X	X	Traffic Endpoint ID	
+SDF Filter	O	If present, this IE shall identify the SDF filter to match for the incoming packet. Several IEs with the same IE type may be present to provision a list of SDF Filters. The full set of applicable SDF filters, if any, shall be provided during the creation or the modification of the PDI.
+See NOTE 3.	-	X	X	X	SDF Filter	
+Application ID	O	If present, this IE shall identify the Application ID to match for the incoming packet. 	-	X	X	X	Application ID	
+Ethernet PDU Session Information	O	This IE may be present to identify all the (DL) Ethernet packets matching an Ethernet PDU session (see clause 5.13.1).	-	-	-	X	Ethernet PDU Session Information	
+Ethernet Packet Filter	O	If present, this IE shall identify the Ethernet PDU to match for the incoming packet.
+Several IEs with the same IE type may be present to represent a list of Ethernet Packet Filters.
+The full set of applicable Ethernet Packet filters, if any, shall be provided during the creation or the modification of the PDI.	-	-	-	X	Ethernet Packet Filter	
+QFI	O	This IE shall not be present if Traffic Endpoint ID is present and the QFI(s) are included in the Traffic Endpoint.
+If present, this IE shall identify the QoS Flow Identifier to match for the incoming packet.
+Several IEs with the same IE type may be present to provision a list of QFIs. When present, the full set of applicable QFIs shall be provided during the creation or the modification of the PDI. 	-	-	-	X	QFI	
+	Framed-Route	O	This IE may be present for a PDR if the UPF indicated support of Framed Routing (see clauses 8.2.25 and 5.16). If present, this IE shall describe a framed route.
+Several IEs with the same IE type may be present to provision a list of framed routes. (NOTE 5)	-	X	-	X	Framed-Route
+	Framed-Routing	O	This IE may be present for a DL PDR if the UPF indicated support of Framed Routing (see clauses 8.2.25 and 5.16). If present, this IE shall describe the routing method for the UP function for the IP route related to Framed-Routes or Framed-IPv6-Routes. (NOTE 7)	-	X	-	X	Framed-Routing
+	Framed-IPv6-Route	O	This IE may be present for a PDR if the UPF indicated support of Framed Routing (see clauses 8.2.25 and 5.16). If present, this IE shall describe a framed IPv6 route.
+Several IEs with the same IE type may be present to provision a list of framed IPv6 routes. (NOTE 5)	-	X	-	X	Framed-IPv6-Route
+	Source Interface Type	O	This IE may be present to indicate the 3GPP interface type of the source interface, if required by functionalities in the UP Function, e.g. for performance measurements.	X	X	-	X	3GPP Interface Type
+	IP Multicast Addressing Info	O	This IE may be present in a DL PDR controlling DL IP multicast traffic (see clause 5.25).
+When present, it shall contain a (range of) IP multicast address(es), and optionally source specific address(es), identifying a set of IP multicast flows. See Table 7.5.2.2-4.
+Several IEs with the same IE type may be present to represent multiple IP multicast flows.	-	-	-	X	IP Multicast Addressing Info
+NOTE 1:	The Network Instance parameter is needed e.g. in the following cases:
+	-	PGW/TDF UP function supports multiple PDNs with overlapping IP addresses;
+	-	SGW UP function is connected to PGWs in different IP domains (S5/S8);
+	-	PGW UP function is connected to SGWs in different IP domains (S5/S8);
+	-	SGW UP function is connected to eNodeBs in different IP domains;
+	-	UPF is connected to 5G-ANs in different IP domains;
+	-	Separation of multiple 5G VN groups communication in the UPF;
+	-	Indirect data forwarding.
+NOTE 2:	When a Local F-TEID is provisioned in the PDI, the Network Instance shall relate to the IP address of the F-TEID. Otherwise, the Network Instance shall relate to the UE IP address if provisioned or the destination IP address in the SDF filter if provisioned
+NOTE 3:	SDF Filter IE(s) shall not be present if Ethernet Packet Filter IE(s) is present.
+NOTE 4:	When several SDF filter IEs are provisioned, the UP function shall consider that the packets are matched if matching any SDF filter. The same principle shall apply for Ethernet Packet Filters and QFIs.
+NOTE 5:	If both the UE IP Address and the Framed-Route (or Framed-IPv6-Route) are present, the packets which are considered being matching the PDR shall match at least one of them.
+NOTE 6:	Maximum two Traffic Endpoint ID containing different Local TEIDs per PDI may be provisioned over the N4 interface for a PFCP session which is established for a PDU session subject for 5G to EPS mobility with N26 supported. Several Traffic Endpoint ID containing different UE IP Addresses may be provisioned over the N4 interface for a PFCP session if the UPF also indicated support of the IP6PL feature (see clause 5.21.1).
+NOTE 7:	In this release of specification, the UP function shall announce the IP route(s) for Framed-Route(s) or Framed-IPv6-Route(s) to the PDN regardless of the value of the Framed-Routing.	
+
+Table 7.5.2.2-3: Ethernet Packet Filter IE within PFCP Session Establishment Request
+Octet 1 and 2		Ethernet Packet Filter IE Type = 132 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Ethernet Filter ID	C	This shall be present if Bidirectional Ethernet filter is required. This IE shall uniquely identify an Ethernet Filter among all the Ethernet Filters provisioned for a given PFCP session.	-	-	-	X	Ethernet Filter ID
+Ethernet Filter Properties	C	This IE shall be present when provisioning a bidirectional Ethernet Filter the first time (see clause 5.13.4).	-	-	-	X	Ethernet Filter Properties
+MAC address	O	If present, this IE shall identify the MAC address.
+This IE may be present up to 16 times.	-	-	-	X	MAC address
+Ethertype	O	If present, this IE shall identify the Ethertype.	-	-	-	X	Ethertype
+C-TAG	O	If present, this IE shall identify the Customer-VLAN tag.	-	-	-	X	C-TAG
+S-TAG	O	If present, this IE shall identify the Service-VLAN tag.	-	-	-	X	S-TAG
+SDF Filter	O	If packet filtering is required, for Ethernet frames with Ethertype indicating IPv4 or IPv6 payload, this IE shall describe the IP Packet Filter Set.
+Several IEs with the same IE type may be present to represent a list of SDF filters.	-	-	-	X	SDF Filter
+
+Table 7.5.2.2-4: IP Multicast Addressing Info IE within PFCP Session Establishment Request
+Octet 1 and 2		IP Multicast Addressing Info IE Type = 188 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+IP Multicast Address	M	This IE shall contain the IP multicast address(es) of the DL multicast flow(s) or indicate "any" IP multicast address.	-	-	-	X	IP Multicast Address
+Source IP Address	O	When present, this IE shall contain the source specific IP address of the DL multicast flow.
+Several IEs with the same IE type may be present to represent multiple source specific addresses.
+If this IE is not present, this indicates "any" source IP address.	-	-	-	X	Source IP Address
+
+Table 7.5.2.2-5: Redundant Transmission Detection Parameters IE in PDI
+Octet 1 and 2		Redundant Transmission Detection Parameters IE Type = 255 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Local F-TEID for Redundant Transmission	M	This IE shall identify the local F-TEID to match for an incoming packet for redundant transmission.
+The CP function shall set the CHOOSE (CH) bit to 1 if it requests the UP function to assign a local F-TEID to the PDR.	-	-	-	X	F-TEID
+Network Instance for Redundant Transmission	C	This IE shall be included if the Local F-TEID for Redundant Transmission uses a different network Instance than the Network Instance used for the Local F-TEID for the primary GTP-U tunnel.	-	-	-	X	Network Instance
+
+Table 7.5.2.2-6: Transport Delay Reporting IE in Create PDR IE
+Octet 1 and 2		Transport Delay Reporting IE Type = 271 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Preceding UL GTP-U Peer	M	This IE shall identify the preceding UL GTP-U peer.
+	-	-	-	X	Remote GTP-U Peer
+DSCP	O	If present, this IE shall contain the DSCP to use to measure the GTP-U path delay with the preceding UL GTP-U peer.	-	-	-	X	Transport Level Marking
+
+
+7.5.2.3	Create FAR IE within PFCP Session Establishment Request
+The Create FAR grouped IE shall be encoded as shown in Figure 7.5.2.3-1.
+Table 7.5.2.3-1: Create FAR IE within PFCP Session Establishment Request
+Octet 1 and 2		Create FAR IE Type = 3 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+FAR ID	M	This IE shall uniquely identify the FAR among all the FARs configured for that PFCP session.	X	X	X	X	FAR ID
+Apply Action	M	This IE shall indicate the action to apply to the packets, See clauses 5.2.1 and 5.2.3.	X	X	X	X	Apply Action
+Forwarding Parameters	C	This IE shall be present when the Apply Action requests the packets to be forwarded. It may be present otherwise.
+
+When present, this IE shall contain the forwarding instructions to be applied by the UP function when the Apply Action requests the packets to be forwarded.
+See table 7.5.2.3-2.	X	X	X	X	Forwarding Parameters
+Duplicating Parameters 	C	This IE shall be present when the Apply Action requests the packets to be duplicated. It may be present otherwise.
+
+When present, this IE shall contain the forwarding instructions to be applied by the UP function for the traffic to be duplicated, when the Apply Action requests the packets to be duplicated.
+
+Several IEs with the same IE type may be present to represent to duplicate the packets to different destinations. See NOTE 1.
+
+See table 7.5.2.3-3.	X	X	-	-	Duplicating Parameters
+BAR ID	O	When present, this IE shall contain the BAR ID of the BAR defining the buffering instructions to be applied by the UP function when the Apply Action requests the packets to be buffered. 	X	-	-	X	BAR ID
+Redundant Transmission Forwarding Parameters	C	This IE shall be present when the Apply Action requests the packets to be duplicated for redundant transmission and the Forwarding Parameters IE is included. It may be present otherwise.
+
+When present, this IE shall contain the forwarding instructions to be applied by the UP function for the traffic to be duplicated, when the Apply Action requests the packets to be duplicated for redundant transmission. Except for the parameters included in the Redundant Transmission Parameters IE, the duplicated packets shall apply the same parameters as those indicated in the Forwarding Parameters IE.
+
+See table 7.5.2.3-4.					Redundant Transmission Forwarding Parameters
+NOTE 1:	The same user plane packets may be required, according to operator's policy and configuration, to be duplicated to different SX3LIFs.
+
+Table 7.5.2.3-2: Forwarding Parameters IE in FAR
+Octet 1 and 2		Forwarding Parameters IE Type = 4 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Destination Interface	M	This IE shall identify the destination interface of the outgoing packet.	X	X	X	X	Destination Interface
+Network Instance	O	When present, this IE shall identify the Network instance towards which to send the outgoing packet. See NOTE 1.	X	X	X	X	Network Instance
+Redirect Information	C	This IE shall be present if the UP function is required to enforce traffic redirection towards a redirect destination provided by the CP function. 	-	X	X	X	Redirect Information
+Outer Header Creation 	C	This IE shall be present if the UP function is required to add one or more outer header(s) to the outgoing packet. If present, it shall contain the F-TEID of the remote GTP-U peer when adding a GTP-U/UDP/IP header, or the Destination IP address and/or Port Number when adding a UDP/IP header or an IP header or the C-TAG/S-TAG (for 5GC). See NOTE 2.	X	X	-	X	Outer Header Creation
+Transport Level Marking 	C	This IE shall be present if the UP function is required to mark the IP header with the DSCP marking as defined by IETF RFC 2474 [22]. When present for EPC, it shall contain the value of the DSCP in the TOS/Traffic Class field set based on the QCI, and optionally the ARP priority level, of the associated EPS bearer, as described in clause 5.10 of 3GPP TS 23.214 [2]. When present for 5GC, it shall contain the value of the DSCP in the TOS/Traffic Class field set based on the 5QI, the Priority Level (if explicitly signalled), and optionally the ARP priority level, of the associated QoS flow, as described in clause 5.8.2.7 of 3GPP TS 23.501 [28],	X	X	-	X	Transport Level Marking
+Forwarding Policy 	C	This IE shall be present if a specific forwarding policy is required to be applied to the packets. It shall be present if the Destination Interface IE is set to SGi-LAN / N6-LAN. It may be present if the Destination Interface is set to Core, Access, or CP-Function. See NOTE 2.
+When present, it shall contain an Identifier of the Forwarding Policy locally configured in the UP function.	-	X	X	X	Forwarding Policy
+Header Enrichment	O	This IE may be present if the UP function indicated support of Header Enrichment of UL traffic. When present, it shall contain information for header enrichment.	-	X	X	X	Header Enrichment
+Linked Traffic Endpoint ID	C	This IE may be present, if it is available and the UP function indicated support of the PDI optimisation feature, (see clause 8.2.25). When present, it shall identify the Traffic Endpoint ID allocated for this PFCP session to receive the traffic in the reverse direction (see clause 5.2.3.1).	X	X	-	X	Traffic Endpoint ID
+Proxying	C	This IE shall be present if proxying is to be performed by the UP function.
+
+When present, this IE shall contain the information that the UPF shall respond to Address Resolution Protocol and / or IPv6 Neighbour Solicitation based on the local cache information for the Ethernet PDUs.	-	-	-	X	Proxying
+Destination Interface Type	O	This IE may be present to indicate the 3GPP interface type of the destination interface, if required by functionalities in the UP Function, e.g. for performance measurements.	X	X	-	X	3GPP Interface Type
+Data Network Access Identifier	C	This IE shall be present over N16a to link the UL FAR in an UL CL or BP towards a specific local PSA, if more than one local PSA has been inserted by an I-SMF. It may be present over N16a otherwise. This IE shall not be sent over N4.
+When present, it shall be set to the DNAI associated to the local PSA towards which the UL traffic shall be forwarded. 	-	-	-	-	Data Network Access Identifier
+NOTE 1:	The Network Instance parameter is needed e.g. in the following cases:
+	-	PGW/TDF UP function supports multiple PDNs with overlapping IP addresses;
+	-	SGW UP function is connected to PGWs in different IP domains (S5/S8);
+	-	PGW UP function is connected to SGWs in different IP domains (S5/S8);
+	-	SGW UP function is connected to eNodeBs in different IP domains;
+	-	UPF is connected to 5G-ANs in different IP domains;
+	-	Separation of multiple 5G VN groups communication in the UPF;
+	-	Indirect data forwarding.
+NOTE 2:	If the Outer Header Creation and Forwarding Policy are present, the UP function shall put the user plane packets in the user plane tunnel by applying Outer Header Creation, after enforcing the required Forwarding Policy.
+
+Table 7.5.2.3-3: Duplicating Parameters IE in FAR
+Octet 1 and 2		Duplicating Parameters IE Type = 5 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Destination Interface	M	This IE shall identify the destination interface of the outgoing packet.	X	X	-	-	Destination Interface
+Outer Header Creation 	C	This IE shall be present if the UP function is required to add one or more outer header(s) to the outgoing packet. If present, it shall contain the F-TEID of the remote GTP-U peer. See NOTE 1.	X	X	-	-	Outer Header Creation
+Transport Level marking	C	This IE shall be present if the UP function is required to mark the IP header with the DSCP marking as defined by IETF RFC 2474 [22]. When present, it shall contain the value of the DSCP in the TOS/Traffic Class field. 	X	X	-	-	Transport Level Marking
+Forwarding Policy 	C	This IE shall be present if a specific forwarding policy is required to be applied to the packets. When present, it shall contain an Identifier of the Forwarding Policy locally configured in the UP function.	X	X	-	-	Forwarding Policy
+NOTE 1:	If the Outer Header Creation and Forwarding Policy are present, the UP function shall put the user plane packets in the user plane tunnel by applying Outer Header Creation, after enforcing the required Forwarding Policy.
+
+Table 7.5.2.3-4: Redundant Transmission Forwarding Parameters IE in FAR
+Octet 1 and 2		Redundant Transmission Forwarding Parameters IE Type = 270 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Outer Header Creation 	M	This IE shall be present if the UP function is required to perform the redundant transmission of the outgoing packet.
+If present, it shall contain the F-TEID of the remote GTP-U peer for redundant transmission.	-	-	-	X	Outer Header Creation
+Network Instance for Redundant Transmission	C	This IE shall be included if the GTP-U tunnel used for redundant transmission uses a different network Instance than the Network Instance used for the primary GTP-U tunnel.	-	-	-	X	Network Instance
+
+
+7.5.2.8	Create MAR IE within PFCP Session Establishment Request
+The Create MAR grouped IE shall be encoded as shown in Figure 7.5.2.8-1.
+Table 7.5.2.8-1: Create MAR IE within PFCP Session Establishment Request
+Octet 1 and 2		Create MAR IE Type = 165 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+MAR ID	M	This IE shall uniquely identify the MAR among all the MARs configured for that PFCP session.	-	-	-	X	MAR ID
+Steering Functionality	M	This IE shall be present to indicate the applicable traffic steering functionality.
+	-	-	-	X	Steering Functionality
+Steering Mode	M	This IE shall be present to indicate the steering mode.
+	-	-	-	X	Steering Mode
+3GPP Access Forwarding Action Information	C	This IE shall be present to provision 3GPP access specific forwarding action information if the UE is registered for 3GPP access, except when steering mode is set to "Active-Standby", Non-3GPP access is the active access and 3GPP access is not used as Standby access. In the latter case, this IE may be present.
+(NOTE)	-	-	-	X	3GPP Access Forwarding Action Information 
+Non-3GPP Access Forwarding Action Information	C	This IE shall be present to provision non-3GPP access specific forwarding action information if the UE is registered for non-3GPP access, except when steering mode is set to "Active-Standby", 3GPP access is the active access and Non-3GPP access is not used as Standby access. In the latter case, this IE may be present.
+(NOTE)	-	-	-	X	Non-3GPP Access Forwarding Action Information
+NOTE:	For the "Active-Standby" steering mode, if the network determines to not define a Standby access (as specified in clause 5.32.8 of 3GPP TS 23.501 [28]), the SMF shall either set the Priority IE within (Non-)3GPP Access Forwarding Action Information IE to the value "No Standby" or not include the (Non-)3GPP Access Forwarding Action Information IE for that access not defined as Standby access.
+
+Table 7.5.2.8-2: 3GPP Access Forwarding Action Information IE in the Create MAR IE
+Octet 1 and 2		3GPP Access Forwarding Action Information 1 IE Type = 166 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+FAR ID	M	This IE shall uniquely identify the FAR among all the FARs configured for this PFCP session. 	-	-	-	X	FAR ID
+Weight	C	This IE shall be present if steering mode is set to "Load Balancing" to identify the weight of the FAR.
+(NOTE 1) 	-	-	-	X	Weight
+Priority	C	This IE shall be present if the steering mode is set to "Active-Standby" or "Priority-based". (NOTE 2)	-	-	-	X	Priority
+URR ID 	C	This IE shall uniquely identify the URR among all the URRs configured for the PFCP session. This enables the SMF to request separate usage reports for different FARs (i.e. different accesses) (NOTE 3)
+
+Several IEs within the same IE type may be present to represent a list of URRs to be associated to the FAR.	-	-	-	X	URR ID
+NOTE 1:	The weights for all FARs included in both 3GPP Access Forwarding Action Information and Non 3GPP Access Forwarding Action Information need to sum up to 100.
+NOTE 2:	The Priority value shall be set to "Active", "Standby" or "No Standby" if the Steering Mode is set to "Active-Standby"; the Priority value shall be set to "High" or "Low" if the Steering Mode is set to "Priority-based". The 3GPP Access Forwarding Action Information and Non 3GPP Access Forwarding Action Information shall set different values.
+NOTE 3:	One or more URRs may still be provisioned in the Create PDR IE when a MAR ID is present, while the URR(s) provisioned in this IE shall present a different set of URR(s) to request separate usage reports.
+
+Table 7.5.2.8-3: Non-3GPP Access Forwarding Action Information IE in the Create MAR IE
+Octet 1 and 2		Non-3GPP Access Forwarding Action Information IE Type = 167 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Same IEs and requirements as defined in Table 7.5.2.8-2 
+
+
+7.5.4	PFCP Session Modification Request
+7.5.4.1	General
+The PFCP Session Modification Request is used over the Sxa, Sxb, Sxc and N4 interface by the CP function to request the UP function to modify the PFCP session.
+Table 7.5.4.1-1: Information Elements in a PFCP Session Modification Request
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+CP F-SEID	C	This IE shall be present if the CP function decides to change its F-SEID for the PFCP session. The UP function shall use the new CP F-SEID for subsequent PFCP Session related messages for this PFCP Session. See Note 2.	X	X	X	X	F-SEID
+Remove PDR	C	When present, this IE shall contain the PDR Rule which is requested to be removed. See Table 7.5.4-6-1.
+Several IEs within the same IE type may be present to represent a list of PDRs to remove.	X	X	X	X	Remove PDR
+Remove FAR	C	When present, this IE shall contain the FAR Rule which is requested to be removed. See Table 7.5.4-7-1.
+Several IEs within the same IE type may be present to represent a list of FARs to remove.	X	X	X	X	Remove FAR
+Remove URR	C	When present, this shall contain the URR Rule which is requested to be removed. See Table 7.5.4-8-1.
+Several IEs within the same IE type may be present to represent a list of URRs to remove.	X	X	X	X	Remove URR
+Remove QER	C	When present, this IE shall contain the QER Rule which is requested to be removed. See Table 7.5.4-9-1.
+Several IEs within the same IE type may be present to represent a list of QERs to remove.	-	X	X	X	Remove QER
+Remove BAR	C	When present, this IE shall contain the BAR Rule which is requested to be removed. See Table 7.5.4.12-1.	X	-	-	X	Remove BAR
+Remove Traffic Endpoint	C	When present, this IE shall contain the Traffic Endpoint ID identifying the traffic endpoint to be removed, if the UP function has indicated support of PDI optimization.
+All the PDRs that refer to the removed Traffic Endpoint shall be deleted.
+See Table 7.5.4.14-1.	X	X	X	X	Remove Traffic Endpoint
+Create PDR	C	This IE shall be present if the CP function requests the UP function to create a new PDR.
+See Table 7.5.2.2-1.
+Several IEs within the same IE type may be present to represent a list of PDRs to create.	X	X	X	X	Create PDR
+Create FAR	C	This IE shall be present if the CP function requests the UP function to create a new FAR. See Table 7.5.2.3-1.
+Several IEs within the same IE type may be present to represent a list of FARs to create.	X	X	X	X	Create FAR
+Create URR	C	This IE shall be present if the CP function requests the UP function to create a new URR. See Table 7.5.2.4-1.
+Several IEs within the same IE type may be present to represent a list of URRs to create.	X	X	X	X	Create URR
+Create QER	C	This IE shall be present if the CP function requests the UP function to create a new QER. See Table 7.5.2.5-1.
+Several IEs within the same IE type may be present to represent a list of QERs to create.	-	X	X	X	Create QER
+Create BAR	C	This IE shall be present if the CP function requests the UP function to create a new BAR.
+See Table 7.5.2.6-1.	X	-	-	X	Create BAR
+Create Traffic Endpoint	C	When present this IE shall contain the information associated with the Traffic Endpoint to be created, if the UP function has indicated support of PDI optimization. See Table 7.5.2.7-1.	X	X	X	X	Create Traffic Endpoint
+Update PDR	C	This IE shall be present if a PDR previously created for the PFCP session need to be modified. See Table 7.5.4.2-1.
+Several IEs within the same IE type may be present to represent a list of PDRs to update.	X	X	X	X	Update PDR
+Update FAR	C	This IE shall be present if a FAR previously created for the PFCP session need to be modified. See Table 7.5.4.3-1. Several IEs within the same IE type may be present to represent a list of FARs to update.	X	X	X	X	Update FAR
+Update URR	C	This IE shall be present if URR(s) previously created for the PFCP session need to be modified.
+Several IEs within the same IE type may be present to represent a list of modified URRs. Previously URRs that are not modified shall not be included. See Table 7.5.4.4-1.	X	X	X	X	Update URR
+Update QER	C	This IE shall be present if QER(s) previously created for the PFCP session need to be modified.
+Several IEs within the same IE type may be present to represent a list of modified QERs.
+Previously created QERs that are not modified shall not be included.
+See Table 7.5.4.5-1.	-	X	X	X	Update QER
+Update BAR	C	This IE shall be present if a BAR previously created for the PFCP session needs to be modified.
+A previously created BAR that is not modified shall not be included.
+See Table 7.5.4.11-1.	X	-	-	X	Update BAR
+Update Traffic Endpoint	C	When present this IE shall contain the information associated with the traffic endpoint to be updated, if the UP function has indicated support of PDI optimization.
+
+All the PDRs that refer to the Traffic Endpoint shall use the updated Traffic Endpoint information.
+See Table 7.5.4.13-1.	X	X	X	X	Update Traffic Endpoint
+PFCPSMReq-Flags	C	This IE shall be included if at least one of the flags is set to "1".
+-	DROBU (Drop Buffered Packets): the CP function shall set this flag if the UP function is requested to drop the packets currently buffered for this PFCP session (see NOTE 1).
+-	QAURR (Query All URRs): the CP function shall set this flag if the CP function requests immediate usage report(s) for all the URRs previously provisioned for this PFCP session (see NOTE 3). 	
+
+X
+
+
+
+X	
+
+-
+
+
+
+X	
+
+-
+
+
+
+X	
+
+X
+
+
+
+X	PFCPSMReq-Flags
+Query URR	C	This IE shall be present if the CP function requests immediate usage report(s) to the UP function.
+Several IEs within the same IE type may be present to represent a list of URRs for which an immediate report is requested.
+See Table 7.5.4.10-1.
+See NOTE 3.	X	X	X	X	Query URR
+PGW-C FQ-CSID	C	This IE shall be included according to the requirements in clause 23 of 3GPP TS 23.007 [24].	X	X	-	-	FQ-CSID
+SGW-C FQ-CSID	C	This IE shall be included according to the requirements in clause 23 of 3GPP TS 23.007 [24].	X	X	-	-	FQ-CSID
+MME FQ-CSID	C	This IE shall be included according to the requirements in clause 23 of 3GPP TS 23.007 [24].	X	X	-	-	FQ-CSID
+ePDG FQ-CSID	C	This IE shall be included according to the requirements in clause 23 of 3GPP TS 23.007 [24].	-	X	-	-	FQ-CSID
+TWAN FQ-CSID	C	This IE shall be included according to the requirements in clause 23 of 3GPP TS 23.007 [24].	-	X	-	-	FQ-CSID
+User Plane Inactivity Timer	C	This IE shall be present if it needs to be changed.	-	X	X	X	User Plane Inactivity Timer
+Query URR Reference	O	This IE may be present if the Query URR IE is present or the QAURR flag is set to "1". When present, it shall contain a reference identifying the query request, which the UP function shall return in any usage report sent in response to the query.	X	X	X	X	Query URR Reference
+Trace Information	O	When present, this IE shall contain the trace instructions to be applied by the UP function for this PFCP session.
+A Trace Information with a null length indicates that the trace session shall be deactivated. 	X	X	X	X	Trace Information
+Remove MAR	C	When present, this IE shall contain the MAR Rule which is requested to be removed. See Table 7.5.4.15-1.
+Several IEs within the same IE type may be present to represent a list of MARs to remove.	-	-	-	X	Remove MAR
+Update MAR	C	This IE shall be present if a MAR previously created for the PFCP session needs to be modified. See Table 7.5.4.16-1.
+
+Several IEs within the same IE type may be present to represent a list of MARs to update.	-	-	-	X	Update MAR
+Create MAR	C	This IE shall be present if the CP function requests the UP function to create a new MAR for a new PDR. See Table 7.5.2.8-1.
+
+Several IEs within the same IE type may be present to represent a list of MARs to create.	-	-	-	X	Create MAR
+Node ID	C	This IE shall be present if a new SMF in an SMF Set, with one PFCP association per SMF and UPF (see clause 5.22.3), takes over the control of the PFCP session.
+When present, it shall contain the unique identifier of the new SMF.	-	-	-	X	Node ID
+TSC Management Information	C	This IE shall be present if the SMF needs to send TSC Management information to the UPF.
+Several IEs within the same IE type may be present to transfer PMICs for different NW-TT ports.	-	-	-	X	TSC Management Information
+Remove SRR	C	When present, this shall indicate the SRR Rule which is requested to be removed. See Table 7.5.4-19-1.
+Several IEs within the same IE type may be present to represent a list of SRRs to remove.	-	-	-	X	Remove SRR
+Create SRR	C	This IE shall be present if the CP function requests the UP function to create a new SRR. See Table 7.5.2.9-1.
+Several IEs within the same IE type may be present to represent a list of SRRs to create.	-	-	-	X	Create SRR
+Update SRR	C	This IE shall be present if SRR(s) previously created for the PFCP session need to be modified.
+Several IEs within the same IE type may be present to represent a list of modified SRRs. Previously SRRs that are not modified shall not be included. See Table 7.5.4.20-1.	-	-	-	X	Update SRR
+Provide ATSSS Control Information	C	This IE shall be present for PFCP session modification for a MA PDU session, if the ATSSS Control Information changes.
+When present, this IE shall contain the required ATSSS functionalities for this MA PDU session.
+The UPF shall replace any value received previously by the new information received in this IE. See Note 4.
+See Table 7.5.2.10-1.	-	-	-	X	Provide ATSSS Control Information
+Ethernet Context Information	C	This IE shall be present to update the list of MAC addresses associated to the PDU session during an Ethernet PDU session anchor relocation. 	-	-	-	X	Ethernet Context Information
+Access Availability Information	O	This IE may be present for a MA PDU session to signal that an access type has become transiently unavailable or has become available again (see clause 5.20.5).
+Two IEs with the same IE type may be present to report changes of access availability for both 3GPP and non-3GPP accesses.	-	-	-	X	Access Availability Information
+Query Packet Rate Status	C	This IE shall be present if the CP function requests immediate packet rate status report(s) to the UP function.
+Several IEs within the same IE type may be present to represent a list of QERs for which an immediate packet rate status report is requested.
+See Table 7.5.4.22-1.	-	X	-	X	Query Packet Rate Status
+S-NSSAI	O	This IE may be present to indicate the S-NSSAI of the PDU session, if the S-NSSAI of the PDU Session has been provided previously to the UP function and the S-NSSAI has changed. (NOTE 5)	-	-	-	X	S-NSSAI
+NOTE 1:	The CP function may request the UP function to drop the packets currently buffered for the PFCP session when using extended buffering of downlink data packets, buffering is performed in the UP function and the DL Data Buffer Expiration Time is handled by the CP function. In this case, when the DL Data Buffer Expiration Time expires, the CP function shall send a PFCP Session Modification Request including the DROBU flag (to drop the downlink data packets currently buffered in the UP function) and updating the Apply Action within the FARs of this PFCP session to request the UP function to start buffering the downlink data packets with notifying the arrival of subsequent downlink data packets. See clause 5.9.3 of 3GPP TS 23.214 [2].
+NOTE 2:	When changing the CP F-SEID of an established PFCP Session, the CP function shall be able to handle any incoming PFCP Session related messages sent by the UP function with the previous CP F-SEID for a duration at least longer than twice the PFCP retransmission timer (N1xT1).
+NOTE 3:	The QAURR (Query All URRs) flag in the PFCPSMReq-Flags IE and the Query URR IE are exclusive from each other in a PFCP Session Modification Request.
+NOTE 4:	If the ATSSS resources have already been allocated to the PFCP session previously, e.g. during the PFCP session establishment, the UPF shall not allocate new values for such resources (e.g. UE Link-Specific IP Address).
+NOTE 5:	S-NSSAI for the PDU session may be updated after PDU session establishment, i.e. during EPS to 5GS handover procedure, the initial AMF may use configured S-NSSAI for interworking to create the PDU session in 5GS. For home routed PDU session, if the S-NSSAI in serving PLMN (mapped from S-NSSAI in HPLMN) is different from the configured S-NSSAI for interworking and V-SMF reselection is not needed, the AMF will update V-SMF with S-NSSAI in serving PLMN for the PDU session, as specified in clause 4.11.1.3.3 of 3GPP TS 23.502 [29]. The S-NSSAI may be used by the UP function for performance measurement.
+
+7.5.4.2	Update PDR IE within PFCP Session Modification Request
+The Update PDR grouped IE shall be encoded as shown in Figure 7.5.4.2-1.
+Table 7.5.4.2-1: Update PDR IE within PFCP Session Modification Request
+Octet 1 and 2		Update PDR IE Type = 9 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+PDR ID	M	This IE shall uniquely identify the PDR among all the PDRs configured for that PFCP session.	X	X	X	X	PDR ID
+Outer Header Removal 	C	This IE shall be present if it needs to be changed.	X	X	-	X	Outer Header Removal
+Precedence	C	This IE shall be present if there is a change in the PDR's precedence to be applied by the UP function among all PDRs of the PFCP session, when looking for a PDR matching an incoming packet.	-	X	X	X	Precedence
+PDI	C	This IE shall be present if there is a change within the PDI against which incoming packets will be matched. When present, this IE shall replace the PDI previously stored in the UP function for this PDR. See Table 7.5.2.2-2.	X	X	X	X	PDI
+FAR ID 	C	This IE shall be present if it needs to be changed	X	X	X	X	FAR ID
+URR ID 	C	This IE shall be present if a measurement action shall be applied or no longer applied to packets matching this PDR.
+When present, this IE shall contain the list of all the URR IDs to be associated to the PDR.	X	X	X	X	URR ID
+QER ID 	C	This IE shall be present if a QoS enforcement action shall be applied or no longer applied to packets matching this PDR.
+When present, this IE shall contain the list of all the QER IDs to be associated to the PDR.	-	X	X	X	QER ID
+Activate Predefined Rules 	C	This IE shall be present if new Predefined Rule(s) needs to be activated for the PDR. When present this IE shall contain one Predefined Rules name.
+Several IEs with the same IE type may be present to represent multiple "Activate Predefined Rules" names.	-	X	X	X	Activate Predefined Rules 
+Deactivate Predefined Rules 	C	This IE shall be present if Predefined Rule(s) needs to be deactivated for the PDR. When present this IE shall contain one Predefined Rules name.
+Several IEs with the same IE type may be present to represent multiple "Activate Predefined Rules" names.	-	X	X	X	Deactivate Predefined Rules 
+Activation Time	O	This IE may be present if the PDR activation time shall be changed. (NOTE 2)	-	X	X	X	Activation Time
+Deactivation Time	O	This IE may be present if the PDR deactivation time shall be changed. (NOTE 2)	-	X	X	X	Deactivation Time
+IP Multicast Addressing Info	O	This IE may be present in an UL PDR controlling UL IGMP/MLD traffic (see clause 5.25), if it needs to be changed
+When present, it shall contain a (range of) IP multicast address(es), and optionally source specific address(es), identifying a set of IP multicast flows. See Table 7.5.2.2-4.
+Several IEs with the same IE type may be present to represent multiple IP multicast flows.
+When present, the UPF shall replace any IP multicast address(es) previously stored for this PDR by the IP multicast address(es) received in this IE.	-	-	-	X	IP Multicast Addressing Info
+Transport Delay Reporting	C	This IE shall be present if Transport Delay Reporting needs to be changed (e.g. transport delay reporting needs to be activated or deactivated). See Table 7.5.2.2-6.	-	-	-	X	Transport Delay Reporting
+NOTE1:	The IEs which do not need to be modified shall not be included in the Update PDR IE. The UP function shall continue to behave according to the values previously received for IEs not present in the Update PDR IE.
+NOTE2:	When the Activation Time and Deactivation Time are not present, the PDR shall keep its current activation status, either active or inactive.
+
+7.5.4.3	Update FAR IE within PFCP Session Modification Request
+The Update FAR grouped IE shall be encoded as shown in Figure 7.5.4.3-1.
+Table 7.5.4.3-1: Update FAR IE within PFCP Session Modification Request
+Octet 1 and 2		Update FAR IE Type = 10 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+FAR ID	M	This IE shall identify the FAR to be updated.	X	X	X	X	FAR ID
+Apply Action	C	This IE shall be present if it is changed.	X	X	X	X	Apply Action
+Update Forwarding parameters	C	This IE shall be present if it is changed. See table 7.5.4.3-2.	X	X	X	X	Update Forwarding Parameters
+Update Duplicating Parameters 	C	This IE shall be present if it is changed. See table 7.5.4.3-3.
+Several IEs with the same IE type may be present to request to duplicate the packets to different destinations.	X	X	-	-	Update Duplicating Parameters
+Redundant Transmission Forwarding Parameters	C	This IE shall be present if it is changed. See table 7.5.2.3-4.	-	-	-	X	Redundant Transmission Forwarding Parameters
+BAR ID	C	This IE shall be present if the BAR ID associated to the FAR needs to be modified. 	X	-	-	X	BAR ID
+
+Table 7.5.4.3-2: Update Forwarding Parameters IE in FAR
+Octet 1 and 2		Update Forwarding Parameters IE Type = 11 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Destination Interface	C	This IE shall only be provided if it is changed.
+When present, it shall indicate the destination interface of the outgoing packet.	X	X	X	X	Destination Interface
+Network instance	C	This IE shall only be provided if it is changed.	X	X	X	X	Network Instance
+Redirect Information	C	This IE shall be present if the instructions regarding the redirection of traffic by the UP function need to be modified.	-	X	X	X	Redirect Information
+Outer Header Creation 	C	This IE shall only be provided if it is changed. See NOTE 1.	X	X	-	X	Outer Header Creation
+Transport Level Marking 	C	This IE shall only be provided if it is changed	X	X	-	X	Transport Level Marking
+Forwarding Policy 	C	This IE shall only be provided if it is changed. See NOTE 1.	-	X	X	X	Forwarding Policy
+Header Enrichment	C	This IE shall only be provided if it is changed	-	X	X	X	Header Enrichment
+PFCPSMReq-Flags	C	This IE shall be included if at least one of the flags is set to "1".
+-	SNDEM (Send End Marker Packets): this IE shall be present if the CP function modifies the F-TEID of the downstream node in the Outer Header Creation IE and the CP function requests the UP function to construct and send GTP-U End Marker messages towards the old F-TEID of the downstream node. 	X	X	-	X	PFCPSMReq-Flags
+Linked Traffic Endpoint ID	C	This IE may be present, if it is changed and the UP function indicated support of the PDI optimization feature, (see clause 8.2.25). When present, it shall identify the Traffic Endpoint ID allocated for this PFCP session to receive the traffic in the reverse direction (see clause 5.2.3.1).	X	X	-	X	Traffic Endpoint ID
+Destination Interface Type	C	This IE shall be present to indicate the 3GPP interface type of the destination interface, if the value has changed.	X	X	-	X	3GPP Interface Type
+Data Network Access Identifier	C	This IE shall be provided over N16a if it is changed. This IE shall not be sent over N4. 	-	-	-	-	Data Network Access Identifier
+NOTE 1:	If the Outer Header Creation and Forwarding Policy are present, the UP function shall put the user plane packets in the user plane tunnel by applying Outer Header Creation, after enforcing the required Forwarding Policy.
+
+Table 7.5.4.3-3: Update Duplicating Parameters IE in FAR
+Octet 1 and 2		Update Duplicating Parameters IE Type = 105 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Destination Interface	C	This IE shall only be provided if it is changed.
+When present, it shall indicate the destination interface of the outgoing packet.	X	X	-	-	Destination Interface
+Outer Header Creation 	C	This IE shall only be provided if it is changed. See NOTE 1.	X	X	-	-	Outer Header Creation
+Transport Level Marking 	C	This IE shall only be provided if it is changed.	X	X	-	-	Transport Level Marking
+Forwarding Policy 	C	This IE shall only be provided if it is changed. See NOTE 1.	-	X	-	-	Forwarding Policy
+NOTE 1:	If the Outer Header Creation and Forwarding Policy are present, the UP function shall put the user plane packets in the user plane tunnel by applying Outer Header Creation, after enforcing the required Forwarding Policy.
+
+7.5.4.4	Update URR IE within PFCP Session Modification Request
+The Update URR grouped IE shall be encoded as shown in Figure 7.5.4.4-1.
+Table 7.5.4.4-1: Update URR IE within PFCP Session Modification Request
+Octet 1 and 2		Update URR IE Type = 13 (decimal)	
+Octets 3 and 4		Length = n	
+Information elements	P	Condition / Comment	Appl.	IE Type	
+			Sxa	Sxb	Sxc	N4		
+URR ID	M	This IE shall uniquely identify the URR among all the URRs configured for that PFCP session	X	X	X	X	URR ID	
+Measurement Method	C	This IE shall be present if the measurement method needs to be modified.
+When present, this IE shall indicate the method for measuring the network resources usage, i.e. whether the data volume, duration (i.e. time), combined volume/duration, or event shall be measured.	X	X	X	X	Measurement Method	
+Reporting Triggers	C	This IE shall be present if the reporting triggers needs to be modified.
+When present, this IE shall indicate the trigger(s) for reporting network resources usage to the CP function, e.g. periodic reporting or reporting upon reaching a threshold, or envelope closure, or when an SMF instructs an UPF to report the reception of the End Marker packet from the old I-UPF during a Service Request procedure (see clauses 4.2.3.2 and 4.23.4.3 in 3GPP TS 23.502 [29]).	X	X	X	X	Reporting Triggers	
+Measurement Period 	C	This IE shall be present if the Measurement Period needs to be modified.
+When present, it shall indicate the period for generating and reporting usage reports. 	X	X	X	X	Measurement Period	
+Volume Threshold	C	This IE shall be present if the Volume Threshold needs to be modified. When present, it shall indicate the traffic volume value after which the UP function shall report network resources usage to the CP function for this URR.	X	X	X	X	Volume Threshold	
+Volume Quota	C	This IE shall be present if the Volume Quota needs to be modified.
+When present, it shall indicate the Volume Quota value.	-	X	X	X	Volume Quota	
+Time Threshold	C	This IE shall be present if the Time Threshold needs to be modified. When present, it shall indicate the time usage after which the UP function shall report network resources usage to the CP function for this URR.	X	X	X	X	Time Threshold	
+Time Quota	C	This IE shall be present if the Time Quota needs to be modified.
+When present, it shall indicate the Time Quota value.	-	X	X	X	Time Quota	
+Event Threshold	C	This IE shall be present if Event Threshold needs to be modified.
+When present, it shall indicate the number of events after which the UP function shall report to the CP function for this URR.	-	X	X	X	Event Threshold		
+Event Quota	C	This IE shall be present if Event Quota needs to be modified.
+When present, it shall indicate the Event Quota value.	-	X	X	X	Event Quota		
+Quota Holding Time	C	This IE shall be present if the Quota Holding Time needs to be modified.
+When present, it shall contain the duration of the Quota Holding Time.	-	X	X	X	Quota Holding Time	
+Dropped DL Traffic Threshold	C	This IE shall be present if the Dropped DL Threshold needs to be modified.
+When present, it shall contain the threshold of the DL traffic being dropped.	X	-	-	X	Dropped DL Traffic Threshold	
+Quota Validity Time	C	This IE shall be present if Quota Validity time was not sent earlier or quota validity time value needs to be modified.	-	X	-	X	Quota Validity Time	
+Monitoring Time	C	This IE shall be present if the Monitoring Time needs to be modified. When present, this IE shall contain the time at which the UP function shall re-apply the volume or time threshold. 	X	X	X	X	Monitoring Time	
+Subsequent Volume Threshold	C	This IE shall be present if the Subsequent Volume Threshold needs to be modified and volume-based measurement is used.
+When present, it shall indicate the traffic volume value after which the UP function shall report network resources usage to the CP function for this URR for the period after the Monitoring Time.	X	X	X	X	Subsequent Volume Threshold	
+Subsequent Time Threshold	C	This IE shall be present if the Subsequent Time Threshold needs to be modified. When present, it shall indicate the time usage value after which the UP function shall report network resources usage to the CP function for this URR for the period after the Monitoring Time.	X	X	X	X	Subsequent Time Threshold	
+Subsequent Volume Quota	C	This IE shall be present if the Subsequent Volume Quota needs to be modified.
+When present, it shall indicate the Volume Quota value which the UP function shall use for this URR for the period after the Monitoring Time.	-	X	X	X	Subsequent Volume Quota	
+Subsequent Time Quota	C	This IE shall be present if the Subsequent Time Quota needs to be modified.
+When present, it shall indicate the Time Quota value which the UP function shall use for this URR for the period after the Monitoring Time.	-	X	X	X	Subsequent Time Quota	
+Subsequent Event Threshold	O	This IE shall be present if the Subsequent Event Threshold needs to be modified.
+When present, it shall indicate the number of events after which the UP function shall report to the CP function for this URR for the period after the Monitoring Time.	-	X	X	X	Subsequent Event Threshold		
+Subsequent Event Quota	O	This IE shall be present if the Subsequent Event Quota needs to be modified.
+When present, it shall indicate the Event Quota value which the UP function shall use for this URR for the period after the Monitoring Time.	-	X	X	X	Subsequent Event Quota		
+Inactivity Detection Time	C	This IE shall be present if the Inactivity Detection Time needs to be modified.
+When present, it shall indicate the duration of the inactivity period after which time measurement needs to be suspended when no packets are received during this inactivity period. 	-	X	X	X	Inactivity Detection Time	
+Linked URR ID 	C	This IE shall be present if linked usage reporting is required. When present, this IE shall contain the linked URR ID which is related with this URR (see clause 5.2.2.4).
+
+Several IEs with the same IE type may be present to represent multiple linked URRs which are related with this URR.	-	X	X	X	Linked URR ID 	
+Measurement Information	C	his IE shall be included if any of the following flag is set to "1" or if the change of flag(s) from "1" to "0" results in the IE becoming set to all zeros.
+Applicable flags are:
+-	Inactive Measurement Flag: this flag shall be set to "1" if the measurement shall be paused (inactive). The measurement shall be performed (active) if the bit is set to "0" or if the Measurement Information IE is not present in the Update URR IE.
+-	Reduced Application Detection Information Flag: this flag may be set to "1", if the Reporting Triggers request to report the start or stop of application, to request the UP function to only report the Application ID in the Application Detection Information, e.g. for envelope reporting.
+-	Immediate Start Time Metering Flag: this flag may be set to "1" if time-based measurement is used and the UP function is requested to start the time metering immediately at receiving the flag.	
+
+
+
+-
+
+
+
+
+
+
+-
+
+
+
+
+
+
+-	
+
+
+
+X
+
+
+
+
+
+
+X
+
+
+
+
+
+
+X	
+
+
+
+-
+
+
+
+
+
+
+-
+
+
+
+
+
+
+X	
+
+
+
+X
+
+
+
+
+
+
+X
+
+
+
+
+
+
+X	Measurement Information	
+Time Quota Mechanism	C	This IE shall be present if time-based measurement based on CTP or DTP needs to be modified.	-	X	-	-	Time Quota Mechanism	
+Aggregated URRs	C	This IE shall be included if the Aggregated URRs IE needs to be modified. See Table 7.5.2.4-2.
+
+Several IEs with the same IE type may be present to provision multiple aggregated URRs.
+
+When present, this IE shall provide the complete list of the aggregated URRs.	-	X	-	-	Aggregated URRs	
+	FAR ID for Quota Action	C	This IE shall be present if the FAR ID for Quota Action IE needs to be modified. This IE may be present if the Volume Quota IE or the Time Quota IE or Event Quota IE is newly provisioned in the URR and the UP Function indicated support of the Quota Action.
+When present, it shall contain the identifier of the substitute FAR the UP function shall apply, for the traffic associated to this URR, when exhausting any of these quotas. See NOTE 1, NOTE 2. 	-	X	X	X	FAR ID
+Ethernet Inactivity Timer	C	This IE shall be present if the Ethernet Inactivity Timer needs to be modified. When present, it shall contain the duration of the Ethernet inactivity period.	-	-	-	X	Ethernet Inactivity Timer	
+	Additional Monitoring Time	O	This IE shall be present if the additional Monitoring Time needs to be modified. When present, this IE shall contain the time at which the UP function shall re-apply the volume or time or event threshold/quota. See Table 7.5.2.4-3.
+The CP function shall provide the full set of Additional Monitoring Times IE(s). The UP function shall replace any Additional Monitoring Times IE(s) provisioned earlier by the new set of received IE(s).	X	X	X	X	Additional Monitoring Time
+	Number of Reports	O	This IE may be present if the Number of Reports need to be changed. When present, it shall indicate the number of usage reports to be generated by the URR. See also clauses 5.2.2.2.1 and 5.2.2.3.1.	X	X	X	X	Number of Reports
+NOTE 1:	The substitute FAR used when exhausting a Volume Quota or Time Quota may be set to drop the packets or redirect the traffic towards a redirect destination as specified in clause 5.4.7.
+NOTE 2:	If the FAR as indicated in the FAR ID for Quota Action is removed after being provisioned, the UP function shall behave as if the FAR ID for Quota Action is not provisioned and shall apply the default behaviour per local configuration when the quota is exhausted.	
+
+7.5.4.5	Update QER IE within PFCP Session Modification Request
+The Update QER grouped IE shall be encoded as shown in Figure 7.5.4.5-1.
+Table 7.5.4.5-1: Update QER IE within PFCP Session Modification Request
+Octet 1 and 2		Update QER IE Type = 14 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+QER ID	M	This IE shall uniquely identify the QER among all the QRs configured for that PFCP session	-	X	X	X	QER ID
+QER Correlation ID	C	This IE shall be present if the QER correlation ID in this QER needs to be modified.
+See NOTE 1.	-	X	-	X	QER Correlation ID
+Gate Status	C	This IE shall be present if the Gate Status needs to be modified. When present, it shall indicate whether the packets are allowed to be forwarded (the gate is open) or shall be discarded (the gate is closed) in the uplink and/or downlink directions.
+See NOTE 1.	-	X	X	X	Gate Status
+Maximum Bitrate	C	This IE shall be present if an MBR enforcement action applied to packets matching this PDR need to be modified.
+When present, this IE shall indicate the uplink and/or downlink maximum bit rate to be enforced for packets matching the PDR.
+
+For EPC, this IE may be set to the value of:
+-	the APN-AMBR, for a QER that is referenced by all the PDRs of the non-GBR bearers of a PDN connection;
+-	the TDF session MBR, for a QER that is referenced by all the PDRs of a TDF session;
+-	the bearer MBR, for a QER that is referenced by all the PDRs of a bearer;
+-	the SDF MBR, for a QER that is referenced by all the PDRs of a SDF.
+
+For 5GC, this IE may be set to the value of:
+-	the Session-AMBR, for a QER that is referenced by all the PDRs of the non-GBR QoS flows of a PDU session;
+-	the QoS Flow MBR, for a QER that is referenced by all the PDRs of a QoS Flow;
+-	the SDF MBR, for a QER that is referenced by all the PDRs of a SDF.
+
+See NOTE 1.	-	X	X	X	MBR
+Guaranteed Bitrate	C	This IE shall be present if a GBR authorization to packets matching this PDR needs to be modified. When present, this IE shall indicate the authorized uplink and/or downlink guaranteed bit rate.
+
+This IE may be set to the value of:
+-	the aggregate GBR, for a QER that is referenced by all the PDRs of a GBR bearer;
+-	the QoS Flow GBR, for a QER that is referenced by all the PDRs of a QoS Flow (for 5GC);
+-	the SDF GBR, for a QER that is referenced by all the PDRs of a SDF.
+See NOTE 1.	-	X	X	X	GBR
+Packet Rate	C	This IE shall be present if a Packet Rate enforcement action (in terms of number of packets per time interval) need to be modified for packets matching this PDR. 	-	X	-	-	Packet Rate
+DL Flow Level Marking	C	This IE shall be set if the DL Flow Level Marking IE needs to be modified.
+See NOTE 1.	-	X	X	-	DL Flow Level Marking
+QoS flow identifier	C	This IE shall be present if it needs to be modified.	-	-	-	X	QFI
+Reflective QoS	C	This IE shall be present if the state of the Reflective QoS needs to be modified (activate if inactive, or deactivate the active Reflective QoS).	-	-	-	X	RQI
+Paging Policy Indicator	C	This IE shall be present if it needs to be modified.	-	-	-	X	Paging Policy Indicator
+Averaging Window	O	This IE may be present if the UP function is required to modify the Averaging Window. (NOTE 2)
+	-	-	-	X	Averaging Window
+QER Control Indications	C	This IE shall be included if the CP function need to provide the updated QoS enforcement control information:
+-	RCSR (Rate Control Status Reporting): the CP function shall set this bit "1" to request the UP function to report the rate control status when the PFCP session is released.	-	X	-	X	QER Control Indications
+NOTE 1:	The IEs which do not need to be modified shall not be included in the Update QER IE. The UP function shall continue to behave according to the values previously received for IEs not present in the Update QER IE.
+NOTE 2:	As 5QI is not signalled over N4, one default averaging window shall be pre-configured in the UPF.
+
+7.5.4.6	Remove PDR IE within PFCP Session Modification Request
+The Remove PDR grouped IE shall be encoded as shown in Figure 7.5.4.6-1.
+Table 7.5.4.6-1: Remove PDR IE within PFCP Session Modification Request
+Octet 1 and 2		Remove PDR IE Type = 15 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+PDR ID	M	This IE shall identify the PDR to be deleted.
+	X	X	X	X	PDR ID
+
+7.5.4.7	Remove FAR IE within PFCP Session Modification Request
+The Remove FAR grouped IE shall be encoded as shown in Figure 7.5.4.7-1.
+Table 7.5.4.7-1: Remove FAR IE within PFCP Session Modification Request
+Octet 1 and 2		Remove FAR IE Type = 16 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+FAR ID	M	This IE shall identify the FAR to be deleted.	X	X	X	X	FAR ID
+
+7.5.4.8	Remove URR IE within PFCP Session Modification Request
+The Remove URR grouped IE shall be encoded as shown in Figure 7.5.4.7-1.
+Table 7.5.4.8-1: Remove URR IE within PFCP Session Modification Request
+Octet 1 and 2		Remove URR IE Type = 17 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+URR ID	M	This IE shall identify the URR to be deleted.	X	X	X	X	URR ID
+
+7.5.4.9	Remove QER IE PFCP Session Modification Request
+The Remove QER grouped IE shall be encoded as shown in Figure 7.5.4.9-1.
+Table 7.5.4.9-1: Remove QER IE PFCP Session Modification Request
+Octet 1 and 2		Remove QER IE Type = 18 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+QER ID	M	This IE shall identify the QER to be deleted.	-	X	X	X	QER ID
+
+7.5.4.10	Query URR IE within PFCP Session Modification Request
+The Query URR grouped IE shall be encoded as shown in Figure 7.5.4.10-1.
+Table 7.5.4.10-1: Query URR IE within PFCP Session Modification Request
+Octet 1 and 2		Query URR IE Type = 77 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+URR ID	M	This IE shall identify the URR being queried.	X	X	X	X	URR ID
+
+7.5.4.11	Update BAR IE within PFCP Session Modification Request
+The Update BAR grouped IE shall be encoded as shown in Figure 7.5.4.11-1.
+Table 7.5.4.11-1: Update BAR IE within PFCP Session Modification Request
+Octet 1 and 2		Update BAR IE Type = 86 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+BAR ID	M	This IE shall identify the BAR Rule to be modified.	X	-	-	X	BAR ID
+Downlink Data Notification Delay	C	This IE shall be present if the UP function indicated support of the Downlink Data Notification Delay parameter (see clause 8.2.28) and the Downlink Data Notification Delay needs to be modified.
+When present, it shall contain the delay the UP function shall apply between receiving a downlink data packet and notifying the CP function about it, when the Apply Action parameter requests to buffer the packets and notify the CP function.	X	-	-	X	Downlink Data Notification Delay
+Suggested Buffering Packets Count	C	This IE may be present if the UP Function indicated support of the feature UDBC.
+
+When present, it shall contain the number of packets that are suggested to be buffered when the Apply Action parameter requests to buffer the packets. The packets that exceed the limit shall be discarded.		X	X	X	Suggested Buffering Packets Count
+MT-EDT Control Information	O	This IE may be included to request the SGW-U to report the sum of DL Data Packets Size.	X	-	-	-	MT-EDT Control Information
+
+7.5.4.12	Remove BAR IE within PFCP Session Modification Request
+The Remove BAR grouped IE shall be encoded as shown in Figure 7.5.4.12-1.
+Table 7.5.4.12-1: Remove BAR IE within PFCP Session Modification Request
+Octet 1 and 2		Remove BAR IE Type = 87 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+BAR ID	M	This IE shall identify the BAR to be deleted.	X	-	-	X	BAR ID
+
+7.5.4.13	Update Traffic Endpoint IE within PFCP Session Modification Request
+The Update Traffic Endpoint grouped IE shall be encoded as shown in Figure 7.5.4.13-1.
+Table 7.5.4.13-1: Update Traffic Endpoint IE within PFCP Session Modification Request
+Octet 1 and 2	Update Traffic Endpoint Type = 129 (decimal)
+Octets 3 and 4	Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Traffic Endpoint ID	M	This IE shall uniquely identify the Traffic Endpoint to be modified for that PFCP session.	X	X	X	X	Traffic Endpoint ID
+Local F-TEID 	C	This IE shall be present if it needs to be changed.
+The CP function shall set the CHOOSE (CH) bit to 1 if the CP function requests the UP function to assign a local F-TEID to the PDR.
+See NOTE.	X	-	-	X	F-TEID
+Network Instance	O	If present, this IE shall identify the Network instance to match for the incoming packet. See NOTE.	X	X	X	X	Network Instance
+Redundant Transmission Detection Parameters	C	This IE shall be present if it needs to be changed See Table 7.5.2.2-5.
+See NOTE.	-	-	-	X	Redundant Transmission Detection Parameters
+UE IP address 	C	This IE shall be present if it needs to be changed.
+In the 5GC, several IEs with the same IE type may be present to represent multiple UE IP addresses, if the UPF indicated support of the IP6PL feature (see clause 5.21). When present, the UE IP address(es) present in this IE shall replace the UE IP address(es) stored in the UP function for this traffic endpoint.
+See NOTE.	-	X	X	X	UE IP address
+Framed-Route	C	This IE shall be present for a PDR if the UPF indicated support of Framed Routing (see clauses 8.2.25 and 5.16) and it needs to be changed. If present, this IE shall describe a framed route.
+Several IEs with the same IE type may be present to provision a list of framed routes. 	-	X	-	X	Framed-Route
+Framed-Routing	C	This IE shall be present for a DL PDR if the UPF indicated support of Framed Routing (see clauses 8.2.25 and 5.16) and it needs to be changed. If present, this IE shall describe the routing method for the UP function for the IP route related to Framed-Routes or Framed-IPv6-Routes. (NOTE 2)	-	X	-	X	Framed-Routing
+Framed-IPv6-Route	C	This IE shall be present for a PDR if the UPF indicated support of Framed Routing (see clauses 8.2.25 and 5.16) and it needs to be changed. If present, this IE shall describe a framed IPv6 route.
+Several IEs with the same IE type may be present to provision a list of framed IPv6 routes. 	-	X	-	X	Framed-IPv6-Route
+QFI	C	This IE shall be present if QFI(s) applicable for the traffic endpoints need to be changed and if the UPF has indicated it supports MTE feature as specified in clause 8.2.25.
+
+If present, this IE shall identify the QoS Flow Identifier to match for the incoming packet.
+Several IEs with the same IE type may be present to provision a list of QFIs. When present, the full set of applicable QFIs shall be provided.	-	-	-	X	QFI
+Source Interface Type	C	This IE shall be present if the 3GPP interface type of the traffic endpoint needs to be changed.	X	X	-	X	3GPP Interface Type
+NOTE 1:	The IEs which do not need to be modified shall not be included in the Update Traffic Endpoint IE. The UP function shall continue to behave according to the values previously received for IEs not present in the Update Traffic Endpoint IE. F-TEID may be changed if the SGW-C has received the "Change F-TEID support Indication" over the S11/S4 interface (for an IDLE state UE initiated TAU/RAU procedure to allow the SGW changing the GTP-U F-TEID).
+NOTE 2:	In this release of specification, the UP function shall announce the IP route(s) for Framed-Route(s) or Framed-IPv6-Route(s) to the PDN regardless of the value of the Framed-Routing.
+
+7.5.4.14	Remove Traffic Endpoint IE within PFCP Session Modification Request
+The Remove Traffic Endpoint grouped IE shall be encoded as shown in Figure 7.5.4.14-1.
+Table 7.5.4.14-1: Remove Traffic Endpoint IE within PFCP Session Modification Request
+Octet 1 and 2		Remove Traffic Endpoint IE Type = 130 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Traffic Endpoint ID	M	This IE shall identify the Traffic Endpoint to be deleted.
+	X	X	X	X	Traffic Endpoint ID
+
+7.5.4.15	Remove MAR IE within PFCP Session Modification Request
+The Remove MAR grouped IE shall be encoded as shown in Figure 7.5.4.15-1.
+Table 7.5.4.15-1: Remove MAR IE within PFCP Session Modification Request
+Octet 1 and 2		Remove MAR IE Type = 168 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+MAR ID	M	This IE shall identify the MAR to be deleted.	-	-	-	X	MAR ID
+
+7.5.4.16	Update MAR IE within PFCP Session Modification Request
+The Update MAR grouped IE shall be encoded as shown in Figure 7.5.4.16-1.
+Table 7.5.4.16-1: Update MAR IE within PFCP Session Modification Request
+Octet 1 and 2		Update MAR IE Type = 169 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+MAR ID	M	This IE shall identify the MAR to be updated.	-	-	-	X	MAR ID
+Steering Functionality	C	This IE shall be present if it is changed.	-	-	-	X	Steering Functionality
+Steering Mode	C	This IE shall be present if it is changed.
+	-	-	-	X	Steering Mode
+Update 3GPP Access Forwarding Action Information	C	This IE shall be present if the 3GPP Access Forwarding Action Information was provisioned previously and if any of IEs is to be changed.
+
+This IE shall also be present to remove 3GPP Access Forwarding Action Information that was provisioned previously if the UE deregisters from the corresponding access. This shall be done by including this IE with a null length.	-	-	-	X	Update 3GPP Access Forwarding Action Information
+Update Non-3GPP Access Forwarding Action Information	C	This IE shall be present if the Non-3GPP Access Forwarding Action Information was provisioned previously and if any of IEs is to be changed.
+
+This IE shall also be present to remove the Non-3GPP Access Forwarding Action Information that was provisioned previously if the UE deregisters from the corresponding access. This shall be done by including this IE with a null length.
+	-	-	-	X	Update Non-3GPP Access Forwarding Action Information 
+3GPP Access Forwarding Action Information	C	This IE shall be present to provision 3GPP access specific forwarding action information when this access is added, i.e. when the UE registers to 3GPP access.
+
+See Table 7.5.2.8-2. 	-	-	-	X	3GPP Access Forwarding Action Information 
+Non-3GPP Access Forwarding Action Information	C	This IE shall be present to provision Non-3GPP access specific forwarding action information when this access is added, i.e. when the UE registers to non-3GPP access.
+See Table 7.5.2.8-3. 	-	-	-	X	Non-3GPP Access Forwarding Action Information 
+
+Table 7.5.4.16-2: Update 3GPP Access Forwarding Action Information IE in Update MAR IE
+Octet 1 and 2		Update 3GPP Access Forwarding Action Information IE Type = 175 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+FAR ID	C	This IE shall be present if it is changed. 	-	-	-	X	FAR ID
+Weight	C	This IE shall be present if it is changed.	-	-	-	X	Weight
+Priority	C	This IE shall be present if it is changed.	-	-	-	X	Priority
+URR ID 	C	This IE shall be present if a measurement action shall be applied or no longer applied to packets for this access.
+
+When present, this IE shall contain the list of all the URR IDs to be associated to this access.	-	-	-	X	URR ID
+
+Table 7.5.4.16-3: Update Non-3GPP Access Forwarding Action Information IE in Update MAR IE
+Octet 1 and 2		Update Non-3GPP Access Forwarding Action Information IE Type = 176 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Same IEs and requirements as defined in Table 7.5.4.16-2
+
+7.5.4.17	Create PDR/FAR/URR/QER/BAR/MAR IEs within PFCP Session Modification Request
+PFCP Session Modification Request message may conditionally include Create PDR IE, Create FAR IE, Create URR IE, Create QER IE, Create BAR IE and Create MAR IE. The encoding of these IEs are specified within PFCP Session Establishment Request message (see clauses 7.5.2.2 – 7.5.2.8).
+7.5.4.18	TSC Management Information IE within PFCP Session Modification Request
+The TSC Management Information grouped IE shall be encoded as shown in Table 7.5.4.18-1.
+Table 7.5.4.18-1: TSC Management Information IE within PFCP Session Modification Request
+Octet 1 and 2		TSC Management Information IE Type = 199 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+Port Management Information Container	O	When present, this IE shall contain a Port Management Information container. 	-	-	-	X	Port Management Information Container
+Bridge Management Information Container	O	When present, this IE shall contain a Bridge Management Information container.	-	-	-	X	Bridge Management Information Container
+NW-TT Port Number	C	When PMIC IE is present, this IE shall contain the related NW-TT Port Number. 	-	-	-	X	NW-TT Port Number
+
+7.5.4.19	Remove SRR IE within PFCP Session Modification Request
+The Remove SRR grouped IE shall be encoded as shown in Figure 7.5.4.19-1.
+Table 7.5.4.19-1: Remove SRR IE within PFCP Session Modification Request
+Octet 1 and 2		Remove SRR IE Type = 211 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+SRR ID	M	This IE shall identify the SRR to be deleted.	-	-	-	X	SRR ID
+
+7.5.4.20	Update SRR IE within PFCP Session Modification Request
+The Update SRR grouped IE shall be encoded as shown in Figure 7.5.4.20-1.
+Table 7.5.4.20-1: Update SRR IE within PFCP Session Modification Request
+Octet 1 and 2		Update SRR IE Type = 213 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+SRR ID	M	This IE shall uniquely identify the SRR among all the SRRs configured for that PFCP session	-	-	-	X	SRR ID
+Access Availability Control Information	C	This IE shall be present if the Access Availability Control Information needs to be modified. See Table 7.5.2.9-2.
+
+The CP function shall provide the full Access Availability Control Information IE. The UP function shall replace the Access Availability Control Information IE provisioned earlier, if any, by the new received IE.	-	-	-	X	Access Availability Control Information
+QoS Monitoring per QoS flow Control Information	C	This IE shall be present if the QoS Monitoring per QoS flow Control Information needs to be modified. See Table 7.5.2.9-3.
+The CP function shall provide the full set of QoS Monitoring per QoS flow Control Information IE(s). The UP function shall replace any QoS Monitoring per QoS flow Control Information IE(s) provisioned earlier by the new set of received IE(s).
+Several IEs within the same IE type may be present to represent a list of QoS Monitoring per QoS flow Control Information for different QoS flows.	-	-	-	X	QoS Monitoring per QoS flow Control Information
+
+7.5.4.21	Ethernet Context Information within PFCP Session Modification Request
+The Ethernet Context Information grouped IE shall be encoded as shown in Figure 7.5.4.21-1.
+Table 7.5.4.21-1: Ethernet Context Information IE within PFCP Session Modification Request
+Octet 1 and 2		Ethernet Context Information IE Type = 254 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+MAC Addresses Detected	M	This IE shall be present if one or more MAC addresses need to be associated to the PDU session.
+Several IEs with the same IE type may be present to provision multiple lists of MAC addresses (e.g. with different V-LAN tags).	-	-	-	X	MAC Addressed Detected
+
+7.5.4.22	Query Packet Rate Status IE within PFCP Session Modification Request
+The Query Packet Rate Status grouped IE shall be encoded as shown in Figure 7.5.4.22-1.
+Table 7.5.4.22-1: Query Packet Rate Status IE within PFCP Session Modification Request
+Octet 1 and 2		Query Packet Rate Status IE Type = 263 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+QER ID	M	This IE shall identify the QER being queried for its Packet Rate Status	-	X	-	X	QER ID
+
+
+8.2.3	F-TEID
+The F-TEID IE type shall be encoded as shown in Figure 8.2.3-1. It indicates an F-TEID.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 21 (decimal)	
+	3 to 4	Length = n	
+	5 	Spare	CHID	CH	V6	V4	
+	6 to 9 	TEID	
+	m to (m+3) 	IPv4 address	
+	p to (p+15) 	IPv6 address	
+	q 	CHOOSE ID	
+	k to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.3-1: F-TEID
+The following flags are coded within Octet 5:
+-	Bit 1 – V4: If this bit is set to "1" and the CH bit is not set, then the IPv4 address field shall be present, otherwise the IPv4 address field shall not be present.
+-	Bit 2 – V6: If this bit is set to "1" and the CH bit is not set, then the IPv6 address field shall be present, otherwise the IPv6 address field shall not be present.
+-	Bit 3 – CH (CHOOSE): If this bit is set to "1", then the TEID, IPv4 address and IPv6 address fields shall not be present and the UP function shall assign an F-TEID with an IP4 or an IPv6 address if the V4 or V6 bit is set respectively. This bit shall only be set by the CP function.
+-	Bit 4 – CHID (CHOOSE ID): If this bit is set to "1", then the UP function shall assign the same F-TEID to the PDRs requested to be created in a PFCP Session Establishment Request or PFCP Session Modification Request with the same CHOOSE ID value. This bit may only be set to "1" if the CH bit it set to "1". This bit shall only be set by the CP function.
+-	Bit 5 to 8: Spare, for future use and set to "0".
+At least one of the V4 and V6 flags shall be set to "1", and both may be set to "1" for both scenarios:
+-	when the CP function is providing F-TEID, i.e. both IPv4 address field and IPv6 address field may be present; or
+-	when the UP function is requested to allocate the F-TEID, i.e. when CHOOSE bit is set to "1", and the IPv4 address and IPv6 address fields are not present.
+Octet 6 to 9 (TEID) shall be present and shall contain a GTP-U TEID, if the CH bit in octet 5 is not set. When the TEID is present, if both IPv4 and IPv6 addresses are present in the F-TEID IE, then the TEID value shall be shared by both addresses.
+Octets "m to (m+3)" and/or "p to (p+15)" (IPv4 address / IPv6 address fields), if present, it shall contain the respective IP address values.
+Octet q shall be present and shall contain a binary integer value if the CHID bit in octet 5 is set to "1".
+
+8.2.5	SDF Filter
+The SDF Filter IE type shall be encoded as shown in Figure 8.2.5-1. It contains an SDF Filter, i.e. a single IP flow packet filter.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 23 (decimal)	
+	3 to 4	Length = n	
+	5	Spare	BID	FL	SPI	TTC	FD	
+	6	Spare	
+	m to (m+1)	Length of Flow Description	
+	(m+2) to p	Flow Description	
+	s to (s+1)	ToS Traffic Class	
+	t to (t+3)	Security Parameter Index	
+	v to (v+2)	Flow Label	
+	w to (w+3)	SDF Filter ID	
+	x to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.5-1: SDF Filter
+The following flags are coded within Octet 5:
+-	Bit 1 – FD (Flow Description): If this bit is set to "1", then the Length of Flow Description and the Flow Description fields shall be present, otherwise they shall not be present.
+-	Bit 2 – TTC (ToS Traffic Class): If this bit is set to "1", then the ToS Traffic Class field shall be present, otherwise the ToS Traffic Class field shall not be present.
+-	Bit 3 – SPI (Security Parameter Index): If this bit is set to "1", then the Security Parameter Index field shall be present, otherwise the Security Parameter Index field shall not be present.
+-	Bit 4 – FL (Flow Label): If this bit is set to "1", then the Flow Label field shall be present, otherwise the Flow Label field shall not be present.
+-	Bit 5 – BID (Bidirectional SDF Filter): If this bit is set to "1", then the SDF Filter ID shall be present, otherwise the SDF Filter ID shall not be present.
+-	Bit 6 to 8: Spare, for future use and set to "0".
+The Flow Description field, when present, shall be encoded as an OctetString as specified in clause 5.4.2 of 3GPP TS 29.212 [8].
+The ToS Traffic Class field, when present, shall be encoded as an OctetString on two octets as specified in clause 5.3.15 of 3GPP TS 29.212 [8].
+The Security Parameter Index field, when present, shall be encoded as an OctetString on four octets and shall contain the IPsec security parameter index (which is a 32-bit field), as specified in clause 5.3.51 of 3GPP TS 29.212 [8].
+The Flow Label field, when present, shall be encoded as an OctetString on 3 octets as specified in clause 5.3.52 of 3GPP TS 29.212 [8] and shall contain an IPv6 flow label (which is a 20-bit field). The bits 8 to 5 of the octet "v" shall be spare and set to zero, and the remaining 20 bits shall contain the IPv6 flow label.
+An SDF Filter may:
+-	be a pattern for matching the IP 5 tuple (source IP address or IPv6 network prefix, destination IP address or IPv6 network prefix, source port number, destination port number, protocol ID of the protocol above IP). In the pattern:
+-	a value left unspecified in a filter matches any value of the corresponding information in a packet;
+-	an IP address may be combined with a prefix mask;
+-	port numbers may be specified as port ranges;
+-	the pattern can be extended by the Type of Service (TOS) (IPv4) / Traffic class (IPv6) and Mask;
+-	consist of the destination IP address and optional mask, protocol ID of the protocol above IP, the Type of Service (TOS) (IPv4) / Traffic class (IPv6) and Mask and the IPsec Security Parameter Index (SPI);
+-	consist of the destination IP address and optional mask, the Type of Service (TOS) (IPv4) / Traffic class (IPv6) and Mask and the Flow Label (IPv6);
+NOTE 1:	The details about the IPsec Security Parameter Index (SPI), the Type of Service (TOS) (IPv4) / Traffic class (IPv6) and Mask and the Flow Label (IPv6) are defined in 3GPP TS 23.060 [19] clause 15.3.
+-	extend the packet inspection beyond the possibilities described above and look further into the packet. Such service data flow filters need to be predefined in the PGW-U, as specified in clause 5.11 of 3GPP TS 23.214 [2].
+NOTE 2:	Such filters may be used to support filtering with respect to a service data flow based on the transport and application protocols used above IP, e.g. for HTTP and WAP. Filtering for further application protocols and services can also be supported.
+The SDF Filter ID, when present, shall be encoded as an Unsigned32 binary integer value. It shall uniquely identify an SDF Filter among all the SDF Filters provisioned for a given PFCP Session. The source/destination IP address and port information, in a bidirectional SDF Filter, shall be set as for downlink IP flows. The SDF filter for the opposite direction has the same parameters, but having the source and destination address/port parameters swapped. When being provisioned with a bidirectional SDF filter in a PDR, the UP function shall apply the SDF filter as specified in clause 5.2.1A.2A.
+
+8.2.26	Apply Action
+The Apply Action IE indicates the action(s) the UP function is required to apply to packets. It is coded as shown in Figure 8.2.26-1.
+
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 44 (decimal)	
+	3 to 4	Length = n	
+	5	DFRT	IPMD	IPMA	DUPL	NOCP	BUFF	FORW	DROP	
+	6	Spare	DDPN	BDPN	EDRT	
+	7 to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.26-1: Apply Action
+The octet 5 shall be encoded as follows:
+-	Bit 1 – DROP (Drop): when set to "1", this indicates a request to drop the packets.
+-	Bit 2 – FORW (Forward): when set to "1", this indicates a request to forward the packets.
+-	Bit 3 – BUFF (Buffer): when set to "1", this indicates a request to buffer the packets.
+-	Bit 4 – NOCP (Notify the CP function): when set to "1", this indicates a request to notify the CP function about the arrival of a first downlink packet being buffered.
+-	Bit 5 – DUPL (Duplicate): when set to "1", this indicates a request to duplicate the packets.
+-	Bit 6 – IPMA (IP Multicast Accept): when set to "1", this indicates a request to accept UE requests to join an IP multicast group.
+-	Bit 7 – IPMD (IP Multicast Deny): when set to "1", this indicates a request to deny UE requests to join an IP multicast group.
+-	Bit 8 – DFRT (Duplicate for Redundant Transmission): when set to "1", this indicates a request to duplicate the packets for redundant transmission (see clause 5.24.2).
+The octet 6 shall be encoded as follows:
+-	Bit 1 – EDRT (Eliminate Duplicate Packets for Redundant Transmission): when set to "1", this indicates a request to eliminate duplicate packets used for redundant transmission (see clause 5.24.2).
+-	Bit 2 – BDPN (Buffered Downlink Packet Notification): when set to "1", this indicates a request to notify the CP function about the first buffered DL packet for downlink data delivery status notification.
+-	Bit 3 – DDPN (Discarded Downlink Packet Notification): when set to "1", this indicates a request to notify the CP function about the first discarded DL packet for downlink data delivery status notification if the DL Buffering Duration or DL Buffering Suggested Packet Count is exceeded or it is discarded directly. See clause 5.2.3.1.
+-	Bit 4 to 8 – Spare, for future use and seto to "0".
+One and only one of the DROP, FORW, BUFF, IPMA and IPMD flags shall be set to "1".
+The NOCP flag and BDPN flag may only be set if the BUFF flag is set.
+The DUPL flag may be set with any of the DROP, FORW, BUFF and NOCP flags.
+The DFRN flag may only be set if the FORW flag is set.
+The EDRT flag may be set if the FORW flag is set.
+The DDPN flag may be set with any of the DROP and BUFF flags.
+
+8.2.41	Usage Report Trigger
+The Usage Report Trigger IE shall be encoded as shown in Figure 8.2.41-1. It indicates the trigger of the usage report.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 63 (decimal)	
+	3 to 4	Length = n	
+	5	IMMER	DROTH	STOPT	START	QUHTI	TIMTH	VOLTH	PERIO	
+	6
+	EVETH	MACAR	ENVCL	MONIT	TERMR	LIUSA	TIMQU	VOLQU	
+	7	Spare	Spare	Spare	EMRRE	QUVTI	IPMJL	TEBUR	EVEQU	
+	8 to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.41-1: Usage Report Trigger
+Octet 5 shall be encoded as follows:
+-	Bit 1 – PERIO (Periodic Reporting): when set to "1", this indicates a periodic report.
+-	Bit 2 – VOLTH (Volume Threshold): when set to "1", this indicates that the data volume usage reaches a volume threshold.
+-	Bit 3 – TIMTH (Time Threshold): when set to "1", this indicates that the time usage reaches a time threshold.
+-	Bit 4 – QUHTI (Quota Holding Time): when set to "1", this indicates that no packets have been received for a period exceeding the Quota Holding Time.
+-	Bit 5 – START (Start of Traffic): when set to "1", this indicates that the start of traffic is detected.
+-	Bit 6 – STOPT (Stop of Traffic): when set to "1", this indicates that the stop of traffic is detected.
+-	Bit 7 - DROTH (Dropped DL Traffic Threshold): when set to "1", this indicates that the DL traffic being dropped reaches a threshold.
+-	Bit 8 – IMMER (Immediate Report): when set to "1", this indicates an immediate report reported on CP function demand.
+Octet 6 shall be encoded as follows:
+-	Bit 1 – VOLQU (Volume Quota): when set to "1", this indicates that the Volume Quota has been exhausted.
+-	Bit 2 – TIMQU (Time Quota): when set to "1", this indicates that the Time Quota has been exhausted.
+-	Bit 3 - LIUSA (Linked Usage Reporting): when set to "1", this indicates a linked usage report, i.e. a usage report being reported for a URR due to a usage report being also reported for a linked URR (see clause 5.2.2.4).
+-	Bit 4 – TERMR (Termination Report): when set to "1", this indicates a usage report being reported (in a PFCP Session Deletion Response) for a URR due to the termination of the PFCP session, or a usage report being reported (in a PFCP Session Modification Response) for a URR due to the removal of the URR or dissociated from the last PDR.
+-	Bit 5 – MONIT (Monitoring Time): when set to "1", this indicates a usage report being reported for a URR due to the Monitoring Time being reached.
+-	Bit 6 – ENVCL (Envelope Closure): when set to "1", this indicates the usage report is generated for closure of an envelope (see clause 5.2.2.3).
+-	Bit 7 – MACAR (MAC Addresses Reporting): when set to "1", this indicates a usage report to report MAC (Ethernet) addresses used as source address of frames sent UL by the UE.
+-	Bits 8: EVETH (Event Threshold): when set to "1", this indicates a usage report is generated when an event threshold is reached.
+Octet 7 shall be encoded as follows:
+-	Bit 1 – EVEQU (Event Quota): when set to "1", this indicates that the Event Quota has been exhausted.
+-	Bit 2 – TEBUR (Termination By UP function Report): when set to "1", this indicates a usage report being reported for a URR due to the termination of the PFCP session which is initiated by the UP function.
+-	Bit 3 – IPMJL (IP Multicast Join/Leave): when set to "1", this indicates a usage report being reported for a URR due to the UPF adding or removing the PDU session to/from the DL replication tree associated with an IP multicast flow.
+-	Bit 4 – QUVTI (Quota Validity Time): when set to "1", this indicates a usage report being reported for a URR due to the quota validity timer expiry.
+-	Bit 5 – EMRRE (End Marker Reception REport): this indicates that the UP function has received End Marker from the old I-UPF. See clauses 4.2.3.2 and 4.23.4.3 in 3GPP TS 23.502 [29])
+-	Bit 6 to 8: Spare, for future use and set to "0".
+At least one bit shall be set to "1". Several bits may be set to "1".
+
+8.2.62	UE IP Address
+The UE IP Address IE type shall be encoded as shown in Figure 8.2.62-1. It contains a source or destination IP address.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 93 (decimal)	
+	3 to 4	Length = n	
+	5	Spare	IP6PL	CHV6	CHV4	IPv6D	S/D	V4	V6	
+	m to (m+3)	IPv4 address	
+	p to (p+15)	IPv6 address 	
+	r	IPv6 Prefix Delegation Bits	
+	s	IPv6 Prefix Length	
+	k to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.62-1: UE IP Address
+The following flags are coded within Octet 5:
+-	Bit 1 – V6: If this bit is set to "1", then the CHV6 bit shall not be set and the IPv6 address field shall be present in the UE IP Address, otherwise the IPv6 address field shall not be present.
+-	Bit 2 – V4: If this bit is set to "1", then the CHV4 bit sshall not be set and the IPv4 address field shall be present in the UE IP Address, otherwise the IPv4 address field shall not be present.
+-	Bit 3 – S/D: This bit is only applicable to the UE IP Address IE in the PDI IE. It shall be set to "0" and ignored by the receiver in IEs other than PDI IE. In the PDI IE, if this bit is set to "0", this indicates a Source IP address; if this bit is set to "1", this indicates a Destination IP address.
+-	Bit 4 – IPv6D: This bit is only applicable to the UE IP address IE in the PDI IE and when the V6 bit or CHV6 bit is set to "1". If this bit is set to "1", then the IPv6 Prefix Delegation Bits field shall be present, otherwise the UP function shall consider IPv6 prefix is default /64.
+-	Bit 5 – CHV4 (CHOOSE IPV4): If this bit is set to "1", then the V4 bit shall not be set, the IPv4 address shall not be present and the UP function shall assign an IPv4 address. This bit shall only be set by the CP function.
+-	Bit 6 – CHV6 (CHOOSE IPV6): If this bit is set to "1", then the V6 bit shall not be set, the IPv6 address shall not be present and the UP function shall assign an IPv6 address. This bit shall only be set by the CP function.
+-	Bit 7 – IP6PL (IPv6 Prefix Length): this bit is only applicable when the V6 bit or CHV6 bit is set to "1" and the "IPv6D" bit is set to "0", for an IPv6 prefix other than default /64, when the UP function supports the IP6PL feature as specified in clause 8.2.25. If this bit is set to "1", then the IPv6 Prefix Length field shall be present.
+-	Bit 8 Spare, for future use and set to "0".
+Octets "m to (m+3)" or "p to (p+15)" (IPv4 address / IPv6 address fields), if present, shall contain the address value.
+Octet r, if present, shall contain the number of bits allocated for IPv6 prefix delegation (relative to the default /64 IPv6 prefix), e.g. if /60 IPv6 prefix is used, the value shall be set to "4". When using UE IP address IE in a PDI to match packets, the UP function shall only use the IPv6 prefix part and ignore the interface identifier part. When the field is set to "0", the UP function shall determine a value based on the local configuration.
+The IPv6 Prefix Length in octet s, when present, shall be encoded as an 8 bits binary integer, e.g. if /72 prefix is used, the value shall be set to to (decimal) 72, or if /56 prefix is used, the value shall be set to (decimal) 56. The prefix length value "128" indicates an individual /128 IPv6 address. When the field is set to "0", the UP function shall determine a value based on the local configuration.

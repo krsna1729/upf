@@ -1,5 +1,8 @@
 # The datapath: modules, resources and placement
 
+Section references in this document are to the pinned 3GPP Release 16
+excerpts in `docs/spec/`; the claims register names the exact version and clause
+for every conformance claim.
 Claims -- what is verified, and by which evidence -- live in
 `docs/claims.md`; this document explains mechanisms, not status.
 
@@ -133,7 +136,8 @@ matcher's seam, not a module class: it is the only implementation of
 | `gtpu_responder.{h,cc}` | `gtpu_responder` | none | `port_`, a Recovery Time Stamp | all |
 | `urr_count.{h,cc}` | `urr_count` | `<module>/counters` (`CounterKey{action_id}`) | per-worker cell planes, per-rule stamp pairs | all |
 | `arp_responder.{h,cc}` | `upf_arp_responder` | `<module>/entries` (IPv4, host order) | the slot table's mask and its live count | all |
-| `pdr_match.{h,cc}` + `pdr_match_scan.cc` | `pdr_match` | `<module>/rules` (session id → its rule list), `<module>/settings` | the key/action/QFI attribute ids and the settings singleton | all |
+| `pdr_match.{h,cc}` + `pdr_match_scan.cc` | `pdr_match` | `<module>/rules` (session id → its rule list), `<module>/settings` | the key/action/QFI/steering attribute ids and the settings singleton | all |
+| `atsss_steer.{h,cc}` | `AtsssSteer` | `<module>/policies` (global policy id), `<module>/health` (access) | the policy attribute id, the next-hop/tunnel/accounting attribute ids | all |
 
 `PdrMatch` is the custom profile's matcher (`deploy/custom-pdrmatch.yaml`): the
 session is the packet's key attribute (`upf_teid` on the uplink, the selector's
@@ -141,9 +145,9 @@ session is the packet's key attribute (`upf_teid` on the uplink, the selector's
 carries the rule's ActionId so the rest of the chain is unchanged. The default
 graphs use the shared `WildcardMatch` tables instead.
 
-Four resource kinds, then: the encap's tunnels and the counters (one instance
+Five resource kinds, then: the encap's tunnels, the counters (one instance
 per direction, plus one on the buffering branch), the custom profile's PDR map,
-and the responder's entries. The tunnels and counters are keyed by an action id
+the responder's entries, and the steering module's policies and health. The tunnels and counters are keyed by an action id
 the compiler hands out; the PDR map is keyed by the session; an ARP entry's key
 is the subscriber's own address, which two sessions of one deployment must not
 both hold (`internal/session/arp.go` claims it like a rule key). Every one of
@@ -180,11 +184,34 @@ write would let one packet's QFI reach the next packet's rule lookup. The reader
 table: `pdr_ul`'s match `fields` name the attribute, and a rule's mask is
 `0xff` when its PDR named a QFI and `0x00` when it did not.
 
+### `atsss_steer` — the two-access choice
+
+A downlink PDR may name a MAR instead of a FAR (TS 29.244 7.5.2.2 and 7.5.2.8).
+The compiler resolves the MAR's 3GPP and non-3GPP access actions to Router next
+hops and, where an access adds an outer header, to its own GtpuEncap tunnel
+records; the PDR's matcher rule carries the compiler-allocated policy id in
+`steering_policy_id` (the matcher's `steering_attr`). `AtsssSteer` reads that id after the action
+table, selects an access, and writes `next_hop_id`, `tunnel_id` and the optional
+`accounting_id`. The encap reads `tunnel_id` when the graph declares it and
+falls back to `action_id` for a packet whose value is 0 (not steered), so a
+mixed deployment needs one encap module, not two.
+
+The policy is one immutable object keyed by the compiler-allocated policy id;
+the health table is keyed by access, so one access's status is shared by every policy that uses it. A
+missing health record means "not monitored" and counts as available; a missing
+policy, or neither access usable, drops the packet. Policy id 0 means "not
+steered" and passes the packet through with the action table's own next hop and
+tunnel. Only Steering Mode active/standby is applied; the other modes are
+refused with cause 73 at PFCP time rather than programmed as a different
+policy.
+
 ### `gtpu_encap` — the N3 exit
 
 Writes the outer Eth/IPv4/UDP/GTP-U around a downlink packet from the tunnel
-record the packet's ActionId names — `{teid, gnb_ip, ether_src, ether_dst,
-qfi, marking}` — copying the inner TOS onto the outer header (the RAN's
+record the packet's ActionId names -- or, in an ATSSS graph, the `tunnel_id`
+AtsssSteer selected, with `action_id` as the fallback for a packet that was not
+steered -- `{teid, gnb_ip, ether_src, ether_dst, qfi, marking}`, copying the
+inner TOS onto the outer header (the RAN's
 transport is DSCP-marked; dropping it would send every downlink packet as best
 effort) and recomputing lengths and checksums. One record per downlink rule: the
 controller resolves the FAR once, at programming time, so the packet path does

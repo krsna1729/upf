@@ -116,6 +116,14 @@ func pdrsInOrder(s *Session) []*pdr {
 	return out
 }
 
+func marsInOrder(s *Session) []*mar {
+	out := make([]*mar, 0, len(s.MARs))
+	for _, id := range idsOf(s.MARs) {
+		out = append(out, s.MARs[id])
+	}
+	return out
+}
+
 func qersInOrder(s *Session) []*qer {
 	out := make([]*qer, 0, len(s.QERs))
 	for _, id := range idsOf(s.QERs) {
@@ -193,8 +201,13 @@ type pdrReq struct {
 	// named none must not resolve to it.
 	hasFarID bool
 	farID    uint32
-	qerIDs   []uint32
-	urrIDs   []uint32
+	// hasMAR and marID are the PDR's MAR ID (TS 29.244 8.2.34): when set, the
+	// MAR's two accesses decide where the packet goes and the PDR's own FAR
+	// must be absent. MAR 0 is not a policy this side serves.
+	hasMAR bool
+	marID  uint16
+	qerIDs []uint32
+	urrIDs []uint32
 
 	// instance is the PDI's Network Instance (TS 29.244 8.2.4): the deployment
 	// interface this rule belongs to, empty when the SMF named none.
@@ -219,6 +232,27 @@ type pdrReq struct {
 	// Zero is a legal CHOOSE ID, so the flag and the value are two fields.
 	hasCHID bool
 	chid    uint8
+}
+
+// marReq is one Create MAR or Update MAR (TS 29.244 7.5.2.8): the access
+// forwarding action information for the 3GPP and non-3GPP accesses, and the
+// mode that says how they are chosen between.
+type marReq struct {
+	create bool
+	hasID  bool
+	id     uint16
+
+	hasFunctionality bool
+	functionality    uint8
+	hasMode          bool
+	mode             uint8
+
+	// haveAccess says which access IEs the message carried: an Update MAR may
+	// name one access and keep the other as the session has it. removeAccess
+	// is a null-length Update access IE, which deregisters that access.
+	haveAccess   [2]bool
+	removeAccess [2]bool
+	access       [2]marAccess
 }
 
 type farReq struct {
@@ -465,7 +499,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		// the SEID field, and 0 names no session).
 		return c.establishResponse(req, 0, 0, ie.CauseMandatoryIEMissing, nil)
 	}
-	pdrs, fars, bars, qers, urrs, err := parseCreate(ies)
+	pdrs, fars, bars, qers, urrs, mars, err := parseCreate(ies)
 	if err != nil {
 		c.log.Warn("session: cannot read the establishment request", "error", err)
 		return c.establishResponse(req, cpSEID, 0, parseCause(err), nil)
@@ -492,9 +526,10 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		QERs:      map[uint32]*qer{},
 		URRs:      map[uint32]*urr{},
 		BARs:      map[uint8]*bar{},
+		MARs:      map[uint16]*mar{},
 		chids:     map[uint8]uint32{},
 	}
-	if err := c.merge(s, pdrs, fars, bars, qers, urrs, removals{}); err != nil {
+	if err := c.merge(s, pdrs, fars, bars, qers, urrs, mars, removals{}); err != nil {
 		c.log.Warn("session: cannot carry the establishment request",
 			"cp_seid", cpSEID, "error", err)
 		// merge allocates as it goes (the F-TEID among them) and refuses when a
@@ -585,7 +620,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	}
 
 	ies := modificationIEs(req)
-	pdrs, fars, bars, qers, urrs, err := parseCreate(ies)
+	pdrs, fars, bars, qers, urrs, mars, err := parseCreate(ies)
 	if err != nil {
 		c.log.Warn("session: cannot read the modification request", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, parseCause(err), nil)
@@ -656,7 +691,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	c.mu.Lock()
 	before := s.snapshot()
 	c.mu.Unlock()
-	if err := c.merge(s, pdrs, fars, bars, qers, urrs, rm); err != nil {
+	if err := c.merge(s, pdrs, fars, bars, qers, urrs, mars, rm); err != nil {
 		c.mu.Lock()
 		c.rollback(s, before)
 		c.mu.Unlock()
@@ -840,7 +875,7 @@ func mergeBars(s *Session, bars []barReq) {
 
 // merge folds a request's objects into the session's model.
 func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq, qers []qerReq,
-	urrs []urrReq, rm removals) error {
+	urrs []urrReq, mars []marReq, rm removals) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -985,6 +1020,69 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				errMandatoryIE, entry.id)
 		}
 	}
+	for _, m := range mars {
+		entry := s.MARs[m.id]
+		if entry == nil {
+			if !m.create {
+				return fmt.Errorf("%w: the MAR %d is not in the session", errNotExpressible, m.id)
+			}
+			entry = &mar{id: m.id}
+			s.MARs[m.id] = entry
+		}
+		if m.hasFunctionality {
+			if m.functionality != ie.SteeringFunctionalityATSSSLL {
+				return fmt.Errorf(
+					"%w: MAR %d asks for Steering Functionality %d; this UP applies ATSSS-LL only",
+					errNotExpressible, m.id, m.functionality)
+			}
+		} else if m.create {
+			return fmt.Errorf(
+				"%w: Create MAR %d names no Steering Functionality (Table 7.5.2.8-1)",
+				errMandatoryIE, m.id)
+		}
+		if m.hasMode {
+			if m.mode != ie.SteeringModeActiveStandby {
+				return fmt.Errorf(
+					"%w: MAR %d asks for Steering Mode %d; this UP applies active/standby only",
+					errNotExpressible, m.id, m.mode)
+			}
+			entry.mode = m.mode
+		} else if m.create {
+			return fmt.Errorf(
+				"%w: Create MAR %d names no Steering Mode (Table 7.5.2.8-1)",
+				errMandatoryIE, m.id)
+		}
+		for which := 0; which < 2; which++ {
+			if !m.haveAccess[which] {
+				continue
+			}
+			if m.removeAccess[which] {
+				entry.accesses[which] = marAccess{}
+				continue
+			}
+			if m.create {
+				entry.accesses[which] = m.access[which]
+				continue
+			}
+			// Update access IEs carry only the fields that changed
+			// (Table 7.5.4.16-2): merge those, keep the rest.
+			access := entry.accesses[which]
+			if m.access[which].hasFarID {
+				access.farID, access.hasFarID = m.access[which].farID, true
+			}
+			if m.access[which].hasPrior {
+				access.priority, access.hasPrior = m.access[which].priority, true
+			}
+			if m.access[which].hasWeight {
+				access.weight, access.hasWeight = m.access[which].weight, true
+			}
+			entry.accesses[which] = access
+		}
+		if !entry.accesses[0].hasFarID && !entry.accesses[1].hasFarID {
+			return fmt.Errorf(
+				"%w: MAR %d names no access forwarding action information", errMandatoryIE, m.id)
+		}
+	}
 	mergeBars(s, bars)
 	for _, u := range urrs {
 		entry := s.URRs[u.id]
@@ -1073,7 +1171,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			id: p.id, precedence: p.precedence, srcIfc: p.srcIfc,
 			down: downSide(p.srcIfc),
 			ueIP: p.ueIP, ueIPDst: p.ueIPDst, sdfs: p.sdfs, farID: p.farID,
-			qerIDs: p.qerIDs, urrIDs: p.urrIDs,
+			hasMAR: p.hasMAR, marID: p.marID, qerIDs: p.qerIDs, urrIDs: p.urrIDs,
 			instance: p.instance, qfis: p.qfis,
 		}
 		if old != nil {
@@ -1160,6 +1258,22 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 		s.PDRs[p.id] = pdr
 	}
+	// A removed MAR that a PDR still names is refused: the PDR's only egress
+	// would be gone, and the packet path would drop it with no cause the SMF
+	// could see. This is read after the PDRs are folded in, so a message that
+	// removes the PDR and its MAR together is accepted.
+	for _, id := range rm.mars {
+		for _, p := range s.PDRs {
+			if p.hasMAR && p.marID == id {
+				return fmt.Errorf(
+					"%w: MAR %d is still named by PDR %d", errNotExpressible, id, p.id)
+			}
+		}
+		if old := s.MARs[id]; old != nil {
+			s.removedMARs = append(s.removedMARs, old)
+			delete(s.MARs, id)
+		}
+	}
 	createdQERs := make(map[uint32]bool, len(qers))
 	for _, q := range qers {
 		createdQERs[q.id] = true
@@ -1221,6 +1335,162 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	return nil
 }
 
+// resolveMAR derives one MAR's two accesses into the packet path's numbers: the
+// Router next hop each FAR leaves by, the tunnel record an access that adds an
+// outer header names, and the preferred access the priority IE selects. It is
+// called for every MAR the session holds, and is idempotent: a tunnel id
+// allocated by an earlier compile is kept.
+func (c *Compiler) resolveMAR(s *Session, m *mar) error {
+	if m.mode != ie.SteeringModeActiveStandby {
+		return fmt.Errorf("%w: MAR %d uses Steering Mode %d; this UP applies active/standby only",
+			errNotExpressible, m.id, m.mode)
+	}
+	if m.policyID == 0 {
+		id, err := c.policies.alloc()
+		if err != nil {
+			return fmt.Errorf("MAR %d: allocating a steering policy: %w", m.id, err)
+		}
+		m.policyID = id
+	}
+	ifc, err := c.marInterface(s, m.id)
+	if err != nil {
+		return err
+	}
+	active := -1
+	for which := 0; which < 2; which++ {
+		access := &m.accesses[which]
+		if !access.hasFarID {
+			// The access is not provisioned (the SMF omitted it, which
+			// active/standby allows for an access with no standby).
+			continue
+		}
+		switch access.priority {
+		case ie.PriorityActive:
+			if active != -1 {
+				return fmt.Errorf("%w: MAR %d names both accesses active", errNotExpressible, m.id)
+			}
+			active = which
+		case ie.PriorityStandby, ie.PriorityNoStandby:
+			// No Standby is an access that is present but never selected as
+			// the standby (Table 7.5.2.8-2). It remains a valid active/standby
+			// access; it is not one of the unsupported modes.
+		default:
+			return fmt.Errorf(
+				"%w: MAR %d's %s access has Priority %d; active/standby needs PriorityActive and PriorityStandby",
+				errNotExpressible, m.id, []string{"3GPP", "non-3GPP"}[which], access.priority)
+		}
+	}
+	if active == -1 {
+		return fmt.Errorf("%w: MAR %d names no active access", errNotExpressible, m.id)
+	}
+	for which := 0; which < 2; which++ {
+		access := &m.accesses[which]
+		if !access.hasFarID || access.priority == ie.PriorityNoStandby {
+			s.retireTunnel(m.tunnelIDs[which])
+			m.nextHops[which] = 0
+			m.tunnelIDs[which] = 0
+			continue
+		}
+		far := s.FARs[access.farID]
+		if far == nil {
+			return fmt.Errorf("%w: MAR %d's %s access names FAR %d, which the session does not hold",
+				errNotExpressible, m.id, []string{"3GPP", "non-3GPP"}[which], access.farID)
+		}
+		if far.apply&applyForw == 0 {
+			return fmt.Errorf("%w: MAR %d's %s access names FAR %d, which does not forward",
+				errNotExpressible, m.id, []string{"3GPP", "non-3GPP"}[which], access.farID)
+		}
+		hop, err := c.egressHop(far, ifc, c.cfg.Down)
+		if err != nil {
+			return err
+		}
+		if hop == 0 {
+			return fmt.Errorf(
+				"%w: MAR %d's %s access has no Router next hop", errNotExpressible,
+				m.id, []string{"3GPP", "non-3GPP"}[which])
+		}
+		m.nextHops[which] = hop
+		if far.hasOuter {
+			if c.cfg.Down.Tunnels == "" {
+				return fmt.Errorf(
+					"%w: MAR %d's %s access adds an outer header, and this deployment's downlink tunnel module is unset (-tunnels)",
+					errNotExpressible, m.id, []string{"3GPP", "non-3GPP"}[which])
+			}
+			if m.tunnelIDs[which] == 0 {
+				id, err := c.actions.alloc()
+				if err != nil {
+					return fmt.Errorf("MAR %d: allocating a tunnel for the %s access: %w",
+						m.id, []string{"3GPP", "non-3GPP"}[which], err)
+				}
+				m.tunnelIDs[which] = id
+			}
+		} else {
+			s.retireTunnel(m.tunnelIDs[which])
+			m.tunnelIDs[which] = 0
+		}
+	}
+	// The preferred access is the active one; the field is an index because
+	// that is what the packet path reads.
+	m.preferred = uint32(active)
+	// The PDR matcher writes the shared policy id, not the session-local MAR
+	// id: two sessions may both use MAR 7 without sharing a policy.
+	for _, p := range pdrsInOrder(s) {
+		if p.hasMAR && p.marID == m.id {
+			p.policyID = m.policyID
+		}
+	}
+	return nil
+}
+
+// marInterface is the deployment interface a MAR's accesses leave by: the PDI
+// interface of the PDR that names it. One MAR is one policy, so every PDR
+// naming it must be in the same interface; two interfaces would need two
+// policies for one pfcp MAR.
+func (c *Compiler) marInterface(s *Session, id uint16) (routing.Interface, error) {
+	var chosen routing.Interface
+	found := false
+	for _, p := range pdrsInOrder(s) {
+		if !p.hasMAR || p.marID != id {
+			continue
+		}
+		ifc, err := c.interfaceFor(p)
+		if err != nil {
+			return routing.Interface{}, err
+		}
+		if !found {
+			chosen, found = ifc, true
+			continue
+		}
+		if ifc.Instance != chosen.Instance || ifc.Domain != chosen.Domain {
+			return routing.Interface{}, fmt.Errorf(
+				"%w: MAR %d is named by PDRs in two network instances (%q and %q)",
+				errNotExpressible, id, chosen.Instance, ifc.Instance)
+		}
+	}
+	if found {
+		return chosen, nil
+	}
+	if c.cfg.Instances != nil {
+		return c.cfg.Instances.Default(), nil
+	}
+	return routing.Interface{}, nil
+}
+
+// retireTunnel records a tunnel record that an update stopped using. compile
+// erases it and settle returns its id after the transaction lands; keeping it
+// only on the MAR would lose it, because resolve overwrites the field.
+func (s *Session) retireTunnel(id uint32) {
+	if id == 0 {
+		return
+	}
+	for _, old := range s.retiredTunnels {
+		if old == id {
+			return
+		}
+	}
+	s.retiredTunnels = append(s.retiredTunnels, id)
+}
+
 // resolve derives what each PDR's FAR and QERs mean for the dataplane: a
 // forward or a drop, the meter of the QER this direction is policed by, and
 // (downlink) the tunnel record the FAR's outer header creation names. compile
@@ -1250,6 +1520,11 @@ func (c *Compiler) resolve(s *Session) error {
 			linkedTo[lid] = true
 		}
 	}
+	for _, id := range idsOf(s.MARs) {
+		if err := c.resolveMAR(s, s.MARs[id]); err != nil {
+			return err
+		}
+	}
 	for _, uid := range urrIDsInOrder(s) {
 		// LIUSA (8.2.19) is the link itself: a URR that asks for Linked Usage
 		// Reporting has no report of its own -- the group's is owed when a URR
@@ -1269,29 +1544,61 @@ func (c *Compiler) resolve(s *Session) error {
 			return err
 		}
 		p.domain = ifc.Domain
-		hop, err := c.egressHop(far, ifc, dir)
-		if err != nil {
-			return err
-		}
-		p.nextHop = hop
-		// A FAR that asks for buffering and not for forwarding (Apply Action
-		// BUFF, 8.2.26) is the idle-UE downlink case: the packets are held and
-		// the SMF is told they arrived. Where the deployment has a store
-		// (Config.Buffering), the rule delivers them on that branch; where it
-		// has none, they are dropped, because delivering traffic the SMF asked
-		// to hold would be worse than dropping it (docs/claims.md's row
-		// over 7.5.2.6).
 		wasBuffering := p.buffer
-		// Buffering is the downlink's: a BAR is the instruction for downlink data
-		// (5.2.4.1), and only the downlink chain has the branch. A BUFF-only FAR
-		// on an uplink PDR -- which no SMF should send -- keeps the drop it had,
-		// rather than gating to a branch that is not in its chain.
-		p.buffer = c.cfg.Buffering != nil && far != nil && p.srcIfc != ie.SrcInterfaceAccess &&
-			far.apply&applyForw == 0 && far.apply&applyBuff != 0
-		// The report is the SMF's to ask for: NOCP is set with BUFF (8.2.26),
-		// and without it the held packets are reported to nobody.
-		p.notify = p.buffer && far.apply&applyNOCP != 0
-		p.drop = far == nil || (far.apply&applyForw == 0 && !p.buffer)
+		if p.hasMAR {
+			// A MAR PDR has no FAR of its own: the MAR's selected access is
+			// the egress, and AtsssSteer writes the next hop and tunnel it
+			// names. The rule's action record still carries the PDR's meter
+			// and counters, so this branch only decides the egress.
+			if !p.down {
+				return fmt.Errorf(
+					"%w: PDR %d names a MAR on the uplink; this UP steers downlink accesses only",
+					errNotExpressible, p.id)
+			}
+			if c.cfg.Atsss == "" {
+				return fmt.Errorf(
+					"%w: PDR %d names MAR %d, and this deployment has no AtsssSteer module (-atsss)",
+					errNotExpressible, p.id, p.marID)
+			}
+			if c.cfg.Down.PdrMatch == "" {
+				return fmt.Errorf(
+					"%w: PDR %d names MAR %d, and the downlink uses no PdrMatch module to write the policy id",
+					errNotExpressible, p.id, p.marID)
+			}
+			m := s.MARs[p.marID]
+			if m == nil {
+				return fmt.Errorf("%w: PDR %d names MAR %d, which the session does not hold",
+					errNotExpressible, p.id, p.marID)
+			}
+			if err := c.resolveMAR(s, m); err != nil {
+				return err
+			}
+			p.nextHop = 0
+			p.drop, p.buffer, p.tunnels = false, false, nil
+		} else {
+			hop, err := c.egressHop(far, ifc, dir)
+			if err != nil {
+				return err
+			}
+			p.nextHop = hop
+			// A FAR that asks for buffering and not for forwarding (Apply Action
+			// BUFF, 8.2.26) is the idle-UE downlink case: the packets are held and
+			// the SMF is told they arrived. Where the deployment has a store
+			// (Config.Buffering), the rule delivers them on that branch; where it
+			// has none, they are dropped, because delivering traffic the SMF asked
+			// to hold would be worse than dropping it (docs/claims.md's row
+			// over 7.5.2.6).
+			// Buffering is the downlink's: a BAR is the instruction for downlink data
+			// (5.2.4.1), and only the downlink chain has the branch. A BUFF-only FAR
+			// on an uplink PDR -- which no SMF should send -- keeps the drop it had,
+			// rather than gating to a branch that is not in its chain.
+			p.buffer = c.cfg.Buffering != nil && far != nil && p.srcIfc != ie.SrcInterfaceAccess &&
+				far.apply&applyForw == 0 && far.apply&applyBuff != 0
+			// The report is the SMF's to ask for: NOCP is set with BUFF (8.2.26),
+			// and without it the held packets are reported to nobody.
+			p.notify = p.buffer && far.apply&applyNOCP != 0
+			p.drop = far == nil || (far.apply&applyForw == 0 && !p.buffer)
+		}
 		if !p.buffer {
 			// The episode is over: this PDR no longer holds packets, so a later
 			// BUFF is a new one and owes its own first-packet report (5.2.4.1),
@@ -1315,6 +1622,7 @@ func (c *Compiler) resolve(s *Session) error {
 		p.meterID = 0
 		p.tunnels = nil
 		p.encapQFI = 0
+		p.hasEncapQFI = false
 		var sharedUL, ownUL, sharedDL, ownDL uint32
 		for _, qid := range p.qerIDs {
 			entry := s.QERs[qid]
@@ -1368,8 +1676,14 @@ func (c *Compiler) resolve(s *Session) error {
 					// with the id the SMF programmed (the last QER that names
 					// one, as the meter is the last that polices).
 					p.encapQFI = entry.qfi
+					p.hasEncapQFI = true
 				}
 			}
+		}
+		if p.hasMAR && p.hasEncapQFI {
+			return fmt.Errorf(
+				"%w: PDR %d names MAR %d and a QER with a QFI; one MAR tunnel is shared by its PDRs, so a per-PDR QFI has no record to carry it",
+				errNotExpressible, p.id, p.marID)
 		}
 		// The meter this PDR is policed by: the session's shared QER when the
 		// PDR names it, else the last rate-bearing QER of its own (which is
@@ -1393,7 +1707,7 @@ func (c *Compiler) resolve(s *Session) error {
 				p.meterID = ownUL
 			}
 		}
-		if far != nil && far.hasOuter {
+		if !p.hasMAR && far != nil && far.hasOuter {
 			if dir.Tunnels == "" {
 				// The FAR adds an outer header, so the forward's packets must
 				// leave in a tunnel -- indirect data forwarding (Destination
@@ -2542,6 +2856,14 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				createdFTEID(p.teid, c.cfg.N3Addr)))
 		}
 	}
+	// The MAR policies and the tunnel records their accesses name, before the
+	// matcher's rules that name them: a rule's steer id is read by AtsssSteer,
+	// whose policy must be live by the time the rule selects a packet.
+	marWrites, err := c.marChanges(s)
+	if err != nil {
+		return nil, nil, err
+	}
+	changes = append(changes, marWrites...)
 	// The firewall policies last: each is the whole policy of its module --
 	// this session's rules and every other live session's -- so it is built
 	// once, after the loop has put this session's PDRs where the model keeps
@@ -2620,6 +2942,97 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	changes = append(changes, matched...)
 	committed = true
 	return changes, created, nil
+}
+
+// marChanges writes the session's MAR policies and the tunnel records their
+// accesses name. It is a no-op for a deployment without steering, which is
+// every deployment before -atsss; a MAR PDR is refused in resolve when the
+// module is absent.
+func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
+	if c.cfg.Atsss == "" || (len(s.MARs) == 0 && len(s.removedMARs) == 0) {
+		return nil, nil
+	}
+	changes := make([]bess.Change, 0, 2*len(s.MARs)+1)
+	seen := map[string]bool{}
+	add := func(ch bess.Change) {
+		key := ch.Resource + "\x00" + fmt.Sprint(ch.Key)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		changes = append(changes, ch)
+	}
+	policyRes := c.cfg.Atsss + "/policies"
+	for _, id := range idsOf(s.MARs) {
+		m := s.MARs[id]
+		accesses := make([]map[string]any, 0, 2)
+		for which := 0; which < 2; which++ {
+			access := m.accesses[which]
+			healthID := uint32(0)
+			nextHop, tunnelID := m.nextHops[which], m.tunnelIDs[which]
+			if access.hasFarID && access.priority != ie.PriorityNoStandby {
+				healthID = uint32(which + 1)
+			} else {
+				// A missing access and a "No Standby" access are both
+				// ineligible; the packet path skips a zero health id.
+				nextHop, tunnelID = 0, 0
+			}
+			accesses = append(accesses, map[string]any{
+				"next_hop_id":   nextHop,
+				"tunnel_id":     tunnelID,
+				"accounting_id": uint32(0),
+				// The deployment's two access health records. The compiler
+				// does not write them: their availability is the controller's
+				// or operator's observation, not the SMF's session.
+				"health_id": healthID,
+			})
+			if m.tunnelIDs[which] == 0 {
+				continue
+			}
+			far := s.FARs[access.farID]
+			if far == nil {
+				return nil, fmt.Errorf("MAR %d's %s access names FAR %d, which the session does not hold",
+					m.id, []string{"3GPP", "non-3GPP"}[which], access.farID)
+			}
+			value := map[string]any{
+				"teid":      far.teid,
+				"gnb_ip":    far.peer.String(),
+				"ether_src": c.cfg.N3MAC[:],
+				"ether_dst": c.cfg.PeerMAC[:],
+			}
+			if far.hasMarking {
+				value["marking"] = uint32(far.marking)
+			}
+			add(bess.Change{
+				Resource: tunnelsRes(c.cfg.Down),
+				Key:      map[string]any{"action_id": m.tunnelIDs[which]},
+				Value:    value,
+			})
+		}
+		add(bess.Change{
+			Resource: policyRes,
+			Key:      map[string]any{"policy_id": m.policyID},
+			Value: map[string]any{
+				"mode":      uint32(0),
+				"preferred": m.preferred,
+				"access":    accesses,
+			},
+		})
+	}
+	for _, m := range s.removedMARs {
+		if m.policyID != 0 {
+			add(bess.Change{Resource: policyRes, Key: map[string]any{"policy_id": m.policyID}})
+		}
+		for _, id := range m.tunnelIDs {
+			if id != 0 {
+				add(bess.Change{Resource: tunnelsRes(c.cfg.Down), Key: map[string]any{"action_id": id}})
+			}
+		}
+	}
+	for _, id := range s.retiredTunnels {
+		add(bess.Change{Resource: tunnelsRes(c.cfg.Down), Key: map[string]any{"action_id": id}})
+	}
+	return changes, nil
 }
 
 // rulePriority is the classifier's priority for a PDR's Precedence (TS 29.244
@@ -3305,6 +3718,7 @@ func establishmentIEs(req *message.SessionEstablishmentRequest) []*ie.IE {
 	return requestIEs(
 		[]*ie.IE{req.NodeID, req.CPFSEID, req.CreateBAR},
 		req.CreatePDR, req.CreateFAR, req.CreateQER, req.CreateURR,
+		req.CreateMAR,
 	)
 }
 
@@ -3317,6 +3731,7 @@ func modificationIEs(req *message.SessionModificationRequest) []*ie.IE {
 		req.UpdatePDR, req.UpdateFAR, req.UpdateQER, req.UpdateURR,
 		[]*ie.IE{req.CreateBAR, req.UpdateBAR, req.RemoveBAR},
 		req.RemovePDR, req.RemoveFAR, req.RemoveQER, req.RemoveURR,
+		req.CreateMAR, req.UpdateMAR, req.RemoveMAR,
 	)
 }
 
@@ -3347,48 +3762,55 @@ func cpFSEID(ies []*ie.IE) (uint64, error) {
 }
 
 // parseCreate reads the Create/Update lists a session message carries.
-func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []barReq, []qerReq, []urrReq, error) {
+func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []barReq, []qerReq, []urrReq, []marReq, error) {
 	var pdrs []pdrReq
 	var fars []farReq
 	var bars []barReq
 	var qers []qerReq
 	var urrs []urrReq
+	var mars []marReq
 	for _, i := range ies {
 		switch i.Type {
 		case ie.CreatePDR, ie.UpdatePDR:
 			p, err := parsePDR(i)
 			if err != nil {
-				return nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, err
 			}
 			pdrs = append(pdrs, p)
 		case ie.CreateFAR, ie.UpdateFAR:
 			f, err := parseFAR(i)
 			if err != nil {
-				return nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, err
 			}
 			fars = append(fars, f)
 		case ie.CreateBAR, ie.UpdateBARWithinSessionModificationRequest,
 			ie.UpdateBARWithinSessionReportResponse:
 			b, err := parseBAR(i)
 			if err != nil {
-				return nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, err
 			}
 			bars = append(bars, b)
 		case ie.CreateQER, ie.UpdateQER:
 			q, err := parseQER(i)
 			if err != nil {
-				return nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, err
 			}
 			qers = append(qers, q)
 		case ie.CreateURR, ie.UpdateURR:
 			u, err := parseURR(i)
 			if err != nil {
-				return nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, err
 			}
 			urrs = append(urrs, u)
+		case ie.CreateMAR, ie.UpdateMAR:
+			m, err := parseMAR(i)
+			if err != nil {
+				return nil, nil, nil, nil, nil, nil, err
+			}
+			mars = append(mars, m)
 		}
 	}
-	return pdrs, fars, bars, qers, urrs, nil
+	return pdrs, fars, bars, qers, urrs, mars, nil
 }
 
 // parseRemovals reads the PDR, FAR, BAR and URR ids a modification removes.
@@ -3462,6 +3884,7 @@ type removals struct {
 	bars []uint8  // Remove BAR (7.5.4.5)
 	qers []uint32 // Remove QER (7.5.4.6)
 	urrs []uint32 // Remove URR (7.5.4.4)
+	mars []uint16 // Remove MAR (7.5.4.7)
 }
 
 func parseRemovals(ies []*ie.IE) removals {
@@ -3533,6 +3956,19 @@ func parseRemovals(ies []*ie.IE) removals {
 					rm.urrs = append(rm.urrs, id)
 				}
 			}
+		case ie.RemoveMAR:
+			children, err := i.RemoveMAR()
+			if err != nil {
+				continue
+			}
+			for _, c := range children {
+				if c.Type != ie.MARID {
+					continue
+				}
+				if id, err := c.MARID(); err == nil {
+					rm.mars = append(rm.mars, id)
+				}
+			}
 		}
 	}
 	return rm
@@ -3563,6 +3999,13 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 			if id, err := c.FARID(); err == nil {
 				p.farID, p.hasFarID = id, true
 			}
+		case ie.MARID:
+			// The MAR this PDR is steered by (8.2.34). The MAR's two access
+			// actions replace the PDR's own FAR; a message that names both is
+			// refused below rather than choosing one silently.
+			if id, err := c.MARID(); err == nil {
+				p.marID, p.hasMAR = id, true
+			}
 		case ie.QERID:
 			if id, err := c.QERID(); err == nil {
 				p.qerIDs = append(p.qerIDs, id)
@@ -3587,6 +4030,18 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 	if !p.hasID {
 		return pdrReq{}, errors.New("PDR without a PDR ID")
 	}
+	if p.hasMAR {
+		if p.marID == 0 {
+			return pdrReq{}, fmt.Errorf(
+				"%w: PDR %d names MAR 0, which is no policy", errNotExpressible, p.id)
+		}
+		if p.hasFarID {
+			return pdrReq{}, fmt.Errorf(
+				"%w: PDR %d names both a FAR and a MAR; the MAR's access actions are the egress (TS 29.244 7.5.2.8)",
+				errNotExpressible, p.id)
+		}
+		return p, nil
+	}
 	if !p.hasFarID {
 		// The PDR's FAR ID is mandatory (Table 7.5.2.2-1), and it is read as a
 		// flag because FAR 0 is a legal FAR: a PDR that carried none would
@@ -3597,6 +4052,132 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 			errMandatoryIE, p.id)
 	}
 	return p, nil
+}
+
+// parseMAR reads a Create MAR or Update MAR. Only the active/standby steering
+// mode and ATSSS-LL are compiled: the other modes choose an access by a rule
+// this datapath does not have, and accepting one would program a policy that
+// steers differently from the SMF's instruction.
+func parseMAR(i *ie.IE) (marReq, error) {
+	m := marReq{create: i.Type == ie.CreateMAR}
+	children, err := i.CreateMAR()
+	what := "Create MAR"
+	if i.Type == ie.UpdateMAR {
+		children, err = i.UpdateMAR()
+		what = "Update MAR"
+	}
+	if err != nil {
+		return marReq{}, fmt.Errorf("%s: %w", what, err)
+	}
+	for _, c := range children {
+		switch c.Type {
+		case ie.MARID:
+			if id, err := c.MARID(); err == nil {
+				m.id, m.hasID = id, true
+			}
+		case ie.SteeringFunctionality:
+			v, err := c.SteeringFunctionality()
+			if err != nil {
+				return marReq{}, fmt.Errorf("Steering Functionality: %w", err)
+			}
+			m.hasFunctionality, m.functionality = true, v
+		case ie.SteeringMode:
+			v, err := c.SteeringMode()
+			if err != nil {
+				return marReq{}, fmt.Errorf("Steering Mode: %w", err)
+			}
+			m.hasMode, m.mode = true, v
+		case ie.TGPPAccessForwardingActionInformation,
+			ie.UpdateTGPPAccessForwardingActionInformation:
+			partial := !m.create && c.Type == ie.UpdateTGPPAccessForwardingActionInformation
+			if err := parseMARAccess(&m, 0, c, partial); err != nil {
+				return marReq{}, fmt.Errorf("3GPP access forwarding action information: %w", err)
+			}
+		case ie.NonTGPPAccessForwardingActionInformation,
+			ie.UpdateNonTGPPAccessForwardingActionInformation:
+			partial := !m.create && c.Type == ie.UpdateNonTGPPAccessForwardingActionInformation
+			if err := parseMARAccess(&m, 1, c, partial); err != nil {
+				return marReq{}, fmt.Errorf("non-3GPP access forwarding action information: %w", err)
+			}
+		case ie.AccessAvailabilityControlInformation:
+			// The UPF has no access-availability measurement to apply it to,
+			// and accepting the instruction while ignoring it would leave the
+			// SMF believing the UP reports availability it never measures.
+			// Health updates are a deployment/controller input in this tree;
+			// cause 73 is the honest answer until that reporting exists.
+			return marReq{}, fmt.Errorf(
+				"%w: MAR access availability control is not implemented", errNotExpressible)
+		}
+	}
+	if !m.hasID {
+		return marReq{}, fmt.Errorf("%w: %s without a MAR ID", errMandatoryIE, what)
+	}
+	return m, nil
+}
+
+// parseMARAccess reads one access's forwarding action information: the FAR it
+// forwards through, the weight the load-balancing modes use and the priority
+// that makes it active or standby. The FAR ID and the priority are the fields
+// active/standby needs; a message that leaves either out cannot say which
+// access is the preferred one and is refused here.
+func parseMARAccess(m *marReq, which int, i *ie.IE, partial bool) error {
+	if m.haveAccess[which] {
+		return fmt.Errorf("%w: the MAR names the access twice", errNotExpressible)
+	}
+	var children []*ie.IE
+	var err error
+	switch i.Type {
+	case ie.TGPPAccessForwardingActionInformation:
+		children, err = i.TGPPAccessForwardingActionInformation()
+	case ie.UpdateTGPPAccessForwardingActionInformation:
+		children, err = i.UpdateTGPPAccessForwardingActionInformation()
+	case ie.NonTGPPAccessForwardingActionInformation:
+		children, err = i.NonTGPPAccessForwardingActionInformation()
+	case ie.UpdateNonTGPPAccessForwardingActionInformation:
+		children, err = i.UpdateNonTGPPAccessForwardingActionInformation()
+	}
+	if err != nil {
+		return err
+	}
+	if partial && len(children) == 0 {
+		// A null-length Update access IE deregisters the access
+		// (Table 7.5.4.16-1): the other access stays, and the active/standby
+		// selection must still name an active one.
+		m.removeAccess[which] = true
+		m.haveAccess[which] = true
+		return nil
+	}
+	var access marAccess
+	for _, c := range children {
+		switch c.Type {
+		case ie.FARID:
+			if id, err := c.FARID(); err == nil {
+				access.farID, access.hasFarID = id, true
+			}
+		case ie.Priority:
+			v, err := c.Priority()
+			if err != nil {
+				return fmt.Errorf("Priority: %w", err)
+			}
+			access.priority, access.hasPrior = v, true
+		case ie.Weight:
+			v, err := c.Weight()
+			if err != nil {
+				return fmt.Errorf("Weight: %w", err)
+			}
+			access.weight, access.hasWeight = v, true
+		}
+	}
+	if !partial {
+		if !access.hasFarID {
+			return fmt.Errorf("%w: the access names no FAR ID", errMandatoryIE)
+		}
+		if !access.hasPrior {
+			return fmt.Errorf("%w: the access names no Priority", errMandatoryIE)
+		}
+	}
+	m.access[which], m.haveAccess[which] = access, true
+	return nil
 }
 
 // qfiIE reads a QFI IE (TS 29.244 8.2.89): the six-bit QoS Flow Identifier a
@@ -4757,6 +5338,14 @@ func pdrMatchRule(p *pdr) (map[string]any, error) {
 	}
 	if p.hasQFI {
 		rule["qfi"] = uint32(p.qfi)
+	}
+	if p.hasMAR && !p.drop && !p.buffer {
+		// The policy ID the PDR matcher writes into the steering attribute;
+		// AtsssSteer reads it and selects the access. A rule that drops never
+		// reaches the steering module, and the matcher refuses a drop rule
+		// that carries a policy id, so a closed gate or exhausted quota
+		// publishes none.
+		rule["steering_policy_id"] = p.policyID
 	}
 	return rule, nil
 }

@@ -38,6 +38,8 @@ inline constexpr uint16_t kPass = 0;
 struct QfiRules {
   std::unique_ptr<const SessionMatcher> matcher;
   std::vector<uint32_t> action_ids;
+  // The MAR ID of each rule, in the same order: 0 for a rule that names none.
+  std::vector<uint32_t> steering_ids;
 };
 
 // One session's rules, published whole: the structures that match them, and
@@ -116,6 +118,7 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
   struct Parsed {
     FirewallRule rule;
     std::optional<uint8_t> qfi;
+    uint32_t steering_id = 0;
   };
   std::vector<Parsed> rules;
   rules.reserve(static_cast<size_t>(entry.rules_size()));
@@ -176,6 +179,11 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
           where + "a rule that drops cannot name an action - the packet never "
                   "reaches the ActionTable that would resolve it");
     }
+    if (rule.drop() && rule.steering_policy_id() != 0) {
+      return std::unexpected(
+          where + "a rule that drops cannot name a MAR - the packet never "
+                  "reaches the steering module");
+    }
 
     std::optional<uint8_t> qfi;
     if (rule.has_qfi()) {
@@ -203,7 +211,7 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
     parsed.dst_port_high = static_cast<uint16_t>(dst_high);
     parsed.action = rule.drop() ? kDrop : kPass;
     parsed.action_id = rule.action_id();
-    rules.push_back({parsed, qfi});
+    rules.push_back({parsed, qfi, rule.steering_policy_id()});
     i++;
   }
 
@@ -218,6 +226,7 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
       if (!p.qfi || (q && *p.qfi == *q)) {
         list.push_back(p.rule);
         out.action_ids.push_back(p.rule.action_id);
+        out.steering_ids.push_back(p.steering_id);
       }
     }
     auto matcher = MakeSessionMatcher(std::move(list));

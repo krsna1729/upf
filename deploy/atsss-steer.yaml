@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: BSD-3-Clause
+
+# The AtsssSteer module alone, with no PFCP and no classifier: one Source's
+# frame carries the steering policy id in metadata, the module selects an
+# access, and the Router sends the packet to the gate that access names. The
+# lane (ci/atsss-steer.sh) changes the health table and the policy between
+# windows, so each window's dump is evidence for one selection rule.
+#
+# The policy here has no tunnel records: the two accesses are plain IP, and the
+# Router's two next hops are the two Dumps. A deployment with tunnels adds the
+# GtpuEncap module after its selected next hop and writes the tunnel records the
+# policy names; the PFCP tests cover that record, and the module's packet path
+# treats the tunnel id as one more metadata field.
+
+modules:
+  - name: src
+    mclass: Source
+    arg: {pkt_size: 51, burst: 0}
+  - name: rewrite
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAACCABFuAAlAAFAAEARH9EICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
+  - name: set_session
+    mclass: SetMetadata
+    arg:
+      attrs:
+        # The session key, in network order (the decap writes be32_t on N3);
+        # value_int would write host order and the matcher would look up
+        # 0x01000000.
+        - {name: upf_teid, size: 4, value_bin: "AAAAAQ=="}
+  - name: pdr_match
+    mclass: PdrMatch
+    arg:
+      key_attr: upf_teid
+      steering_attr: steering_policy_id
+  - name: set_hop
+    mclass: SetMetadata
+    arg:
+      attrs:
+        # The action table's next hop in a real graph. AtsssSteer writes the
+        # same attribute afterwards; this proves the two writers compose.
+        - {name: next_hop_id, size: 4, value_bin: "AAAAAQ=="}
+  - name: atsss
+    mclass: AtsssSteer
+    arg:
+      policy_attr: steering_policy_id
+      next_hop_attr: next_hop_id
+  - name: rt
+    mclass: Router
+  - name: dump_a
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_a
+    mclass: Sink
+  - name: dump_b
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_b
+    mclass: Sink
+
+connections:
+  - {upstream: src, downstream: rewrite}
+  - {upstream: rewrite, downstream: set_session}
+  - {upstream: set_session, downstream: pdr_match}
+  - {upstream: pdr_match, downstream: set_hop}
+  - {upstream: set_hop, downstream: atsss}
+  - {upstream: atsss, downstream: rt}
+  - {upstream: rt, downstream: dump_a, ogate: 0}
+  - {upstream: dump_a, downstream: sink_a}
+  - {upstream: rt, downstream: dump_b, ogate: 1}
+  - {upstream: dump_b, downstream: sink_b}
+
+resources:
+  rt/next_hops:
+    - key: {id: 1}
+      value: {egress_gate: 0}
+    - key: {id: 2}
+      value: {egress_gate: 1}
+  pdr_match/rules:
+    - key: {session: 1}
+      value:
+        rules:
+          # The rule carries the MAR id; the matcher writes it into
+          # steering_policy_id. action_id 0 is "no action table", which this
+          # graph does not have.
+          - {steering_policy_id: 1}
+  atsss/health:
+    - key: {health_id: 1}
+      value: {available: true}
+    - key: {health_id: 2}
+      value: {available: true}
+  atsss/policies:
+    - key: {policy_id: 1}
+      value:
+        mode: ATSSS_ACTIVE_STANDBY
+        preferred: 0
+        access:
+          - {next_hop_id: 1, health_id: 1}
+          - {next_hop_id: 2, health_id: 2}

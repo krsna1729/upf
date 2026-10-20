@@ -80,6 +80,19 @@ CommandResponse PdrMatch::Init(const upf::pb::PdrMatchArg &arg) {
   }
   key_attr_name_ = arg.key_attr();
 
+  if (!arg.steering_attr().empty()) {
+    if (arg.steering_attr() == arg.key_attr() ||
+        (arg.steering_attr() == "action_id" && arg.key_attr() == "action_id")) {
+      return CommandFailure(EINVAL,
+                            "the steering attribute must be distinct");
+    }
+    steering_attr_ = AddMetadataAttr(arg.steering_attr(), sizeof(be32_t),
+                                     AccessMode::kWrite);
+    if (steering_attr_ < 0) {
+      return CommandFailure(-steering_attr_, "add_metadata_attr() failed");
+    }
+  }
+
   // The QoS flow, as the decap read it out of the PDU Session Container (0 when
   // none was carried): what a rule that names a QFI is matched against. Read
   // only by sessions that have such a rule; declared here so the attribute has
@@ -235,6 +248,10 @@ void PdrMatch::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   // offset is valid only when something reads the attribute; with no reader
   // there is nothing to resolve the action for, and nothing to write.
   const bool publish_action = bess::metadata::IsValidOffset(action_offset);
+  const bess::metadata::mt_offset_t steering_offset =
+      steering_attr_ >= 0 ? attr_offset(steering_attr_) : -1;
+  const bool publish_steering =
+      bess::metadata::IsValidOffset(steering_offset);
   // The QFI is read only for a session that has a rule naming one; with no
   // writer the attribute has no offset, and a packet is of no QFI at all --
   // kNoPduSessionQfi, the value no container can carry, so a rule naming a
@@ -294,6 +311,10 @@ void PdrMatch::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       // rule_id is 1-based, in the list the packet was matched against.
       const uint32_t id = list->action_ids[match.rule_id - 1];
       _set_attr_with_offset<be32_t>(action_offset, pkt, be32_t(id));
+    }
+    if (publish_steering) {
+      const uint32_t mar = list->steering_ids[match.rule_id - 1];
+      _set_attr_with_offset<be32_t>(steering_offset, pkt, be32_t(mar));
     }
     ogates[i] = 0;
   }

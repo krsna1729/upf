@@ -1,6 +1,39 @@
 {
  "schema": 1,
  "generated_by": "ci/verify.sh",
+ "supported_release": "16",
+ "specs": {
+  "TS 29.244": {
+   "version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "url": "https://www.3gpp.org/ftp/Specs/archive/29_series/29.244/29244-g91.zip"
+  },
+  "TS 29.281": {
+   "version": "16.2.0",
+   "release": "16",
+   "file": "docs/spec/29.281-v16.2.0.txt",
+   "url": "https://www.3gpp.org/ftp/Specs/archive/29_series/29.281/29281-g20.zip"
+  },
+  "TS 38.415": {
+   "version": "16.6.0",
+   "release": "16",
+   "file": "docs/spec/38.415-v16.6.0.txt",
+   "url": "https://www.3gpp.org/ftp/Specs/archive/38_series/38.415/38415-g60.zip"
+  }
+ },
+ "message_sections": {
+  "Association": "7.4",
+  "Heartbeat and restart detection": "7.5",
+  "Error Indication and its report": "5.10",
+  "Session Establishment": "7.5.2",
+  "Session Modification": "7.5.4",
+  "Session Deletion": "7.5.6",
+  "Session Report": "7.5.8",
+  "Shared information elements": "8.2",
+  "Cross-cutting (no message)": "",
+  "Competition": ""
+ },
  "claims": [
   {
    "id": "status-1",
@@ -49,7 +82,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "an F-TEID with the CH flag (no TEID) is assigned one"
+   "claim": "an F-TEID with the CH flag (no TEID) is assigned one",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2"
   },
   {
    "id": "status-2",
@@ -110,7 +149,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "PDIs sharing a CHOOSE ID share one F-TEID"
+   "claim": "PDIs sharing a CHOOSE ID share one F-TEID",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2"
   },
   {
    "id": "status-3",
@@ -147,7 +192,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "a CHOOSE for an address family the UP has no address for is refused"
+   "claim": "a CHOOSE for an address family the UP has no address for is refused",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2"
   },
   {
    "id": "status-4",
@@ -184,7 +235,13 @@
    ],
    "kind": "engineering",
    "block": 2,
-   "claim": "a request with no session layer configured is refused with a Cause"
+   "claim": "a request with no session layer configured is refused with a Cause",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "status-5",
@@ -221,7 +278,13 @@
    ],
    "kind": "engineering",
    "block": null,
-   "claim": "a datapath refusal becomes a Cause, not a half-programmed session"
+   "claim": "a datapath refusal becomes a Cause, not a half-programmed session",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "status-6",
@@ -261,7 +324,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "a port range in an SDF filter matches as a range"
+   "claim": "a port range in an SDF filter matches as a range",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2"
   },
   {
    "id": "status-7",
@@ -309,7 +378,13 @@
    ],
    "kind": "conformance",
    "block": 9,
-   "claim": "a non-IPv4 address, or a prefix with host bits, is refused"
+   "claim": "a non-IPv4 address, or a prefix with host bits, is refused",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2"
   },
   {
    "id": "status-8",
@@ -382,7 +457,13 @@
    ],
    "kind": "engineering",
    "block": 7,
-   "claim": "an opt-in firewall path carries the match the wildcard key cannot"
+   "claim": "an opt-in firewall path carries the match the wildcard key cannot",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "status-9",
@@ -418,7 +499,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "a PDI with no UE IP IE matches by its F-TEID"
+   "claim": "a PDI with no UE IP IE matches by its F-TEID",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2"
   },
   {
    "id": "status-10",
@@ -491,7 +578,13 @@
    ],
    "kind": "engineering",
    "block": null,
-   "claim": "a restarted controller empties the predecessor's dataplane state"
+   "claim": "a restarted controller empties the predecessor's dataplane state",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "status-11",
@@ -532,7 +625,13 @@
    ],
    "kind": "engineering",
    "block": 2,
-   "claim": "a deleted session's id is not reused until the dataplane retires it"
+   "claim": "a deleted session's id is not reused until the dataplane retires it",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.6"
   },
   {
    "id": "status-12",
@@ -585,7 +684,13 @@
    ],
    "kind": "engineering",
    "block": 2,
-   "claim": "one key is one rule: a live session's rule cannot be taken"
+   "claim": "one key is one rule: a live session's rule cannot be taken",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "status-13",
@@ -634,7 +739,13 @@
    ],
    "kind": "engineering",
    "block": 7,
-   "claim": "the management surface: metrics as text, the rest as flags"
+   "claim": "the management surface: metrics as text, the rest as flags",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "status-14",
@@ -695,7 +806,13 @@
    ],
    "kind": "engineering",
    "block": 1,
-   "claim": "a checkpointed run keeps its sessions across a restart"
+   "claim": "a checkpointed run keeps its sessions across a restart",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "status-15",
@@ -735,7 +852,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "an uplink SDF filter is left as provisioned, not swapped"
+   "claim": "an uplink SDF filter is left as provisioned, not swapped",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.4"
   },
   {
    "id": "status-16",
@@ -771,7 +894,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "several SDF Filter IEs are a list; a packet matches any"
+   "claim": "several SDF Filter IEs are a list; a packet matches any",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   },
   {
    "id": "status-17",
@@ -807,7 +936,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "several QFI IEs are a list; a packet matches any"
+   "claim": "several QFI IEs are a list; a packet matches any",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   },
   {
    "id": "status-18",
@@ -847,7 +982,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "an SDF Filter IE with no Flow Description is refused (cause 64)"
+   "claim": "an SDF Filter IE with no Flow Description is refused (cause 64)",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.4"
   },
   {
    "id": "status-19",
@@ -883,7 +1024,13 @@
    ],
    "kind": "conformance",
    "block": null,
-   "claim": "a match field the parser does not handle is refused, never ignored"
+   "claim": "a match field the parser does not handle is refused, never ignored",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2"
   },
   {
    "id": "status-20",
@@ -947,7 +1094,13 @@
    ],
    "kind": "conformance",
    "block": 5,
-   "claim": "several QERs on one PDR: a closed gate in any of them stops the rule"
+   "claim": "several QERs on one PDR: a closed gate in any of them stops the rule",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   },
   {
    "id": "status-21",
@@ -983,7 +1136,13 @@
    ],
    "kind": "conformance",
    "block": 6,
-   "claim": "the Session Deletion Response reports each URR's usage"
+   "claim": "the Session Deletion Response reports each URR's usage",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.8"
   },
   {
    "id": "status-22",
@@ -1019,7 +1178,13 @@
    ],
    "kind": "conformance",
    "block": 8,
-   "claim": "a G-PDU on an unknown TEID is discarded and an Error Indication returned"
+   "claim": "a G-PDU on an unknown TEID is discarded and an Error Indication returned",
+   "spec_version": "16.2.0",
+   "release": "16",
+   "file": "docs/spec/29.281-v16.2.0.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "5.10"
   },
   {
    "id": "status-23",
@@ -1071,7 +1236,13 @@
    ],
    "kind": "conformance",
    "block": 9,
-   "claim": "the UE IP S/D bit places the address on the right side of the key"
+   "claim": "the UE IP S/D bit places the address on the right side of the key",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2"
   },
   {
    "id": "status-24",
@@ -1115,7 +1286,13 @@
    ],
    "kind": "conformance",
    "block": null,
-   "claim": "FAR options: Forwarding Policy is held; L7 actions are refused (cause 73)"
+   "claim": "FAR options: Forwarding Policy is held; L7 actions are refused (cause 73)",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   },
   {
    "id": "status-25",
@@ -1159,7 +1336,13 @@
    ],
    "kind": "conformance",
    "block": 12,
-   "claim": "the uplink lookup names the tunnel the packet arrived on"
+   "claim": "the uplink lookup names the tunnel the packet arrived on",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   },
   {
    "id": "status-26",
@@ -1195,7 +1378,13 @@
    ],
    "kind": "conformance",
    "block": 6,
-   "claim": "a PDR naming a QER the session does not hold is refused (cause 73)"
+   "claim": "a PDR naming a QER the session does not hold is refused (cause 73)",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   },
   {
    "id": "status-27",
@@ -1231,7 +1420,13 @@
    ],
    "kind": "conformance",
    "block": 7,
-   "claim": "NOCP decides the Downlink Data Report; BUFF alone buffers silently"
+   "claim": "NOCP decides the Downlink Data Report; BUFF alone buffers silently",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.8"
   },
   {
    "id": "status-28",
@@ -1279,7 +1474,13 @@
    ],
    "kind": "conformance",
    "block": 8,
-   "claim": "a peer Error Indication becomes an ERIR report to the SMF"
+   "claim": "a peer Error Indication becomes an ERIR report to the SMF",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "5.10"
   },
   {
    "id": "status-29",
@@ -1319,7 +1520,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "QFI 0 is legal; here it means 'no container'"
+   "claim": "QFI 0 is legal; here it means 'no container'",
+   "spec_version": "16.6.0",
+   "release": "16",
+   "file": "docs/spec/38.415-v16.6.0.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2"
   },
   {
    "id": "status-30",
@@ -1355,7 +1562,13 @@
    ],
    "kind": "conformance",
    "block": 6,
-   "claim": "the Usage Report Trigger is octets 5-7 of its IE"
+   "claim": "the Usage Report Trigger is octets 5-7 of its IE",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.8"
   },
   {
    "id": "status-31",
@@ -1396,7 +1609,13 @@
    ],
    "kind": "engineering",
    "block": 2,
-   "claim": "a refused modification leaves the session exactly as it was"
+   "claim": "a refused modification leaves the session exactly as it was",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.4"
   },
   {
    "id": "status-32",
@@ -1440,7 +1659,13 @@
    ],
    "kind": "conformance",
    "block": 6,
-   "claim": "pfcpsim's zero TEID, QER 0, QFI 0 and inert period are accepted"
+   "claim": "pfcpsim's zero TEID, QER 0, QFI 0 and inert period are accepted",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   },
   {
    "id": "status-33",
@@ -1480,7 +1705,13 @@
    ],
    "kind": "conformance",
    "block": 7,
-   "claim": "Remove QER is applied; rule IDs may number from 0"
+   "claim": "Remove QER is applied; rule IDs may number from 0",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.4"
   },
   {
    "id": "status-34",
@@ -1520,7 +1751,13 @@
    ],
    "kind": "conformance",
    "block": 6,
-   "claim": "a usage report's window is the one the tick decided, not the send time"
+   "claim": "a usage report's window is the one the tick decided, not the send time",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.8"
   },
   {
    "id": "status-35",
@@ -1556,7 +1793,13 @@
    ],
    "kind": "conformance",
    "block": 5,
-   "claim": "several QERs' rates are enforced together, not one of them"
+   "claim": "several QERs' rates are enforced together, not one of them",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   },
   {
    "id": "status-36",
@@ -1586,7 +1829,13 @@
    ],
    "kind": "conformance",
    "block": 5,
-   "claim": "Packet Rate: a QER capping packets per time unit, and its queryable status"
+   "claim": "Packet Rate: a QER capping packets per time unit, and its queryable status",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.4"
   },
   {
    "id": "status-37",
@@ -1626,7 +1875,13 @@
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "the downlink selector is keyed byte-for-byte as the engine keys it"
+   "claim": "the downlink selector is keyed byte-for-byte as the engine keys it",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   },
   {
    "id": "competition-1",
@@ -1671,7 +1926,13 @@
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 1
+   "block": 1,
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-2",
@@ -1712,7 +1973,13 @@
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 2
+   "block": 2,
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-3",
@@ -1753,7 +2020,13 @@
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 3
+   "block": 3,
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-4",
@@ -1856,7 +2129,13 @@
     "**eUPF** \u2014 F-TEID+CHID `cmd/core/pdr_creation_context.go:109-132`; UE IP `cmd/ebpf/xdp/n3n6_entrypoint.c:70`; ranges `cmd/ebpf/xdp/sdf_filter.h:101-102`; precedence absent; QFI header-only `n3n6_entrypoint.c:128`",
     "**free5GC** \u2014 its three credits are in `free5gc/gtp5g` (not the go-upf tree): precedence `src/pfcp/pdr.c:538-551`; UE IP `src/pfcp/pdr.c:314-318`; ranges `src/pfcp/pdr.c:266-273`; go-upf discards NI (`gtp5g.go:377`) and allocates no TEID",
     "**us** \u2014 `docs/claims.md`: status-1..3, 7, 9, 15-17, 23; ranges: status-6 is the refusals, the opt-in firewall path compiles them on both sides"
-   ]
+   ],
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-5",
@@ -1897,7 +2176,13 @@
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 5
+   "block": 5,
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-6",
@@ -1942,7 +2227,13 @@
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 6
+   "block": 6,
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-7",
@@ -1983,7 +2274,13 @@
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 7
+   "block": 7,
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-8",
@@ -2024,7 +2321,13 @@
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 8
+   "block": 8,
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-9",
@@ -2066,15 +2369,35 @@
    "statement": "",
    "kind": "competition",
    "block": 9,
-   "field": "the three IPv6 capabilities are the three places an IPv6 deployment would carry the address: the PFCP UE IP address (8.2.62, an IPv6 prefix with IPv6D/IP6PL lengths), the inner packet the PDR matches, and the N9 transport (GTP-U over IPv6). This tree refuses the first two rather than match them loosely -- the WildcardMatch key is four bytes, so an IPv6 UE address or F-TEID is cause 73 (status-7) and a non-IPv4 PDI is never widened to IPv4 -- while an IPv6 SDF prefix compiles only on the opt-in firewall path, whose rule carries a CIDR string (status-8). The inner/outer IPv6 datapath and the N9 IPv6 tunnel are not built: no graph has an IPv6 address, and the encap writes IPv4. The score is 0; UPG-VPP's 33 is one of the three."
+   "field": "the three IPv6 capabilities are the three places an IPv6 deployment would carry the address: the PFCP UE IP address (8.2.62, an IPv6 prefix with IPv6D/IP6PL lengths), the inner packet the PDR matches, and the N9 transport (GTP-U over IPv6). This tree refuses the first two rather than match them loosely -- the WildcardMatch key is four bytes, so an IPv6 UE address or F-TEID is cause 73 (status-7) and a non-IPv4 PDI is never widened to IPv4 -- while an IPv6 SDF prefix compiles only on the opt-in firewall path, whose rule carries a CIDR string (status-8). The inner/outer IPv6 datapath and the N9 IPv6 tunnel are not built: no graph has an IPv6 address, and the encap writes IPv4. The score is 0; UPG-VPP's 33 is one of the three.",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-10",
    "scope": "competition",
-   "evidence": [],
+   "evidence": [
+    "TestMARProgramsPolicyAndSteeringRule",
+    "TestUpdateMARMovesThePreferredAccess",
+    "ci/atsss-steer.sh"
+   ],
    "result": {
-    "state": "gap",
-    "evidence": {}
+    "state": "ok",
+    "evidence": {
+     "TestMARProgramsPolicyAndSteeringRule": {
+      "state": "ok"
+     },
+     "TestUpdateMARMovesThePreferredAccess": {
+      "state": "ok"
+     },
+     "ci/atsss-steer.sh": {
+      "state": "ok"
+     }
+    }
    },
    "clause": null,
    "part": "competition",
@@ -2086,7 +2409,7 @@
    ],
    "message": "Competition",
    "scores": {
-    "us": "**0**",
+    "us": "**50**",
     "OAI-CN5G": "50",
     "open5gs": "0",
     "free5GC": "0",
@@ -2094,10 +2417,16 @@
     "eUPF": "0",
     "OMEC": "0"
    },
-   "detail": "",
+   "detail": "One of the block's two features is implemented: MAR parsing, active/standby steering and health-driven failover. The Steering Modes other than active/standby, MPTCP and the CP's ATSSS control parameters remain open.",
    "statement": "",
    "kind": "competition",
-   "block": 10
+   "block": 10,
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-11",
@@ -2138,7 +2467,13 @@
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 11
+   "block": 11,
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
   },
   {
    "id": "competition-12",
@@ -2176,7 +2511,79 @@
    "statement": "",
    "kind": "competition",
    "block": 12,
-   "field": "free5GC v4.3.0 SMF drove upfd through establishment, modification and deletion unshimmed (docs/interop.md, run fixes-ccf667c; ci/interop/run.sh). open5gs 100: its UPF is the field's production interop."
+   "field": "free5GC v4.3.0 SMF drove upfd through establishment, modification and deletion unshimmed (docs/interop.md, run fixes-ccf667c; ci/interop/run.sh). open5gs 100: its UPF is the field's production interop.",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "",
+   "message_spec_version": "16.9.1",
+   "message_clause": ""
+  },
+  {
+   "id": "status-38",
+   "scope": "status",
+   "evidence": [
+    "TestMARProgramsPolicyAndSteeringRule",
+    "TestUpdateMARMovesThePreferredAccess",
+    "TestRemoveMARStillNamedByAPDRIsRefused",
+    "TestRemoveMARWithItsPDR",
+    "TestMAROnlySupportsActiveStandby",
+    "ci/atsss-steer.sh",
+    "TestMARWithOneAccessAndNoStandby",
+    "TestMARAccessAvailabilityControlIsRefused"
+   ],
+   "result": {
+    "state": "ok",
+    "evidence": {
+     "TestMARProgramsPolicyAndSteeringRule": {
+      "state": "ok"
+     },
+     "TestUpdateMARMovesThePreferredAccess": {
+      "state": "ok"
+     },
+     "TestRemoveMARStillNamedByAPDRIsRefused": {
+      "state": "ok"
+     },
+     "TestRemoveMARWithItsPDR": {
+      "state": "ok"
+     },
+     "TestMAROnlySupportsActiveStandby": {
+      "state": "ok"
+     },
+     "ci/atsss-steer.sh": {
+      "state": "ok"
+     },
+     "TestMARWithOneAccessAndNoStandby": {
+      "state": "ok"
+     },
+     "TestMARAccessAvailabilityControlIsRefused": {
+      "state": "ok"
+     }
+    }
+   },
+   "clause": "7.5.2.8",
+   "part": "ies",
+   "title": "a PDR's MAR is compiled to an active/standby steering policy, keyed globally, and its access selection is proved",
+   "declared": "in: a PDR with a MAR ID and no FAR compiles to one matcher rule carrying a compiler-allocated global policy id; the MAR's two access actions become an AtsssSteer policy (next hop, tunnel, health); update changes the preferred access; remove is refused while a PDR names it; unsupported steering modes are refused with cause 73",
+   "spec": "TS 29.244",
+   "group": "datapath and deployment",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "",
+   "detail": "The PFCP half is `internal/session`'s `parseMAR`, merge and `resolveMAR`, and the compile writes `atsss/policies` plus the access tunnel records. The packet half is `datapath/atsss_steer.cc`; `ci/atsss-steer.sh` drives its health, policy update and erase windows through a PdrMatch rule that carries the policy id, so the metadata hand-off is exercised, not just the resource shape.",
+   "effect": "Only active/standby is applied: the other Steering Modes are refused (cause 73) rather than compiled as a different policy; MPTCP and the load-balancing/priority modes remain open. A MAR PDR whose QER names a QFI is refused because one MAR tunnel is shared by its PDRs and has no per-PDR QFI record.",
+   "extra": [],
+   "kind": "conformance",
+   "block": 10,
+   "claim": "a MAR's two access actions are compiled to one steering policy and selected by health",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   }
  ],
  "aliases": {

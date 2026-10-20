@@ -110,6 +110,90 @@ message GtpuEncapArg {
   // How many tunnels the table holds. 0 means 65536. One record per session,
   // written in the same transaction as the rules that select it.
   uint32 max_tunnels = 4;
+
+  // The metadata attribute the tunnel's key is read from, 4 bytes, network
+  // order. Empty reads "action_id", the ActionTable's attribute, which is
+  // what every graph without ATSSS steering uses. A graph with an
+  // AtsssSteer module sets this to the attribute AtsssSteer writes
+  // ("tunnel_id"): a MAR's two accesses each have a tunnel record of their
+  // own, and the selected access names it. A packet whose tunnel id is 0
+  // (not steered) falls back to "action_id".
+  string tunnel_attr = 5;
+}
+
+// AtsssSteerArg configures active/standby access steering (TS 29.244 7.5.2.8,
+// a MAR's Steering Mode 0: one access active, the other on standby).
+message AtsssSteerArg {
+  // How many policies and health records the tables hold. 0 means 65536.
+  // A PFCP MAR ID is session-local; the compiler allocates a global policy id
+  // from this space for each live MAR.
+  uint32 capacity = 1;
+
+  // The metadata attribute carrying the policy id, 4 bytes, network order.
+  // The PDR matcher writes it from a rule's global policy id; 0 means the packet is not
+  // steered and is passed through unchanged. Required.
+  string policy_attr = 2;
+
+  // The Router next hop the selected access leaves by, 4 bytes, network order.
+  // Required; a policy names a nonzero hop for each access.
+  string next_hop_attr = 3;
+
+  // The GtpuEncap tunnel record the selected access names, 4 bytes, network
+  // order. Empty leaves the attribute unwritten; a graph whose accesses tunnel
+  // sets it to the attribute GtpuEncapArg.tunnel_attr names.
+  string tunnel_attr = 4;
+
+  // The usage-counter record the selected access names, 4 bytes, network
+  // order. Empty leaves the attribute unwritten (the first deployment has no
+  // per-access URR accounting).
+  string accounting_attr = 5;
+}
+
+enum AtsssSteeringMode {
+  ATSSS_ACTIVE_STANDBY = 0;
+}
+
+// AtsssAccessAction is one access of a steering policy: where its packets go
+// and the health record that says whether the access is usable.
+message AtsssAccessAction {
+  // The Router next hop, nonzero.
+  uint32 next_hop_id = 1;
+  // The GtpuEncap tunnel record, 0 when this access adds no outer header.
+  uint32 tunnel_id = 2;
+  // The usage-counter record, 0 when this access has none.
+  uint32 accounting_id = 3;
+  // The health record this access reads, nonzero. The policy references the
+  // record, so a transaction that erases a live access's health is refused.
+  uint32 health_id = 4;
+}
+
+// AtsssSteeringPolicy is one MAR's rule, as the packet path applies it.
+message AtsssSteeringPolicy {
+  AtsssSteeringMode mode = 1;
+  // The preferred access's index in `access`: 0 or 1. The other access is the
+  // standby.
+  uint32 preferred = 2;
+  // Exactly two: the 3GPP access and the non-3GPP access, in that order.
+  repeated AtsssAccessAction access = 3;
+}
+
+// AtsssSteeringPolicyKey is one key of "<module>/policies": the global policy
+// id the PDR
+// matcher wrote into the packet's policy attribute. 0 names no policy.
+message AtsssSteeringPolicyKey {
+  uint32 policy_id = 1;
+}
+
+// AtsssAccessHealthKey is one key of "<module>/health": an access's health
+// record. 0 names none.
+message AtsssAccessHealthKey {
+  uint32 health_id = 1;
+}
+
+// AtsssAccessHealth is whether an access is usable. The record is shared by
+// every policy that uses the access, so one report updates one entry.
+message AtsssAccessHealth {
+  bool available = 1;
 }
 
 // -- resources ---------------------------------------------------------------
@@ -257,6 +341,12 @@ message PdrMatchArg {
   // at creation, and is not resized: a session that does not fit is refused at
   // programming time rather than silently dropped by the packet path.
   uint32 max_sessions = 2;
+
+  // The metadata attribute a matched rule's global policy id is written to, 4 bytes,
+  // network order. Empty writes none. A graph with an AtsssSteer module sets
+  // this to the attribute AtsssSteerArg.policy_attr names; a rule without a
+  // MAR writes 0, which steers nothing.
+  string steering_attr = 3;
 }
 
 // PdrMatchSettings is the module's own settings, beside the map: the singleton
@@ -315,6 +405,12 @@ message PdrMatchRule {
   // that "no QFI named" is not "QFI 0". The order is still the list's: the
   // first rule that matches the packet's tuple *and* its QFI wins.
   optional uint32 qfi = 10;
+
+  // The global policy id the compiler allocated for this PDR's MAR (TS 29.244
+  // 8.2.34), 0 for none. The module
+  // writes it into the graph's steering attribute, where AtsssSteer selects
+  // the access. A rule that drops cannot carry one.
+  uint32 steering_policy_id = 11;
 }
 
 // PdrMatchEntry is one session's rule list, in the session's precedence order:

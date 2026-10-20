@@ -206,3 +206,14 @@ func TestParseMAC(t *testing.T) {
 		}
 	}
 }
+
+// TestAtsssNeedsTheMatcher: the wildcard table has no field for a MAR id, so a
+// deployment that names an AtsssSteer module without the downlink PdrMatch is
+// refused at startup rather than accepting a session it cannot steer.
+func TestAtsssNeedsTheMatcher(t *testing.T) {
+	args := validArgs()
+	args.atsss = "atsss_dl"
+	if _, err := graphConfig(args); err == nil {
+		t.Fatal("graphConfig accepted -atsss without -pdr-match-dl")
+	}
+}
