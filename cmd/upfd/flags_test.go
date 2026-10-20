@@ -18,7 +18,7 @@ import (
 func TestParseInstancesReadsTheEgresses(t *testing.T) {
 	d, err := parseInstances(
 		"name=internet,domain=1,next-hop=1,tunnel-next-hop=3,sgi-lan-next-hop=4,arp=arp_n6,arp-mac=02:00:00:00:06:01;"+
-			" name=vn,domain=2,vn-next-hop=5", 4)
+			" name=vn,domain=2,vn-next-hop=5", 4, session.RouteByHop)
 	if err != nil {
 		t.Fatalf("the deployment was refused: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestParseInstancesReadsTheEgresses(t *testing.T) {
 func TestParseInstancesReadsTheDeployment(t *testing.T) {
 	d, err := parseInstances(
 		"name=internet,domain=0,next-hop=1,pool=10.45.0.0/16; name=ims, domain=1, next-hop=3, pool=10.45.0.0/16",
-		2)
+		2, session.RouteByHop)
 	if err != nil {
 		t.Fatalf("the deployment was refused: %v", err)
 	}
@@ -91,12 +91,47 @@ func TestParseInstancesReadsTheDeployment(t *testing.T) {
 	// says otherwise: the flag's omission is not an outage. No next-hop is an
 	// instance whose forwards all tunnel, or that only re-injects: it needs an
 	// egress of some kind, not that one.
-	bare, err := parseInstances("name=n9,domain=3,tunnel-next-hop=3", 4)
+	bare, err := parseInstances("name=n9,domain=3,tunnel-next-hop=3", 4, session.RouteByHop)
 	if err != nil {
 		t.Fatalf("an interface with no pool was refused: %v", err)
 	}
 	if ifc, ok := bare.Lookup("n9"); !ok || ifc.NextHop != 0 || !ifc.Serves(netip.MustParseAddr("10.45.0.2")) {
 		t.Errorf("n9 is %+v, want no plain hop (the egress is a tunnel) and an unconstrained pool", ifc)
+	}
+}
+
+// TestParseInstancesRoutedModeNeedsNoEgress: with a Router in destination mode
+// the deployment's routes are the egress table, so an instance line names its
+// domain and pool and no next hop; the parser must not demand one.
+func TestParseInstancesRoutedModeNeedsNoEgress(t *testing.T) {
+	d, err := parseInstances("name=n6,domain=0,pool=10.45.0.0/16", 1, session.RouteByDestination)
+	if err != nil {
+		t.Fatalf("a routed instance with no egress key was refused: %v", err)
+	}
+	ifc, ok := d.Lookup("n6")
+	if !ok || ifc.Domain != 0 || ifc.NextHop != 0 {
+		t.Errorf("the routed interface is %+v (found %v), want domain 0 and no policy hop", ifc, ok)
+	}
+}
+
+// TestParseRouteModeNamesTheTwoModes: the flag's value is the Router's mode,
+// and a typo is refused rather than defaulted to the mode that would drop the
+// deployment's packets.
+func TestParseRouteModeNamesTheTwoModes(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want session.RouteMode
+	}{
+		{"hop", session.RouteByHop},
+		{"destination", session.RouteByDestination},
+	} {
+		got, err := session.ParseRouteMode(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("ParseRouteMode(%q) = %v, %v; want %v", c.in, got, err, c.want)
+		}
+	}
+	if _, err := session.ParseRouteMode("fib"); err == nil {
+		t.Error("an unknown mode was accepted")
 	}
 }
 
@@ -129,7 +164,7 @@ func TestParseInstancesRefuses(t *testing.T) {
 		{"an interface with no egress", "name=internet,domain=0,pool=10.45.0.0/16", 2, "needs an egress"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := parseInstances(c.spec, c.max)
+			_, err := parseInstances(c.spec, c.max, session.RouteByHop)
 			if err == nil {
 				t.Fatalf("%q was accepted", c.spec)
 			}

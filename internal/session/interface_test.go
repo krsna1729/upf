@@ -378,6 +378,49 @@ func TestATunnelOutOfAnInstanceTakesTheTunnelEgress(t *testing.T) {
 	}
 }
 
+// TestDestinationRoutingNamesNoNextHop: in destination mode the Router decides
+// the egress from the packet's own address and the deployment's routes, so the
+// FAR's egress is not resolved here -- every supported Destination Interface
+// names hop 0 (the action table's "no next hop"). The tunnel record is still
+// written: the FIB chooses the encap's gate, and the encap reads the session's
+// tunnel from the action id.
+func TestDestinationRoutingNamesNoNextHop(t *testing.T) {
+	cfg := egressConfig(t)
+	cfg.RouteMode = RouteByDestination
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	resp := c.Establish(egressEstablishment(0x7460, "10.45.0.2", 0x6e, "internet",
+		farTo(ie.DstInterfaceCore, tunnelTo(0x22334455, "10.20.30.9")),
+		farTo(ie.DstInterfaceSGiLANN6LAN, ie.NewForwardingPolicy("steering-1"))))
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	changes := rec.last()
+	ul := ruleIn(t, changes, cfg.Up.PDRTable)
+	if got := nextHop(t, changes, actionsRes(cfg.Up), ul.actionID()); got != 0 {
+		t.Errorf("the uplink action names next hop %d, want 0: the Router's FIB decides", got)
+	}
+	dl := ruleIn(t, changes, cfg.Down.PDRTable)
+	if got := nextHop(t, changes, actionsRes(cfg.Down), dl.actionID()); got != 0 {
+		t.Errorf("the downlink action names next hop %d, want 0: the Router's FIB decides", got)
+	}
+
+	// The Router looks the packet up in the domain it was classified in, so a
+	// FAR that forwards into another instance cannot be expressed by routes
+	// this compiler writes; it is refused rather than routed in the wrong FIB.
+	rec = &recorder{}
+	c = New(cfg, rec, quietLogger())
+	resp = c.Establish(egressEstablishment(0x7461, "10.45.0.3", 0x6f, "internet",
+		farTo(ie.DstInterfaceCore),
+		farTo(ie.DstInterfaceCore, ie.NewNetworkInstance("vn"))))
+	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a forward into another instance answered cause %d, want 73", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Errorf("the refused establishment wrote %d transactions, want none", len(rec.txns))
+	}
+}
+
 // TestAServiceLanForwardTakesTheServiceLanEgress: Destination Interface
 // SGi-LAN/N6-LAN is the service fabric's exit, declared per instance.
 func TestAServiceLanForwardTakesTheServiceLanEgress(t *testing.T) {
