@@ -150,6 +150,8 @@ run lacks.
 
 Audited 2026-10-20 against each project's checkout; cells are lower bounds (silence counts as absent). OAI's precedence credit is the simple-switch path -- its XDP array follows PFCP order; free5GC's three credits are in the gtp5g kernel module, its userspace tree has no matcher; open5gs' NI is a setup-time choice of the DNN's GTP-U resource and needs an external SMF to be exercised.
 
+**block 9** — the three IPv6 capabilities are the three places an IPv6 deployment would carry the address: the PFCP UE IP address (8.2.62, an IPv6 prefix with IPv6D/IP6PL lengths), the inner packet the PDR matches, and the N9 transport (GTP-U over IPv6). This tree refuses the first two rather than match them loosely -- the WildcardMatch key is four bytes, so an IPv6 UE address or F-TEID is cause 73 (status-7) and a non-IPv4 PDI is never widened to IPv4 -- while an IPv6 SDF prefix compiles only on the opt-in firewall path, whose rule carries a CIDR string (status-8). The inner/outer IPv6 datapath and the N9 IPv6 tunnel are not built: no graph has an IPv6 address, and the encap writes IPv4. The score is 0; UPG-VPP's 33 is one of the three.
+
 **block 12** — free5GC v4.3.0 SMF drove upfd through establishment, modification and deletion unshimmed (docs/interop.md, run fixes-ccf667c; ci/interop/run.sh). open5gs 100: its UPF is the field's production interop.
 
 ## Finding numbers
