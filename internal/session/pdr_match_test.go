@@ -19,6 +19,7 @@ package session
 import (
 	"context"
 	"net"
+	"slices"
 	"testing"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -392,11 +393,11 @@ func TestAPdrMatchPDINamingAQFIIsCarriedOnItsRule(t *testing.T) {
 	}
 }
 
-func TestTheSweepErasesAnEarlierRunsMapKeys(t *testing.T) {
-	// The restart wall reaches the map: an earlier run's key is a session this
-	// process does not know, and the module matches packets on it. The sweep
-	// erases exactly the keys it read back -- this is the map's generic path,
-	// not the firewall's whole-policy one.
+func TestTheSweepResetsAnEarlierRunsOptInMap(t *testing.T) {
+	// The restart wall reaches the opt-in map: an earlier run's key is a
+	// session this process does not know, and the module matches packets on
+	// it. The sweep empties the whole map in the daemon (ResetResources), not
+	// key by key.
 	cfg := pdrMatchConfig("pdr_match_ul")
 	f := &sweepFake{contents: map[string][]bess.Entry{}}
 	c := New(cfg, f, quietLogger())
@@ -410,13 +411,16 @@ func TestTheSweepErasesAnEarlierRunsMapKeys(t *testing.T) {
 	if err := c.Sweep(context.Background()); err != nil {
 		t.Fatalf("the sweep: %v", err)
 	}
-	for _, teid := range []uint32{0x81, 0x82} {
-		ch, ok := find0(f.changes[0], "pdr_match_ul/rules", "session", teid)
-		if !ok {
-			t.Fatalf("the sweep left the key of F-TEID %#x in the map", teid)
+	found := false
+	for _, names := range f.resets {
+		if slices.Contains(names, "pdr_match_ul/rules") {
+			found = true
 		}
-		if ch.Value != nil {
-			t.Errorf("the sweep wrote F-TEID %#x's key instead of erasing it: %v", teid, ch.Value)
-		}
+	}
+	if !found {
+		t.Error("the sweep did not reset the opt-in map")
+	}
+	if len(f.changes) != 0 {
+		t.Errorf("the sweep erased %d keys one by one from tables it reset", len(f.changes))
 	}
 }
