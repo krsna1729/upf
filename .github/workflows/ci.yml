@@ -220,7 +220,7 @@ jobs:
           if [ ! -f datapath/build/build.ninja ]; then
             PKG_CONFIG="pkg-config --define-prefix" \
             PKG_CONFIG_PATH="$stage_pc" \
-              meson setup datapath/build
+              meson setup datapath/build datapath
           fi
           ninja -C datapath/build
 
