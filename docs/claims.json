@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "generated_by": "ci/verify.sh",
- "updated": "2026-10-20T09:11:12+05:30",
+ "updated": "2026-10-20T09:38:59+05:30",
  "claims": [
   {
    "id": "status-1",
@@ -14,23 +14,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestACHOOSEForBothFamiliesGetsTheIPv4FTEID": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestACHRequestIsAllocatedWhateverItsFamilyFlag": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAConfiguredFeatureIsAdvertised": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/session-live.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -70,35 +70,35 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestACHOOSEIDIsTheSessionsFTEIDForThatGroup": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestARefusedModificationKeepsTheCHIDItAllocated": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestLiveSessionSharesOneFTEIDPerCHOOSEID": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTwoCHOOSEIDsGetTwoFTEIDs": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/session-live.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -109,9 +109,9 @@
    "spec": "TS 29.244",
    "group": "datapath and deployment",
    "messages": [
-    "Session Modification"
+    "Shared information elements"
    ],
-   "message": "Session Modification",
+   "message": "Shared information elements",
    "statement": "",
    "detail": "in: the session keeps one F-TEID per CHOOSE ID and hands it to every PDI that names it; a refused modification keeps the F-TEID it allocated rather than returning it to the pool, and the SMF's retry is answered with that value (the model's mutation is not undone by a refusal, and the reservation is what keeps the value off another session until this one ends)",
    "effect": "",
@@ -132,11 +132,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestACHOOSEForIPv6IsRefused": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -170,11 +170,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestSessionRequestsWithoutSessionLayer": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -208,11 +208,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestDataplaneRefusalBecomesACause": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -247,15 +247,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAPortRangeCompilesToAFirewallRuleWithItsRange": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestPortRangeIsRefusedNotMatchedTooWidely": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -291,23 +291,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAMixedFamilyFirewallRuleIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestANonIPv4PDIIsRefusedNotWidened": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAnSDFPrefixIsAPrefixNotAnAddress": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -349,47 +349,47 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAFirewallDeploymentThatBuffersIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAFirewallRuleCarriesThePDRAVerdict": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAMixedFamilyFirewallRuleIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAPortRangeCompilesToAFirewallRuleWithItsRange": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestDeletingASessionRewritesTheFirewallPolicy": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestGraphConfigMapsTheFlags": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheFirewallPathIsOptIn": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheFirewallPolicyIsTheUnionOfTheLiveSessions": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheSweepReplacesAStaleFirewallPolicy": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -400,9 +400,9 @@
    "spec": "TS 29.244",
    "group": "datapath composition",
    "messages": [
-    "Session Deletion"
+    "Cross-cutting (no message)"
    ],
-   "message": "Session Deletion",
+   "message": "Cross-cutting (no message)",
    "statement": "",
    "detail": "**partly in, and unarmed.** `upfd -firewall-ul`/`-firewall-dl` name the module a direction's PDRs go into instead of `-pdr-table-*`: its `<name>/rules` singleton holds the *whole ordered policy*, so the compiler writes every live session's rules of that module (a write of one session's alone would erase the others', and a packet no rule matches is dropped), ordered by Precedence ascending -- 8.2.11's lower value wins and a firewall list applies its first matching rule, so no inversion here -- and replaces it on a deletion and in the startup sweep (an empty policy). A rule's fields are `FirewallArg.Rule`'s: `src_ip`/`dst_ip` (CIDR strings, length mandatory), `proto`, the four port-range bounds, `drop`. What it **cannot** carry is any action: the module's words are drop and pass, it writes no packet metadata, so a rule cannot name the PDR's ActionId or next hop (nor the QFI, the route domain or the tunnel), and a PDR that buffers is refused (no gate to the store). Nothing is live: the installed stage carries no `firewall` module, and a graph that names a module the daemon does not have fails to load, so no `deploy/*.yaml` graph declares one and the arms in `ci/` run the WildcardMatch path with its refusals untouched",
    "effect": "",
@@ -423,11 +423,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestTheUplinkRuleIsKeyedOnTheSessionsUEAddress": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -469,47 +469,47 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestLiveStartupSweepErasesStaleSessions": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestSweepErasesEveryReadEntryInOneTransaction": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestSweepErasesInBoundedBatchesAtScale": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestSweepLeavesNothingErasedWhenTheReadbackFails": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestSweepNamesTheGraphsResources": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestSweepReportsAnUnreadableDataplane": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestSweepStopsAtTheFirstFailedBatch": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestSweepWithNothingToEraseWritesNothing": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheSweepReplacesAStaleFirewallPolicy": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/n4-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -544,15 +544,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestTheIDPoolWalksTheSpaceAndWaitsOutTheGrace": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/session-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -590,27 +590,27 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestADeletionFreesOnlyItsOwnRuleKeys": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAFailedCompileKeepsTheKeysTheSessionHeld": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestARefusedMoveKeepsTheKeysRule": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestASecondSessionsRuleCannotTakeTheFirsts": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAnUnansweredApplyKeepsTheSessionsKeys": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -621,9 +621,9 @@
    "spec": "TS 29.244",
    "group": "control plane",
    "messages": [
-    "Session Deletion"
+    "Cross-cutting (no message)"
    ],
-   "message": "Session Deletion",
+   "message": "Cross-cutting (no message)",
    "statement": "",
    "detail": "in (docs/design.md, \"Restart and failure semantics\"): `compile` keeps the owner of every rule key a live session holds and refuses the second claimant with cause 73 rather than letting it take the first's packets (and, on its deletion, erase the rule the first still holds); the check and the claim are one critical section, a compile that fails partway gives up only the keys it was the first to claim, and a key is given up in `settle` -- once the transaction that erases it has landed -- or in `releaseSession`, once the deletion has landed",
    "effect": "",
@@ -647,23 +647,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestParseInstancesReadsTheDeployment": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestStatsCountWhatTheSMFAsked": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheMetricsAddressIsBoundAtStartup": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheMetricsEndpointReportsTheNodesNumbers": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -674,11 +674,9 @@
    "spec": "TS 29.244",
    "group": "control plane",
    "messages": [
-    "Session Deletion",
-    "Session Establishment",
-    "Session Modification"
+    "Cross-cutting (no message)"
    ],
-   "message": "Session Deletion",
+   "message": "Cross-cutting (no message)",
    "statement": "",
    "detail": "**partly in**: the numbers -- `upfd -metrics host:port` serves the session layer's counters (sessions held, establishments, modifications, deletions, refusals), the reporting loop's (reports sent, refused, held, dropped) and whether a CP function is associated, as Prometheus text at the node that measured them; the graph's shape (module names, key fields, next hops), the network instances, the reporting interval and the checkpoint file are flags. What is not in: nothing of the two the row used to name -- GTP-U echo and the end marker are the dataplane's own rows below, and DDN/BAR are the buffering's, and both are in and live-armed",
    "effect": "",
@@ -705,35 +703,35 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestTheAssociationAnswerCarriesTheConfiguredRecoveryTimeStamp": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheAssociationEndingClearsTheCheckpoint": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheCheckpointIgnoresATornRecord": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheCheckpointRefusesCorruption": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheCheckpointReplaysSessions": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheCheckpointStampSurvivesARestart": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/n4-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -744,10 +742,9 @@
    "spec": "TS 29.244",
    "group": "control plane",
    "messages": [
-    "Association",
-    "Session Establishment"
+    "Cross-cutting (no message)"
    ],
-   "message": "Association",
+   "message": "Cross-cutting (no message)",
    "statement": "",
    "detail": "in (docs/design.md's restart wall, no PFCP clause): `upfd -checkpoint <path>` journals every applied session message before the SMF is answered and replays it before the PFCP socket opens (after the sweep, so the dataplane holds the journal's sessions and nothing else); a replayed session keeps the local SEID the SMF addresses it by; a restart that restored the journal re-advertises the recorded Recovery Time Stamp, so the SMF does not re-establish sessions this node still holds, and a restart with no usable journal mints a new one and clears the file; the association's end clears it too, because the CP function's restart voids the sessions it describes",
    "effect": "",
@@ -769,15 +766,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAnUplinkPDRKeysTheWildcardRuleOnTheSwappedFilter": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAnUplinkPDRReadsTheDownlinkFormFilterSwapped": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -810,11 +807,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestSeveralSDFFiltersAreSeveralRules": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -847,11 +844,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestSeveralQFIsAreSeveralRules": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -885,15 +882,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestADefinitionChangeRewritesTheReferencingPDRsRule": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAnUplinkPDRThatNamesABidirectionalFilterByIDGetsItsFlowDescription": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -926,11 +923,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAMatchTheUPDoesNotImplementIsRefusedNotDropped": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -970,39 +967,39 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAGBRAboveTheMBRIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAPDRWithSeveralRateBearingQERsEnforcesTheSharedOne": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAQERThatCapsOneDirectionWritesOneMeter": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAQERsAveragingWindowIsTheMetersBurst": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAQERsGBRIsTheMetersCommittedRate": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestLiveGBRSplitsTheMeter": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/meter-compose.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1035,11 +1032,11 @@
    ],
    "result": {
     "state": "skip",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestLiveUsageReportReachesTheSMF": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1049,8 +1046,6 @@
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
-    "Session Deletion",
-    "Session Modification",
     "Session Report"
    ],
    "message": "Session Report",
@@ -1074,11 +1069,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "ci/smoke-gtpu.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1115,27 +1110,27 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestADestinationAddressIsNotTheSessionsUEAddress": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAFirewallRuleRefusesTheSDContradiction": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAFirewallRulesUESideFollowsThePDIsSD": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAPDIsDestinationAddressGoesInTheDestinationField": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAPDIsDestinationAndTheSDFsMustAgree": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1170,19 +1165,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAFARThatAsksForL7WorkIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAFARThatAsksToDuplicateIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAServiceLanForwardNeedsItsForwardingPolicy": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1217,19 +1212,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "deploy/upf.yaml": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/interop/up.sh": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/veth-port.sh": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1262,11 +1257,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAPDRNamingAnUnknownQERIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1299,11 +1294,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestTheDownlinkReportIsOwedOncePerBufferingEpisode": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1313,9 +1308,9 @@
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
-    "Session Modification"
+    "Session Report"
    ],
-   "message": "Session Modification",
+   "message": "Session Report",
    "statement": "8.2.26 NOCP: notify the CP function about the first buffered DL packet *only when* the flag is set; BUFF alone is a request to buffer silently (an SMF sends that while paging is in progress)",
    "detail": "the Downlink Data Report is decided by `p.buffer && !p.ddnSent` (`downlink.go:94`): NOCP is never consulted",
    "effect": "a report the SMF did not ask for, on every buffering episode. **Fixed**: `applyNOCP` (8.2.26 octet 5 bit 4) is read and the PDR carries `notify`, so the reading in `EvaluateDownlinks` asks only for buffering PDRs whose FAR asked to be told; `TestTheDownlinkReportIsOwedOncePerBufferingEpisode` now holds the two arms -- a BUFF FAR without NOCP owes nothing, and the modification that sets NOCP makes the same episode's held packet owed (`session-path`'s live arm sends BUFF\\",
@@ -1339,23 +1334,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAPeerErrorIndicationBecomesAnERIRReport": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestLiveErrorIndicationBecomesAnERIRReport": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/session-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/smoke-gtpu.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1365,8 +1360,7 @@
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
-    "Error Indication and its report",
-    "Session Report"
+    "Error Indication and its report"
    ],
    "message": "Error Indication and its report",
    "statement": "5.10, 7.5.8.4 and 8.2.21's third bit (ERIR): on receipt of a GTP-U Error Indication the UP shall send a Session Report Request with an **Error Indication Report** (Report Type ERIR) carrying the remote F-TEID",
@@ -1390,15 +1384,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAQFIIsInRangeOrRefused": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/smoke-gtpu.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1431,11 +1425,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAOneOctetReportingTriggersIsRead": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1469,15 +1463,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestARefusedModificationGivesBackTheMetersAndTEIDsItTook": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestARefusedModificationLeavesTheSessionAsItWas": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1513,19 +1507,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAMeasurementPeriodWithoutThePeriodicTriggerIsInert": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAQERsQFIReachesTheTunnelRecord": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/cntc-path.sh": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1559,15 +1553,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestZeroIsALegalRuleID": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1577,7 +1571,6 @@
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
-    "Session Establishment",
     "Session Modification"
    ],
    "message": "Session Modification",
@@ -1602,15 +1595,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestTheTerminationReportCarriesWhatADecidedReportStillHolds": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAnUnansweredReportIsSentAgainBeforeTheNextOne": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1620,8 +1613,6 @@
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
-    "Session Deletion",
-    "Session Modification",
     "Session Report"
    ],
    "message": "Session Report",
@@ -1645,11 +1636,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "ci/meter-compose.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1680,7 +1671,7 @@
    "evidence": [],
    "result": {
     "state": "gap",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {}
    },
    "clause": "5.4.15",
@@ -1713,15 +1704,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestASelectorThatIgnoresTheRouteDomainHoldsOneSessionPerAddress": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/pdrmatch-2dn.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1756,19 +1747,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAssociationAndHeartbeat": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestCPRestartVoidsAssociation": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestHeartbeatTimeoutEndsAssociation": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1804,15 +1795,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestARefusedModificationLeavesTheSessionAsItWas": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/session-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1848,15 +1839,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAPeerErrorIndicationBecomesAnERIRReport": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/session-report.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1894,23 +1885,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAPDINamingAQFIKeysTheRuleOnIt": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAPortRangeCompilesToAFirewallRuleWithItsRange": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestPortRangeIsRefusedNotMatchedTooWidely": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestSeveralSDFFiltersAreSeveralRules": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1946,15 +1937,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestAQERThatCapsOneDirectionWritesOneMeter": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAQERsGBRIsTheMetersCommittedRate": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -1991,19 +1982,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestALinkedURRReportsItsGroupUnderOneURSEQN": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAOneOctetReportingTriggersIsRead": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAQuotaExhaustedURRDropsItsPDRs": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -2039,15 +2030,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestTheDownlinkReportIsOwedOncePerBufferingEpisode": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/buffer-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -2083,15 +2074,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "ci/smoke-gtpu.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "ci/veth-port.sh": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -2127,15 +2118,15 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "TestANonIPv4PDIIsRefusedNotWidened": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      },
      "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -2168,7 +2159,7 @@
    "evidence": [],
    "result": {
     "state": "gap",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {}
    },
    "clause": null,
@@ -2202,11 +2193,11 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "ci/iface-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },
@@ -2241,11 +2232,11 @@
    ],
    "result": {
     "state": "skip",
-    "at": "2026-10-20T09:11:12+05:30",
+    "at": "2026-10-20T09:38:59+05:30",
     "evidence": {
      "ci/interop/up.sh": {
       "state": "skip",
-      "at": "2026-10-20T09:11:12+05:30"
+      "at": "2026-10-20T09:38:59+05:30"
      }
     }
    },

@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 292" width="780" height="292" role="img" aria-label="Claims by message">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>
+text{font:13px system-ui,-apple-system,Segoe UI,sans-serif;fill:#111}
+.lbl{text-anchor:end;font-weight:600}.num{fill:#555}.t{font-size:15px;font-weight:700}
+.ok{fill:#2e7d32}.gap{fill:#b26a00}.skip{fill:#8a8f98}.fail{fill:#c62828}
+</style>
+<text class="t" x="0" y="22">Claims by message — 49 total · 45 ok · 2 gap · 2 skip · 0 fail</text>
+<text class="lbl" x="238" y="71">Error Indication and its report</text>
+<rect class="ok" x="250.0" y="61" width="63.3" height="14" rx="2"/>
+<text class="num" x="640" y="71">2</text>
+<text class="lbl" x="238" y="97">Session Establishment</text>
+<rect class="ok" x="250.0" y="87" width="285.0" height="14" rx="2"/>
+<text class="num" x="640" y="97">9</text>
+<text class="lbl" x="238" y="123">Session Modification</text>
+<rect class="ok" x="250.0" y="113" width="126.7" height="14" rx="2"/>
+<rect class="gap" x="376.7" y="113" width="31.7" height="14" rx="2"/>
+<text class="num" x="640" y="123">5</text>
+<text class="lbl" x="238" y="149">Session Deletion</text>
+<rect class="ok" x="250.0" y="139" width="31.7" height="14" rx="2"/>
+<text class="num" x="640" y="149">1</text>
+<text class="lbl" x="238" y="175">Session Report</text>
+<rect class="ok" x="250.0" y="165" width="95.0" height="14" rx="2"/>
+<rect class="skip" x="345.0" y="165" width="31.7" height="14" rx="2"/>
+<text class="num" x="640" y="175">4</text>
+<text class="lbl" x="238" y="201">Shared information elements</text>
+<rect class="ok" x="250.0" y="191" width="285.0" height="14" rx="2"/>
+<text class="num" x="640" y="201">9</text>
+<text class="lbl" x="238" y="227">Cross-cutting (no message)</text>
+<rect class="ok" x="250.0" y="217" width="221.7" height="14" rx="2"/>
+<text class="num" x="640" y="227">7</text>
+<text class="lbl" x="238" y="253">Competition</text>
+<rect class="ok" x="250.0" y="243" width="316.7" height="14" rx="2"/>
+<rect class="gap" x="566.7" y="243" width="31.7" height="14" rx="2"/>
+<rect class="skip" x="598.3" y="243" width="31.7" height="14" rx="2"/>
+<text class="num" x="640" y="253">12</text>
+</svg>
