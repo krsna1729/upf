@@ -1792,17 +1792,71 @@
    "message": "Competition",
    "scores": {
     "us": "**80**",
-    "OAI-CN5G": "\u2014",
-    "open5gs": "\u2014",
-    "free5GC": "\u2014",
-    "UPG-VPP": "\u2014",
-    "eUPF": "\u2014",
-    "OMEC": "\u2014"
+    "OAI-CN5G": "80",
+    "open5gs": "100",
+    "free5GC": "60",
+    "UPG-VPP": "80",
+    "eUPF": "60",
+    "OMEC": "80"
    },
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 4
+   "block": 4,
+   "field_table": {
+    "headers": [
+     "project",
+     "credited",
+     "not credited"
+    ],
+    "rows": [
+     [
+      "open5gs",
+      "precedence; F-TEID+CHID; UE IP; SDF+ranges; NI+QFI",
+      "\u2014"
+     ],
+     [
+      "OAI-CN5G",
+      "precedence; F-TEID+CHID; UE IP; SDF+ranges",
+      "NI (parsed, never matched)"
+     ],
+     [
+      "UPG-VPP",
+      "precedence; F-TEID+CHID; UE IP; SDF+ranges",
+      "QFI (parsed, never matched)"
+     ],
+     [
+      "OMEC",
+      "precedence; F-TEID+CHID; UE IP; SDF+ranges",
+      "NI+QFI; ranges wider than 100 ports refused"
+     ],
+     [
+      "eUPF",
+      "F-TEID+CHID; UE IP; SDF+ranges",
+      "precedence; NI; QFI"
+     ],
+     [
+      "free5GC",
+      "precedence; UE IP; SDF+ranges (gtp5g kernel)",
+      "F-TEID+CHID; NI+QFI"
+     ],
+     [
+      "**us**",
+      "precedence; F-TEID+CHID; UE IP; NI+QFI",
+      "SDF+ranges on the generic path (the opt-in firewall path compiles them; no live arm)"
+     ]
+    ]
+   },
+   "field": "Audited 2026-10-20 against each project's checkout; cells are lower bounds (silence counts as absent). OAI's precedence credit is the simple-switch path -- its XDP array follows PFCP order; free5GC's three credits are in the gtp5g kernel module, its userspace tree has no matcher; open5gs' NI is a setup-time choice of the DNN's GTP-U resource and needs an external SMF to be exercised.",
+   "field_sources": [
+    "**open5gs** \u2014 precedence `lib/pfcp/handler.c:596`, `lib/pfcp/context.c:1473`; F-TEID+CHID `lib/pfcp/context.c:1678-1804`; UE IP `src/upf/context.c:451-478`; ranges `lib/pfcp/rule-match.c:415-432`; NI+QFI `src/upf/gtp-path.c:469`",
+    "**OAI-CN5G** \u2014 precedence `src/upf_app/simpleswitch/pfcp_switch.cpp:1441`; F-TEID+CHID `pfcp_session.cpp:1826-1857`; UE IP `xdp_pdr_match_kern.c:344`; ranges `xdp_pdr_match_kern.c:104-108`, `SdfFilterParser.cpp:91-111`; NI unused",
+    "**UPG-VPP** \u2014 precedence `upf_sxu_2_update_dynamic.c:807-855`; F-TEID+CHID `upf_sxu_1_provide_actions.c:155-165`; UE IP `upf_sxu_3_compile_rules.c:635`; ranges `upf_ipfilter.c:84-94`; QFI parsed only `pfcp_proto.c:5133`",
+    "**OMEC** \u2014 precedence `pfcpiface/bess.go:1182`; F-TEID+CHID `messages_session.go:163-177`; UE IP `bess.go:1187-1198`; ranges `parse_pdr.go:128-140`; NI/QFI unread `parse_pdr.go:619-636`",
+    "**eUPF** \u2014 F-TEID+CHID `cmd/core/pdr_creation_context.go:109-132`; UE IP `cmd/ebpf/xdp/n3n6_entrypoint.c:70`; ranges `cmd/ebpf/xdp/sdf_filter.h:101-102`; precedence absent; QFI header-only `n3n6_entrypoint.c:128`",
+    "**free5GC** \u2014 its three credits are in `free5gc/gtp5g` (not the go-upf tree): precedence `src/pfcp/pdr.c:538-551`; UE IP `src/pfcp/pdr.c:314-318`; ranges `src/pfcp/pdr.c:266-273`; go-upf discards NI (`gtp5g.go:377`) and allocates no TEID",
+    "**us** \u2014 `docs/claims.md`: status-1..3, 7, 9, 15-17, 23; ranges: status-6 is the refusals, the opt-in firewall path compiles them on both sides"
+   ]
   },
   {
    "id": "competition-5",
@@ -2085,12 +2139,12 @@
    "id": "competition-12",
    "scope": "competition",
    "evidence": [
-    "ci/interop/up.sh"
+    "ci/interop/run.sh"
    ],
    "result": {
     "state": "skip",
     "evidence": {
-     "ci/interop/up.sh": {
+     "ci/interop/run.sh": {
       "state": "skip"
      }
     }
@@ -2105,7 +2159,7 @@
    ],
    "message": "Competition",
    "scores": {
-    "us": "**0**",
+    "us": "**100**",
     "OAI-CN5G": "0",
     "open5gs": "**100**",
     "free5GC": "0",
@@ -2116,7 +2170,8 @@
    "detail": "",
    "statement": "",
    "kind": "competition",
-   "block": 12
+   "block": 12,
+   "field": "free5GC v4.3.0 SMF drove upfd through establishment, modification and deletion unshimmed (docs/interop.md, run fixes-ccf667c; ci/interop/run.sh). open5gs 100: its UPF is the field's production interop."
   }
  ],
  "aliases": {

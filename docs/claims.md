@@ -98,14 +98,17 @@ The code is not in question.
 
 ## Competition
 
-`us` is bold where nothing in the field scores higher.
+`us` is bold where nothing in the field scores higher. A `· gap` or
+`· skip` beside a block is the verdict of its evidence lane in this run,
+not part of the score: `skip` means the lane needs an environment this
+run lacks.
 
 | block | us | OAI-CN5G | open5gs | free5GC | UPG-VPP | eUPF | OMEC | proof |
 |---|---|---|---|---|---|---|---|---|
 | **1** association, heartbeat, restart detection (3) | **100** | 100 | 100 | 100 | 100 | 100 | 100 | test ×3 |
 | **2** session establishment, modification, deletion (3) | **100** | 100 | 100 | 100 | 100 | 100 | 100 | test · lane |
 | **3** Session Report Request: USAR, DLDR (2) | **100** | 100 | 100 | 100 | 50 | 0 | 0 | test · lane |
-| **4** PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5) | **80** | — | — | — | — | — | — | test ×4 |
+| **4** PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5) | 80 | 80 | 100 | 60 | 80 | 60 | 80 | test ×4 |
 | **5** QER: gate, MBR, per-flow or GBR (3) | **100** | 67 | 67 | 33 | 0 | 67 | 67 | test ×2 |
 | **6** URR: volume, time, thresholds, quota + enforcement, linked (5) | **100** | 60 | 60 | 60 | 100 | 0 | 0 | test ×3 |
 | **7** BAR + DDN: buffering, DDN, duration, drop-buffered (4) | **100** | 75 | 75 | 25 | 0 | 0 | 25 | test · lane |
@@ -113,7 +116,41 @@ The code is not in question.
 | **9** IPv6: PFCP UE IP, inner + outer, N9 (3) | 0 | 0 | 0 | 0 | 33 | 0 | 0 | test ×2 |
 | **10** MAR / ATSSS-LL (2) · gap | 0 | 50 | 0 | 0 | 50 | 0 | 0 | — |
 | **11** ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 | lane |
-| **12** real-SMF interop (1) · skip | 0 | 0 | 100 | 0 | 0 | 0 | 0 | lane |
+| **12** real-SMF interop (1) · skip | **100** | 0 | 100 | 0 | 0 | 0 | 0 | lane |
+| **mean (12 blocks)** | **78** | **56** | **65** | **43** | **46** | **31** | **42** | |
+
+### Field notes
+
+**block 4 — audited**
+
+<details>
+<summary>how each cell was earned (code evidence)</summary>
+
+| project | credited | not credited |
+|---|---|---|
+| open5gs | precedence; F-TEID+CHID; UE IP; SDF+ranges; NI+QFI | — |
+| OAI-CN5G | precedence; F-TEID+CHID; UE IP; SDF+ranges | NI (parsed, never matched) |
+| UPG-VPP | precedence; F-TEID+CHID; UE IP; SDF+ranges | QFI (parsed, never matched) |
+| OMEC | precedence; F-TEID+CHID; UE IP; SDF+ranges | NI+QFI; ranges wider than 100 ports refused |
+| eUPF | F-TEID+CHID; UE IP; SDF+ranges | precedence; NI; QFI |
+| free5GC | precedence; UE IP; SDF+ranges (gtp5g kernel) | F-TEID+CHID; NI+QFI |
+| **us** | precedence; F-TEID+CHID; UE IP; NI+QFI | SDF+ranges on the generic path (the opt-in firewall path compiles them; no live arm) |
+
+**sources (file:line, audited commit)**
+
+- **open5gs** — precedence `lib/pfcp/handler.c:596`, `lib/pfcp/context.c:1473`; F-TEID+CHID `lib/pfcp/context.c:1678-1804`; UE IP `src/upf/context.c:451-478`; ranges `lib/pfcp/rule-match.c:415-432`; NI+QFI `src/upf/gtp-path.c:469`
+- **OAI-CN5G** — precedence `src/upf_app/simpleswitch/pfcp_switch.cpp:1441`; F-TEID+CHID `pfcp_session.cpp:1826-1857`; UE IP `xdp_pdr_match_kern.c:344`; ranges `xdp_pdr_match_kern.c:104-108`, `SdfFilterParser.cpp:91-111`; NI unused
+- **UPG-VPP** — precedence `upf_sxu_2_update_dynamic.c:807-855`; F-TEID+CHID `upf_sxu_1_provide_actions.c:155-165`; UE IP `upf_sxu_3_compile_rules.c:635`; ranges `upf_ipfilter.c:84-94`; QFI parsed only `pfcp_proto.c:5133`
+- **OMEC** — precedence `pfcpiface/bess.go:1182`; F-TEID+CHID `messages_session.go:163-177`; UE IP `bess.go:1187-1198`; ranges `parse_pdr.go:128-140`; NI/QFI unread `parse_pdr.go:619-636`
+- **eUPF** — F-TEID+CHID `cmd/core/pdr_creation_context.go:109-132`; UE IP `cmd/ebpf/xdp/n3n6_entrypoint.c:70`; ranges `cmd/ebpf/xdp/sdf_filter.h:101-102`; precedence absent; QFI header-only `n3n6_entrypoint.c:128`
+- **free5GC** — its three credits are in `free5gc/gtp5g` (not the go-upf tree): precedence `src/pfcp/pdr.c:538-551`; UE IP `src/pfcp/pdr.c:314-318`; ranges `src/pfcp/pdr.c:266-273`; go-upf discards NI (`gtp5g.go:377`) and allocates no TEID
+- **us** — `docs/claims.md`: status-1..3, 7, 9, 15-17, 23; ranges: status-6 is the refusals, the opt-in firewall path compiles them on both sides
+
+</details>
+
+Audited 2026-10-20 against each project's checkout; cells are lower bounds (silence counts as absent). OAI's precedence credit is the simple-switch path -- its XDP array follows PFCP order; free5GC's three credits are in the gtp5g kernel module, its userspace tree has no matcher; open5gs' NI is a setup-time choice of the DNN's GTP-U resource and needs an external SMF to be exercised.
+
+**block 12** — free5GC v4.3.0 SMF drove upfd through establishment, modification and deletion unshimmed (docs/interop.md, run fixes-ccf667c; ci/interop/run.sh). open5gs 100: its UPF is the field's production interop.
 
 ## Finding numbers
 

@@ -404,7 +404,10 @@ comp = [c for c in doc['claims'] if c['scope'] == 'competition']
 if comp:
     impls = [k for k in comp[0].get('scores', {}) if k != 'us']
     lines += ['## Competition', '',
-              '`us` is bold where nothing in the field scores higher.', '',
+              '`us` is bold where nothing in the field scores higher. A `· gap` or',
+              '`· skip` beside a block is the verdict of its evidence lane in this run,',
+              'not part of the score: `skip` means the lane needs an environment this',
+              'run lacks.', '',
               '| block | us | ' + ' | '.join(impls) + ' | proof |',
               '|---|---|' + '---|' * len(impls) + '---|']
     for c in sorted(comp, key=idkey):
@@ -419,7 +422,36 @@ if comp:
         lines.append(f"| **{c['block']}** {name} | {usc} | " +
                      ' | '.join(s.get(k, '—').strip('*') for k in impls) +
                      f" | {evidence_kinds(c) or '—'} |")
+    # A mean is the arithmetic mean of the rows every project scores, so a
+    # block a project has no cell for is left out of that project's mean.
+    scored = [c for c in comp if all(str(c.get('scores', {}).get(k, '—')).strip('*').isdigit()
+                                     for k in ['us'] + impls)]
+    def mean(col):
+        vals = [int(str(c['scores'][col]).strip('*')) for c in scored]
+        return str(int(sum(vals) / len(vals) + 0.5)) if vals else '—'
+    lines.append(f"| **mean ({len(scored)} blocks)** | **{mean('us')}** | " +
+                 ' | '.join(f"**{mean(k)}**" for k in impls) + ' | |')
     lines.append('')
+    notes = [c for c in sorted(comp, key=idkey)
+             if c.get('field') or c.get('field_table')]
+    if notes:
+        lines += ['### Field notes', '']
+        for rec in notes:
+            b, text, table = rec['block'], rec.get('field'), rec.get('field_table')
+            if table:
+                lines += [f"**block {b} — audited**", '',
+                          '<details>', '<summary>how each cell was earned (code evidence)</summary>', '',
+                          '| ' + ' | '.join(table['headers']) + ' |',
+                          '|' + '---|' * len(table['headers'])]
+                for row in table['rows']:
+                    lines.append('| ' + ' | '.join(row) + ' |')
+                srcs = rec.get('field_sources') or []
+                if srcs:
+                    lines += ['', '**sources (file:line, audited commit)**', '']
+                    lines += [f"- {s}" for s in srcs]
+                lines += ['', '</details>', '']
+            if text:
+                lines += [text if table else f"**block {b}** — {text}", '']
 
 aliases = doc.get('aliases') or {}
 if aliases:
