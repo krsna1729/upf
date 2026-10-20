@@ -214,9 +214,12 @@ jobs:
 
       - name: Build the plugin
         run: |
+          # bess-dev.pc lives under stage/lib/pkgconfig or the host's multiarch
+          # directory (lib/<triplet>/pkgconfig); find it rather than assuming.
+          stage_pc=$(find "$PWD/build/bess/stage/lib" -type d -name pkgconfig | paste -sd: -)
           if [ ! -f datapath/build/build.ninja ]; then
             PKG_CONFIG="pkg-config --define-prefix" \
-            PKG_CONFIG_PATH="$PWD/build/bess/stage/lib/pkgconfig" \
+            PKG_CONFIG_PATH="$stage_pc" \
               meson setup datapath/build
           fi
           ninja -C datapath/build

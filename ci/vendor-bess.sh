@@ -18,8 +18,10 @@
 # And what it rewrites, because three places carry the checkout's absolute
 # path and would silently keep the copy reading the original:
 #
-#   - the DPDK paths in stage/lib/pkgconfig/bess-dev.pc and dpdk's own .pc files
-#     and rte_build_config.h (the plugin build and its flags read them);
+#   - the DPDK paths in every .pc file under stage/ and dpdk/install (bess-dev.pc
+#     and DPDK's own; meson puts them in lib/pkgconfig or lib/<triplet>/pkgconfig
+#     depending on the host) and in rte_build_config.h (the plugin build and its
+#     flags read them);
 #   - the PMD driver directory compiled into librte_eal (RTE_EAL_PMD_PATH): bessd
 #     has no flag for it, so without this every NIC driver loads from the
 #     checkout. The string is patched in place, NUL-padded, which is why the new
@@ -56,11 +58,14 @@ cp -a "$SRC/sdk/go" "$DEST/sdk/go"
 
 OLD=$DPDK_SRC
 NEW=$DEST/dpdk
-for f in "$DEST/stage/lib/pkgconfig/bess-dev.pc" \
-         "$DEST"/dpdk/install/lib/pkgconfig/*.pc \
-         "$DEST/dpdk/install/include/rte_build_config.h"; do
-  [ -f "$f" ] && sed -i "s|$OLD|$NEW|g" "$f"
-done
+# Where meson installs pkg-config files depends on the host's libdir: a plain
+# lib/pkgconfig here, lib/<triplet>/pkgconfig on Debian/Ubuntu. Rewrite every
+# one the install produced rather than assuming the first layout -- a missed
+# bess-dev.pc keeps naming the checkout, and the final check below catches it.
+while IFS= read -r -d '' f; do
+  sed -i "s|$OLD|$NEW|g" "$f"
+done < <(find "$DEST/stage" "$DEST/dpdk/install" -type f \
+           \( -name '*.pc' -o -name rte_build_config.h \) -print0)
 
 PMD_OLD=$(ls -d "$OLD"/install/lib/dpdk/pmds-* | head -1)
 PMD_NEW=$NEW/install/lib/dpdk/$(basename "$PMD_OLD")
