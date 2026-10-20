@@ -8,7 +8,9 @@
 #
 #   uplink    src_up  -> rewrite_up  -> teid -> decap0 -> mt_md -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt
 #             src_up2 -> rewrite_up2 -/                                                            rt -> dump_n6      (ogate 0, N6)
-#             src_up3 -> rewrite_up3 -/                                                            rt -> enc -> dump_n3 (ogates 1, 2)
+#             src_up3 -> rewrite_up3 -/
+#             src_ulcl_n6, src_ulcl_n9 -> rewrite_ulcl_* -/                                       (one session, two PDRs)
+#                                                                                                 rt -> enc -> dump_n3 (ogates 1, 2)
 #             src_vn  -> rewrite_vn  -/                                                            rt -> dump_lan     (ogate 3, the service LAN)
 #                                                                                                 rt -> pdr_dl       (ogate 4, the 5G VN re-injection)
 #   downlink  src_dn -> rewrite_dn -> l2_sort -> vif_n6 -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> rt
@@ -42,6 +44,8 @@
 #   rewrite_up   a G-PDU to TEID 0x11223344 holding 10.45.0.2:5000 -> 8.8.8.8:53
 #   rewrite_up2  the same to TEID 0x11223345, 10.45.0.3
 #   rewrite_up3  the same to TEID 0x11223346, 10.45.0.4
+#   rewrite_ulcl_n6  a G-PDU to TEID 0x1122334b holding 10.45.0.8:5000 -> 8.8.8.8:53
+#   rewrite_ulcl_n9  the same TEID and source, to 10.46.0.2:53 (the N9 branch)
 #   rewrite_vn   a G-PDU to TEID 0x11223347 holding 10.45.0.5:5000 -> 10.45.0.6:5000
 #                (the 5G VN case: one UE's packet to another UE of the same VN)
 #   rewrite_dn   the data network's answer 8.8.8.8:5000 -> 10.45.0.7:53, to the
@@ -99,6 +103,24 @@ modules:
     arg:
       templates:
         - "AgAAAAACAgAAAAABCABFAABJEjQAAEAR5GzAAAIBwAACAghoCGgANQAAMP8AJREiM0ZFAAAlEjQAAEARTlQKLQAECAgICBOIADUAEQAAaGVsbG8tdXBm"
+  # One session, two destinations, one tunnel: the ULCL branch. Both frames
+  # carry the same TEID; the PDRs differ only in the destination they select.
+  - name: src_ulcl_n6
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_ulcl_n6
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAABJEjQAAEAR5GzAAAIBwAACAghoCGgANQAAMP8AJREiM0tFAAAlEjQAAEARTlAKLQAICAgICBOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_ulcl_n9
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_ulcl_n9
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAABJEjQAAEAR5GzAAAIBwAACAghoCGgANQAAMP8AJREiM0tFAAAlEjQAAEARVDAKLQAICi4AAhOIADUAEQAAaGVsbG8tdXBm"
   - name: src_vn
     mclass: Source
     arg: {pkt_size: 87, burst: 32}
@@ -244,6 +266,10 @@ connections:
   - {upstream: rewrite_up2, downstream: teid}
   - {upstream: src_up3, downstream: rewrite_up3}
   - {upstream: rewrite_up3, downstream: teid}
+  - {upstream: src_ulcl_n6, downstream: rewrite_ulcl_n6}
+  - {upstream: rewrite_ulcl_n6, downstream: teid}
+  - {upstream: src_ulcl_n9, downstream: rewrite_ulcl_n9}
+  - {upstream: rewrite_ulcl_n9, downstream: teid}
   - {upstream: src_vn, downstream: rewrite_vn}
   - {upstream: rewrite_vn, downstream: teid}
   - {upstream: teid, downstream: decap0}

@@ -18,7 +18,10 @@
 # egress, and for the values this UP does not serve at all, the establishment is
 # refused with a cause that names the fault (73, or 66 for the IE Tables
 # 7.5.2.3-1/7.5.2.3-2 make mandatory). A session's UE address is answered over
-# ARP while the session lives, and not after it is deleted.
+# ARP while the session lives, and not after it is deleted. One session's two
+# uplink PDRs -- a general port-53 filter and a specific destination -- send
+# their frames out of two different exits (ULCL: the data network's hop and an
+# N9 tunnel) on the session's one TEID.
 #
 # Why windows rather than one run: every frame in this graph opens with the same
 # MACs, so each window injects exactly the streams its case is about and the
@@ -117,6 +120,7 @@ window() {
 
 window control
 window egress
+window ulcl
 window down
 window forward
 window vn
@@ -165,6 +169,8 @@ CTL_ARP=$(dump_hex dump_arp "$WORK/control.log")
 EG_N6=$(dump_hex dump_n6 "$WORK/egress.log")
 EG_N3=$(dump_hex dump_n3 "$WORK/egress.log")
 EG_LAN=$(dump_hex dump_lan "$WORK/egress.log")
+UL_N6=$(dump_hex dump_n6 "$WORK/ulcl.log")
+UL_N3=$(dump_hex dump_n3 "$WORK/ulcl.log")
 DN_N6=$(dump_hex dump_n6 "$WORK/down.log")
 DN_N3=$(dump_hex dump_n3 "$WORK/down.log")
 FW_N6=$(dump_hex dump_n6 "$WORK/forward.log")
@@ -192,6 +198,16 @@ contains "egress: the uplink packet left by the data network's exit" \
       "$EG_N6" "0a 2d 00 02 08 08 08 08"
 contains "egress: it carries that exit's L2 pair" \
       "$EG_N6" "02 00 00 00 06 02 02 00 00 00 06 01"
+# ULCL: one session, one TEID, two uplink PDRs. The general port-53 filter
+# matches both destinations; the specific 10.46.0.2 filter has the higher
+# precedence, so that frame takes the N9 branch while 8.8.8.8 takes the data
+# network's plain hop.
+contains "ulcl: the general destination left by the data network's exit" \
+      "$UL_N6" "0a 2d 00 08 08 08 08 08"
+contains "ulcl: the specific destination left by the N9 tunnel" \
+      "$UL_N3" "0a 2d 00 08 0a 2e 00 02"
+contains "ulcl: the N9 tunnel carries the branch's own TEID" \
+      "$UL_N3" "55 66 77 88"
 # Destination Interface Core with an outer header: a tunnel out of the instance
 # (N9), through the encap, carrying the FAR's own TEID.
 contains "egress: a tunnel out of the instance left through the encap" \

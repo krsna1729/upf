@@ -96,7 +96,7 @@ Run the lane that proves the path you touched:
 | `ci/n4-path.sh` | PFCP message → compiler → one transaction → packets; restart and checkpoint replay |
 | `ci/session-report.sh` | URR reports — period, threshold, quota — over PFCP |
 | `ci/buffer-path.sh` | BAR buffering, DDN, and the duration's expiry |
-| `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names |
+| `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names; a ULCL session's two uplink PDRs take the data network's hop and an N9 tunnel |
 | `ci/veth-port.sh` | one PMD port split into N3/N6/N9 on a veth, with route domains (needs root) |
 | `ci/pdrmatch-2dn.sh` | two network instances, one UE address, two exits |
 | `ci/bench-n4.sh` | the N4 envelope: establish / modify / delete rates |

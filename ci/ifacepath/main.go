@@ -123,6 +123,7 @@ const (
 	seidS5 = 0x4105
 	seidS6 = 0x4106
 	seidS7 = 0x4107
+	seidS8 = 0x4108
 
 	upTEID1 = 0x11223344
 	upTEID2 = 0x11223345
@@ -131,6 +132,7 @@ const (
 	upTEID5 = 0x11223348
 	upTEID6 = 0x11223349
 	upTEID7 = 0x1122334a
+	upTEID8 = 0x1122334b
 
 	dlTEID1 = 0x55667781
 	dlTEID2 = 0x55667782
@@ -139,6 +141,7 @@ const (
 	dlTEID5 = 0x55667789
 	dlTEID6 = 0x55667786
 	dlTEID7 = 0x55667787
+	dlTEID8 = 0x55667788
 
 	// The tunnel S1's FAR is moved to (the `forward` arm): the far end of an
 	// indirect forward.
@@ -152,6 +155,7 @@ const (
 	ueS4 = "10.45.0.5"
 	ueS5 = "10.45.0.6"
 	ueS6 = "10.45.0.7"
+	ueS8 = "10.45.0.8"
 
 	// One session's two addresses, and why they are a pair: the responder's
 	// table has 131072 slots for the graph's 65536 entries and
@@ -172,6 +176,9 @@ const (
 	port53Query  = "permit out udp from any 53 to assigned"
 	port5000S4   = "permit out udp from any 5000 to assigned"
 	port5000S5   = "permit out udp from any to assigned 5000"
+	// The ULCL branch's specific filter: destination 10.46.0.2 on port 53,
+	// which the general port-53 filter also matches; the PDR precedences decide.
+	port53ToN9 = "permit out udp from 10.46.0.2 53 to assigned"
 )
 
 const waitWithin = 15 * time.Second
@@ -186,6 +193,8 @@ var streams = []struct {
 	{"src_up2", 87},
 	{"src_up3", 87},
 	{"src_vn", 87},
+	{"src_ulcl_n6", 87},
+	{"src_ulcl_n9", 87},
 	{"src_dn", 51},
 	{"src_arp", 42},
 	{"src_arp2", 42},
@@ -232,6 +241,12 @@ func run(target, handshake string) error {
 		return err
 	}
 	if err := pass(handshake, "egress"); err != nil {
+		return err
+	}
+	if err := ulcl(ctx, client, c); err != nil {
+		return err
+	}
+	if err := pass(handshake, "ulcl"); err != nil {
 		return err
 	}
 	if err := down(ctx, client, c); err != nil {
@@ -421,6 +436,46 @@ func egress(ctx context.Context, client *bess.Client, c *session.Compiler) (uint
 		return 0, errors.New("the first case's answer named no session")
 	}
 	return seid1, nil
+}
+
+// ulcl establishes one session with two uplink PDRs and one tunnel: the
+// destination selects the PDR, and the PDR's FAR selects the exit. The general
+// filter matches port 53 at any destination; the specific one matches
+// 10.46.0.2:53 and is given the higher precedence, so the two frames -- both
+// on the session's one TEID -- leave by the data network's hop and by a tunnel
+// out of the instance (N9) respectively.
+func ulcl(ctx context.Context, client *bess.Client, c *session.Compiler) error {
+	cs := sessionCase{
+		name:     "ULCL: one session, two uplink PDRs, two exits",
+		instance: internet, seid: seidS8, upTEID: upTEID8,
+		upPrecedence:  20,
+		up:            pdrCase{srcIfc: ie.SrcInterfaceAccess, ue: ueS8, sdf: port53Query, far: forward(ie.DstInterfaceCore)},
+		up2:           &pdrCase{srcIfc: ie.SrcInterfaceAccess, ue: ueS8, sdf: port53ToN9, far: forward(ie.DstInterfaceCore, tunnel(dlTEID8))},
+		up2Precedence: 10,
+		down:          pdrCase{srcIfc: ie.SrcInterfaceCore, ue: ueS8, sdf: port53Filter, far: forward(ie.DstInterfaceAccess, tunnel(dlTEID8))},
+	}
+	before, err := snapshot(ctx, client)
+	if err != nil {
+		return err
+	}
+	if _, err := establish(c, cs); err != nil {
+		return err
+	}
+	for _, name := range []string{"src_ulcl_n6", "src_ulcl_n9"} {
+		if err := inject(ctx, client, name); err != nil {
+			return err
+		}
+	}
+	for _, e := range []exit{{module: router, gate: n6Gate}, {module: router, gate: n9Gate}} {
+		if _, err := waitFor(ctx, client, e.module, e.gate, value(before, e)); err != nil {
+			return fmt.Errorf("the ULCL session's %s exit (gate %s) never carried a packet: %w", e.module, e.gate, err)
+		}
+	}
+	if err := stopAll(ctx, client); err != nil {
+		return err
+	}
+	fmt.Println("ifacepath: ulcl: one session's two destinations left by the data network's hop and by a tunnel out of the instance")
+	return nil
 }
 
 // down establishes S6 -- a PDR whose PDI names the service LAN's interface
@@ -744,6 +799,10 @@ type sessionCase struct {
 	seid     uint64
 	upTEID   uint32
 	up, down pdrCase
+	// up2 is a second uplink PDR of the same session and tunnel, with its own
+	// FAR: the ULCL branch. Precedence 0 is the cases' default (100).
+	up2                         *pdrCase
+	upPrecedence, up2Precedence uint32
 	// down2 is a second subscriber-side PDR of the same session -- another UE
 	// address, the responder's collision case -- or nil.
 	down2 *pdrCase
@@ -751,12 +810,18 @@ type sessionCase struct {
 
 // message is the Session Establishment Request a case sends.
 func (cs sessionCase) message() *message.SessionEstablishmentRequest {
+	prec := func(v uint32) uint32 {
+		if v == 0 {
+			return 100
+		}
+		return v
+	}
 	ies := []*ie.IE{
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(cs.seid, nil, nil),
 		ie.NewCreatePDR(
 			ie.NewPDRID(1),
-			ie.NewPrecedence(100),
+			ie.NewPrecedence(prec(cs.upPrecedence)),
 			ie.NewPDI(
 				ie.NewSourceInterface(cs.up.srcIfc),
 				ie.NewNetworkInstance(cs.instance),
@@ -779,6 +844,23 @@ func (cs sessionCase) message() *message.SessionEstablishmentRequest {
 			ie.NewFARID(2),
 		),
 		ie.NewCreateFAR(append([]*ie.IE{ie.NewFARID(2)}, cs.down.far...)...),
+	}
+	if cs.up2 != nil {
+		ies = append(ies,
+			ie.NewCreatePDR(
+				ie.NewPDRID(4),
+				ie.NewPrecedence(prec(cs.up2Precedence)),
+				ie.NewPDI(
+					ie.NewSourceInterface(cs.up2.srcIfc),
+					ie.NewNetworkInstance(cs.instance),
+					ie.NewFTEID(0x01, cs.upTEID, net.ParseIP(n3Addr), nil, 0),
+					ie.NewUEIPAddress(0x02, cs.up2.ue, "", 0, 0),
+					ie.NewSDFFilter(cs.up2.sdf, "", "", "", 0),
+				),
+				ie.NewFARID(4),
+			),
+			ie.NewCreateFAR(append([]*ie.IE{ie.NewFARID(4)}, cs.up2.far...)...),
+		)
 	}
 	if cs.down2 != nil {
 		ies = append(ies,
