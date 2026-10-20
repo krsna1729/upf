@@ -24,6 +24,9 @@ type sweepFake struct {
 	// reads is every Contents call's resource list, as made: what the sweep
 	// asked the daemon to pack into one response, call by call.
 	reads [][]string
+	// resets is every ResetResources call's names: the whole tables the sweep
+	// emptied in the daemon.
+	resets [][]string
 	// applies counts every Apply call, a recorded transaction or not, so a
 	// test can tell "the sweep stopped" from "the sweep sent nothing".
 	applies int
@@ -60,6 +63,34 @@ func (f *sweepFake) ClearStore(_ context.Context, module string) error {
 func (f *sweepFake) ReleaseFlow(_ context.Context, module string, id uint32) error { return nil }
 
 func (f *sweepFake) DropFlow(_ context.Context, module string, id uint32) error { return nil }
+
+func (f *sweepFake) ResetResources(_ context.Context, names ...string) (uint64, error) {
+	f.resets = append(f.resets, append([]string(nil), names...))
+	if f.err != nil {
+		return 0, f.err
+	}
+	if f.contents == nil {
+		f.contents = map[string][]bess.Entry{}
+	}
+	removed := uint64(0)
+	for _, name := range names {
+		removed += uint64(len(f.contents[name]))
+		f.contents[name] = nil
+	}
+	return removed, nil
+}
+
+func (f *sweepFake) ResourcePages(_ context.Context, name string, visit func(bess.Entry) error) error {
+	if f.err != nil {
+		return f.err
+	}
+	for _, e := range f.contents[name] {
+		if err := visit(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (f *sweepFake) Contents(_ context.Context, names ...string) (map[string][]bess.Entry, error) {
 	f.reads = append(f.reads, append([]string(nil), names...))
@@ -227,11 +258,11 @@ func TestSweepClearsTheStoreAndNamesItsCounter(t *testing.T) {
 	}
 }
 
-// TestSweepErasesEveryReadEntryInOneTransaction is the restart wall's unit
-// half: the sweep reads the session tables, erases exactly the entries it
-// found -- the key from the readback, not one it made up -- in one
-// transaction, and does not touch a resource it does not own.
-func TestSweepErasesEveryReadEntryInOneTransaction(t *testing.T) {
+// TestSweepResetsOnlyTheSessionTables is the restart wall's unit half: the
+// sweep empties the maps the compiler owns in the daemon -- one reset naming
+// every map, no key read back -- and does not touch a resource it does not
+// own.
+func TestSweepResetsOnlyTheSessionTables(t *testing.T) {
 	f := &sweepFake{contents: map[string][]bess.Entry{}}
 	c := New(liveConfig(), f, quietLogger())
 	names := c.resources()
@@ -239,27 +270,28 @@ func TestSweepErasesEveryReadEntryInOneTransaction(t *testing.T) {
 		f.contents[name] = []bess.Entry{{Key: map[string]any{"id": uint64(i + 1)}}}
 	}
 	// The graph's own resource, which no session writes and no sweep may erase.
-	f.contents["rt/next_hops"] = []bess.Entry{{Key: map[string]any{"id": uint64(1)}}}
+	const graphResource = "rt/next_hops"
+	f.contents[graphResource] = []bess.Entry{{Key: map[string]any{"id": uint64(1)}}}
 
 	if err := c.Sweep(context.Background()); err != nil {
 		t.Fatalf("the sweep: %v", err)
 	}
-	if len(f.changes) != 1 {
-		t.Fatalf("the sweep wrote %d transactions, want one", len(f.changes))
+	if len(f.resets) != 1 {
+		t.Fatalf("the sweep called ResetResources %d times, want once", len(f.resets))
 	}
-	if got := len(f.changes[0]); got != len(names) {
-		t.Errorf("the sweep erased %d entries, want one per session table (%d)", got, len(names))
+	if got := f.resets[0]; len(got) != len(names) {
+		t.Errorf("the reset names %d resources, want the %d session tables", len(got), len(names))
 	}
-	for _, ch := range f.changes[0] {
-		if ch.Resource == "rt/next_hops" {
-			t.Error("the sweep erased the graph's own next hops: only session tables are its to empty")
+	for _, name := range f.resets[0] {
+		if name == graphResource {
+			t.Error("the reset names the graph's own next hops: only session tables are its to empty")
 		}
-		if ch.Value != nil {
-			t.Errorf("the sweep wrote %s with a value: an erase carries a key and no value", ch.Resource)
-		}
-		if ch.Key == nil {
-			t.Errorf("the sweep erased %s with no key", ch.Resource)
-		}
+	}
+	if len(f.changes) != 0 {
+		t.Errorf("the sweep also wrote %d key erases for tables it reset", len(f.changes))
+	}
+	if got := f.contents[graphResource]; len(got) != 1 {
+		t.Errorf("the graph's own next hops were emptied: %v", got)
 	}
 }
 
@@ -276,58 +308,54 @@ func TestSweepWithNothingToEraseWritesNothing(t *testing.T) {
 	}
 }
 
-// staleEntries fills the session tables with n entries, one per key across
-// every resource, the way an earlier run's million sessions would be spread.
-func staleEntries(f *sweepFake, names []string, n int) {
+// arpSweepConfig is a deployment with one ARP responder whose pool is the
+// subscriber prefix: the table the sweep still reads page by page.
+func arpSweepConfig(t *testing.T) Config {
+	t.Helper()
+	d, err := routing.New([]routing.Interface{{
+		Instance: "internet", Domain: 0, NextHop: 1,
+		ARP: "arp_n6", ARPMAC: [6]byte{2, 0, 0, 0, 0, 1},
+		Pool: []netip.Prefix{netip.MustParsePrefix("10.45.0.0/16")},
+	}}, 4)
+	if err != nil {
+		t.Fatalf("the deployment was refused: %v", err)
+	}
+	cfg := liveConfig()
+	cfg.Instances = d
+	return cfg
+}
+
+// staleARPEntries fills the responder's table with n subscriber addresses, the
+// way an earlier run's sessions would have.
+func staleARPEntries(f *sweepFake, n int) {
 	for i := range n {
-		name := names[i%len(names)]
-		f.contents[name] = append(f.contents[name], bess.Entry{Key: map[string]any{"id": uint64(i + 1)}})
+		ip := fmt.Sprintf("10.45.%d.%d", i/256, i%256)
+		f.contents["arp_n6/entries"] = append(f.contents["arp_n6/entries"],
+			bess.Entry{Key: map[string]any{"ip": ip}})
 	}
 }
 
 // TestSweepErasesInBoundedBatchesAtScale is the restart wall at the size the
-// deployment target implies, on both halves of it. The readback is one
-// Contents call per resource, never one naming them all: every resource named
-// is packed into one response there, and the daemon refuses a response above
-// its 64 MiB message limit (RESOURCE_EXHAUSTED, "name fewer resources"), which
-// the whole session layer of a 1M-session dataplane is -- so the bound is the
-// largest single table, not the sum of the tables. The fake reader answers that
-// refusal exactly as the daemon does. And the erase is chunked: 5000 entries
-// go out in transactions of at most sweepBatch changes each, never one
-// transaction carrying every entry, with every entry read erased exactly once.
+// deployment target implies. The session maps are one ResetResources call (no
+// key readback, no 64 MiB ceiling), and the one table that still needs its
+// keys -- the ARP responder's, shared with the deployment's own entry -- is
+// read through ReadResource's pages and erased in transactions of at most
+// sweepBatch changes, with every entry erased exactly once.
 func TestSweepErasesInBoundedBatchesAtScale(t *testing.T) {
 	const entries = 5000
 	f := &sweepFake{contents: map[string][]bess.Entry{}}
-	c := New(liveConfig(), f, quietLogger())
-	names := c.resources()
-	staleEntries(f, names, entries)
+	c := New(arpSweepConfig(t), f, quietLogger())
+	staleARPEntries(f, entries)
 
 	if err := c.Sweep(context.Background()); err != nil {
 		t.Fatalf("the sweep: %v", err)
 	}
-	// One read per resource, each naming exactly that one: a read naming them
-	// all is the message the daemon refuses at this size.
-	if len(f.reads) != len(names) {
-		t.Errorf("the sweep read the dataplane %d times for %d resources, want one read each",
-			len(f.reads), len(names))
-	}
-	read := map[string]int{}
-	for i, got := range f.reads {
-		if len(got) != 1 {
-			t.Errorf("read %d names %v: one Contents call names one resource, so the 64 MiB message limit bounds a table and not the sum of them",
-				i+1, got)
-			continue
-		}
-		read[got[0]]++
-	}
-	for _, name := range names {
-		if read[name] != 1 {
-			t.Errorf("the sweep read %s %d times, want once", name, read[name])
-		}
+	if len(f.resets) != 1 {
+		t.Errorf("the sweep reset %d times, want one whole-table call", len(f.resets))
 	}
 	want := (entries + sweepBatch - 1) / sweepBatch
 	if len(f.changes) != want {
-		t.Fatalf("the sweep wrote %d transactions for %d entries, want %d of at most %d changes each",
+		t.Fatalf("the sweep wrote %d transactions for %d ARP entries, want %d of at most %d changes each",
 			len(f.changes), entries, want, sweepBatch)
 	}
 	erased := map[string]int{}
@@ -344,11 +372,12 @@ func TestSweepErasesInBoundedBatchesAtScale(t *testing.T) {
 				t.Errorf("transaction %d wrote %s with a value: an erase carries a key and no value",
 					i+1, ch.Resource)
 			}
-			erased[fmt.Sprintf("%s/%v", ch.Resource, ch.Key["id"])]++
+			ip, _ := ch.Key["ip"].(string)
+			erased[ip]++
 		}
 	}
 	if len(erased) != entries {
-		t.Errorf("the sweep erased %d distinct entries, want the %d it read", len(erased), entries)
+		t.Errorf("the sweep erased %d distinct ARP entries, want the %d it read", len(erased), entries)
 	}
 	for key, n := range erased {
 		if n != 1 {
@@ -365,9 +394,8 @@ func TestSweepErasesInBoundedBatchesAtScale(t *testing.T) {
 func TestSweepStopsAtTheFirstFailedBatch(t *testing.T) {
 	const entries = 5000
 	f := &sweepFake{contents: map[string][]bess.Entry{}, failBatch: 3}
-	c := New(liveConfig(), f, quietLogger())
-	names := c.resources()
-	staleEntries(f, names, entries)
+	c := New(arpSweepConfig(t), f, quietLogger())
+	staleARPEntries(f, entries)
 
 	err := c.Sweep(context.Background())
 	if err == nil {

@@ -450,40 +450,25 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   an occupied id replaces it: a rule that outlives its controller can come to
   name another session's action, and on the downlink another session's tunnel.
   There is no checkpoint and no replay path yet, so a restart is followed by
-  emptying the session tables — the controller does it itself, **in chunks**,
-  before its PFCP socket opens (`session.Compiler.Sweep`: it reads the session
-  resources back with `bess.Client.Contents`, erases exactly the entries it
-  found, and leaves the graph's own resources alone -- both directions' tunnel
-  records among them, and the subscriber entries of every interface's ARP
-  responder, which is the one table that has two writers: the graph writes the
-  interface's own entry there, so the sweep takes back only the addresses inside
-  the interface's declared pools, which is exactly what the compiler writes) — or by a `bessd` restart,
-  and by the SMF re-establishing, which its own path management forces once the
-  Recovery Time Stamp changes. The chunking is implemented on both halves:
-  `Sweep` erases in transactions of at most 1000 changes each (`sweepBatch`),
-  in sequence, and stops at the first the daemon refuses -- a partial sweep
-  leaves the tables half-empty, so `upfd` treats any sweep error as fatal rather
-  than serving PFCP beside one (a few hundred entries are still one
-  transaction) -- and it reads the tables back **one `Contents` call per
-  resource**, never one call naming them all, because every resource a call
-  names is packed into one response and the daemon refuses a response above its
-  64 MiB message limit (`RESOURCE_EXHAUSTED`, "name fewer resources"; its
-  `GetPipelineRequest` carries a resource list and no cursor, offset or chunk
-  size). **The ceiling is therefore a table, not a session count:** a resource
-  read is bounded by that message limit, so a table is readable to roughly 510K
-  entries at 131 B each, and one resource per call is what puts the limit on the
-  largest single table rather than the sum of all of them. That is the interim's
-  limit, and past that table's capacity the operator's escape is a `bessd`
-  restart, which discards the warm dataplane -- which is why "the erase is
-  chunked" must not be read as "the sweep scales to 1M" on its own. **The target
-  is a bounded clear, which removes the readback entirely:** the readback exists
-  only so the sweep can name the keys it erases, a client-side enumeration of a
-  table the daemon already owns, so the operation to expose is *clear this
-  resource*, batched inside the daemon -- a handful of control calls, no read.
-  That is the direction recorded here and it is a BESS item; until it exists,
-  the per-resource read above is what makes a sweep work to roughly 510K entries
-  per table ("Session scale" below, item 1 of the control plane's O(total
-  sessions) operations). What is still missing is the replay path that
+  emptying the session tables -- the controller does it itself, before its PFCP
+  socket opens (`session.Compiler.Sweep`), and leaves the graph's own resources
+  alone. The maps the compiler owns are emptied in the daemon with
+  `Control.ResetResources`: one request names them, the daemon converges each
+  to no entries and applies the erases in batches, so no session key is read
+  over the wire and the 64 MiB message limit no longer bounds a table. Two
+  resources are not whole-table clears. A firewall is a singleton whose value is
+  the whole policy, so the sweep replaces a non-empty policy with an empty one.
+  An ARP responder table holds the interface's own entry beside the subscribers'
+  -- the one table with two writers -- so the sweep reads it with
+  `ReadResource`'s pages and erases only the addresses inside the interface's
+  declared pools, which is exactly what the compiler writes; an interface that
+  declares no pool gets a warning and the table is left as it was. The selective
+  erases go out in transactions of at most 1000 changes each (`sweepBatch`), in
+  sequence, and the sweep stops at the first transaction the daemon refuses: a
+  partial sweep leaves the tables half-empty, so `upfd` treats any sweep error
+  as fatal rather than serving PFCP beside one (a few hundred entries are still
+  one transaction). A reset refused after some of its batches are applied is the
+  same partial state. What is still missing is the replay path that
   would keep the sessions across a restart instead of emptying them: Wall 4
   below is that work.
 - Either restart must be a *reapply*, never a trust fall: the controller
@@ -985,14 +970,14 @@ before the dataplane footprint above becomes the limit. They are all ours, and
 the 1M target is a claim about the whole system, so all three have to be
 addressed:
 
-1. **`Compiler.Sweep`.** The sweep is bounded on both halves except for one
-   ceiling: the daemon has no paged read, so a single resource read is one
-   message and a table is readable to roughly 510K entries at 131 B each (the
-   64 MiB limit). At 1M sessions a table holding every session is past it, and
-   the operator's escape is a `bessd` restart. The derivations, the bounded-clear
-   target and its BESS dependency are in "Restart and failure semantics"; the
-   scale consequence belongs here: the sweep does not reach 1M sessions until
-   that read disappears.
+1. **`Compiler.Sweep`.** The sweep no longer reads session tables key by key:
+   the maps are emptied in the daemon with `ResetResources`, and only the ARP
+   responder tables (filtered by the interface's pools) are read, through
+   `ReadResource`'s bounded pages. The readback that used to be one message --
+   and so bounded by the 64 MiB limit at roughly 510K entries at 131 B each --
+   is gone from the sweep's path; the remaining per-key work is the ARP
+   subscribers', whose number is the interfaces' pools, not the sessions'. See
+   "Restart and failure semantics".
 2. **The firewall policy is a whole-policy singleton, so every session change
    rewrites every session's rules.** `compile.go`'s `firewallChanges` builds
    "the whole policy of every configured firewall module ... every live
