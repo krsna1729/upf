@@ -1,5 +1,8 @@
 # Design
 
+Section references in this document are to the pinned 3GPP Release 16
+excerpts in `docs/spec/`; the claims register names the exact version and clause
+for every conformance claim.
 Claims -- what is verified, and by which evidence -- live in
 `docs/claims.md`; this document explains mechanisms, not status.
 

@@ -27,6 +27,10 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 1
+# The repository's go.mod is the source of the SDK version. A machine-local
+# go.work may point at an older checkout; the evidence run must use the pin,
+# exactly as the documented `GOWORK=off` build does.
+export GOWORK=off
 CLAIMS=docs/claims.json
 OUT=build/run/verify
 mkdir -p "$OUT"
@@ -184,7 +188,7 @@ done <<< "$graphs"
 
 # --- merge the results, write the contract, render the document --------------
 python3 - "$CLAIMS" "$OUT" "$STRICT" <<'PY'
-import json, sys, re
+import json, os, sys, re
 
 claims_path, out, strict = sys.argv[1], sys.argv[2], sys.argv[3] == '1'
 
@@ -202,6 +206,37 @@ def table(name):
 status = {'test': table('tests.tsv'), 'lane': table('lanes.tsv'), 'graph': table('graphs.tsv')}
 doc = json.load(open(claims_path, encoding='utf-8'))
 
+# Every claim that names a specification must name the pinned version and the
+# reference text that version lives in. The register is the only place a
+# release is chosen: a claim cannot quietly cite a newer clause than the tree
+# supports.
+supported = doc.get('supported_release')
+specs = doc.get('specs', {})
+for name, info in specs.items():
+    if not info.get('version') or not info.get('release') or not info.get('file'):
+        sys.exit(f"claims: {name} has no version/release/file pin")
+    if supported and info['release'] != supported:
+        sys.exit(f"claims: {name} is Release {info['release']}, register is {supported}")
+    if not os.path.exists(info['file']):
+        sys.exit(f"claims: {name} reference text {info['file']} is missing")
+for c in doc['claims']:
+    spec = c.get('spec')
+    if not spec:
+        continue
+    info = specs.get(spec)
+    if info is None:
+        sys.exit(f"claims: {c['id']} cites {spec}, which has no pin in 'specs'")
+    if c.get('spec_version') != info['version'] or c.get('release') != info['release']:
+        sys.exit(f"claims: {c['id']} is {c.get('spec')} V{c.get('spec_version')} "
+                 f"(Release {c.get('release')}), pin is V{info['version']} "
+                 f"(Release {info['release']})")
+    m = c.get('message') or ''
+    section = doc.get('message_sections', {}).get(m, '')
+    if section and (c.get('message_clause') != section or
+                    c.get('message_spec_version') != specs['TS 29.244']['version']):
+        sys.exit(f"claims: {c['id']} message {m!r} is not pinned to "
+                 f"TS 29.244 V{specs['TS 29.244']['version']} §{section}")
+
 def kind(tok):
     if tok.startswith('Test'):
         return 'test'
@@ -212,7 +247,6 @@ def kind(tok):
     return 'src'
 
 src = {}
-import os
 for c in doc['claims']:
     for tok in c.get('evidence', []):
         if kind(tok) == 'src' and tok not in src:
@@ -310,10 +344,32 @@ def evidence_kinds(c):
     return ' · '.join(k if counts[k] == 1 else f"{k} ×{counts[k]}"
                       for k in order if counts.get(k))
 
+def spec_ref(c):
+    spec = c.get('spec')
+    if not spec:
+        return ''
+    info = doc.get('specs', {}).get(spec, {})
+    version = c.get('spec_version') or info.get('version')
+    return f"{spec} V{version}" if version else spec
+
 def head_of(c):
     if c['scope'] == 'competition':
         return f"block {c.get('block')}"
-    return c.get('clause') or 'no clause'
+    clause = c.get('clause')
+    ref = spec_ref(c)
+    if not clause:
+        return f"{ref} · no clause" if ref else 'no clause'
+    return f"{ref} §{clause}" if ref else clause
+
+def message_head(m):
+    ref = ''
+    info = doc.get('message_sections', {}).get(m)
+    if info:
+        # Every message section in this register is TS 29.244's; the claims in
+        # it name their own spec where they differ.
+        spec = doc.get('specs', {}).get('TS 29.244', {})
+        ref = f" · TS 29.244 V{spec.get('version')} §{info}" if spec else ''
+    return m + ref
 
 def claim_line(c):
     out = f"- **{c['id']}** · {head_of(c)} — {claim_text(c)}"
@@ -353,6 +409,10 @@ lines = [
     '',
     '`ok` proved by the evidence named · `gap` a documented missing capability ·',
     '`skip` needs an environment this run lacks · `FAIL` a regression.',
+    '',
+    f"Specs are pinned to 3GPP Release {doc.get('supported_release', '?')}: every",
+    'claim below names the specification, release version and clause it reads.',
+    'The reference texts are in `docs/spec/`, with their official source URLs.',
     '',
 ]
 
@@ -395,7 +455,7 @@ for m in sections:
     for c in cs:
         cnt[c['result']['state']] = cnt.get(c['result']['state'], 0) + 1
     summary = ', '.join(f"{v} {k}" for k, v in sorted(cnt.items()))
-    lines += [f"### {m} · {plural(len(cs), 'claim', 'claims')} ({summary})", '']
+    lines += [f"### {message_head(m)} · {plural(len(cs), 'claim', 'claims')} ({summary})", '']
     for c in sorted(cs, key=sortkey):
         lines.append(claim_line(c))
     lines.append('')
