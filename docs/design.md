@@ -30,6 +30,14 @@ PDR rules, its action, its meters, its next hop and its route go in together or
 not at all, with a request id that survives retries, and no other writer exists
 to race.
 
+```mermaid
+flowchart TB
+    smf["SMF"] -->|PFCP session message| n4["internal/n4<br/>association, sequence numbers,<br/>restart detection"]
+    n4 --> sess["internal/session<br/>parse, validate,<br/>resolve PDR → FAR/QER/URR"]
+    sess -->|"one control_v2 transaction<br/>(request id survives retries)"| bess["bessd<br/>rules, actions, meters,<br/>next hops, tunnels"]
+    bess -->|"publish a generation"| workers["workers"]
+```
+
 ## Mapping PFCP → BESS
 
 | PFCP | BESS |
@@ -37,7 +45,7 @@ to race.
 | PDR (Precedence, PDI: Source Interface, F-TEID, Network Instance, UE IP, SDF filters, QFI) | one rule in the PDR table (WildcardMatch over masked keys) whose result is `{gate, ActionId}`; the rule's priority is the Precedence inverted (8.2.11's lower value is the higher precedence, the classifier applies the higher priority), and the QFI is the last key field where the graph declares it, so one session's several QoS flows are several rules; a port *range* is refused on this path — the opt-in firewall path below carries it, and see the OMEC table below |
 | F-TEID the CP function asks the UP function to choose (8.2.3: the CH flag, and CHID for a group the CP function names) | one TEID rule in front of the decap per F-TEID we allocate; the PDIs of a session that carry one CHOOSE ID share the F-TEID the session gave that group, so an SMF's several filters on one tunnel are one rule and one Created PDR value |
 | FAR (Apply Action, Forwarding Parameters: Destination Interface, Network Instance, Outer Header Creation) | a *treatment* resource the action references (forward / drop / buffer / notify) plus the next hop and GTP-U encap parameters |
-| QER (Gate Status, MBR, GBR, Averaging Window, QFI) | a meter resource per QER, referenced from the action: a two-rate three-colour meter whose peak is the MBR (8.2.8) and whose committed rate is the GBR (8.2.7), so the band between them leaves the meter's gate 1 -- green and yellow are forwarded by the graph, and a deployment that marks or sheds the guarantee changes that one connection. Its burst is the rate over the QER's Averaging Window (8.2.115), its QFI goes into the tunnel record (where the encap writes the downlink packet's PDU Session Container from), and a PDR naming several QERs is gated by all of them but policed by the session's shared one (docs/claims.md, finding 6: one action carries one meter id; a chain of ActionTable/Meter pairs composes several, proven by `ci/meter-compose.sh`, and finding 23 is the compiler work). Two facts such a chain has to be built on, probed rather than assumed (2026-10-19, a scratch graph, two runs of it): `meter_id: 0` is "no meter" -- the packet passes that stage unmetered (the probe's green gate counted 72M packets, its red gate 0) -- and an action record naming an id its table's meters resource does not hold is refused at *apply* (`references missing mt/meters/07000000`), the reference check an action id gets (D-021). So every stage's table must hold an entry for every action id, with 0 where that stage's QER is not the PDR's, and a stage cannot be left without an entry for a packet it will see |
+| QER (Gate Status, MBR, GBR, Averaging Window, QFI) | a meter resource per QER, referenced from the action: a two-rate three-colour meter whose peak is the MBR (8.2.8) and whose committed rate is the GBR (8.2.7), so the band between them leaves the meter's gate 1 -- green and yellow are forwarded by the graph, and a deployment that marks or sheds the guarantee changes that one connection. Its burst is the rate over the QER's Averaging Window (8.2.115), its QFI goes into the tunnel record (where the encap writes the downlink packet's PDU Session Container from), and a PDR naming several QERs is gated by all of them but policed by the session's shared one (docs/claims.md, status-20 and status-35: one action carries one meter id; a chain of ActionTable/Meter pairs composes several, proven by `ci/meter-compose.sh`, and the compiler's composition is status-35). Two facts such a chain has to be built on, probed rather than assumed (2026-10-19, a scratch graph, two runs of it): `meter_id: 0` is "no meter" -- the packet passes that stage unmetered (the probe's green gate counted 72M packets, its red gate 0) -- and an action record naming an id its table's meters resource does not hold is refused at *apply* (`references missing mt/meters/07000000`), the reference check an action id gets (D-021). So every stage's table must hold an entry for every action id, with 0 where that stage's QER is not the PDR's, and a stage cannot be left without an entry for a packet it will see |
 | URR (Measurement Method, Reporting Triggers, thresholds, period) | per-rule counters in the `UrrCount` module, one entry per rule a URR's PDRs name, keyed by the rule's ActionId, plus the decision in `session.EvaluateAll` -- one bulk reading per counter module per tick, every session judged in memory against it -- and `session.Evaluate`, the single-session reading that names its own rules: it reads the module's counters, reports the period, a threshold or a quota, and stops the traffic of a spent quota. Every limit and the period are measured over the usage since the URR's last report (a report opens the next window), which is the window the report itself carries; the alternative -- accumulate from provisioning and compare the running total -- needs a second base per URR, and the SMF's lever (an Update URR that provisions a new quota, which clears the flag) is the same either way. Time is the dataplane's own fact: the counting module stamps a rule's first packet of a reading and the last one it counted (one stamp pair per rule, shared and stored once per counted batch -- a timestamp is the rule's, not a worker's), the reading carries the wall clock it took them at, and the controller places them on the clock an SMF reads; a reading the reporting side makes closes the window and the next packet opens the next one, while a diagnostic read of the same command leaves it alone. A time threshold and a time quota are then measured against the time the *window's* traffic ran -- the window's own first packet to the reading's last -- which is the base the volume limits use too, with the idle gaps taken out of it. A graph whose counters carry no stamps falls back to the window's length, the same number while the traffic is continuous. Sending the report as a PFCP Session Report Request is `internal/n4`'s `Report` (the one exchange this node initiates, with retries and the Session Report Response routed back to the caller), driven by `upfd -urr-interval`; a report the SMF does not answer is held by the loop (a bounded per-session queue, the oldest report first, so the UR-SEQNs the SMF reads stay in order, retried with a doubling backoff and at most one attempt per tick, since each attempt costs the n4 layer's whole retry budget) rather than dropped, because an unanswered send leaves the outcome unknown while a refusal is an answer. Two facts hold the counters together: a rule's entry exists exactly while a URR measures it (a rule that drops keeps it, so an erase always finds it), and the first reading of a URR is the window's baseline (the cells outlive an erased entry and the id pool reissues ActionIds, so a fresh rule's first reading may hold the previous holder's totals) |
 | Error Indication Report (ERIR: a tunnel this UPF sends into that the peer's GTP-U reports unreachable, 5.10) | the `GtpuResponder` behind the TEID table's default gate counts every Error Indication the peer sends, per TEID, in a fixed-size lock-free table (`track_errors`, `get_errors`); the report tick reads that one table once per tick (`-gtpu-errors <module>` names it) and every count above a session's high-water mark becomes a Session Report Request whose Report Type has the ERIR bit and whose Error Indication Report IE carries the remote F-TEID the session sends with (7.5.8.4). No UP Function Features bit advertises it: 8.2.25 defines none for it |
 | Session (CP F-SEID, UP F-SEID) | one transaction's worth of resources, all named `<session-id>/…` |
@@ -77,7 +85,8 @@ table in front of the decap, one per session:
   session table at all: it strips headers, writes `upf_teid` and passes the inner
   packet on (TS 29.281 answers an Error Indication to the peer -- the responder
   behind the table's default gate does, 7.3.1; the notification path to the SMF
-  is a later item, finding 15). This is also the *whole* cost of the F-TEID
+  is the responder's error table plus the report tick, `docs/claims.md`'s
+  status-28). This is also the *whole* cost of the F-TEID
   match, and it
   is one hash lookup, the same table machinery every other rule uses.
 - A *session table* in the plugin was the first design, and it does not work: the
@@ -304,15 +313,10 @@ isolated CPU at the performance governor).
 outer header (the DSCP copy; `ci/session-path.sh` checks the outer header carries the
 inner class). Its re-run is the 2026-10-17 run above (+17.77 ns over its control; an
 unisolated cross-check had put it at +16.88 ns against the +18.1 here, which is the
-between-run spread an unpaired run can see). What the re-run had to work around is the
-wrapper's child: it writes nothing and exits 1 —
-measured today, and it is **`--cpu` rather than `--isolate`**: `omarchy-benchmark
---cpu 4 -- /bin/echo` exits 1 without running the command (its launcher's status is
-1, and it restores the machine on the way out), `--cpu 4 --isolate` the same, while
-the same command with no CPU selection runs — so `ci/bench-modules.sh` now fails
-loudly when its report is empty instead of `sed`-ing nothing and exiting 0. It is
-not a privilege problem: `sudo -n true` succeeds on this host, and the wrapper
-does restore the CPU, turbo and governor state it touched.
+between-run spread an unpaired run can see). The bench wrapper fails loudly on
+an empty report now: it used to `sed` nothing and exit 0. (On this host its
+`omarchy-benchmark --cpu`/`--isolate` forms exit without running the command;
+that is a tooling fact, not a measurement.)
 
 **Fusion decision from these numbers.** The decap is 44 cycles, the encap 63, and the
 classifier in front of the decap is ~49 (its control above `M.base`, including its rule,
@@ -562,6 +566,15 @@ three interfaces on one PMD port, each with its own address, its own ARP answers
 and its own routing domain; nothing in 3GPP requires a distinct MAC per reference
 point, and a shared MAC is fine where the segments are tagged apart.
 
+```mermaid
+flowchart TB
+    port["one PMDPort"] --> vif["Vif<br/>matches (VLAN, destination MAC)"]
+    vif -->|gate| n3["N3 interface"]
+    vif -->|gate| n6["N6 interface"]
+    vif -->|gate| n9["N9 interface"]
+    vif -.->|"writes vif_id + route_domain"| key["PDR rule key"]
+```
+
 `route_domain` is written, and now read: `core/route/route_domain.h` and
 `Router` (`core/route/router.h`) are domain-aware (`kMaxRouteDomains`, a
 `max_domains` per router, routes taken per domain) and `vif` writes the domain
@@ -645,23 +658,10 @@ measured on a software port, so that it does not wait for a NIC:
 veth, `qpairs=4`) with four `QueueInc`s into a `Vif` whose three interfaces are
 N3, N6 and N9 -- each with its own MAC, its own address and its own route
 domain -- and the PDR tables whose keys carry what the Vif writes;
-`ci/veth-port.sh` deploys it and checks the result, and `docs/datapath.md` holds
-the recipe. That is four things the port has to get right, proven here:
-
-- **the queue count**, from two independent views: BESS's (the runtime PortInfo
-  and the active pipeline, four receive and four transmit queues) and DPDK's own
-  device telemetry (four rx/tx queues, all of them started) -- and the PMD's
-  count comes from the vdev's `qpairs=`, not from the veth's `numrxqueues`, so
-  it is a real declaration that took effect rather than an echo;
-- **real L2**, in that a frame addressed to an interface's MAC crosses the veth,
-  is read by the port and lands on that interface's gate -- the three gates'
-  counts are exactly the frames sent, no more and no fewer;
-- **the vif split with its route domains**, end to end: the domain the port
-  wrote for a frame is what the compiler's downlink rule (`upfd`, over N4) is
-  keyed on, and that frame is selected by the rule and crosses the chain to the
-  encap, while the same frame before that rule existed is dropped;
-- **the per-queue spread**: the af_packet PMD's `fanout_mode=hash` places a flow
-  on a queue, and all four queues move under many flows.
+`ci/veth-port.sh` deploys it and checks the result; `docs/datapath.md` holds
+the recipe and the checklist — the queue count from BESS and DPDK telemetry,
+the L2 landing, the vif split with its route domains end to end, and the
+per-queue spread under many flows.
 
 What the veth cannot do is the measurement this section is about. The af_packet
 PMD advertises no RSS offload at all -- the telemetry's `ethdev_rss_hf` is `0x0`,
@@ -695,6 +695,17 @@ checkpoint is the restart wall below.
 Every packet forces two questions, and they are answered differently in each
 direction.
 
+```mermaid
+flowchart TB
+    pkt["packet"] --> dir{"direction?"}
+    dir -->|N3| teid["TEID → session<br/>exact match"]
+    dir -->|N6| ue["UE address/prefix → session<br/>masked key (LPM owed)"]
+    teid --> pdr["that session's PDR rules"]
+    ue --> pdr
+    pdr --> act["matching rule → ActionId"]
+    act --> rest["meter, counter, next hop, tunnel"]
+```
+
 1. **Which session does this packet belong to?** On N3 the packet is inside a
    GTP-U tunnel and the **TEID names the session exactly** — the SMF gave that
    TEID to the gNB for that one session — so this lookup is exact, and no prefix
@@ -722,7 +733,7 @@ modules — `ExactMatch` (`sel_dl`) writing the session id into the packet's
 `action_id` metadata, then the keyed matcher reading that id
 (`internal/session/selector.go`, live in `ci/pdrmatch-path.sh`). An LPM is the
 structure for an IPv6 UE *prefix* or a framed route, and it is owed when those
-are served (IPv6 is refused today: docs/claims.md). Under that design the
+are served (IPv6 is refused today: `docs/claims.md`, status-7). Under that design the
 shared table does **not** disappear either: a profile whose downlink is the
 shared table keeps it, and the compiler chooses per direction which structure a
 rule goes in.
@@ -974,40 +985,14 @@ before the dataplane footprint above becomes the limit. They are all ours, and
 the 1M target is a claim about the whole system, so all three have to be
 addressed:
 
-1. **`Compiler.Sweep`.** It reads the session tables back and erases what it
-   read **key by key**. Both halves are now bounded, and neither is unbounded
-   any more: the erase goes out in transactions of `sweepBatch` (1000) changes
-   rather than one -- the daemon refuses one transaction per sweep twice over,
-   at 64 MiB of changes and at its engine's retirement budget ("transaction
-   retires up to N objects, more than one batch allows (2048); split it") -- and
-   the readback is **one `Contents` call per resource**, never one call naming
-   them all, because every resource a call names is packed into one response and
-   a response above the daemon's 64 MiB message limit is refused with "name
-   fewer resources" (`api_v2.cc`).
-   **What is left is the ceiling, and it is per table:** the daemon has no paged
-   or cursored read (`GetPipelineRequest` carries a resource list and no offset,
-   chunk size or cursor), so one resource read is one message, and a table is
-   readable to roughly 510K entries at 131 B each. That is the interim's limit:
-   at 1M sessions a single table that holds a session each way is past it, past
-   a table's capacity the operator's escape is a `bessd` restart, which discards
-   the warm dataplane, and nothing in the session layer lifts it (the SDK's
-   `Pipeline`/`WithResources` is the same call).
-   **The target is a bounded clear, which removes the readback entirely.** The
-   readback exists only so the sweep can name the keys it erases -- a
-   client-side enumeration of a table the daemon already owns, which at 1M
-   sessions is both the 64 MiB wall and a million entries' worth of work. The
-   operation to expose is *clear this resource*, batched inside the daemon,
-   which makes the sweep a handful of control calls and no read at all. The
-   shape exists already: a desired-state pipeline that *lists* a resource with
-   no entries clears it (`ResourceContents`' own comment), but it builds one
-   server-side transaction with one op per entry it finds (`Converge` →
-   `engine.Apply(ops)` under the control-plane lock), so it is unbounded exactly
-   where the sweep is now bounded -- the batching inside the daemon is what is
-   missing, not the operation. That is the direction recorded here, a BESS item;
-   until it exists, the per-resource read above is what makes a sweep work to
-   roughly 510K entries per table.
-   The design sentence that *prescribed* the defect is corrected
-   above ("emptying the session tables" now says chunked on both halves and why).
+1. **`Compiler.Sweep`.** The sweep is bounded on both halves except for one
+   ceiling: the daemon has no paged read, so a single resource read is one
+   message and a table is readable to roughly 510K entries at 131 B each (the
+   64 MiB limit). At 1M sessions a table holding every session is past it, and
+   the operator's escape is a `bessd` restart. The derivations, the bounded-clear
+   target and its BESS dependency are in "Restart and failure semantics"; the
+   scale consequence belongs here: the sweep does not reach 1M sessions until
+   that read disappears.
 2. **The firewall policy is a whole-policy singleton, so every session change
    rewrites every session's rules.** `compile.go`'s `firewallChanges` builds
    "the whole policy of every configured firewall module ... every live
@@ -1379,9 +1364,8 @@ egress is resolved to a hop id then (`internal/session/compile.go`, the action
 record) -- so the deployment's Router is a hop table on the packet path, not a
 routing table. Part 1 is what the fork's Router does today, read in this tree
 and named by file and line. Part 2 is what routing inside a network instance
-would need, and where each piece goes; nothing there is implemented, and
-`docs/claims.md` records the consequence (one next hop per instance, per
-installation).
+would need, and where each piece goes; nothing there is implemented, and the
+consequence is one next hop per egress, per installation.
 
 ### Part 1 - what the Router does
 
@@ -1400,19 +1384,20 @@ installation).
 **(a) A FIB lookup on the packet path.** A deployment whose instance has more
 than one destination behind one interface -- a transit N6 with many prefixes, an
 N9 peer chosen by address, an ECMP set -- cannot be provisioned today: the
-compiler resolves one hop per instance at installation time
-(`routing.Interface.Hops` -> `p.nextHop` -> the action record), so every packet
-of that instance leaves by that gate. The library side is ready
-(`LookupRoute`, the domain's LPM); what is missing is a policy for *when* the
-module routes instead of forwarding the id it was given. The natural one: a
-hop id of 0 means "not named" (the same convention `RewriteL2` uses for a zero
-MAC), so the module routes a packet whose action record carries 0, in the domain
-the packet's `route_domain` names, to the hop the FIB resolves -- and drops it
-where the FIB has no route. That needs an argument saying which attribute holds
-the destination (the graph's key already knows: `dst_ip` is in every deployed
-PDR table) and a resource for the routes themselves (`route::LpmResource`
-exists, `core/route/lpm_resource.h`). It is a module change, ours or the fork's;
-no part of it is in the packet path's way until a deployment asks for it.
+compiler resolves one hop per *egress* of the instance at installation time
+(`routing.Interface.Hops` -> `p.nextHop` -> the action record), so every forward
+of that egress leaves by that gate, whatever its destination. The library side
+is ready (`LookupRoute`, the domain's LPM); what is missing is a policy for
+*when* the module routes instead of forwarding the id it was given. The
+natural one: a hop id of 0 means "not named" (the same convention `RewriteL2`
+uses for a zero MAC), so the module routes a packet whose action record carries
+0, in the domain the packet's `route_domain` names, to the hop the FIB resolves
+-- and drops it where the FIB has no route. That needs an argument saying which
+attribute holds the destination (the graph's key already knows: `dst_ip` is in
+every deployed PDR table) and a resource for the routes themselves
+(`route::LpmResource` exists, `core/route/lpm_resource.h`). It is a module
+change, ours or the fork's; no part of it is in the packet path's way until a
+deployment asks for it.
 
 **(b) Connected and local routes.** Nothing derives them. An interface that
 knows its own address and domain (`Vif`'s `interfaces`: `ip_addr`,
@@ -1442,5 +1427,4 @@ What follows from (a)-(c) for the deployment as it stands: the UPF's own
 egresses are hop ids decided per FAR, the compiler refuses an egress the
 instance does not declare (`internal/routing`), and the one place a routed
 deployment is recorded as limited is the FAR's Destination Interface and Network
-Instance being "where the traffic leaves by, not a next hop"
-(`docs/claims.md`, "routing inside a network instance").
+Instance being "where the traffic leaves by, not a next hop" (Part 2 above).

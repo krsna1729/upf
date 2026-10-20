@@ -115,3 +115,14 @@ The code is not in question.
 | **11** ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 | lane |
 | **12** real-SMF interop (1) · skip | 0 | 0 | 100 | 0 | 0 | 0 | 0 | lane |
 
+## Finding numbers
+
+Code comments cite the finding numbers of the audit that produced this
+register; they map to entries:
+
+- finding 6 → `status-20`, `status-35`
+- finding 15 → `status-28`
+- finding 18 → `status-32`
+- finding 19 → `status-33`
+- finding 20 → `status-34`
+

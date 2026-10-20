@@ -26,6 +26,26 @@ Session Report Request was seen in the 15 s hold.
 | 9-10 | Session Modification (173 B: Update PDR 2, Update FAR 2 with the gNB's tunnel) | accepted; the response carried a Created PDR on the first run, and since `4f40f59` it is `Cause 1` alone (re-run `runs/final`, capture checked: the only Created PDR is in the establishment response) |
 | 13-14 | Session Deletion | accepted; the 197 B response carries one TERMR Usage Report per URR (trigger `000800`, URSEQN 0); the SMF completed the release |
 
+```mermaid
+sequenceDiagram
+    participant SMF as free5GC SMF
+    participant UPF as upfd
+    participant DP as bessd
+    SMF->>UPF: Association Setup Request
+    UPF-->>SMF: Cause 1, Node ID, Recovery Time Stamp
+    loop every 10 s
+        UPF->>SMF: Heartbeat Request
+        SMF-->>UPF: Heartbeat Response
+    end
+    SMF->>UPF: Session Establishment (2 PDR/FAR, 2 QER, 2 URR)
+    UPF->>DP: one control_v2 transaction
+    UPF-->>SMF: Cause 1, Node ID, UP F-SEID, Created PDR
+    SMF->>UPF: Session Modification (Update PDR 2, FAR 2 + Outer Header Creation)
+    UPF-->>SMF: Cause 1
+    SMF->>UPF: Session Deletion
+    UPF-->>SMF: Cause 1 + TERMR Usage Report
+```
+
 The earlier result, kept below as the record of what failed first, is that
 against an unmodified `upfd` of that day the furthest stage was (a): the first
 PDU session was refused for three independent reasons (section "Findings"),
@@ -162,7 +182,7 @@ level=DEBUG msg="n4: unmatched heartbeat response" from=10.77.88.10:8805 seq=1
   before `onHeartbeatResponse` compares it, so the response always looks
   unmatched; liveness itself is not affected.
 
-## Stage (b): registration and PDU session — registration PASSED, session REFUSED
+## Stage (b): registration PASSED, PDU session first REFUSED — now PASSED
 
 gNB and UE (UERANSIM, one container pair sharing a network namespace):
 
@@ -261,7 +281,7 @@ ACCESS, Network Instance `"internet"` and the Outer Header Creation, and the
 re-sent Update PDR 2's PDI carries `"internet"` again: the access-side FAR
 gains a Network Instance only there.
 
-### What `upfd` answers — three independent failures
+### What `upfd` answered — three independent failures (all fixed; kept as the record)
 
 **1. A URR naming Measurement Information is refused, even when it names nothing.**
 Stock config (`runs/stock-urr`), and again with PCC rules whose URRs carry
@@ -357,7 +377,11 @@ UpdateFAR 2  ApplyAction FORW
 Modification Response, which the Modification never asked for (no CHOOSE). The
 SMF accepted it. Nothing in the SMF's request was refused.
 
-## Stage (c): PDU session release — REACHED, shimmed only
+## Stage (c): PDU session release — PASSED; the shimmed run below is the record
+
+In the current result the deletion is answered `Cause 1` with the TERMR Usage
+Report the table above records. The run below was shimmed and had no URRs, so
+its response carries no Usage Report; it is kept as the release-path record.
 
 `ci/interop/ue.sh release` (`nr-cli imsi-208930000000001 -e "ps-release 1"`):
 
@@ -413,7 +437,7 @@ an IE it does not support is the URR refusal.
 
 Open: Open5GS (no official image), free5GC's own UPF (not relevant), a second
 UE/session, N9, the SMF-initiated release/modify paths (T3591/T3592 timers),
-and finding 20's narrow residue (a report already in flight when the deletion
+and status-34's narrow residue (a report already in flight when the deletion
 arrives can be counted twice -- 5 packets, once, on `runs/dp-fix`).
 `ci/interop/run.sh` is the regression entry point: it ends with
 `stage reached: c` and `upfd` and `bessd` shutting down cleanly.
@@ -443,7 +467,7 @@ Measured (`runs/dp4`, `runs/dp5`, generic; `runs/dp-custom`, custom):
 |---|---|
 | the echo | 20 packets, **0% loss**, each way: `cnt_ul +20`, `cnt_dl +20` packets (the graph's own counting modules) |
 | the URRs at a real SMF | PERIO reports before the traffic, then VOLTH reports with real volume: 2052 octets / 9 packets each way, accepted (`Session Report Response`, cause 1) |
-| the whole traffic accounted | both URRs' windows plus the deletion's termination report sum to 20 packets / 4560 octets each way, exactly what crossed (`runs/dp-fix`; before the fix `runs/dp5` delivered 20 for URR 1 and 11 for URR 2 -- finding 20) |
+| the whole traffic accounted | both URRs' windows plus the deletion's termination report sum to 20 packets / 4560 octets each way, exactly what crossed (`runs/dp-fix`; before the fix `runs/dp5` delivered 20 for URR 1 and 11 for URR 2 -- status-34) |
 | a report the session's end overtook | the queued report is cancelled, not sent (`upf_usage_reports_total{outcome="cancelled"}`), and its usage goes in the termination report instead |
 
 Two gaps this arm exposed; the first is closed:

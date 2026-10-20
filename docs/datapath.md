@@ -8,148 +8,80 @@ plugs into. It is deliberately narrower than the other files:
 
 | file | what it owns |
 |---|---|
-| `docs/design.md` | why the deployment is shaped this way, the walls, the costs, the milestones |
+| `docs/design.md` | why the deployment is shaped this way: the walls, the costs, the milestones |
 | **`docs/datapath.md`** (this) | what each module is, which resource it owns and under which key, what it takes from BESS, how packets and workers are placed |
-| `docs/claims.md` | clause-by-clause status and the test or script that proves each row |
-| `docs/claims.md` | how the field scores, and what each of our numbers rests on |
+| `docs/claims.md` | clause-by-clause status, the evidence that proves each entry, and the competitive scores |
+| `docs/interop.md` | the real-SMF interoperability record (free5GC v4.3.0) |
 | `README.md` | how to build, run and prove |
 
 ## The graph
 
-One `bessd`, one graph, one set of workers. `[0]` on an arrow is the gate the
-packet leaves by; a gate no connection wires is a drop. `WCM` is
-`WildcardMatch`, and every `WCM` rule's value is `{priority, gate, action_id}`
-(BESS D-141): the action id the classifier writes is the id everything
-downstream is keyed by.
+One `bessd`, one graph, one set of workers. In the packet-path graphs an edge
+label is the output gate the packet leaves by; a gate no connection wires is a
+drop. `WCM` is `WildcardMatch`, and every `WCM` rule's value is
+`{priority, gate, action_id}` (BESS D-141): the action id the classifier writes
+is the id everything downstream is keyed by.
 
 ### Uplink
 
+```mermaid
+flowchart TB
+    n3["N3 PMDPort<br/>one rx queue"] --> n3in["n3_in · PortInc"]
+    n3in -->|0| teid["teid · WildcardMatch<br/>key: GTP-U TEID<br/>one rule per session"]
+    teid -->|0| decap["decap0 · GtpuDecap<br/>strips Eth/IP/UDP/GTP-U<br/>writes upf_teid + qfi"]
+    teid -->|"1 · default gate"| echo["echo0 · GtpuResponder<br/>Echo Request → reply<br/>unknown G-PDU → Error Indication"]
+    decap -->|0| mt["mt_ul_read · MetadataTest<br/>reads upf_teid, so the write<br/>gets a metadata offset"]
+    mt -->|0| pdr["pdr_ul · WildcardMatch<br/>key: inner 5-tuple (+ QFI)"]
+    pdr -->|0| at["at_ul · ActionTable<br/>{meter id, next hop id}"]
+    at -->|0| meter["mt_ul · Meter<br/>two-rate three-colour"]
+    meter -->|"0, 1 · green, yellow"| cnt["cnt_ul · UrrCount"]
+    meter -->|"2 · red, unwired"| drop(("drop"))
+    cnt -->|0| rt["rt · Router"]
+    rt -->|"ogate 0 · hop 1"| n6["n6_out · PortOut → N6"]
+    echo -->|0| n3out["n3_out · PortOut → N3"]
 ```
-   N3  PMDPort (n3), num_rx_queues: 1
-    |
-    v
- +-----------------+          +--------------------+          +---------------------+
- | n3_in  PortInc  |--- 0 --->| teid   WCM         |--- 0 --->| decap0  GtpuDecap   |
- +-----------------+          |  key: GTP-U TEID   |          |  strips Eth/IP/UDP/ |
-                              |  one rule/session  |          |  GTP-U; writes      |
-                              +---------+----------+          |  upf_teid, qfi (u8) |
-                                        |                     +----------+----------+
-                          ogate 1: default gate                         | 0
-                          (no rule names it)                             v
-                                        |                     +---------------------+
-                                        v                     | mt_ul_read          |
-                              +-------------------+           |  MetadataTest       |  (a write-only attribute
-                              | echo0  GtpuResponder   |           |  reads upf_teid     |   gets no offset unless
-                              |  type 1 -> type 2 |
-                              |  G-PDU -> type 26 |           +----------+----------+   something reads it)
-                              +---------+---------+                      | 0
-                                        |                                v
-                                        |                     +---------------------+
-                                        |                     | pdr_ul  WCM         |
-                                        |                     |  key: inner 5-tuple |
-                                        |                     +----------+----------+
-                                        |                                | 0
-                                        |                                v
-                                        |                     +---------------------+
-                                        |                     | at_ul  ActionTable  |  its own resource is
-                                        |                     |  {meter, next hop}  |  at_ul/actions; meters
-                                        |                     +----------+----------+  and next hops are
-                                        |                                | 0           resources it reads
-                                        |                                v
-                                        |                     +---------------------+
-                                        |                     | mt_ul  Meter        |
-                                        |                     +----------+----------+
-                                        |                                | 0
-                                        |                                v
-                                        |                     +---------------------+
-                                        |                     | cnt_ul  UrrCount    |
-                                        |                     +----------+----------+
-                                        |                                | 0
-                                        |                                v
-                                        |                     +---------------------+
-                                        |                     | rt  Router          |
-                                        |                     +----------+----------+
-                                        |                                | ogate 0
-                                        v                                v
-                              +-------------------+          +---------------------+
-                              | n3_out  PortOut   |---> N3   | n6_out  PortOut     |---> N6
-                              +-------------------+          +---------------------+
-                                 ^                                        ^
-                                 |                                        |
-                          echo0's reply, the                    rt's ogate 0 (next hop 1):
-                          End Marker's frame                    the deployment's N6 port
-```
+
+The ActionTable's own resource is `at_ul/actions`; the meters and next hops it
+names are resources it reads. A metadata attribute nothing reads is never given
+an offset (`core/metadata.cc`), which is why `mt_ul_read` sits after the decap.
 
 ### Downlink
 
+```mermaid
+flowchart TB
+    n6in["n6_in · PortInc"] -->|0| pdr["pdr_dl · WildcardMatch<br/>key: inner 5-tuple"]
+    pdr -->|0| at["at_dl · ActionTable"]
+    pdr -->|"1 · BUFF (buffer-path only)"| cb["cnt_buf · UrrCount"]
+    cb -->|0| buf["buf · PacketStore<br/>key_attrs: [action_id]"]
+    buf -->|"0 · release"| at
+    buf -->|"1 · eviction, unwired"| drop(("drop"))
+    at -->|0| meter["mt_dl · Meter"]
+    meter -->|"0, 1 · green, yellow"| cnt["cnt_dl · UrrCount"]
+    meter -->|"2 · red, unwired"| drop
+    cnt -->|0| rt["rt · Router"]
+    rt -->|"ogate 1 · hop 2"| enc["enc · GtpuEncap<br/>outer Eth/IPv4/UDP/GTP-U<br/>DSCP + PDU Session Container"]
+    enc -->|0| n3out["n3_out · PortOut → N3"]
 ```
-   N6  PMDPort (n6), num_rx_queues: 1
-    |
-    v
- +-----------------+          +--------------------+
- | n6_in  PortInc  |--- 0 --->| pdr_dl  WCM        |
- +-----------------+          |  key: inner 5-tuple|
-                              +----+---------------+
-                                   | 0
-                                   v
-                        +------------------+
-                        | at_dl ActionTable|<--------------------+
-                        +--------+---------+                     |
-                                 | 0                             |
-                                 v                               |
-                        +------------------+                     |
-                        | mt_dl  Meter     |                     |
-                        +--------+---------+                     |
-                                 | 0                             |
-                                 v                               |
-                        +------------------+                     |
-                        | cnt_dl  UrrCount |                     |
-                        +--------+---------+                     |
-                                 | 0                             |
-                                 v                               |
-                        +------------------+                     |
-                        | rt  Router       |                     |
-                        +--------+---------+                     |
-                                 | ogate 1                       |
-                                 v                               |
-                        +------------------+                     |
-                        | enc  GtpuEncap   |                     |
-                        |  outer headers,  |                     |
-                        |  DSCP copy/mark  |                     |
-                        +--------+---------+                     |
-                                 | 0                             |
-                                 v                               |
-                        +------------------+                     |
-                        | n3_out  PortOut  |---> N3              |
-                        +------------------+                     |
-                                                                 |
-   pdr_dl, ogate 1 (deploy/buffer-path.yaml only)                |
-                                                                 |
-                        +------------------+                     |
-                        | cnt_buf  UrrCount|--- 0 --->+          |
-                        +------------------+           |          |
-                                                       v          |
-                                             +-------------------+--+
-                                             | buf  PacketStore     |  BESS's own module,
-                                             |  key_attrs:          |  one queue per rule
-                                             |  ["action_id"]       |
-                                             +----+-----------------+
-                                                  | gate 0: release, into the action path
-                                                  +-----> at_dl (above), which applies the
-                                                          SMF's new instruction
-                                                  | gate 1: unwired -> dropped
-                                                  +-----> eviction and overflow; the daemon's
-                                                          gate counters see them
-```
+
+The buffering branch exists only in `deploy/buffer-path.yaml` (and its
+`pdrmatch` twin). Release feeds the packet back into `at_dl`, so the SMF's new
+instruction is what moves it; the store's eviction and overflow leave by gate 1,
+which nothing wires — the daemon's gate counters are what see them.
 
 ### The control plane's own port
 
+```mermaid
+flowchart TB
+    upfd["upfd · -end-marker<br/>builds the 60-byte End Marker"] -->|"one write · SOCK_SEQPACKET"| cp["cp_in · PortInc"]
+    cp -->|"deploy/upf.yaml, custom-pdrmatch"| n3out["n3_out · PortOut → N3"]
+    cp -->|"session-path.yaml, buffer-path.yaml"| dump["dump_m · Dump"]
+    dump --> sink["sink_m · Sink<br/>no output gate, no metric"]
 ```
-   cp_in  PortInc -----> dump_m  Dump -----> sink_m  Sink      (deploy/session-path.yaml)
-      ^
-      |  one write of a whole frame, SOCK_SEQPACKET
-   upfd (-end-marker): constructs the 60-byte End Marker itself
-```
+
+`upfd` constructs the End Marker itself and writes one whole frame per call. In
+the deployment the frame leaves by N3, after the transaction that moved the
+tunnel has landed; the lab graphs send it through a `Dump` to a `Sink` so the
+lane can byte-check it.
 
 | graph | used by | what differs |
 |---|---|---|
@@ -188,8 +120,10 @@ path, unchanged — which is the only path an older daemon had.
 
 ## Modules we own
 
-Five modules, one `.so` (`BESS_PLUGIN` + `ADD_MODULE`, `datapath/meson.build`),
-built only against the installed `bess-dev` stage.
+Six modules, one `.so` (`BESS_PLUGIN` + `ADD_MODULE`, `datapath/meson.build`),
+built only against the installed `bess-dev` stage. `pdr_match_scan.cc` is the
+matcher's seam, not a module class: it is the only implementation of
+`pdr_match_matcher.h`, over BESS's `FirewallScan`.
 
 | module | mclass | resource it owns (key) | state it holds | workers |
 |---|---|---|---|---|
@@ -198,13 +132,22 @@ built only against the installed `bess-dev` stage.
 | `gtpu_responder.{h,cc}` | `gtpu_responder` | none | `port_`, a Recovery Time Stamp | all |
 | `urr_count.{h,cc}` | `urr_count` | `<module>/counters` (`CounterKey{action_id}`) | per-worker cell planes, per-rule stamp pairs | all |
 | `arp_responder.{h,cc}` | `upf_arp_responder` | `<module>/entries` (IPv4, host order) | the slot table's mask and its live count | all |
+| `pdr_match.{h,cc}` + `pdr_match_scan.cc` | `pdr_match` | `<module>/rules` (session id → its rule list), `<module>/settings` | the key/action/QFI attribute ids and the settings singleton | all |
 
-Three resources, then: the encap's tunnels, the counters — one instance per
-direction, plus one on the buffering branch — and the responder's entries. Of
-the three, the entries is the only one written per session: the tunnels and the
-counters are keyed by an action id the compiler hands out, and an ARP entry's
-key is the subscriber's own address, which two sessions of one deployment must
-not both hold (`internal/session/arp.go` claims it like a rule key).
+`PdrMatch` is the custom profile's matcher (`deploy/custom-pdrmatch.yaml`): the
+session is the packet's key attribute (`upf_teid` on the uplink, the selector's
+`action_id` on the downlink), the map holds one key per session, and a match
+carries the rule's ActionId so the rest of the chain is unchanged. The default
+graphs use the shared `WildcardMatch` tables instead.
+
+Four resource kinds, then: the encap's tunnels and the counters (one instance
+per direction, plus one on the buffering branch), the custom profile's PDR map,
+and the responder's entries. The tunnels and counters are keyed by an action id
+the compiler hands out; the PDR map is keyed by the session; an ARP entry's key
+is the subscriber's own address, which two sessions of one deployment must not
+both hold (`internal/session/arp.go` claims it like a rule key). Every one of
+them is written per session at programming time — none is written by the packet
+path except the counters' planes.
 
 ### `gtpu_decap` — the N3 entry
 
@@ -385,14 +328,13 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 |---|---|---|
 | `WildcardMatch` | both PDR tables, the TEID table | `action_resource: <at_*/actions>` (D-141: the rule's action id goes to the packet's `action_id`), `fields` = the graph's key in the order the compiler's `PDRFields` names, `max_tuples` |
 | `ActionTable` | one per direction | its own resource is `<module>/actions` (a rule's `{meter_id, next_hop_id}`); it *reads* `mt_*/meters` and `rt/next_hops` and fails closed when the id it writes has no reader |
-| `Meter` | one per direction | `<module>/meters`, the QER's committed and peak rate; a closed gate compiles to the drop gate instead |
 | `Router` | one, both directions | `<module>/next_hops`, the egress gate an action names; a resolved hop's `dst_mac`/`src_mac` are written into the frame it forwards (BESS D-153, `route::RewriteL2`) |
-| `UpdateTTL` | both chains, before the `Router` | RFC 791's hop count: one decrement each way, the header checksum kept right; a packet arriving with TTL 1 is dropped, and the drop is silent -- no ICMP Time Exceeded, and BESS's per-gate counters are all that record it (`docs/claims.md`'s hop-count row records both) |
+| `UpdateTTL` | both chains, before the `Router` | RFC 791's hop count: one decrement each way, the header checksum kept right; a packet arriving with TTL 1 is dropped, and the drop is silent -- no ICMP Time Exceeded, and BESS's per-gate counters are all that record it. `ci/session-path.sh`'s byte-checked frames cross both modules |
 | `PMDPort` | `n3`, `n6`, and `upf_port` (a veth) | `num_rx_queues: 1` each in the deployment's graph; RSS and one worker per queue are the scale path. The one-port split (per-pattern RSS, `L3_SRC_ONLY` uplink / `L3_DST_ONLY` downlink) is designed in `docs/design.md`, "N3, N6, N9": `deploy/veth-port.yaml` wires it over a software device (one PMD port, four queues, a `Vif` with the three interfaces) and `ci/veth-port.sh` proves what a veth can prove of it, while the placement measurement is what a NIC is still needed for (`docs/datapath.md`) |
 | `UnixSocketPort` | `cp_marker` | `SOCK_SEQPACKET`: one write from `upfd` is one End Marker frame |
 | `PortInc`/`PortOut`, `Sink`, `Source`, `Rewrite`, `Dump`, `MetadataTest` | graphs | plumbing and lab only; a `Sink` has no output gate, so it appears in no metric — the counters that prove behaviour sit on modules' *output* gates |
 | `deploy/meter-compose.yaml` / `ci/meter-compose.sh` | the composition probe: `classifier -> at1 -> m1 -> at2 -> m2`, two ActionTables rewriting one `meter_id` attribute and two Meters each reading their own id, proving that two rate policies need no module change (and pinning that a stage's writes need a downstream reader) |
-| `Meter` | the two-rate three-colour meter a QER's rates compile to (`mt_ul`/`mt_dl`): `committed_rate`/`peak_rate` are the QER's GBR/MBR and the bursts its Averaging Window, and the packet leaves on the gate that is its colour — 0 green, 1 yellow (between the guarantee and the ceiling), 2 red. The graphs connect 0 and 1 to the chain and leave 2 unwired, which is the drop; an unwired gate has no Track hook, so red's drops are read from the module's own state rather than `bess_gate_packets_total` |
+| `Meter` | one per direction | `<module>/meters`, the QER's committed and peak rate; a closed gate compiles to the drop gate. The model is a two-rate three-colour meter: `committed_rate`/`peak_rate` are the QER's GBR/MBR and the bursts its Averaging Window, and the packet leaves on the gate that is its colour — 0 green, 1 yellow (between the guarantee and the ceiling), 2 red. The graphs connect 0 and 1 to the chain and leave 2 unwired, which is the drop; an unwired gate has no Track hook, so red's drops are read from the module's own state rather than `bess_gate_packets_total` |
 | `PacketStore` | the buffering branch (`buffer-path.yaml`) | `key_attrs: ["action_id"]`, `max_packets`, `max_packets_per_flow`, `timeout_ms`; one owner task, any number of workers. `release`/`drop`/`clear` are commands that enqueue into the store's own request ring (`Command::THREAD_SAFE` since BESS `cdeb4e77`), and its `flows` table is live configuration (`requires_paused_workers: false`), so neither a command nor a flow write is refused with EBUSY or RESOURCE_BUSY and nothing stops the datapath; a command is **accepted, not completed** -- the store's owner task applies it on a later run -- so a caller that needs the effect reads it back (`ps/flows`, the drop and release counters, `GetDesc`). A flow the store holds nothing for is a no-op (ENOENT is gone; the only refusal left is ENOSPC, a full request ring), an upsert or an erase moves no packet, and an erase removes configuration only -- `drop` is what frees what a flow holds (BESS's note: `packet_store: the flow key is a configured attribute, not a fixed pair`, 96d22a8f). The `flows` entries are the SMF's own numbers: `internal/session` writes one per buffering rule (`writeFlowEntry`), keyed by the rule's ActionId, with `timeout_ns` from 8.2.29's DL Buffering Duration and `max_packets_per_flow` from 8.2.30's Suggested Packet Count, each left out where the SMF named none; a modification's Update BAR rewrites it, a deletion erases it, and the startup sweep names the table. BESS's `LimitsFor` resolves it per flow; the store then enforces the cap on every arrival (`StoreBatch`) and, when `total_packets_` reaches `max_packets`, ages each flow's packets past its `timeout_ns` out with `bess::PacketFree` in `EvictExpired` -- a silent discard (no gate, no metric; only `GetDesc`'s stored count falls), distinct from the `drop` command's counted free and from the gate-1 eviction the cap uses |
 | `Vif` | `deploy/upf.yaml` (the N6 interface), `deploy/veth-port.yaml` | the module that splits one port into the reference points: an interface per reference point (`(VLAN, destination MAC)`, ARP answered for its address), each writing `vif_id`/`route_domain` into the packet and sending it out its own gate, so a PDR key can carry the domain the frame arrived with (`docs/design.md`, "N3, N6, N9"; `ci/veth-port.sh` proves the split and the rule selected by it). The deployment uses it for its one N6 port (`vif_n6`): the data network's frames are the interface's, and the interface's own frames leave by the port through `l2_sort` instead of entering the downlink chain (`ci/session-path.sh` runs the frames through it). The interface's *own* ARP answer is inert in `deploy/upf.yaml`, where `l2_sort` diverts ARP to `arp_n6` first -- that module answers for the interface's address and for every live session's, so the Vif's answer is left to the graphs that put it first (`core/modules/vif_test.cc` covers it) |
 
@@ -691,8 +633,8 @@ Two things about this tree that bite an arm:
   counter read immediately after `resume` is not yet "this run's traffic".
 
 RSS and one worker per queue are the scale path (`docs/design.md`, the
-placement policy; BESS `docs/decisions.md` D-097), and `docs/claims.md`'s
-multi-queue row points here for it.
+placement policy; BESS `docs/decisions.md` D-097 and its performance contract),
+and the measurement that needs a NIC is the one below.
 
 ### One port, three interfaces
 
@@ -762,7 +704,7 @@ example of the limit: on a veth it is whatever `qpairs=` says, so it does not
 validate that a NIC's advertised queue count was honoured.
 
 **Multi-queue RSS, per-worker tables, RCU rule updates, no locks or allocations
-in the packet path** (`docs/claims.md`'s row) are the engine's, not this
-repo's: BESS `docs/decisions.md` and `docs/performance-contract.md` are the
-sources, and the placement policy in `docs/design.md` is what a deployment
-turns into a port-and-worker layout.
+in the packet path** are the engine's, not this repo's: BESS
+`docs/decisions.md` and `docs/performance-contract.md` are the sources, and the
+placement policy in `docs/design.md` is what a deployment turns into a
+port-and-worker layout.

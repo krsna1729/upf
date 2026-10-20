@@ -2118,5 +2118,23 @@
    "kind": "competition",
    "block": 12
   }
- ]
+ ],
+ "aliases": {
+  "6": [
+   "status-20",
+   "status-35"
+  ],
+  "15": [
+   "status-28"
+  ],
+  "18": [
+   "status-32"
+  ],
+  "19": [
+   "status-33"
+  ],
+  "20": [
+   "status-34"
+  ]
+ }
 }

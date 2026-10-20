@@ -421,6 +421,15 @@ if comp:
                      f" | {evidence_kinds(c) or '—'} |")
     lines.append('')
 
+aliases = doc.get('aliases') or {}
+if aliases:
+    lines += ['## Finding numbers', '',
+              'Code comments cite the finding numbers of the audit that produced this',
+              'register; they map to entries:', '']
+    for k in sorted(aliases, key=int):
+        lines.append(f"- finding {k} → " + ', '.join(f"`{v}`" for v in aliases[k]))
+    lines.append('')
+
 open('docs/claims.md', 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
 
 counts = {}

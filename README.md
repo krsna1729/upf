@@ -202,8 +202,8 @@ build/bess/stage/bin/bessctl apply deploy/upf.yaml
   what was held into the action path.
   The SMF's own numbers are the flow's, not the graph's: 8.2.29's duration and
   8.2.30's count reach the store's live per-flow `flows` entry, so a buffering
-  flow's cap and its expiry are per-BAR; both are measured — the scorecard's
-  block-7 rows and compliance's BUFF row carry the evidence, including the arm's
+  flow's cap and its expiry are per-BAR; both are measured — `docs/claims.md`'s
+  competition-7 and status-27 carry the evidence, including the arm's
   default-stage negative. The DDN trigger is a poll of the branch's counters at
   `-urr-interval`, so its latency is up to one tick and a deployment that wants
   DDN must set that interval. `ci/buffer-path.sh` proves the whole path against
@@ -248,7 +248,7 @@ build/bess/stage/bin/bessctl apply deploy/upf.yaml
   crosses the dataplane; `docs/interop.md`). `ci/cntc-path.sh` drives TOSSI
   CNTC's PFCP simulator and its N3 robustness frames against `upfd` and `bessd`
   and checks the answers; it is not CNTC's verdict and earns no certificate
-  (`docs/claims.md`, finding 18).
+  (`docs/claims.md`, status-32).
 - The port split is in, on a veth: `deploy/veth-port.yaml` is one PMD port with
   four queues split by a `Vif` into N3/N6/N9, each with its own address and
   route domain, and `ci/veth-port.sh` proves the queues, the split and the
