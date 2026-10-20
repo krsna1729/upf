@@ -184,7 +184,7 @@ done <<< "$graphs"
 
 # --- merge the results, write the contract, render the document --------------
 python3 - "$CLAIMS" "$OUT" "$STRICT" <<'PY'
-import json, sys, datetime
+import json, sys, datetime, re
 
 claims_path, out, strict = sys.argv[1], sys.argv[2], sys.argv[3] == '1'
 
@@ -265,30 +265,87 @@ lines = [
     '',
 ]
 
-for scope, title in (('status', 'Our status'), ('competition', 'The competition')):
-    lines += [f'## {title}', '']
-    for c in doc['claims']:
-        if c['scope'] != scope:
-            continue
-        st = c['result']['state']
-        lines.append(f"### {c['id']} -- {st}")
-        for f in c.get('fields', []):
-            if f['name'].strip() in ('#', '§') or f['value'].strip() == '—':
-                continue
-            lines.append(f"- **{esc(f['name'])}**: {f['value']}")
-        ev = c.get('evidence', [])
-        if ev:
-            parts = []
-            for tok in ev:
-                s = c['result']['evidence'].get(tok, {}).get('state', 'not run')
-                at = c['result']['evidence'].get(tok, {}).get('at')
-                parts.append(f"`{tok}` ({s}{', ' + at[:10] if at else ''})")
-            lines.append('- **verdict per evidence**: ' + ', '.join(parts))
-        else:
-            lines.append('- **verdict**: none -- a documented gap')
-        lines.append(f"- **result**: {st}"
-                     + (f" (`{c['result']['at']}`)" if c['result'].get('at') else ''))
+
+def sortkey(c):
+    cl = c.get('clause') or ''
+    out = []
+    for p in cl.split('.'):
+        m = re.match(r'(\d+)([A-Z]?)$', p)
+        out.append((int(m.group(1)), m.group(2)) if m else (999, p))
+    return (c.get('spec') or '', out, c['id'])
+
+def idkey(c):
+    m = re.search(r'(\d+)$', c['id'])
+    return (int(m.group(1)) if m else 0)
+
+def render_claim(c, level='###', title_override=None):
+    st = c['result']['state']
+    head = c.get('clause') or '—'
+    if c.get('part') == 'other-specs':
+        head = f"{c.get('spec', '')} {head}"
+    title = (c.get('title') or '').replace('\n', ' ')
+    lines.append(f"{level} {c['id']} · {head} · {st}")
+    if title and title != title_override:
+        lines.append(esc(title))
         lines.append('')
+    for f in c.get('fields', []):
+        if f['name'].strip() in ('#', '§') or f['value'].strip() == '—':
+            continue
+        if f['value'] == title:
+            continue
+        lines.append(f"- **{esc(f['name'])}**: {f['value']}")
+    ev = c.get('evidence', [])
+    if ev:
+        parts = []
+        for tok in ev:
+            s2 = c['result']['evidence'].get(tok, {}).get('state', 'not run')
+            at = c['result']['evidence'].get(tok, {}).get('at')
+            parts.append(f"`{tok}` ({s2}{', ' + at[:10] if at else ''})")
+        lines.append('- **verdict per evidence**: ' + ', '.join(parts))
+    else:
+        lines.append('- **verdict**: none -- a documented gap')
+    lines.append('')
+
+sections = [
+    ('procedures', 'TS 29.244 §5 -- procedures'),
+    ('messages', 'TS 29.244 §7 -- message formats and contents'),
+    ('ies', 'TS 29.244 §8.2 -- information elements'),
+    ('other-specs', 'Other 3GPP documents'),
+    ('engineering', 'Engineering: guarantees and deployment (no single clause)'),
+    ('competition', 'The competition'),
+]
+lines += ['## Contents', '', '| part | claims | ok | FAIL | gap | skip |', '|---|---:|---:|---:|---:|---:|']
+for key, title in sections:
+    cs = [c for c in doc['claims'] if c.get('part') == key]
+    if not cs:
+        continue
+    cnt = {}
+    for c in cs:
+        cnt[c['result']['state']] = cnt.get(c['result']['state'], 0) + 1
+    lines.append(f"| {title} | {len(cs)} | {cnt.get('ok', 0)} | {cnt.get('FAIL', 0)} | {cnt.get('gap', 0)} | {cnt.get('skip', 0)} |")
+lines.append('')
+
+for key, title in sections:
+    cs = [c for c in doc['claims'] if c.get('part') == key]
+    if not cs:
+        continue
+    lines += [f'## {title}', '']
+    if key == 'engineering':
+        groups = []
+        for c in cs:
+            g = c.get('group') or 'datapath and deployment'
+            if g not in groups:
+                groups.append(g)
+        for g in groups:
+            lines += [f'### {g.capitalize()}', '']
+            for c in sorted([c for c in cs if (c.get('group') or 'datapath and deployment') == g], key=idkey):
+                render_claim(c, level='####')
+    elif key == 'competition':
+        for c in sorted(cs, key=idkey):
+            render_claim(c)
+    else:
+        for c in sorted(cs, key=sortkey):
+            render_claim(c)
 
 open('docs/claims.md', 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
 
