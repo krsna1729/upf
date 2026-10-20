@@ -98,10 +98,13 @@ resources:
   at2/actions:
     - key: {id: 1}
       value: {meter_id: 2, next_hop_id: 0}
+  # 10 GB/s, well above the 64-byte source (about 1.1 GB/s at this graph's
+  # measured rate): the first meter must not drop, and at 1 GB/s it sat on the
+  # boundary once the graph got faster.
   m1/meters:
     - key: {id: 1}
       value:
-        tr_tcm: {committed_rate: 1000000000, committed_burst: 100000000, peak_rate: 1000000000, peak_burst: 100000000}
+        tr_tcm: {committed_rate: 10000000000, committed_burst: 1000000000, peak_rate: 10000000000, peak_burst: 1000000000}
   m2/meters:
     - key: {id: 2}
       value:

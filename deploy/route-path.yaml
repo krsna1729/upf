@@ -1,0 +1,325 @@
+# SPDX-License-Identifier: BSD-3-Clause
+
+# The UPF's whole packet path, on one host, with no NIC: the same composition
+# as deploy/session-live.yaml (the module names internal/session's Config
+# names) plus what it takes to put packets through it and see them.
+#
+# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
+#   downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> rt -> enc -> dump_d -> sink_n3
+#
+# This is the same lab as deploy/session-path.yaml with one difference: the
+# Router is in ROUTE_MODE_DESTINATION, so it decides each packet's egress from
+# the packet's own destination and the routes below, not from the next hop the
+# action names. The compiler runs with -route-mode=destination and writes 0
+# there; the FIB selects the gate. The Router also decrements the TTL in this
+# mode (route/forward.h), so the UpdateTTL modules are not in these chains --
+# wiring them too would decrement twice.
+#
+# A third, idle path is the control plane's own: the unix_port cp_marker (the
+# port `upfd -end-marker` writes to) delivers an End Marker packet
+# (TS 29.244 5.3.2) to a sink, where ci/session-path.sh reads it out of the
+# daemon's log. Nothing of a session's traffic passes through it.
+#
+# Nothing here is a session: the Go controller writes every rule, action,
+# meter, counter, tunnel and TEID rule, and `ci/session-path.sh` proves a session
+# programmed over the control plane carries packets both ways -- the uplink's
+# count needs the TEID rule, the decap and the PDR rule; the downlink's needs
+# the PDR rule, its action, its meter and the tunnel record the encap reads.
+#
+# The two Sources send continuously from the moment the graph is applied, so a
+# sink's counter is zero exactly when no session selects those packets: that is
+# the control arm, and it is why the packets are evidence rather than a picture.
+# They send in bursts of 32 so the *chains* set the rate rather than the
+# generator's one-packet-per-iteration loop (ci/bench-graph.sh measures it).
+#
+# The frames are the ones the compiler's session makes match:
+#   uplink    G-PDU to TEID 0x11223344 (the F-TEID the session's SMF pins),
+#             holding the UE's packet 10.45.0.2:5000 -> 8.8.8.8:53
+#   downlink  the data network's answer 8.8.8.8:5000 -> 10.45.0.2:53, marked
+#             EF (TOS 0xb8, DSCP 46), which the downlink PDR matches ("to
+#             assigned 53"), the FAR's outer header creation (TEID 0x55667788
+#             toward the gNB) puts GTP-U around, and the encap's DSCP copy
+#             carries onto the outer header. It is addressed to the N6
+#             interface's MAC, the deployment's own pair.
+#
+# The N6 side is the deployed graph's (deploy/upf.yaml carries the comments):
+# vif_n6 matches the frames addressed to the interface and is where its ARP
+# answer is built, l2_sort sends that answer back out of the port rather than
+# into the chain, and merge_n6 stands for the port itself -- the router's
+# frames and the interface's own leave by it together. dump_n6 is the uplink's
+# exit, where ci/session-path.sh reads the frame that left toward N6.
+#
+# Metadata attributes are laid out in module registration order, so the module
+# that declares "upf_teid" is listed first and the reader that makes it real
+# (a write-only attribute no module reads gets no offset) follows it, as in
+# deploy/smoke-gtpu.yaml.
+
+ports:
+  # The control plane's marker port: a unix socket (SOCK_SEQPACKET) that the
+  # controller writes whole End Marker frames to. BESS unlinks the path when it
+  # binds, so a run that died leaves nothing behind for the next one.
+  - name: cp_marker
+    driver: UnixSocketPort
+    arg: {path: /tmp/upf-end-marker.sock}
+
+modules:
+  # The peer's GTP-U Error Indication (TS 29.281 7.3.1): type 26, header TEID
+  # 0, and the TEID IE naming the tunnel it cannot reach -- the one this
+  # session's downlink FAR sends with (0x55667788, pathDownTEID in the live
+  # test). It takes the rule table's default gate, the responder behind it
+  # records the count (its track_errors argument), and the SMF hears about it
+  # as an Error Indication Report (TS 29.244 5.10).
+  - name: echo_err
+    mclass: GtpuResponder
+    arg: {track_errors: true}
+  - name: src_err
+    mclass: Source
+    arg: {pkt_size: 55, burst: 1}
+  - name: rewrite_err
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAACCABFAAApAAAAAEARKpoKFB4CChQeAQhoCGgAFQAAMBoABQAAAAAQVWZ3iA=="
+
+  - name: decap0
+    mclass: GtpuDecap
+  - name: mt_md
+    mclass: MetadataTest
+    arg:
+      read: {upf_teid: 4}
+  - name: dump_u
+    mclass: Dump
+    arg: {interval: 1}
+  - name: src_up
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_up
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAABJAAFAAEARUIwKFB4CwAACAQhoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARIIkKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm"
+  - name: teid
+    mclass: WildcardMatch
+    arg:
+      fields:
+        # The G-PDU's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's
+        # flags, type and length (4). One rule per session; a TEID no rule
+        # names takes the default gate, whose responder answers a G-PDU for a
+        # tunnel this node does not have with an Error Indication (7.3.1) and
+        # records the Error Indications the peer sends (5.10).
+        - {offset: 46, num_bytes: 4}
+      default_gate: 1
+  - name: pdr_ul
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 26, num_bytes: 4}  # source address (the UE's)
+        - {offset: 30, num_bytes: 4}  # destination address
+        - {offset: 23, num_bytes: 1}  # protocol
+        - {offset: 34, num_bytes: 2}  # source port
+        - {offset: 36, num_bytes: 2}  # destination port
+        # The QoS flow the packet belongs to, as the decap read it out of the
+        # G-PDU's PDU Session Container (TS 29.244 8.2.89): what tells a
+        # session's several uplink PDRs for one F-TEID apart. It is last, so the
+        # fields before it keep the positions they had.
+        - {attr_name: qfi, num_bytes: 1}
+      # Distinct masks in use at once: a session's shapes are its filters' --
+      # exact addresses, prefixes, ports, and the QFI either named or left open
+      # -- and each is one hash lookup per batch. Declared rather than
+      # defaulted: it is a UPF decision. The QFI field doubles the mask shapes a
+      # session's rules take (one variant per existing shape), so the number the
+      # five-field list was sized for no longer covers a table with it.
+      max_tuples: 16
+      action_resource: at_ul/actions
+  - name: at_ul
+    mclass: ActionTable
+    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
+  - name: mt_ul
+    mclass: Meter
+    arg: {capacity: 65536}
+  - name: cnt_ul
+    mclass: UrrCount
+    arg: {capacity: 65536}
+  # The Router reads route_domain on every upstream path. The downlink's Vif
+  # writes it (domain 1); the uplink's G-PDU is decapped, so nothing on that
+  # path would, and BESS's metadata analysis marks a read attribute with an
+  # unwritten upstream path as unreadable -- the Router would then route every
+  # packet in domain 0 without saying so. This module writes it explicitly.
+  - name: set_domain
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: route_domain, size: 4, value_int: 0}
+  # The routed egress: two FIBs (the uplink's default domain and the N6
+  # interface's domain 1), each lookup deciding the gate. max_domains bounds
+  # the ids the Vif and the compiler may use; the domains exist from their
+  # first route.
+  - name: rt
+    mclass: Router
+    arg: {mode: ROUTE_MODE_DESTINATION, max_domains: 2}
+  # The port: the router's frames and the interface's own (l2_sort's ARP gate)
+  # leave by it together, and dump_n6 is where the lane reads them.
+  - name: merge_n6
+    mclass: Merge
+  - name: dump_n6
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_n6
+    mclass: Sink
+
+  - name: src_dn
+    mclass: Source
+    arg: {pkt_size: 51, burst: 32}
+  - name: rewrite_dn
+    mclass: Rewrite
+    arg:
+      templates:
+        # The data network's answer, addressed to the N6 interface (the
+        # deployment's pair: 02:00:00:00:06:01 from 02:00:00:00:06:02), as a
+        # frame arriving on a real N6 port is.
+        - "AgAAAAYBAgAAAAYCCABFuAAlAAFAAEARH9EICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
+  # The N6 port's interface, as the deployment wires it (deploy/upf.yaml has
+  # the comments): the Vif matches by (VLAN, MAC) and answers ARP, l2_sort
+  # sends the interface's own frames back out of the port rather than into
+  # the chain, and a frame naming no interface is dropped in sink_other.
+  - name: vif_n6
+    mclass: Vif
+    arg:
+      default_gate: 0
+      interfaces:
+        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 1, gate: 1}
+  - name: l2_sort
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 12, num_bytes: 2}  # the frame's EtherType (Eth)
+      default_gate: 1
+  - name: sink_other
+    mclass: Sink
+  - name: pdr_dl
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 26, num_bytes: 4}
+        - {offset: 30, num_bytes: 4}
+        - {offset: 23, num_bytes: 1}
+        - {offset: 34, num_bytes: 2}
+        - {offset: 36, num_bytes: 2}
+      # Distinct masks in use at once: a session's shapes are its filters' --
+      # exact addresses, prefixes, ports -- and each is one hash lookup per
+      # batch. Declared rather than defaulted: it is a UPF decision.
+      max_tuples: 8
+      action_resource: at_dl/actions
+  - name: at_dl
+    mclass: ActionTable
+    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+  - name: mt_dl
+    mclass: Meter
+    arg: {capacity: 65536}
+  - name: cnt_dl
+    mclass: UrrCount
+    arg: {capacity: 65536}
+  - name: enc
+    mclass: GtpuEncap
+    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
+  - name: dump_d
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_n3
+    mclass: Sink
+
+  # The control plane's End Marker path: the port a controller writes a marker
+  # to, a dump the arm reads it from, and a sink. The port is SOCK_SEQPACKET
+  # (unix_socket.cc), so one write is one packet.
+  - name: cp_in
+    mclass: PortInc
+    arg: {port: cp_marker}
+  - name: dump_m
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_m
+    mclass: Sink
+
+connections:
+  - {upstream: src_up, downstream: rewrite_up}
+  - {upstream: rewrite_up, downstream: teid}
+  - {upstream: teid, downstream: decap0}
+  - {upstream: teid, downstream: echo_err, ogate: 1}
+  - {upstream: src_err, downstream: rewrite_err}
+  - {upstream: rewrite_err, downstream: teid}
+  - {upstream: decap0, downstream: mt_md}
+  - {upstream: mt_md, downstream: dump_u}
+  - {upstream: dump_u, downstream: pdr_ul}
+  - {upstream: pdr_ul, downstream: at_ul}
+  - {upstream: at_ul, downstream: mt_ul}
+  # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
+  # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
+  # changes when that band should be marked or shed rather than passed.
+  - {upstream: mt_ul, downstream: cnt_ul}
+  - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
+  - {upstream: cnt_ul, downstream: set_domain}
+  - {upstream: set_domain, downstream: rt}
+  - {upstream: rt, downstream: merge_n6}
+  - {upstream: merge_n6, downstream: dump_n6}
+  - {upstream: dump_n6, downstream: sink_n6}
+
+  - {upstream: src_dn, downstream: rewrite_dn}
+  # The interface's gate: its IP frames enter the downlink table, and its own
+  # answer (l2_sort's rule) joins the port.
+  - {upstream: rewrite_dn, downstream: vif_n6}
+  - {upstream: vif_n6, downstream: l2_sort, ogate: 1}
+  - {upstream: l2_sort, downstream: pdr_dl, ogate: 1}
+  - {upstream: l2_sort, downstream: merge_n6}
+  - {upstream: vif_n6, downstream: sink_other}
+  - {upstream: pdr_dl, downstream: at_dl}
+  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: mt_dl, downstream: cnt_dl}
+  - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
+  - {upstream: cnt_dl, downstream: rt}
+  - {upstream: rt, downstream: enc, ogate: 1}
+  - {upstream: enc, downstream: dump_d}
+  - {upstream: dump_d, downstream: sink_n3}
+
+  # The control plane's markers: the port's packets go straight to the dump,
+  # never through a rule -- an End Marker is not session traffic.
+  - {upstream: cp_in, downstream: dump_m}
+  - {upstream: dump_m, downstream: sink_m}
+
+workers:
+  - {wid: 0, core: 0}
+
+resources:
+  # The actions' next hops: the deployment's, not a session's. In this graph
+  # the action's id is 0 (the compiler writes none in destination mode); the
+  # routes below name these hops, and their egress gates are the Router's
+  # outputs: 0 toward N6, 1 toward the encap. Hop 1's MACs are the deployment's
+  # N6 pair (base64: 02:00:00:00:06:02 and 02:00:00:00:06:01), written into
+  # every frame the Router resolves that hop for (BESS D-153); the lane's N6
+  # check reads them. Hop 2 names no addresses: the encap builds the frame's
+  # own.
+  rt/next_hops:
+    - key: {id: 1}
+      value: {egress_gate: 0, dst_mac: "AgAAAAYC", src_mac: "AgAAAAYB"}
+    - key: {id: 2}
+      value: {egress_gate: 1}
+
+  # The FIBs, one per route domain. The uplink's frames carry no route_domain
+  # (nothing writes it after the decap), so they are looked up in domain 0 and
+  # leave toward the data network's destination. The downlink's Vif writes
+  # domain 1, where the subscriber pool routes to the encap. The lane's two
+  # single destinations are what these lab routes need; a real deployment
+  # writes the prefixes it serves.
+  rt/routes:
+    - key: {ipv4: "8.8.8.8", prefix_length: 32, domain: 0}
+      value: {next_hop_id: 1}
+    - key: {ipv4: "10.45.0.0", prefix_length: 16, domain: 1}
+      value: {next_hop_id: 2}
+
+  # l2_sort's one rule: an ARP frame (0x0806) -- the Vif's own answer -- leaves
+  # by the port instead of entering the chain. Everything else takes the
+  # default gate, into the downlink table.
+  l2_sort/rules:
+    - key:
+        values: [{value_bin: "CAY="}]
+        masks: [{value_bin: "//8="}]
+      value: {priority: 100, gate: 0}

@@ -113,9 +113,18 @@ modules:
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
-  # Three route domains: 0 is what a packet carries when nothing wrote one (an
-  # uplink packet here), 1 and 2 are the two interfaces' -- so max_domains must
-  # be 3, and upfd's -max-domains must agree.
+  # The uplink is domain 0 by definition, and it has to be written: BESS gives
+  # an attribute a read offset only if every path to the reader writes it, and
+  # the downlink's Vif write does not cover the uplink path. Without this
+  # module the selector below is routed to its default gate (its
+  # `route_domain` read has no valid offset) and no downlink frame matches.
+  - name: set_domain
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: route_domain, size: 4, value_int: 0}
+  # Three route domains: 0 is the uplink's (written above), 1 and 2 are the two
+  # interfaces' -- so max_domains must be 3, and upfd's -max-domains must agree.
   - name: rt
     mclass: Router
     arg: {max_domains: 3}
@@ -232,7 +241,8 @@ connections:
   # changes when that band should be marked or shed rather than passed.
   - {upstream: mt_ul, downstream: cnt_ul}
   - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
-  - {upstream: cnt_ul, downstream: rt}
+  - {upstream: cnt_ul, downstream: set_domain}
+  - {upstream: set_domain, downstream: rt}
   - {upstream: rt, downstream: dump_n6, ogate: 0}
   - {upstream: dump_n6, downstream: sink_n6}
   - {upstream: rt, downstream: dump_n9, ogate: 2}

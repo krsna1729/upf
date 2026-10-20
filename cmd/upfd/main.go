@@ -73,6 +73,12 @@ func run() error {
 			"encap, on a downlink forward, and the indirect-forwarding tunnel on an uplink "+
 			"one. 0 (the default): the downlink direction's own -n3-next-hop, which is what "+
 			"a deployment without uplink forwarding needs")
+	routeMode := flag.String("route-mode", "hop",
+		"how the graph's Router decides a forward's egress: hop (the default) resolves a FAR's "+
+			"egress to the next-hop id its action names; destination writes no hop id and lets the "+
+			"Router look each packet's own IPv4 destination up in its route domain, so one egress "+
+			"can reach many destinations by the deployment's routes. The graph's Router must carry "+
+			"the matching `mode` argument, and a destination-mode graph decrements the TTL itself")
 	instances := flag.String("instances", "",
 		"the deployment's network instances (TS 29.244 8.2.4), ';'-separated, each "+
 			"\"name=<instance>,domain=<route domain>[,next-hop=<id>][,tunnel-next-hop=<id>]\"+"+
@@ -81,7 +87,9 @@ func run() error {
 			"egresses, one per FAR Destination Interface value (8.2.24) and per outer header "+
 			"creation: a plain forward toward the data network, a tunneled one (N9, indirect "+
 			"forwarding), one toward the service LAN and one that re-enters the subscriber "+
-			"side. empty: the one-instance deployment, where no PDI's Network Instance is read")
+			"side. With -route-mode=destination the *-next-hop keys are unnecessary (the Router's "+
+			"routes are the egress table) and an instance line may name no egress. empty: the "+
+			"one-instance deployment, where no PDI's Network Instance is read")
 	maxDomains := flag.Uint("max-domains", 1,
 		"the graph's Router max_domains: every -instances domain must be below it, "+
 			"and a packet classified in one the router does not have resolves to no table")
@@ -244,6 +252,11 @@ func run() error {
 		}
 	}
 
+	mode, err := session.ParseRouteMode(*routeMode)
+	if err != nil {
+		return fmt.Errorf("-route-mode: %w", err)
+	}
+
 	// The profile, before anything else this run does: it is a start-time
 	// choice, and a name that is not a profile must not fall back to the
 	// default -- a deployment whose rules land in a structure nobody chose is
@@ -326,6 +339,7 @@ func run() error {
 			capacity:  uint32(*capacity),
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			accessNextHop: uint32(*accessNextHop),
+			routeMode:     mode,
 			pdrTableUL:    *pdrTableUL, pdrTableDL: *pdrTableDL,
 			firewallUL: *firewallUL, firewallDL: *firewallDL,
 			pdrMatchUL: *pdrMatchUL, pdrMatchDL: *pdrMatchDL,
@@ -772,6 +786,7 @@ type graphArgs struct {
 	n6NextHop          uint32
 	n3NextHop          uint32
 	accessNextHop      uint32
+	routeMode          session.RouteMode
 	instances          string
 	maxDomains         uint32
 	pdrTableUL         string
@@ -884,11 +899,12 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	}
 	var domains *routing.Domains
 	if a.instances != "" {
-		if domains, err = parseInstances(a.instances, a.maxDomains); err != nil {
+		if domains, err = parseInstances(a.instances, a.maxDomains, a.routeMode); err != nil {
 			return session.Config{}, fmt.Errorf("-instances: %w", err)
 		}
 	}
 	graph := session.Config{
+		RouteMode: a.routeMode,
 		TEIDTable: a.teidTable,
 		TEIDGate:  a.teidGate,
 		// The responder that counts the peer's Error Indications, when the

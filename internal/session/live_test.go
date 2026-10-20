@@ -56,6 +56,12 @@ func liveConfig() Config {
 		cfg.Down.SelectorActions = "sel_at"
 		cfg.Down.SelectorFields = []Field{DstIP}
 	}
+	// UPF_ROUTE_MODE=destination is the routed lab (deploy/route-path.yaml):
+	// the Router's own FIB decides each packet's egress, so the compiler names
+	// no hop id, and the graph's routes and TTL handling are its own.
+	if os.Getenv("UPF_ROUTE_MODE") == "destination" {
+		cfg.RouteMode = RouteByDestination
+	}
 	// UPF_FIREWALL=1 is the generic profile's other strategy on both
 	// directions (deploy/firewall-path.yaml): the stock firewall module holds
 	// each direction's PDRs as one ordered policy, behind the same ActionTables.

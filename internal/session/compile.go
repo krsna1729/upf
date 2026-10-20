@@ -1521,11 +1521,22 @@ func (c *Compiler) forwardEgress(far *far, ifc routing.Interface) (routing.Inter
 // forwarding traffic toward an interface the deployment never built.
 //
 // A FAR that does not forward -- a drop, or a BUFF-only FAR -- makes no egress
-// decision: there is no forward to place, and the hop returned here is unused
-// (its rule delivers on the drop gate and names no action record).
+// decision: there is no forward to place, and in hop mode the hop returned here
+// is unused (its rule delivers on the drop gate). In destination mode it is not
+// unused: the action record names it as a reference to the routes table, and a
+// nonzero one would name a route the deployment need not have (a routed graph
+// with no hop for the direction's fallback hands the packet to a Router that
+// never sees the buffering branch). Hop 0 is the mode's "no next hop", so a
+// non-forwarding FAR in destination mode names that.
 func (c *Compiler) egressHop(far *far, ifc routing.Interface, dir Direction) (uint32, error) {
 	if far == nil || far.apply&applyForw == 0 {
+		if c.cfg.RouteMode == RouteByDestination {
+			return 0, nil
+		}
 		return dir.NextHop, nil
+	}
+	if c.cfg.RouteMode == RouteByDestination {
+		return c.destinationHop(far, ifc)
 	}
 	switch far.destIfc {
 	case ie.DstInterfaceAccess:
@@ -1642,6 +1653,70 @@ func (c *Compiler) egressHop(far *far, ifc routing.Interface, dir Direction) (ui
 			"%w: the FAR names Destination Interface value %d, which the spec leaves spare (Table 8.2.24-1)",
 			errNotExpressible, far.destIfc)
 	}
+}
+
+// destinationHop is egressHop for a Router in destination mode: the FAR's
+// egress is not resolved to a next hop here -- the Router looks the packet's
+// own destination up in its route domain -- so every forward that is
+// expressible names hop 0. What stays this function's is the part the FIB
+// cannot say: whether the Destination Interface value is one this UP serves,
+// whether a re-injection adds an outer header, and whether the FAR forwards
+// into the instance the packet was classified in.
+//
+// That last check is the mode's one real limit: the Router routes in the
+// domain the packet carries (the ingress Vif wrote it), so a FAR that names a
+// different egress instance would need the packet's domain rewritten between
+// the table and the Router, which no module here does. Policy hops can express
+// it; destination mode refuses it rather than routing in the wrong table.
+func (c *Compiler) destinationHop(far *far, ifc routing.Interface) (uint32, error) {
+	switch far.destIfc {
+	case ie.DstInterfaceCPFunction, ie.DstInterfaceLIFunction:
+		// CP-function and LI are refusals, as in hop mode.
+		return c.destinationRefusal(far)
+
+	case ie.DstInterfaceAccess, ie.DstInterfaceCore, ie.DstInterfaceSGiLANN6LAN, ie.DstInterface5GVNInternal:
+		// Every expressible forward names hop 0: Access is the deployment's own
+		// exit (the encap, or the indirect tunnel) and destination mode reaches
+		// it by a route to its hop, so the action names none. The instance
+		// check applies to Access too -- an Access FAR that names another
+		// instance is exactly as unexpressible as a Core one: the Router routes
+		// in the packet's own domain, and only the FAR's own egress being in
+		// that domain keeps the access exit reachable.
+		if far.destIfc == ie.DstInterface5GVNInternal && far.hasOuter {
+			return 0, fmt.Errorf(
+				"%w: a forward toward 5G VN Internal (Destination Interface 5) re-enters this UP's own chain and adds no outer header",
+				errNotExpressible)
+		}
+		egress, err := c.forwardEgress(far, ifc)
+		if err != nil {
+			return 0, err
+		}
+		if egress.Domain != ifc.Domain {
+			return 0, fmt.Errorf(
+				"%w: the forward leaves %s, and destination routing looks the packet up in its own route domain (%s): a FAR that forwards into another instance needs policy next hops",
+				errNotExpressible, egressName(egress, c.cfg.Instances),
+				egressName(ifc, c.cfg.Instances))
+		}
+		return 0, nil
+	}
+	return c.destinationRefusal(far)
+}
+
+// destinationRefusal is the Destination Interface values destination mode
+// refuses: the two this UP does not serve and the spare values, with the same
+// wording hop mode uses.
+func (c *Compiler) destinationRefusal(far *far) (uint32, error) {
+	switch far.destIfc {
+	case ie.DstInterfaceCPFunction:
+		return 0, fmt.Errorf(
+			"%w: Destination Interface 3 (CP-function) is not one this UP serves", errNotExpressible)
+	case ie.DstInterfaceLIFunction:
+		return 0, fmt.Errorf(
+			"%w: Destination Interface 4 (LI Function) is not one this UP serves", errNotExpressible)
+	}
+	return 0, fmt.Errorf(
+		"%w: the FAR names Destination Interface value %d, which the spec leaves spare (Table 8.2.24-1)",
+		errNotExpressible, far.destIfc)
 }
 
 // baseHop is the hop an interface's plain egress falls back to when the

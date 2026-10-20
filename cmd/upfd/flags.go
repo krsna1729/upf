@@ -69,7 +69,7 @@ func parsePDRFields(spec string) ([]session.Field, error) {
 //
 // The names, domains and pools are checked together by internal/routing: two
 // instances may serve the same pool, but no two may share a domain.
-func parseInstances(spec string, maxDomains uint32) (*routing.Domains, error) {
+func parseInstances(spec string, maxDomains uint32, routeMode session.RouteMode) (*routing.Domains, error) {
 	var ifaces []routing.Interface
 	for _, entry := range strings.Split(spec, ";") {
 		entry = strings.TrimSpace(entry)
@@ -178,15 +178,17 @@ func parseInstances(spec string, maxDomains uint32) (*routing.Domains, error) {
 			return nil, fmt.Errorf("%q: arp=%s needs arp-mac: a reply must carry the interface's own address",
 				entry, ifc.ARP)
 		}
-		if !hasEgress {
+		if !hasEgress && routeMode != session.RouteByDestination {
 			// An interface with no egress key at all is a configuration
-			// mistake: every forward out of it is a forward the deployment
-			// declares no way out of, and the SMF would hear cause 73 for a
-			// session the operator meant to serve. Which keys an instance
-			// needs is its own business -- one that only re-injects into the
-			// subscriber side (vn-next-hop) has no data-network exit, and one
-			// whose forwards all tunnel (tunnel-next-hop) needs no plain hop.
-			return nil, fmt.Errorf("%q: an interface needs an egress: next-hop=, tunnel-next-hop=, sgi-lan-next-hop= or vn-next-hop=", entry)
+			// mistake in policy mode: every forward out of it is a forward the
+			// deployment declares no way out of, and the SMF would hear cause
+			// 73 for a session the operator meant to serve. Which keys an
+			// instance needs is its own business -- one that only re-injects
+			// into the subscriber side (vn-next-hop) has no data-network exit,
+			// and one whose forwards all tunnel (tunnel-next-hop) needs no
+			// plain hop. In destination mode the Router's routes are the
+			// egress table, so none of these keys is required.
+			return nil, fmt.Errorf("%q: an interface needs an egress: next-hop=, tunnel-next-hop=, sgi-lan-next-hop= or vn-next-hop= (or -route-mode=destination)", entry)
 		}
 		ifaces = append(ifaces, ifc)
 	}

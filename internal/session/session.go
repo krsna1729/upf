@@ -198,6 +198,34 @@ func (f Field) FlagName() string {
 // Direction is one half of the deployed graph: where a PDR of this direction
 // sends its matches, and what a forward means there.
 //
+// RouteMode is how the deployment's Router decides where a forward leaves.
+type RouteMode uint8
+
+const (
+	// RouteByHop is the policy mode: a FAR's egress is resolved when the
+	// session is installed to the next-hop id its action names, and the Router
+	// resolves that id -- one gate per egress, whatever the destination.
+	RouteByHop RouteMode = iota
+
+	// RouteByDestination is the routed mode: the action names no next hop (0),
+	// and the Router looks the packet's own IPv4 destination up in the route
+	// domain it carries. The deployment's routes are the decisions, so one
+	// egress can reach many destinations (a transit N6, an N9 peer by address,
+	// ECMP, per-packet ULCL branching).
+	RouteByDestination
+)
+
+// ParseRouteMode reads -route-mode: "hop" (the default) or "destination".
+func ParseRouteMode(s string) (RouteMode, error) {
+	switch s {
+	case "hop":
+		return RouteByHop, nil
+	case "destination":
+		return RouteByDestination, nil
+	}
+	return 0, fmt.Errorf("route mode %q is hop or destination", s)
+}
+
 // The two directions are two chains of modules, because a BESS module has one
 // output gate per path: the uplink's Meter feeds the Router that leaves toward
 // N6, the downlink's feeds the GtpuEncap that leaves toward N3. The PDR table
@@ -317,6 +345,12 @@ type Config struct {
 	// told of no tunnel loss; a session whose FAR sends with a TEID the peer
 	// reported is reported as an Error Indication Report (TS 29.244 5.10).
 	GTPUErrors string
+
+	// RouteMode is how the graph's Router decides a forward's egress. It must
+	// agree with the Router module's own `mode` argument: a graph in
+	// ROUTE_MODE_DESTINATION ignores the next hop an action names, and a graph
+	// in the default mode drops a packet whose action names 0.
+	RouteMode RouteMode
 
 	// Up and Down are the two chains.
 	Up, Down Direction

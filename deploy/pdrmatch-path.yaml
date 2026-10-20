@@ -5,8 +5,8 @@
 # "the keyed write"). Everything else is that graph's, so the two can be read
 # side by side and the one difference is the thing under test.
 #
-# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_match_ul -> at_ul -> mt_ul -> cnt_ul -> ttl_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
-# downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> sel_dl -> pdr_match_dl -> at_dl -> mt_dl -> cnt_dl -> ttl_dl -> rt -> enc -> dump_d -> sink_n3
+# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_match_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
+# downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> sel_dl -> pdr_match_dl -> at_dl -> mt_dl -> cnt_dl -> rt -> enc -> dump_d -> sink_n3
 #
 # The uplink chain is the claim: `pdr_match_ul` is the only module that reads
 # the decapsulated packet's 5-tuple (there is no WildcardMatch in the chain,
@@ -135,8 +135,6 @@ modules:
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
-  - name: ttl_ul
-    mclass: UpdateTTL
   - name: rt
     mclass: Router
   # The port: the router's frames and the interface's own meet here.
@@ -203,8 +201,6 @@ modules:
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
-  - name: ttl_dl
-    mclass: UpdateTTL
   - name: enc
     mclass: GtpuEncap
     arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
@@ -245,8 +241,7 @@ connections:
   # changes when that band should be marked or shed rather than passed.
   - {upstream: mt_ul, downstream: cnt_ul}
   - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
-  - {upstream: cnt_ul, downstream: ttl_ul}
-  - {upstream: ttl_ul, downstream: rt}
+  - {upstream: cnt_ul, downstream: rt}
   - {upstream: rt, downstream: merge_n6, ogate: 0}
   - {upstream: merge_n6, downstream: dump_n6}
   - {upstream: dump_n6, downstream: sink_n6}
@@ -262,8 +257,7 @@ connections:
   - {upstream: at_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
-  - {upstream: cnt_dl, downstream: ttl_dl}
-  - {upstream: ttl_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: dump_d}
   - {upstream: dump_d, downstream: sink_n3}
