@@ -98,7 +98,7 @@ Run the lane that proves the path you touched:
 | `ci/buffer-path.sh` | BAR buffering, DDN, and the duration's expiry |
 | `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names; a ULCL session's two uplink PDRs take the data network's hop and an N9 tunnel |
 | `ci/veth-port.sh` | one PMD port split into N3/N6/N9 on a veth, with route domains (needs root) |
-| `ci/pdrmatch-2dn.sh` | two network instances, one UE address, two exits |
+| `ci/pdrmatch-2dn.sh` | two network instances, one UE address, two exits; an N9 tunnel out of one instance is decapped and taken by the peer's session in the other |
 | `ci/bench-n4.sh` | the N4 envelope: establish / modify / delete rates |
 
 Every lane starts its own `bessd` on free ports, writes under `build/run/`, and

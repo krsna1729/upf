@@ -72,7 +72,7 @@ const (
 	downRules     = downModule + "/rules"
 	selector      = "sel_dl"
 	selectorRules = selector + "/rules"
-	router = "rt"
+	router        = "rt"
 	// The router's two data-network exits. Every other module here has one
 	// output gate, so gate 0 is also the selector's, the matcher's and the
 	// access-side next hop's.
@@ -101,6 +101,15 @@ const (
 	dlTEIDa = 0x55667788
 	dlTEIDb = 0x55667789
 
+	// The N9 peer arm: a third session on internet whose FAR is a tunnel, and
+	// the peer's session on campus (domain 2) that owns the tunnel's TEID and
+	// whose own instance's next hop carries the decapped packet.
+	seidC    = 0x4444
+	seidD    = 0x5555
+	upTEIDc  = 0x11223346
+	peerTEID = 0x55667790
+	uePeer   = "10.45.0.3"
+
 	// The PCF's Flow Description is the downlink form on both PDRs (TS 29.244
 	// 5.2.1A.2A): the UE answered by 8.8.8.8:5000 -> UE:53 is "to assigned 53",
 	// and the uplink PDR reads the same string swapped.
@@ -120,10 +129,11 @@ var streams = []struct {
 	name string
 	size int
 }{
-	{"src_up", 87},  // the internet session's tunnel
-	{"src_up2", 87}, // the campus session's tunnel
-	{"src_dn1", 51}, // the internet data network's frame
-	{"src_dn2", 51}, // the campus data network's frame
+	{"src_up", 87},   // the internet session's tunnel
+	{"src_up2", 87},  // the campus session's tunnel
+	{"src_dn1", 51},  // the internet data network's frame
+	{"src_dn2", 51},  // the campus data network's frame
+	{"src_peer", 87}, // the N9 peer's uplinked packet
 }
 
 func main() {
@@ -194,8 +204,126 @@ func run(target, handshake string) error {
 	if err := signal(handshake, "c.done"); err != nil {
 		return err
 	}
-	fmt.Println("pdrmatch2dn: all three arms done: one subscriber address, two data networks, both directions")
+	if err := await(handshake, "c.go"); err != nil {
+		return err
+	}
+
+	if err := peer(ctx, client, c); err != nil {
+		return err
+	}
+	if err := signal(handshake, "peer.done"); err != nil {
+		return err
+	}
+	fmt.Println("pdrmatch2dn: all four arms done: one subscriber address, two data networks, both directions, and an N9 peer")
 	return nil
+}
+
+// peer is the fourth arm: the internet instance's session sends its uplink
+// into an N9 tunnel (FAR: Core plus an outer header, hop 4); the G-PDU is
+// dumped and fed back into the TEID table, where the peer's session owns its
+// TEID. That session is in the campus instance, and its own instance's next
+// hop sends the decapped packet to the campus exit. A graph that did not decap
+// the tunnel, or that resolved the peer's egress through the wrong instance,
+// would not deliver it.
+func peer(ctx context.Context, client *bess.Client, c *session.Compiler) error {
+	exits := []exit{{module: router, gate: internetGate}, {module: router, gate: campusGate}}
+	before, err := snapshot(ctx, client, exits)
+	if err != nil {
+		return err
+	}
+	for _, msg := range []*message.SessionEstablishmentRequest{peerLocal(), peerRemote()} {
+		resp, ok := c.Establish(msg).(*message.SessionEstablishmentResponse)
+		if !ok {
+			return errors.New("the peer establishment answered no session-level response")
+		}
+		if got := cause(resp.Cause); got != ie.CauseRequestAccepted {
+			return fmt.Errorf("the N9 peer's establishment was refused with cause %d", got)
+		}
+		seid, err := resp.UPFSEID.FSEID()
+		if err != nil {
+			return fmt.Errorf("the peer establishment answer's F-SEID: %w", err)
+		}
+		fmt.Printf("pdrmatch2dn: peer: established SEID %d\n", seid.SEID)
+	}
+	if err := setBurst(ctx, client, "src_peer", 87, 32); err != nil {
+		return err
+	}
+	if _, err := waitFor(ctx, client, router, campusGate, value(before, exits, router, campusGate)); err != nil {
+		return fmt.Errorf("the decapped packet never left by the campus exit: %w", err)
+	}
+	if err := stopAll(ctx, client); err != nil {
+		return err
+	}
+	time.Sleep(time.Second)
+	after, err := snapshot(ctx, client, exits)
+	if err != nil {
+		return err
+	}
+	if grew := value(after, exits, router, internetGate) - value(before, exits, router, internetGate); grew != 0 {
+		return fmt.Errorf("the N9 packet also left by the internet exit (%v packets); the tunnel is the only uplink egress", grew)
+	}
+	fmt.Println("pdrmatch2dn: peer: the tunneled packet was decapped, matched the campus session, and left by the campus exit")
+	return nil
+}
+
+// peerLocal is the internet session that forwards into the N9 tunnel.
+func peerLocal() *message.SessionEstablishmentRequest {
+	return message.NewSessionEstablishmentRequest(0, 0, seidC, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(seidC, nil, nil),
+		ie.NewCreatePDR(
+			ie.NewPDRID(1),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, upTEIDc, net.ParseIP(n3Addr), nil, 0),
+				ie.NewNetworkInstance(internet),
+				ie.NewUEIPAddress(0x02, uePeer, "", 0, 0),
+				ie.NewSDFFilter(uplinkRule, "", "", "", 0),
+			),
+			ie.NewFARID(1),
+		),
+		ie.NewCreateFAR(
+			ie.NewFARID(1),
+			ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceCore),
+				ie.NewNetworkInstance(internet),
+				ie.NewOuterHeaderCreation(0x0100, peerTEID, gnbAddr, "", 0, 0, 0),
+			),
+		),
+	)
+}
+
+// peerRemote is the peer's session: it owns the TEID the local FAR's outer
+// header creation names, so the tunneled packet's decap lands on this session
+// in the campus instance. Its PDR is an uplink one, and the FAR sends it to
+// the campus instance's own data network (its next hop, not internet's).
+func peerRemote() *message.SessionEstablishmentRequest {
+	return message.NewSessionEstablishmentRequest(0, 0, seidD, 1, 0,
+		ie.NewNodeID("", "", "smf"),
+		ie.NewFSEID(seidD, nil, nil),
+		ie.NewCreatePDR(
+			ie.NewPDRID(1),
+			ie.NewPrecedence(100),
+			ie.NewPDI(
+				ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, peerTEID, net.ParseIP(n3Addr), nil, 0),
+				ie.NewNetworkInstance(campus),
+				ie.NewUEIPAddress(0x02, uePeer, "", 0, 0),
+				ie.NewSDFFilter(uplinkRule, "", "", "", 0),
+			),
+			ie.NewFARID(1),
+		),
+		ie.NewCreateFAR(
+			ie.NewFARID(1),
+			ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceCore),
+				ie.NewNetworkInstance(campus),
+			),
+		),
+	)
 }
 
 // both is the third arm: both sessions live, and the internet instance's two
@@ -281,8 +409,8 @@ func control(ctx context.Context, client *bess.Client) error {
 		return fmt.Errorf("reading rt/next_hops: %w", err)
 	}
 	entries := hops["rt/next_hops"]
-	if len(entries) != 3 {
-		return fmt.Errorf("rt/next_hops holds %d next hops, and the deployment names 3: %v", len(entries), entries)
+	if len(entries) != 4 {
+		return fmt.Errorf("rt/next_hops holds %d next hops, and the deployment names 4: %v", len(entries), entries)
 	}
 	for _, e := range entries {
 		id := fmt.Sprint(e.Key["id"])
@@ -541,7 +669,13 @@ func cause(i *ie.IE) uint8 {
 // UE address, the two fields the graph declares -- and the per-direction names.
 func config() session.Config {
 	instances, err := routing.New([]routing.Interface{
-		{Instance: internet, Domain: 1, NextHop: 1, Pool: []netip.Prefix{netip.MustParsePrefix(pool)}},
+		{Instance: internet, Domain: 1, NextHop: 1, Pool: []netip.Prefix{netip.MustParsePrefix(pool)},
+			// The N9 exit: the tunnel out of this instance (hop 4), distinct
+			// from plain N6 (hop 1).
+			Hops: map[routing.Egress]uint32{
+				{DestIfc: ie.DstInterfaceCore}:               1,
+				{DestIfc: ie.DstInterfaceCore, Tunnel: true}: 4,
+			}},
 		{Instance: campus, Domain: 2, NextHop: 3, Pool: []netip.Prefix{netip.MustParsePrefix(pool)}},
 	}, 3)
 	if err != nil {
@@ -557,6 +691,8 @@ func config() session.Config {
 			Meters:   "mt_ul",
 			Counters: "cnt_ul",
 			NextHop:  1,
+			// The N9 tunnel's records: the encap hop 4 sends them through.
+			Tunnels: "enc_peer",
 		},
 		Down: session.Direction{
 			PdrMatch:        downModule,

@@ -28,7 +28,7 @@
 # internet instance's frame must still leave for the internet session's TEID
 # while the campus session's rule holds the same UE address in another domain.
 #
-# One driver process runs all three arms, because a controller is long-lived and
+# One driver process runs all four arms, because a controller is long-lived and
 # its id spaces are the deployment's: two processes would hand out SEID 1,
 # action 1 and meter 1 twice, and the second session would take the first one's
 # records. The windows are separated by a handshake with the driver (files in
@@ -123,13 +123,23 @@ sleep 2
 slice "$WORK/b.log"
 : >"$WORK/b.go"
 
+# The fourth arm: the N9 peer. The internet session's uplink is tunneled, the
+# G-PDU is dumped before it is decapped, and the peer's campus-instance session
+# owns that tunnel's TEID; its own instance's next hop takes the decapped
+# packet to the campus exit.
+await c.done
+sleep 2
+slice "$WORK/c.log"
+: >"$WORK/c.go"
+await peer.done
+sleep 2
+slice "$WORK/peer.log"
+
 if ! wait "$DRIVER"; then
   echo "pdrmatch-2dn: the driver failed; its output follows" >&2
   cat "$WORK/driver.log" >&2
   exit 1
 fi
-sleep 2
-slice "$WORK/c.log"
 
 . "$ROOT/ci/dumphex.sh"
 FAIL=0
@@ -167,6 +177,9 @@ B_N9=$(dump_hex dump_n9 "$WORK/b.log")
 C_D=$(dump_hex dump_d "$WORK/c.log")
 C_N6=$(dump_hex dump_n6 "$WORK/c.log")
 C_N9=$(dump_hex dump_n9 "$WORK/c.log")
+PEER_T=$(dump_hex dump_tunnel "$WORK/peer.log")
+PEER_N6=$(dump_hex dump_n6 "$WORK/peer.log")
+PEER_N9=$(dump_hex dump_n9 "$WORK/peer.log")
 
 # --- the control arm: no session, every stream stopped ----------------------
 empty "control: no downlink frame left for either data network" "$CTL_D"
@@ -219,6 +232,23 @@ contains "C: with both sessions live it still carries the internet exit's L2 pai
       "$C_N6" "02 00 00 00 0a 02 02 00 00 00 0a 01"
 empty "C: nothing left by the campus exit" "$C_N9"
 
+# --- the N9 peer ------------------------------------------------------------
+# The internet session's uplink FAR adds an outer header, so the frame leaves
+# by hop 4 as a G-PDU for the peer's TEID (0x55667790). The peer decapsulates
+# it, the TEID table names the peer's campus-instance session, and that
+# session's FAR sends it to the campus exit -- the frame that leaves is the same
+# inner packet with that exit's L2 pair. It must not also appear at the internet
+# exit.
+contains "peer: the N9 tunnel carried the peer's TEID" \
+      "$PEER_T" "55 66 77 90"
+contains "peer: the tunnel's inner packet is the session's" \
+      "$PEER_T" "0a 2d 00 03 08 08 08 08"
+contains "peer: the decapped packet left by the campus exit" \
+      "$PEER_N9" "0a 2d 00 03 08 08 08 08"
+contains "peer: it carries the campus exit's L2 pair" \
+      "$PEER_N9" "02 00 00 00 0b 02 02 00 00 00 0b 01"
+empty "peer: the tunneled packet did not leak to the internet exit" "$PEER_N6"
+
 # The selector's rules, as the driver printed them from sel_dl/rules: one per
 # session, keyed by the route domain the graph's Vif writes and the one UE
 # address they share. The key is positional (ExactMatch renders each field as
@@ -238,7 +268,7 @@ contains "the campus session's rule names session 2, not the internet session's 
 check_clean_shutdown "$BESSD_PID" || FAIL=1
 
 if [ "$FAIL" = 0 ]; then
-  echo "pdrmatch-2dn: both data networks' subscribers, both directions, one address"
+  echo "pdrmatch-2dn: both data networks' subscribers, both directions, one address, and the N9 peer"
   rm -rf "$WORK"
 fi
 exit "$FAIL"

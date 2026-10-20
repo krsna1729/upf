@@ -14,6 +14,8 @@
 #   downlink  src_dn1 -> rewrite_dn1 -\
 #                                      > dn_vif -> merge_dn -> mt_vif -> sel_dl -> pdr_match_dl -> at_dl -> mt_dl -> cnt_dl -> rt -> enc -> dump_d -> sink_n3
 #             src_dn2 -> rewrite_dn2 -/
+#   N9 peer   src_peer -> teid ... rt (gate 4) -> enc_peer -> dump_tunnel -> teid
+#             (the peer's session owns the tunnel's TEID; its rule leaves by the campus exit)
 #
 # The two downlink frames are identical except for their destination MAC
 # (02:00:00:00:01:01 and 02:00:00:00:02:02): the same 8.8.8.8:5000 ->
@@ -86,9 +88,18 @@ modules:
     arg:
       templates:
         - "AgAAAAACAgAAAAABCABFAABJAAFAAEARUIwKFB4CwAACAQhoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARIIkKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm"
-  # The second instance's uplink stream: the same UE packet on its own tunnel.
+  # The N9 peer arm's uplink: the internet session's packet on its own tunnel.
   # burst 0: ci/pdrmatch-2dn runs one stream at a time so a Dump's
   # one-packet-a-second sample is that stream's.
+  - name: src_peer
+    mclass: Source
+    arg: {pkt_size: 87, burst: 0}
+  - name: rewrite_peer
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAABJAAFAAEARUIwKFB4CwAACAQhoCGgANQAAMP8AJREiM0ZFAAAlAAFAAEARIIgKLQADCAgICBOIADUAEQAAaGVsbG8tdXBm"
+  # The second instance's uplink stream: the same UE packet on its own tunnel.
   - name: src_up2
     mclass: Source
     arg: {pkt_size: 87, burst: 0}
@@ -140,6 +151,18 @@ modules:
     arg: {interval: 1}
   - name: sink_n9
     mclass: Sink
+  # The N9 link this lane proves: the internet instance's tunnel egress (hop 4)
+  # is a G-PDU that re-enters this UPF as the peer would receive it. The Dump is
+  # the encapsulated frame's evidence; the packet then returns to the one TEID
+  # table and decap, where the peer's session (campus, the other route domain)
+  # owns the tunnel's TEID and its own instance's next hop sends the decapped
+  # packet to the campus exit.
+  - name: enc_peer
+    mclass: GtpuEncap
+    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
+  - name: dump_tunnel
+    mclass: Dump
+    arg: {interval: 1}
 
   # -- the downlink, one stream per data network ------------------------------
   - name: src_dn1
@@ -231,6 +254,8 @@ connections:
   - {upstream: rewrite_up, downstream: teid}
   - {upstream: src_up2, downstream: rewrite_up2}
   - {upstream: rewrite_up2, downstream: teid}
+  - {upstream: src_peer, downstream: rewrite_peer}
+  - {upstream: rewrite_peer, downstream: teid}
   - {upstream: teid, downstream: decap0}
   - {upstream: decap0, downstream: dump_u}
   - {upstream: dump_u, downstream: pdr_match_ul}
@@ -247,6 +272,9 @@ connections:
   - {upstream: dump_n6, downstream: sink_n6}
   - {upstream: rt, downstream: dump_n9, ogate: 2}
   - {upstream: dump_n9, downstream: sink_n9}
+  - {upstream: rt, downstream: enc_peer, ogate: 4}
+  - {upstream: enc_peer, downstream: dump_tunnel}
+  - {upstream: dump_tunnel, downstream: teid}
 
   - {upstream: src_dn1, downstream: rewrite_dn1}
   - {upstream: rewrite_dn1, downstream: dn_vif}
@@ -294,3 +322,6 @@ resources:
     - key: {id: 3}
       # The campus instance's exit (the peer UPF's direction), with its own L2.
       value: {egress_gate: 2, dst_mac: "AgAAAAsC", src_mac: "AgAAAAsB"}
+    - key: {id: 4}
+      # The N9 tunnel out of the internet instance: the encap, not a port.
+      value: {egress_gate: 4}
