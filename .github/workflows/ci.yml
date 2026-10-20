@@ -1,0 +1,272 @@
+name: CI
+
+# Scope, by trigger. The BESS build is pinned by .github/bess.sha and is the
+# same tree every job uses; the pinned SHA is also the cache key, so a pin bump
+# is the only thing that rebuilds it.
+#
+#   push / pull_request   units, then the gating lanes: smoke-gtpu,
+#                         session-path, route-path, iface-path. The lanes run
+#                         against a daemon built from the pinned BESS SHA.
+#   nightly (03:17 UTC)   every core lane the claims cite, except the three
+#                         that need a real SMF (interop), root networking
+#                         (veth-port) or an external checkout (cntc-path):
+#                         smoke, session-path, route-path, iface-path,
+#                         session-instances, session-live, n4-path,
+#                         session-report, pdrmatch-path, pdrmatch-2dn,
+#                         meter-compose, buffer-path.
+#   weekly (Sun 04:42)    ci/verify.sh --benches: every cited lane, including
+#                         interop/veth/cntc, and the cited benchmarks, plus
+#                         the Go race run.
+#
+# Caching: the vendored build/bess (stage, DPDK, fast tree, SDK) is cached by
+# pinned SHA; DPDK's own build is cached by its metadata; ccache is restored
+# across pins; the Go module/build cache is actions/setup-go's; the plugin's
+# meson build directory is cached by BESS SHA + datapath sources. A cache hit
+# skips DPDK bootstrap, the BESS build and vendoring, but not the pinned
+# checkout or the dependency install: a hosted runner is fresh every run, and
+# the lanes need meson/protoc/protobuf/glog and the runtime libraries.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 3 * * *'   # nightly
+    - cron: '42 4 * * 0'   # weekly
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+permissions:
+  contents: read
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 2G
+  CCACHE_COMPRESS: 'true'
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  GO: go
+  # The core lane set nightly runs. The gating lanes are a subset of it.
+  CORE_LANES: >-
+    ci/smoke-gtpu.sh ci/session-path.sh ci/route-path.sh ci/iface-path.sh
+    ci/session-instances.sh ci/session-live.sh ci/n4-path.sh
+    ci/session-report.sh ci/pdrmatch-path.sh ci/pdrmatch-2dn.sh
+    ci/meter-compose.sh ci/buffer-path.sh
+
+jobs:
+  units:
+    name: Units
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache-dependency-path: go.sum
+      - name: Go vet and tests
+        run: |
+          go vet ./...
+          go test ./cmd/... ./internal/... -count=1
+      - name: Shell syntax
+        run: bash -n ci/*.sh ci/interop/*.sh
+      - name: Claims' unit evidence
+        run: ci/verify.sh --quick
+
+  verify:
+    name: BESS and lanes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # The lanes program the session with go test (ci/session-path.sh), and
+      # go.mod asks for 1.26: use the same toolchain as Units, not whatever the
+      # runner image happens to ship.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache-dependency-path: go.sum
+
+      - name: Pinned BESS
+        id: pin
+        run: echo "sha=$(cat .github/bess.sha)" >> "$GITHUB_OUTPUT"
+
+      # The vendored tree is the expensive artifact: stage/bin/bessd, DPDK,
+      # the fast perf tree and the Go SDK. Its key is the pin, so a run of the
+      # same pin never clones or builds BESS at all.
+      - name: Restore vendored BESS
+        id: bess-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/bess
+          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v2
+
+      # The checkout and the dependency install are not part of the cache: a
+      # runner is fresh every run, so the pinned fork is what install-deps.sh
+      # comes from and meson/protoc/protobuf/glog and the runtime shared
+      # libraries must exist even when the vendored tree is restored. Only the
+      # expensive work below (DPDK, the BESS build, vendoring) is skipped.
+      - name: Check out pinned BESS
+        run: |
+          mkdir -p .ci
+          git init -q .ci/bess
+          git -C .ci/bess remote add origin https://github.com/krsna1729/bess.git
+          git -C .ci/bess fetch -q --depth 1 origin '${{ steps.pin.outputs.sha }}'
+          git -C .ci/bess checkout -q FETCH_HEAD
+          git -C .ci/bess rev-parse HEAD
+
+      # Ubuntu 24.04's default g++ is 13, and the pinned fork's bessctl uses
+      # <print> (C++23), which GCC 13 does not have: build with gcc-14/g++-14.
+      # install-deps.sh installs the default toolchain; these are the compilers
+      # the build below names.
+      - name: Install BESS build and runtime dependencies
+        run: |
+          sudo bash .ci/bess/env/install-deps.sh build
+          sudo bash .ci/bess/env/install-deps.sh runtime
+          sudo apt-get install -y gcc-14 g++-14 ccache
+
+      # DPDK is keyed by what changes it, not by the pin: deps/dpdk.json, the
+      # local patch series and the bootstrap script. A BESS pin that does not
+      # touch any of them restores the same built DPDK.
+      - name: DPDK key
+        if: steps.bess-cache.outputs.cache-hit != 'true'
+        id: dpdk
+        run: echo "key=$(sha256sum .ci/bess/deps/dpdk.json .ci/bess/deps/dpdk-patches/*.patch .ci/bess/tools/bootstrap_dpdk.py | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore DPDK
+        if: steps.bess-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci/bess/deps
+          key: bess-dpdk-${{ runner.arch }}-${{ steps.dpdk.outputs.key }}-v1
+
+      - name: Bootstrap DPDK
+        if: steps.bess-cache.outputs.cache-hit != 'true'
+        env:
+          PKG_CONFIG_PATH: ''
+        run: |
+          cd .ci/bess
+          python3 tools/bootstrap_dpdk.py --af-xdp auto --cpu x86-64-v3
+
+      - name: Save DPDK
+        if: steps.bess-cache.outputs.cache-hit != 'true' && steps.dpdk.outputs.key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .ci/bess/deps
+          key: bess-dpdk-${{ runner.arch }}-${{ steps.dpdk.outputs.key }}-v1
+
+      - name: Restore ccache
+        if: steps.bess-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.arch }}-${{ steps.pin.outputs.sha }}-v1
+          restore-keys: |
+            ccache-${{ runner.arch }}-
+
+      - name: Configure and build BESS
+        if: steps.bess-cache.outputs.cache-hit != 'true'
+        run: |
+          cd .ci/bess
+          export PKG_CONFIG_PATH="$(python3 tools/bootstrap_dpdk.py --print-pkg-config-path)"
+          CC="ccache gcc-14" CXX="ccache g++-14" \
+            meson setup build/fast --buildtype=plain -Dcpu=x86-64-v3 -Daf_xdp=auto \
+              -Dcpp_std=c++23 -Dpkg_config_path="$PKG_CONFIG_PATH"
+          ninja -C build/fast
+          DESTDIR="$PWD/build/stage-fast" ninja -C build/fast install
+
+      - name: Save ccache
+        if: steps.bess-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.arch }}-${{ steps.pin.outputs.sha }}-v1
+
+      # vendor-bess.sh rewrites the checkout's absolute DPDK paths and asserts
+      # the replacement does not grow (the PMD path is patched in place), so it
+      # must receive the checkout's absolute path, not `.ci/bess`: the relative
+      # form is shorter than the destination it rewrites to and trips the
+      # assertion.
+      - name: Vendor BESS into this tree
+        if: steps.bess-cache.outputs.cache-hit != 'true'
+        run: ci/vendor-bess.sh "$GITHUB_WORKSPACE/.ci/bess"
+
+      - name: Reverse-check the pin
+        run: |
+          got=$(sed -n 's/.*"commit": *"\([0-9a-f]*\)".*/\1/p' build/bess/stage/share/bess/build-info.json | head -1)
+          want=$(cat .github/bess.sha)
+          test "$got" = "$want" || { echo "vendored BESS is $got, pin is $want" >&2; exit 1; }
+
+      - name: Save vendored BESS
+        if: steps.bess-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/bess
+          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v2
+
+      # The plugin is small, but a cache saves meson setup on every run and
+      # keeps a pin bump's rebuild incremental.
+      - name: Restore plugin build
+        uses: actions/cache/restore@v4
+        with:
+          path: datapath/build
+          key: plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('datapath/**') }}-v1
+          restore-keys: |
+            plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-
+
+      - name: Build the plugin
+        run: |
+          # bess-dev.pc lives under stage/lib/pkgconfig or the host's multiarch
+          # directory (lib/<triplet>/pkgconfig); find it rather than assuming.
+          stage_pc=$(find "$PWD/build/bess/stage/lib" -type d -name pkgconfig | paste -sd: -)
+          if [ ! -f datapath/build/build.ninja ]; then
+            # The vendored .pc carries an absolute prefix; --define-prefix
+            # would override it from the file's (possibly multiarch) location.
+            PKG_CONFIG_PATH="$stage_pc" \
+              meson setup datapath/build datapath
+          fi
+          ninja -C datapath/build
+
+      - name: Save plugin build
+        uses: actions/cache/save@v4
+        with:
+          path: datapath/build
+          key: plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('datapath/**') }}-v1
+
+      - name: Gating lanes (push and pull request)
+        if: github.event_name != 'schedule'
+        env:
+          GO: go
+        run: |
+          for lane in ci/smoke-gtpu.sh ci/session-path.sh ci/route-path.sh ci/iface-path.sh; do
+            echo "=== $lane"
+            "$lane"
+          done
+
+      - name: Nightly core lanes
+        if: github.event_name == 'schedule' && github.event.schedule == '17 3 * * *'
+        env:
+          GO: go
+        run: |
+          for lane in $CORE_LANES; do
+            echo "=== $lane"
+            "$lane"
+          done
+
+      - name: Weekly full evidence
+        if: github.event_name == 'schedule' && github.event.schedule == '42 4 * * 0'
+        env:
+          GO: go
+          LANE_TIMEOUT: '1800'
+        run: |
+          go test -race -count=1 ./cmd/... ./internal/...
+          ci/verify.sh --benches
+
+      - name: Keep the logs of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            build/run/verify
+            /tmp/upf-*.log
+            /tmp/bessd_crash.log
+          if-no-files-found: ignore
