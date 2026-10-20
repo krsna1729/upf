@@ -17,7 +17,8 @@ PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=${GRAPH:-$ROOT/deploy/atsss-steer.yaml}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
-WORK=$(mktemp -d /tmp/upf-atsss-steer-XXXXXX)
+mkdir -p "$ROOT/build/run"
+WORK=$(mktemp -d "$ROOT/build/run/atsss-steer-XXXXXX")
 LOG=$WORK/bessd.log
 DRIVER_LOG=$WORK/driver.log
 DRIVER=

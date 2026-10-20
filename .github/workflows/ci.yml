@@ -13,10 +13,13 @@ name: CI
 #                         smoke, session-path, route-path, iface-path,
 #                         session-instances, session-live, n4-path,
 #                         session-report, pdrmatch-path, pdrmatch-2dn,
-#                         meter-compose, buffer-path.
-#   weekly (Sun 04:42)    ci/verify.sh --benches: every cited lane, including
-#                         interop/veth/cntc, and the cited benchmarks, plus
-#                         the Go race run.
+#                         meter-compose, buffer-path, atsss-steer, then
+#                         session-path on the custom and firewall graphs.
+#   weekly (Sun 04:42)    ci/verify.sh --benches: every cited lane that can run
+#                         on a hosted runner, the cited benchmarks, and the Go
+#                         race run. The interop and CNTC suites need containers
+#                         or an external checkout; verify.sh reports them as
+#                         skipped and they remain a manual run.
 #
 # Caching: the vendored build/bess (stage, DPDK, fast tree, SDK) is cached by
 # pinned SHA; DPDK's own build is cached by its metadata; ccache is restored
@@ -46,40 +49,47 @@ env:
   CCACHE_COMPRESS: 'true'
   CCACHE_BASEDIR: ${{ github.workspace }}
   GO: go
-  # The core lane set nightly runs. The gating lanes are a subset of it.
+  # The gate is the PR/push set; nightly adds the rest. Keep both lists at the
+  # top, not inline in a step, so the two tiers stay visible together.
+  GATING_LANES: >-
+    ci/smoke-gtpu.sh ci/session-path.sh ci/route-path.sh ci/iface-path.sh
+    ci/atsss-steer.sh
   CORE_LANES: >-
     ci/smoke-gtpu.sh ci/session-path.sh ci/route-path.sh ci/iface-path.sh
     ci/session-instances.sh ci/session-live.sh ci/n4-path.sh
     ci/session-report.sh ci/pdrmatch-path.sh ci/pdrmatch-2dn.sh
-    ci/meter-compose.sh ci/buffer-path.sh
+    ci/meter-compose.sh ci/buffer-path.sh ci/atsss-steer.sh
 
 jobs:
   units:
     name: Units
+    # The weekly run executes the same tests under -race in `verify`; do not
+    # run the normal pass again.
+    if: github.event_name != 'schedule' || github.event.schedule != '42 4 * * 0'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version: '1.27.2'
           cache-dependency-path: go.sum
-      - name: Go vet and tests
-        run: |
-          go vet ./...
-          go test ./cmd/... ./internal/... -count=1
+      - name: Go vet
+        run: go vet ./...
+      - name: Go tests and claims' unit evidence
+        run: GO_BIN=go ci/verify.sh --quick
       - name: Shell syntax
         run: bash -n ci/*.sh ci/interop/*.sh
-      - name: Claims' unit evidence
-        run: ci/verify.sh --quick
 
   verify:
     name: BESS and lanes
     runs-on: ubuntu-24.04
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
-      # The lanes program the session with go test (ci/session-path.sh), and
-      # go.mod asks for 1.26: use the same toolchain as Units, not whatever the
-      # runner image happens to ship.
+      # The lanes program the session with go test (ci/session-path.sh): use
+      # the same toolchain as Units, not whatever the runner image happens to
+      # ship.
       - uses: actions/setup-go@v6
         with:
           go-version: '1.27.2'
@@ -236,7 +246,7 @@ jobs:
         env:
           GO: go
         run: |
-          for lane in ci/smoke-gtpu.sh ci/session-path.sh ci/route-path.sh ci/iface-path.sh; do
+          for lane in $GATING_LANES; do
             echo "=== $lane"
             "$lane"
           done
@@ -250,6 +260,11 @@ jobs:
             echo "=== $lane"
             "$lane"
           done
+          # The default lane exercises the generic matcher. These two run the
+          # other deploy graphs through the same driver, so a strategy's graph
+          # cannot rot behind the unit tests.
+          PROFILE=custom ci/session-path.sh
+          FIREWALL=1 ci/session-path.sh
 
       - name: Weekly full evidence
         if: github.event_name == 'schedule' && github.event.schedule == '42 4 * * 0'
@@ -257,8 +272,10 @@ jobs:
           GO: go
           LANE_TIMEOUT: '1800'
         run: |
-          go test -race -count=1 ./cmd/... ./internal/...
-          ci/verify.sh --benches
+          mkdir -p build/run/verify
+          go test -race -json -count=1 ./cmd/... ./internal/... > build/run/race.json
+          # Reuse the race run's test events; do not run the unit pass twice.
+          ci/verify.sh --tests-json build/run/race.json --lanes-only --benches
 
       - name: Keep the logs of a failure
         if: failure()
@@ -266,7 +283,7 @@ jobs:
         with:
           name: logs
           path: |
-            build/run/verify
-            /tmp/upf-*.log
+            build/run
+            /tmp/upf-*
             /tmp/bessd_crash.log
           if-no-files-found: ignore

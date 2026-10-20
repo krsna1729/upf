@@ -23,7 +23,7 @@ meter and router.
 
 ## Onboarding
 
-**You need:** Linux, Go 1.26+, meson, ninja, pkg-config, python3. For the
+**You need:** Linux, Go 1.27.2+, meson, ninja, pkg-config, python3. For the
 datapath, a `bess-dev` stage: this tree reads its own copy under `build/bess/`
 (untracked), vendored from a built checkout of the BESS fork
 (`github.com/krsna1729/bess`) with `ci/vendor-bess.sh`; the layout and the
@@ -99,6 +99,7 @@ Run the lane that proves the path you touched:
 | `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names; a ULCL session's two uplink PDRs take the data network's hop and an N9 tunnel |
 | `ci/veth-port.sh` | one PMD port split into N3/N6/N9 on a veth, with route domains (needs root) |
 | `ci/pdrmatch-2dn.sh` | two network instances, one UE address, two exits; an N9 tunnel out of one instance is decapped and taken by the peer's session in the other |
+| `ci/atsss-steer.sh` | a MAR's two accesses, the health table, policy update and erase; every window byte-checked |
 | `ci/bench-n4.sh` | the N4 envelope: establish / modify / delete rates |
 
 Every lane starts its own `bessd` on free ports, writes under `build/run/`, and

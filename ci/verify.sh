@@ -18,6 +18,8 @@
 #   ci/verify.sh --render     # render docs/claims.md from the last results
 #   ci/verify.sh --strict     # a claim with no runnable evidence also fails
 #   ci/verify.sh --benches    # also run the cited bench scripts
+#   ci/verify.sh --tests-json FILE  # reuse a `go test -json` file instead of
+#                                     running the unit pass again
 #   ci/verify.sh --list       # inventory the claims and their evidence, run nothing
 #
 # Environment: GO_BIN (default: go, or the mise install this tree uses),
@@ -37,18 +39,22 @@ mkdir -p "$OUT"
 LANE_TIMEOUT=${LANE_TIMEOUT:-900}
 FORK=${FORK:-$ROOT/../bess}
 
-QUICK=0; LANES_ONLY=0; STRICT=0; BENCHES=0; LIST=0; RENDER=0
-for arg in "$@"; do
-  case "$arg" in
+QUICK=0; LANES_ONLY=0; STRICT=0; BENCHES=0; LIST=0; RENDER=0; TESTS_JSON=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --quick) QUICK=1 ;;
     --lanes-only) LANES_ONLY=1 ;;
     --strict) STRICT=1 ;;
     --benches) BENCHES=1 ;;
     --list) LIST=1 ;;
     --render) RENDER=1 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
-    *) echo "verify: unknown argument $arg" >&2; exit 2 ;;
+    --tests-json)
+      [ "$#" -ge 2 ] || { echo "verify: --tests-json needs a file" >&2; exit 2; }
+      TESTS_JSON=$2; shift ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    *) echo "verify: unknown argument $1" >&2; exit 2 ;;
   esac
+  shift
 done
 
 if [ ! -f "$CLAIMS" ]; then
@@ -99,14 +105,21 @@ if [ "$LIST" -eq 1 ]; then
 fi
 
 # --- units -------------------------------------------------------------------
-if [ "$LANES_ONLY" -eq 0 ] && [ "$RENDER" -eq 0 ]; then
-  if [ -z "$GO_BIN" ]; then
-    echo "verify: no Go toolchain (set GO_BIN)" >&2
-    exit 2
-  fi
+if [ -n "$TESTS_JSON" ] || { [ "$LANES_ONLY" -eq 0 ] && [ "$RENDER" -eq 0 ]; }; then
   : > "$OUT/tests.tsv"
-  if [ -n "$(printf '%s\n' "$tests" | grep .)" ]; then
+  if [ -n "$TESTS_JSON" ]; then
+    [ -f "$TESTS_JSON" ] || { echo "verify: $TESTS_JSON not found" >&2; exit 2; }
+    if [ "$TESTS_JSON" != "$OUT/go-test.json" ]; then
+      cp "$TESTS_JSON" "$OUT/go-test.json"
+    fi
+  else
+    if [ -z "$GO_BIN" ]; then
+      echo "verify: no Go toolchain (set GO_BIN)" >&2
+      exit 2
+    fi
     "$GO_BIN" test ./cmd/... ./internal/... -count=1 -json > "$OUT/go-test.json" 2> "$OUT/go-test.err"
+  fi
+  if [ -n "$(printf '%s\n' "$tests" | grep .)" ]; then
     python3 - "$OUT/go-test.json" "$OUT/tests.tsv" <<'PY'
 import json, sys
 seen, failed, skipped = {}, {}, {}

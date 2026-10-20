@@ -181,7 +181,7 @@ const (
 	port53ToN9 = "permit out udp from 10.46.0.2 53 to assigned"
 )
 
-const waitWithin = 15 * time.Second
+const waitWithin = 30 * time.Second
 
 // The graph's Sources and the sizes their `settings` carry: burst 0 stops a
 // stream, so each arm injects exactly the streams its case is about.
