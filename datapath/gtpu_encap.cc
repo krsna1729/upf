@@ -197,6 +197,25 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
     resource_.reset();
     return CommandFailure(-action_attr_, "add_metadata_attr() failed");
   }
+  // A steering graph gives each access its own tunnel record, keyed by the
+  // selected access's tunnel id rather than by the PDR's action id. A packet
+  // that is not steered carries 0 there, and falls back to action_id below --
+  // that is the mixed graph's path, not a different module.
+  if (!arg.tunnel_attr().empty()) {
+    if (arg.tunnel_attr() == "action_id") {
+      return CommandFailure(EINVAL, "the tunnel attribute must not be 'action_id'");
+    }
+    has_tunnel_ = true;
+    tunnel_attr_ = AddMetadataAttr(arg.tunnel_attr(), sizeof(bess::utils::be32_t),
+                                   AccessMode::kRead);
+    if (tunnel_attr_ < 0) {
+      const std::string name = resource_->name();
+      CHECK(init_context().resources().Unregister(name));
+      binding_.Reset();
+      resource_.reset();
+      return CommandFailure(-tunnel_attr_, "add_metadata_attr() failed");
+    }
+  }
 
   return CommandSuccess();
 }
@@ -218,6 +237,7 @@ void GtpuEncap::DeInit() {
 void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   // One offset load per batch: the layout does not change under a batch.
   const auto action_offset = attr_offset(action_attr_);
+  const auto tunnel_offset = has_tunnel_ ? attr_offset(tunnel_attr_) : -1;
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
 
@@ -225,8 +245,16 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     bess::PacketRef pkt = batch->packet(i);
     ogates[i] = DROP_GATE;
 
-    const be32_t action_id = get_attr_with_offset<be32_t>(action_offset, pkt);
-    const Tunnel *tunnel = LookupTunnel(ActionId(action_id.value()));
+    uint32_t tunnel_id =
+        get_attr_with_offset<be32_t>(action_offset, pkt).value();
+    if (bess::metadata::IsValidOffset(tunnel_offset)) {
+      const uint32_t steered =
+          get_attr_with_offset<be32_t>(tunnel_offset, pkt).value();
+      if (steered != 0) {
+        tunnel_id = steered;
+      }
+    }
+    const Tunnel *tunnel = LookupTunnel(ActionId(tunnel_id));
     if (tunnel == nullptr) [[unlikely]] {
       continue;  // no session: never send it out untunnelled
     }

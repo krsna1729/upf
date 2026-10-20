@@ -365,6 +365,12 @@ type Config struct {
 	// deployment configures more than one.
 	Instances *routing.Domains
 
+	// Atsss is the AtsssSteer module a MAR-steered PDR's packets go through
+	// (its "<module>/policies" and "<module>/health" resources). Empty means
+	// this deployment does not steer, and a MAR PDR is refused rather than
+	// compiled into a rule that would drop.
+	Atsss string
+
 	// AccessNextHop is the Router next hop a forward whose FAR names
 	// Destination Interface Access (TS 29.244 8.2.24, value 0) leaves by,
 	// whichever direction the PDR is on: the encap on a downlink forward, and
@@ -504,6 +510,10 @@ type Compiler struct {
 	actions  *idPool
 	meters   *idPool
 	teids    *idPool
+	// tunnels is the id space of the GtpuEncap records a MAR's two accesses
+	// name. It shares the action table's capacity: a deployment's graph sizes
+	// both tables from the same bound.
+	tunnels *idPool
 
 	// rules is the owner of every rule key a live session holds, by the key the
 	// engine sees (resource, then the WildcardMatch key). The PDR tables are
@@ -534,6 +544,7 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		meters:   newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
 		teids:    newIDPool(cfg.MaxTEIDs, 0),
+		tunnels:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 	}
 	if reader, ok := ap.(CounterReader); ok {
 		c.counters = reader
@@ -579,6 +590,11 @@ type Session struct {
 	// FAR in the message.
 	BARs map[uint8]*bar
 
+	// MARs are the session's Multi-Access Rules (TS 29.244 7.5.2.8), by MAR
+	// ID. A PDR names one instead of a FAR; the two access actions it holds
+	// are what AtsssSteer applies.
+	MARs map[uint16]*mar
+
 	// chids is the F-TEID the session allocated per CHOOSE ID (TS 29.244
 	// 8.2.3): PDIs whose F-TEID IE carries the same CHOOSE ID are one tunnel
 	// endpoint, and the F-TEID is handed to each of them rather than allocated
@@ -601,6 +617,11 @@ type Session struct {
 	// once that transaction is applied, which leaves the retry after a refusal
 	// erasing the same records.
 	removed []*pdr
+
+	// removedMARs holds the MARs a modification took out of the model. Their
+	// policy records are still in the dataplane until compile erases them, so
+	// a refused modification can put the MAR back.
+	removedMARs []*mar
 
 	// stale holds the PDRs a modification replaced: an update keeps a PDR's
 	// action and its tunnel, but a new filter or a new UE address is a new rule
@@ -647,8 +668,10 @@ type modelSnapshot struct {
 	qers map[uint32]*qer
 	urrs map[uint32]*urr
 	bars map[uint8]*bar
+	mars map[uint16]*mar
 
 	removed, stale []*pdr
+	removedMARs    []*mar
 	ending         []uint32
 	removedQERs    []*qer
 }
@@ -668,7 +691,9 @@ func (s *Session) snapshot() modelSnapshot {
 		ueIP: s.UEIP,
 		pdrs: cloneEntries(s.PDRs), fars: cloneEntries(s.FARs), qers: cloneEntries(s.QERs),
 		urrs: cloneEntries(s.URRs), bars: cloneEntries(s.BARs),
+		mars:    cloneEntries(s.MARs),
 		removed: slices.Clone(s.removed), stale: slices.Clone(s.stale), ending: slices.Clone(s.ending),
+		removedMARs: slices.Clone(s.removedMARs),
 		removedQERs: slices.Clone(s.removedQERs),
 	}
 }
@@ -685,8 +710,9 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 	failedQERs := qersInOrder(s)
 
 	s.UEIP = snap.ueIP
-	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars
+	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs, s.MARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars, snap.mars
 	s.removed, s.stale, s.ending = snap.removed, snap.stale, snap.ending
+	s.removedMARs = snap.removedMARs
 	s.removedQERs = snap.removedQERs
 
 	held := map[uint32]bool{}
@@ -776,8 +802,13 @@ type pdr struct {
 	// packet's destination (ueAddr says what that means for the session).
 	ueIPDst bool
 	farID   uint32
-	qerIDs  []uint32
-	urrIDs  []uint32
+	// hasMAR and marID are the MAR this PDR's packets are steered by (TS
+	// 29.244 8.2.34). A MAR PDR has no FAR of its own: the MAR's two access
+	// actions are its egress.
+	hasMAR bool
+	marID  uint16
+	qerIDs []uint32
+	urrIDs []uint32
 
 	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
 	// empty when the SMF named none: resolve turns it into the deployment's
@@ -882,6 +913,41 @@ type far struct {
 	// packet's own class (the TunnelEntry's "marking" field).
 	hasMarking bool
 	marking    uint16
+}
+
+// mar is one compiled Multi-Access Rule (TS 29.244 7.5.2.8): the steering
+// mode and the two access actions an ATSSS PDR's packets choose between.
+type mar struct {
+	id uint16
+	// mode is the MAR's Steering Mode (8.2.83); only active/standby (0) is
+	// compiled, because that is the one AtsssSteer applies.
+	mode uint8
+	// accesses are the 3GPP and the non-3GPP access, in that order. The slice
+	// is length 2 and is replaced whole by an Update MAR.
+	accesses [2]marAccess
+	// preferred is the active access's index, 0 or 1.
+	preferred uint32
+	// nextHops are the Router next hops the two accesses leave by, resolved
+	// at compile time from their FARs.
+	nextHops [2]uint32
+	// tunnelIDs are the GtpuEncap records the two accesses name, allocated
+	// when an access adds an outer header and kept for the session's life.
+	tunnelIDs [2]uint32
+}
+
+// marAccess is one access of a MAR: the FAR it forwards through (TS 29.244
+// 8.2.34) and the priority that makes it active or standby. A nil/missing
+// access is a MAR that has not been provisioned yet; resolve refuses it rather
+// than steering into a zero.
+type marAccess struct {
+	farID uint32
+	// hasFarID distinguishes FAR 0 (a legal FAR) from an access the message
+	// did not name.
+	hasFarID  bool
+	priority  uint8
+	hasPrior  bool
+	weight    uint8
+	hasWeight bool
 }
 
 // Buffering is the deployment's buffering branch: the store a BUFF FAR's
@@ -1470,6 +1536,22 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			add(bess.Change{Resource: flowsRes(c.cfg.Buffering), Key: map[string]any{"id": p.actionID}})
 		}
 	}
+	// A MAR's policy and the two tunnel records its accesses name are the
+	// session's records too. A MAR a modification removed is on the list for
+	// the same reason a removed PDR's records are: it is out of the model but
+	// still in the dataplane until this transaction erases it.
+	if c.cfg.Atsss != "" {
+		for _, m := range append(marsInOrder(s), s.removedMARs...) {
+			add(bess.Change{Resource: c.cfg.Atsss + "/policies",
+				Key: map[string]any{"policy_id": uint32(m.id)}})
+			for _, id := range m.tunnelIDs {
+				if id != 0 {
+					add(bess.Change{Resource: tunnelsRes(c.cfg.Down),
+						Key: map[string]any{"action_id": id}})
+				}
+			}
+		}
+	}
 	// Meters belong to QERs, not to PDRs: compile writes one per policed
 	// direction whether or not a PDR names it, so a deletion erases them from
 	// the same list. Erasing them per PDR instead would miss the meter of a
@@ -1648,7 +1730,7 @@ func (c *Compiler) settle(s *Session) {
 			s.forgetRuleKey(claim)
 		}
 	}
-	s.removed, s.stale, s.ending = nil, nil, nil
+	s.removed, s.stale, s.ending, s.removedMARs = nil, nil, nil, nil
 }
 
 // releaseSession frees the ids a session's records hold, each exactly once: one
@@ -1705,6 +1787,14 @@ func (c *Compiler) releaseSession(s *Session) {
 	// QER and not with the PDRs that happen to name it. A QER a modification
 	// removed is one of them: the removal took it out of the model, so this is
 	// where its ids come back.
+	for _, m := range append(marsInOrder(s), s.removedMARs...) {
+		for _, id := range m.tunnelIDs {
+			if id != 0 && !actions[id] {
+				actions[id] = true
+				c.tunnels.release(id)
+			}
+		}
+	}
 	for _, q := range append(qersInOrder(s), s.removedQERs...) {
 		if q.meterUL != 0 && !meters[q.meterUL] {
 			meters[q.meterUL] = true

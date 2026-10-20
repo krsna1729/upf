@@ -67,6 +67,11 @@ func run() error {
 	n3NextHop := flag.Uint("n3-next-hop", 2,
 		"the Router next hop a downlink forward leaves by: the encap's gate "+
 			"(a chain with an ActionTable fails closed when its action names none)")
+	atsss := flag.String("atsss", "",
+		"the AtsssSteer module whose policies a MAR-steered PDR uses (TS 29.244 7.5.2.8): "+
+			"its \"<name>/policies\" resource is written with the MAR's two access actions, and the "+
+			"module writes the selected next hop and tunnel. Empty: this deployment does not "+
+			"steer, and a PDR that names a MAR is refused with cause 73")
 	accessNextHop := flag.Uint("access-next-hop", 0,
 		"the Router next hop a forward whose FAR names Destination Interface Access "+
 			"(TS 29.244 8.2.24, value 0) leaves by, whichever direction the PDR is on: the "+
@@ -339,6 +344,7 @@ func run() error {
 			capacity:  uint32(*capacity),
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			accessNextHop: uint32(*accessNextHop),
+			atsss:         *atsss,
 			routeMode:     mode,
 			pdrTableUL:    *pdrTableUL, pdrTableDL: *pdrTableDL,
 			firewallUL: *firewallUL, firewallDL: *firewallDL,
@@ -786,6 +792,7 @@ type graphArgs struct {
 	n6NextHop          uint32
 	n3NextHop          uint32
 	accessNextHop      uint32
+	atsss              string
 	routeMode          session.RouteMode
 	instances          string
 	maxDomains         uint32
@@ -855,6 +862,11 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	// One path or none: a selector writes the key a matcher reads, so a
 	// deployment that names one without the other would either select sessions
 	// nothing matches or match a key nothing writes.
+	if a.atsss != "" && a.pdrMatchDL == "" {
+		return session.Config{}, fmt.Errorf(
+			"-atsss %q needs -pdr-match-dl: the matcher writes the MAR id into the steering attribute, "+
+				"and the wildcard table has no rule field for it", a.atsss)
+	}
 	if (a.selectDL == "") != (a.pdrMatchDL == "") {
 		return session.Config{}, fmt.Errorf(
 			"-select-dl %q and -pdr-match-dl %q are one path: the selector writes the session id the "+
@@ -974,6 +986,7 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		// and the indirect-forwarding tunnel an uplink forward leaves through
 		// (8.2.2 NOTE 2). 0 leaves it to the downlink direction's own hop.
 		AccessNextHop: a.accessNextHop,
+		Atsss:         a.atsss,
 	}
 	if a.bufferStore != "" {
 		// The buffering branch is all three names or none: a store collects the

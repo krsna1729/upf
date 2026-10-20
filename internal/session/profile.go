@@ -147,7 +147,7 @@ func ProfileFor(name string) (Profile, error) {
 		return Profile{
 			Name:    CustomProfile,
 			Graph:   "deploy/custom-pdrmatch.yaml",
-			Modules: []string{"GtpuDecap", "GtpuEncap", "GtpuResponder", "UrrCount", "PdrMatch"},
+			Modules: []string{"GtpuDecap", "GtpuEncap", "GtpuResponder", "UrrCount", "PdrMatch", "AtsssSteer"},
 			Up:      Strategy{PdrMatch: "pdr_match_ul"},
 			Down: Strategy{
 				PdrMatch:        "pdr_match_dl",
