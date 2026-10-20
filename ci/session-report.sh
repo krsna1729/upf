@@ -26,49 +26,28 @@ GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
 TICK=${TICK:-1s}
-BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
-
-[ -x "$BESSD" ] || { echo "session-report: no bessd at $BESSD (set STAGE)" >&2; exit 1; }
-[ -x "$BESSCTL" ] || { echo "session-report: no bessctl at $BESSCTL (set STAGE)" >&2; exit 1; }
-[ -f "$PLUG/libupf_datapath.so" ] || {
-  echo "session-report: build the plugin first: (cd datapath && ninja -C build)" >&2
-  exit 1
-}
 
 WORK=$(mktemp -d /tmp/upf-session-report-XXXXXX)
 LOG=$WORK/bessd.log
 UPFD_LOG=$WORK/upfd.log
-DAEMON_PID=""
 UPFD_PID=""
 cleanup() {
   [ -n "$UPFD_PID" ] && kill "$UPFD_PID" 2>/dev/null || true
-  if [ -n "$DAEMON_PID" ]; then
-    kill "$DAEMON_PID" 2>/dev/null || true
-    wait "$DAEMON_PID" 2>/dev/null || true
-  fi
+  bessd_stop
   echo "session-report: logs in $WORK (bessd.log, upfd.log)"
 }
 trap cleanup EXIT
 
 (cd "$ROOT" && $GO build -o "$WORK/upfd" ./cmd/upfd)
 
-export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-
-"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" \
-  -modules="$PLUG" -f >"$LOG" 2>&1 &
-DAEMON_PID=$!
-for _ in $(seq 1 60); do
-  "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break
-  sleep 0.5
-done
-if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
+bessd_start "$LOG" "$WORK/bessd.pid" || exit 1
+if ! bessd_wait 60 0.5; then
   echo "session-report: the daemon did not come up; log follows" >&2
   tail -30 "$LOG" >&2
   exit 1
 fi
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
+bessd_apply "$GRAPH"
 
 # The controller with its reporting loop on: the graph's chain names its
 # defaults, and the tick is short enough that a test's quota is spent inside a
@@ -108,7 +87,7 @@ check "the controller sent a usage report" "usage report acknowledged"
 check "the report said the quota is spent" "quota spent: the session's traffic is stopped"
 check "the session's report named the URR" "urr=7"
 
-check_clean_shutdown "$DAEMON_PID" || FAIL=1
+check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "session-report: ok (the usage report left the node and the SMF acknowledged it)"
 fi

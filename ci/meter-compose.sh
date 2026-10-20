@@ -27,35 +27,22 @@ PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=$ROOT/deploy/meter-compose.yaml
 SECONDS_RUN=${SECONDS_RUN:-2}
 
-BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
 LOG=$(mktemp /tmp/upf-compose-XXXXXX.log)
 PIDFILE=$(mktemp /tmp/upf-compose-XXXXXX.pid)
 
-[ -x "$BESSD" ] || { echo "compose: no bessd at $BESSD (set STAGE)" >&2; exit 1; }
-[ -x "$BESSCTL" ] || { echo "compose: no bessctl at $BESSCTL (set STAGE)" >&2; exit 1; }
-
-export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-
-"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
-DAEMON=$!
-cleanup() {
-  kill "$DAEMON" 2>/dev/null || true
-  for _ in 1 2 3 4 5; do kill -0 "$DAEMON" 2>/dev/null || break; sleep 1; done
-  kill -9 "$DAEMON" 2>/dev/null || true
-}
+bessd_start "$LOG" "$PIDFILE" || exit 1
+cleanup() { bessd_stop; }
 trap cleanup EXIT
 
-for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 1; done
-if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
+if ! bessd_wait 30 1; then
   echo "compose: the daemon did not come up; log follows" >&2
   cat "$LOG" >&2
   exit 1
 fi
 
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$GRAPH" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
+"$BESSCTL" -s "$SERVER" validate "$GRAPH" >/dev/null
+bessd_apply "$GRAPH"
 sleep "$SECONDS_RUN"
 
 FAIL=0
@@ -117,7 +104,7 @@ if grep -E "unreadable" "$LOG" | grep -Eq "'(at1|at2|m1|m2)'"; then
   FAIL=1
 fi
 
-check_clean_shutdown "$DAEMON" || FAIL=1
+check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "meter-compose: ok (one meter_id attribute, two meters, two policies)"
 else

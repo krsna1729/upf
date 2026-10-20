@@ -50,35 +50,24 @@ esac
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
 TICK=${TICK:-1s}
-BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
 
 WORK=$(mktemp -d /tmp/upf-buffer-XXXXXX)
 LOG=$WORK/bessd.log
 UPFD_LOG=$WORK/upfd.log
 UPFD_PID=
-BESSD_PID=
 
-# stop_bessd ends the daemon this script started, and only then is the run
-# over: the pid is the daemon's own (it runs in the foreground, -f, so $! is
-# it), the pidfile is the fallback when the shell lost it, and the RPC is the
-# last resort for a daemon that outlived both. SIGTERM, then a moment, then
-# SIGKILL -- a daemon this script leaves behind holds the port and the
-# hugepage-free memory node the next run needs.
+# stop_bessd ends the daemon this script started (bessd_stop), then falls back
+# to the pidfile and the RPC for a daemon that outlived this shell: a daemon
+# this script leaves behind holds the port and the hugepage-free memory node
+# the next run needs.
 stop_bessd() {
-  [ -n "$BESSD_PID" ] && kill "$BESSD_PID" 2>/dev/null || true
-  if [ -n "$BESSD_PID" ]; then
-    for _ in $(seq 1 50); do
-      kill -0 "$BESSD_PID" 2>/dev/null || break
-      sleep 0.1
-    done
-    kill -9 "$BESSD_PID" 2>/dev/null || true
-  fi
+  bessd_stop
   # A daemon whose pid this shell no longer has -- one from an earlier run on
   # this port -- still answers: `shutdown` is bessctl's own stop (there is no
   # `kill` command), and the daemon unlinks its pidfile as it goes.
-  if "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
-    "$BESSCTL" -s "127.0.0.1:$BESS_PORT" shutdown >/dev/null 2>&1 || true
+  if "$BESSCTL" -s "$SERVER" status >/dev/null 2>&1; then
+    "$BESSCTL" -s "$SERVER" shutdown >/dev/null 2>&1 || true
   fi
   if [ -f "$WORK/bessd.pid" ]; then
     # The pid file carries a trailing NUL, so it is stripped rather than read
@@ -103,33 +92,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[ -x "$BESSD" ] || { echo "buffer-path: no bessd at $BESSD (set STAGE)" >&2; exit 1; }
-[ -x "$BESSCTL" ] || { echo "buffer-path: no bessctl at $BESSCTL (set STAGE)" >&2; exit 1; }
-[ -f "$PLUG/libupf_datapath.so" ] || {
-  echo "buffer-path: build the plugin first: (cd datapath && ninja -C build)" >&2
-  exit 1
-}
-
-export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-
-"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" \
-  -modules="$PLUG" -f >"$LOG" 2>&1 &
-BESSD_PID=$!
-for _ in $(seq 1 60); do
-  "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break
-  sleep 0.5
-done
-if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
+bessd_start "$LOG" "$WORK/bessd.pid" || exit 1
+if ! bessd_wait 60 0.5; then
   echo "buffer-path: the daemon did not come up; log follows" >&2
   tail -30 "$LOG" >&2
   exit 1
 fi
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null || {
+bessd_apply "$GRAPH" || {
   echo "buffer-path: the graph did not apply -- a bessd without packet_store key_attrs (commit 128fd237) refuses it; log follows" >&2
   tail -20 "$LOG" >&2
   exit 1
 }
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
 # A run that fell back to the generic graph would pass everything below.
 if [ "$PROFILE" = custom ]; then
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" get >"$WORK/pipeline.txt" 2>&1; grep -qi "pdr_\?match_ul" "$WORK/pipeline.txt" || {

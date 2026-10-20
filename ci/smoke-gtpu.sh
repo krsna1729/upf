@@ -21,41 +21,24 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PLUG=${PLUG:-$ROOT/datapath/build}
 SECONDS_RUN=${SECONDS_RUN:-5}
 
-BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
 LOG=$(mktemp /tmp/upf-smoke-XXXXXX.log)
 PIDFILE=$(mktemp /tmp/upf-bessd-XXXXXX.pid)
 
-[ -x "$BESSD" ] || { echo "smoke: no bessd at $BESSD (set STAGE)" >&2; exit 1; }
-[ -x "$BESSCTL" ] || { echo "smoke: no bessctl at $BESSCTL (set STAGE)" >&2; exit 1; }
-[ -f "$PLUG/libupf_datapath.so" ] || {
-  echo "smoke: build the plugin first: (cd datapath && PKG_CONFIG_PATH=<stage>/lib/pkgconfig meson setup build && ninja -C build)" >&2
-  exit 1
-}
-
-export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-
-# No hugepages: the smoke runs anywhere, including a workstation with none.
-"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
-DAEMON=$!
-cleanup() {
-  kill "$DAEMON" 2>/dev/null || true
-  for _ in 1 2 3 4 5; do kill -0 "$DAEMON" 2>/dev/null || break; sleep 1; done
-  kill -9 "$DAEMON" 2>/dev/null || true
-}
+bessd_start "$LOG" "$PIDFILE" || exit 1
+cleanup() { bessd_stop; }
 trap cleanup EXIT
 
-for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 1; done
-if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
+if ! bessd_wait 30 1; then
   echo "smoke: the daemon did not come up; log follows" >&2
   cat "$LOG" >&2
   exit 1
 fi
-
-# validate prints the canonical manifest, apply prints the version it committed.
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$ROOT/deploy/smoke-gtpu.yaml" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$ROOT/deploy/smoke-gtpu.yaml" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
+if ! bessd_apply "$ROOT/deploy/smoke-gtpu.yaml"; then
+  echo "smoke: the graph did not apply; log follows" >&2
+  cat "$LOG" >&2
+  exit 1
+fi
 
 sleep "$SECONDS_RUN"
 
@@ -231,7 +214,7 @@ ERRORS=$(mktemp /tmp/upf-smoke-errors-XXXXXX.txt)
 "$BESSCTL" -s "127.0.0.1:$BESS_PORT" action echo0 get_errors '{}' >"$ERRORS" 2>&1 || true
 check_file "the responder counted the peer's Error Indication" "$ERRORS" "1432778632"
 
-check_clean_shutdown "$DAEMON" || FAIL=1
+check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "smoke: PASS (log: $LOG)"
 else

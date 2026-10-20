@@ -30,41 +30,25 @@ GRAPH=${GRAPH:-$ROOT/deploy/session-instances.yaml}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 SECONDS_RUN=${SECONDS_RUN:-3}
 
-BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
 LOG=$(mktemp /tmp/upf-instances-XXXXXX.log)
 PIDFILE=$(mktemp /tmp/upf-instances-XXXXXX.pid)
 
-[ -x "$BESSD" ] || { echo "instances: no bessd at $BESSD (set STAGE)" >&2; exit 1; }
-[ -x "$BESSCTL" ] || { echo "instances: no bessctl at $BESSCTL (set STAGE)" >&2; exit 1; }
-[ -f "$PLUG/libupf_datapath.so" ] || {
-  echo "instances: no plugin at $PLUG/libupf_datapath.so (build datapath/; see README.md)" >&2
-  exit 1
-}
-
-export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-
-"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
-DAEMON=$!
+bessd_start "$LOG" "$PIDFILE" || exit 1
 cleanup() {
-  kill "$DAEMON" 2>/dev/null || true
-  for _ in 1 2 3 4 5; do kill -0 "$DAEMON" 2>/dev/null || break; sleep 1; done
-  kill -9 "$DAEMON" 2>/dev/null || true
-  wait "$DAEMON" 2>/dev/null || true
+  bessd_stop
   echo "instances: daemon log in $LOG"
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 1; done
-if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
+if ! bessd_wait 30 1; then
   echo "instances: the daemon never came up; log follows" >&2
   cat "$LOG" >&2
   exit 1
 fi
 
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$GRAPH" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
+"$BESSCTL" -s "$SERVER" validate "$GRAPH" >/dev/null
+bessd_apply "$GRAPH"
 
 # The Go half: two sessions for 10.45.0.2, one per instance, and the router's
 # two exits counted. Run from the repository root so the module and its
@@ -95,7 +79,7 @@ check() { # check <description> <the dump's hex> <fixed string it must contain>
 check "the internet stream's G-PDU carries its tunnel" "$TEID_HEX" "11 22 33 44"
 check "the ims stream's G-PDU carries its tunnel" "$TEID_HEX" "11 22 33 45"
 
-check_clean_shutdown "$DAEMON" || FAIL=1
+check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "instances: both tunnels are on the wire (the exits' counters are the Go half's)"
 fi

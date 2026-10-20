@@ -49,32 +49,17 @@ PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=${GRAPH:-$ROOT/deploy/iface-path.yaml}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
-BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
 mkdir -p "$ROOT/build/run"
 WORK=$(mktemp -d "$ROOT/build/run/iface-path-XXXXXX")
 LOG=$WORK/bessd.log
 PIDFILE=$WORK/bessd.pid
 
-[ -x "$BESSD" ] || { echo "iface-path: no bessd at $BESSD (set STAGE)" >&2; exit 1; }
-[ -x "$BESSCTL" ] || { echo "iface-path: no bessctl at $BESSCTL (set STAGE)" >&2; exit 1; }
-[ -f "$PLUG/libupf_datapath.so" ] || {
-  echo "iface-path: build the plugin first: (cd datapath && ninja -C build)" >&2
-  exit 1
-}
-
-export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-
-# stdbuf -oL: the daemon's stdout is a file here, and a block-buffered log
-# would put a window's dump lines in the next window's slice.
-stdbuf -oL -eL "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
-DAEMON=$!
-bc() { "$BESSCTL" -s "127.0.0.1:$BESS_PORT" "$@"; }
+BESSD_STDBUF=1 bessd_start "$LOG" "$PIDFILE" || exit 1
+bc() { "$BESSCTL" -s "$SERVER" "$@"; }
 cleanup() {
   local status=$?
-  if bc status >/dev/null 2>&1; then bc shutdown >/dev/null 2>&1 || true; fi
-  kill "$DAEMON" 2>/dev/null || true
-  wait "$DAEMON" 2>/dev/null || true
+  bessd_stop
   if [ "$status" = 0 ]; then rm -rf "$WORK"; else
     echo "iface-path: exit $status; the run's files are in $WORK" >&2
   fi
@@ -82,16 +67,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 30); do bc status >/dev/null 2>&1 && break; sleep 1; done
-if ! bc status >/dev/null 2>&1; then
+if ! bessd_wait 30 1; then
   echo "iface-path: the daemon did not come up; log follows" >&2
   cat "$LOG" >&2
   exit 1
 fi
 
 bc validate "$GRAPH" >/dev/null
-bc apply "$GRAPH" >/dev/null
-bc resume >/dev/null
+bessd_apply "$GRAPH"
 
 # The driver's handshake: it writes <arm>.done when an arm is over and waits for
 # <arm>.go before the next one, so the shell reads a window's dump lines -- which
@@ -328,7 +311,7 @@ contains "gone: the other sessions' entries survive" "$GONE_HOLD" "10.45.0.3"
 
 # The daemon stops the way an operator would (SIGTERM), and a daemon that aborts
 # on teardown has freed something it should not have.
-check_clean_shutdown "$DAEMON" || FAIL=1
+check_clean_shutdown "$BESSD_PID" || FAIL=1
 
 if [ "$FAIL" = 0 ]; then
   echo "iface-path: every Source and Destination Interface value served (or refused) with its own egress"

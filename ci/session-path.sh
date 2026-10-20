@@ -49,32 +49,18 @@ esac
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 SECONDS_RUN=${SECONDS_RUN:-3}
 
-BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
 LOG=$(mktemp /tmp/upf-path-XXXXXX.log)
 PIDFILE=$(mktemp /tmp/upf-path-XXXXXX.pid)
 
-[ -x "$BESSD" ] || { echo "path: no bessd at $BESSD (set STAGE)" >&2; exit 1; }
-[ -x "$BESSCTL" ] || { echo "path: no bessctl at $BESSCTL (set STAGE)" >&2; exit 1; }
-[ -f "$PLUG/libupf_datapath.so" ] || {
-  echo "path: build the plugin first: (cd datapath && ninja -C build)" >&2
-  exit 1
-}
-
-export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-
-"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
-DAEMON=$!
+bessd_start "$LOG" "$PIDFILE" || exit 1
 cleanup() {
   rm -f "${RENDERED:-}" "${MARKER_SOCK:-}"  # rendered per run, not left behind
-  kill "$DAEMON" 2>/dev/null || true
-  for _ in 1 2 3 4 5; do kill -0 "$DAEMON" 2>/dev/null || break; sleep 1; done
-  kill -9 "$DAEMON" 2>/dev/null || true
+  bessd_stop
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 1; done
-if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
+if ! bessd_wait 30 1; then
   echo "path: the daemon did not come up; log follows" >&2
   cat "$LOG" >&2
   exit 1
@@ -87,14 +73,13 @@ MARKER_SOCK=$ROOT/build/run/end-marker-$BESS_PORT.sock
 mkdir -p "$ROOT/build/run"
 RENDERED=$ROOT/build/run/$(basename "$GRAPH" .yaml)-$BESS_PORT.yaml
 sed "s|/tmp/upf-end-marker.sock|$MARKER_SOCK|" "$GRAPH" >"$RENDERED"
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" validate "$RENDERED" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$RENDERED" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
+"$BESSCTL" -s "$SERVER" validate "$RENDERED" >/dev/null
+bessd_apply "$RENDERED"
 
 # The Go half: the control arm (counters zero), the session, then the counters
 # again. Run from the repository root so the module and its workspace resolve.
 cd "$ROOT"
-MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_PROFILE=$PROFILE UPF_FIREWALL=$FIREWALL \
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_PROFILE=$PROFILE UPF_FIREWALL=$FIREWALL UPF_ROUTE_MODE=${ROUTE_MODE:-hop} \
   $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveSessionSendsTheEndMarkerOnSNDEM|TestLiveErrorIndicationBecomesAnERIRReport|TestLiveGBRSplitsTheMeter' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log, per dump (the helper
@@ -168,7 +153,7 @@ else
   FAIL=1
 fi
 
-check_clean_shutdown "$DAEMON" || FAIL=1
+check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "session-path: ok (uplink and downlink both carried the session's packets)"
   # The log and the pidfile are the run's, not a result: a failed run keeps both

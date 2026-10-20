@@ -37,7 +37,6 @@ case "$PROFILE" in
 esac
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
-BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
 
 # The values the graph's frames carry, and so the values the session must name:
@@ -48,51 +47,31 @@ UE=${UE:-10.45.0.2}
 GNB=${GNB:-10.20.30.2}
 N3=${N3:-192.0.2.1}
 
-[ -x "$BESSD" ] || { echo "n4-path: no bessd at $BESSD (set STAGE)" >&2; exit 1; }
-[ -x "$BESSCTL" ] || { echo "n4-path: no bessctl at $BESSCTL (set STAGE)" >&2; exit 1; }
-[ -f "$PLUG/libupf_datapath.so" ] || {
-  echo "n4-path: build the plugin first: (cd datapath && ninja -C build)" >&2
-  exit 1
-}
-
 WORK=$(mktemp -d /tmp/upf-n4-path-XXXXXX)
 LOG=$WORK/bessd.log
 UPFD_LOG=$WORK/upfd.log
-DAEMON_PID=""
 UPFD_PID=""
 cleanup() {
   [ -n "$UPFD_PID" ] && kill "$UPFD_PID" 2>/dev/null || true
-  [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
+  bessd_stop
   # Every background job this script started, not only the ones the variables
   # still point at: a phase whose own start failed leaves an earlier process
   # running, and an orphan here holds the daemon slot's lock (its fds are
   # inherited) long after the run.
   for pid in $(jobs -p); do kill "$pid" 2>/dev/null || true; done
-  for _ in 1 2 3 4 5; do
-    { [ -z "$UPFD_PID" ] || ! kill -0 "$UPFD_PID" 2>/dev/null; } && \
-    { [ -z "$DAEMON_PID" ] || ! kill -0 "$DAEMON_PID" 2>/dev/null; } && break
-    sleep 1
-  done
   [ -n "$UPFD_PID" ] && kill -9 "$UPFD_PID" 2>/dev/null || true
-  [ -n "$DAEMON_PID" ] && kill -9 "$DAEMON_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 (cd "$ROOT" && $GO build -o "$WORK/upfd" ./cmd/upfd && $GO build -o "$WORK/n4bench" ./cmd/n4bench)
 
-export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-
-"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" \
-  -modules="$PLUG" -f >"$LOG" 2>&1 &
-DAEMON_PID=$!
-for _ in $(seq 1 60); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 0.5; done
-if ! "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1; then
+bessd_start "$LOG" "$WORK/bessd.pid" || exit 1
+if ! bessd_wait 60 0.5; then
   echo "n4-path: the daemon did not come up; log follows" >&2
   cat "$LOG" >&2
   exit 1
 fi
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
+bessd_apply "$GRAPH"
 
 # The control arm: the Sources have been running for seconds, and nothing has
 # selected their packets, so the chains' Dumps are silent.
@@ -278,7 +257,7 @@ if [ "$FAIL" = 0 ]; then
   wait "$UPFD_PID" 2>/dev/null || true
 fi
 
-check_clean_shutdown "$DAEMON_PID" || FAIL=1
+check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "n4-path: ok (PFCP -> session -> packets, both ways, and across a restart; profile $PROFILE)"
   # The work directory is the run's, not a result: a failed run keeps it (the
