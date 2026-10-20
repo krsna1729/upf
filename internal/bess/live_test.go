@@ -109,25 +109,36 @@ func BenchmarkLiveCapabilities(b *testing.B) {
 func scalarFields(m protoreflect.Message) map[string]any {
 	fields := map[string]any{}
 	md := m.Descriptor()
-	for i := 0; i < md.Fields().Len(); i++ {
+	for i := range md.Fields().Len() {
 		fd := md.Fields().Get(i)
 		name := fd.JSONName()
+		var value any
 		switch fd.Kind() {
 		case protoreflect.StringKind:
-			fields[name] = string(fd.Name())
+			value = string(fd.Name())
 		case protoreflect.BytesKind:
-			fields[name] = []byte(fd.Name())
+			value = []byte(fd.Name())
 		case protoreflect.BoolKind:
-			fields[name] = true
+			value = true
 		case protoreflect.EnumKind:
-			fields[name] = float64(1)
+			value = float64(1)
 		case protoreflect.FloatKind, protoreflect.DoubleKind:
-			fields[name] = float64(1)
+			value = float64(1)
 		case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind,
 			protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind,
 			protoreflect.Uint32Kind, protoreflect.Fixed32Kind,
 			protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
-			fields[name] = float64(1)
+			value = float64(1)
+		default:
+			continue
+		}
+		// protojson wants a list for a repeated field; a scalar there is a
+		// syntax error (the Router's groups are always registered now, so the
+		// schema's first repeated scalar is no longer hypothetical).
+		if fd.IsList() {
+			fields[name] = []any{value}
+		} else {
+			fields[name] = value
 		}
 	}
 	return fields
