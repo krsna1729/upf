@@ -140,6 +140,16 @@ modules:
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
+  # The Router reads route_domain on every upstream path. The downlink's Vif
+  # writes it (domain 1); the uplink's G-PDU is decapped, so nothing on that
+  # path would, and BESS's metadata analysis marks a read attribute with an
+  # unwritten upstream path as unreadable -- the Router would then route every
+  # packet in domain 0 without saying so. This module writes it explicitly.
+  - name: set_domain
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: route_domain, size: 4, value_int: 0}
   # The routed egress: two FIBs (the uplink's default domain and the N6
   # interface's domain 1), each lookup deciding the gate. max_domains bounds
   # the ids the Vif and the compiler may use; the domains exist from their
@@ -247,7 +257,8 @@ connections:
   # changes when that band should be marked or shed rather than passed.
   - {upstream: mt_ul, downstream: cnt_ul}
   - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
-  - {upstream: cnt_ul, downstream: rt}
+  - {upstream: cnt_ul, downstream: set_domain}
+  - {upstream: set_domain, downstream: rt}
   - {upstream: rt, downstream: merge_n6}
   - {upstream: merge_n6, downstream: dump_n6}
   - {upstream: dump_n6, downstream: sink_n6}

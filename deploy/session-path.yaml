@@ -4,8 +4,8 @@
 # as deploy/session-live.yaml (the module names internal/session's Config
 # names) plus what it takes to put packets through it and see them.
 #
-# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> ttl_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
-#   downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> ttl_dl -> rt -> enc -> dump_d -> sink_n3
+# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
+#   downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> rt -> enc -> dump_d -> sink_n3
 #
 # A third, idle path is the control plane's own: the unix_port cp_marker (the
 # port `upfd -end-marker` writes to) delivers an End Marker packet
@@ -39,9 +39,9 @@
 # answer is built, l2_sort sends that answer back out of the port rather than
 # into the chain, and merge_n6 stands for the port itself -- the router's
 # frames and the interface's own leave by it together. dump_n6 is the uplink's
-# exit, where ci/session-path.sh reads the frame that left toward N6; ttl_ul
-# and ttl_dl are the same file's, decrementing in both chains before the
-# router.
+# exit, where ci/session-path.sh reads the frame that left toward N6. The
+# Router decrements the TTL in both of its modes, so the chains carry no
+# UpdateTTL module.
 #
 # Metadata attributes are laid out in module registration order, so the module
 # that declares "upf_teid" is listed first and the reader that makes it real
@@ -134,10 +134,7 @@ modules:
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
-  # The hop count, as in the deployment: each chain decrements the inner
-  # packet's TTL before the router resolves a next hop (deploy/upf.yaml).
-  - name: ttl_ul
-    mclass: UpdateTTL
+  # The hop count is the Router's, as in the deployment.
   - name: rt
     mclass: Router
   # The port: the router's frames and the interface's own (l2_sort's ARP gate)
@@ -202,8 +199,6 @@ modules:
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
-  - name: ttl_dl
-    mclass: UpdateTTL
   - name: enc
     mclass: GtpuEncap
     arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
@@ -242,8 +237,7 @@ connections:
   # changes when that band should be marked or shed rather than passed.
   - {upstream: mt_ul, downstream: cnt_ul}
   - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
-  - {upstream: cnt_ul, downstream: ttl_ul}
-  - {upstream: ttl_ul, downstream: rt}
+  - {upstream: cnt_ul, downstream: rt}
   - {upstream: rt, downstream: merge_n6}
   - {upstream: merge_n6, downstream: dump_n6}
   - {upstream: dump_n6, downstream: sink_n6}
@@ -260,8 +254,7 @@ connections:
   - {upstream: at_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
-  - {upstream: cnt_dl, downstream: ttl_dl}
-  - {upstream: ttl_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: enc, downstream: dump_d}
   - {upstream: dump_d, downstream: sink_n3}

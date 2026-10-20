@@ -222,13 +222,11 @@ modules:
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
-  # The hop count is the chain's, before the router resolves anything: the
-  # uplink's decrement is the UE's own (RFC 791; RFC 1122 3.2.1.7: decrement,
-  # and drop at 1). The module has no ICMP Time Exceeded and keeps nothing but
-  # its gate counters, so that drop is silent -- recorded in docs/datapath.md
-  # and docs/claims.md.
-  - name: ttl_ul
-    mclass: UpdateTTL
+  # The hop count is the Router's in both modes now (BESS D-155/D-167): it
+  # decrements the inner packet's TTL and fixes the checksum, so no UpdateTTL
+  # is in the chain. The uplink's decrement is the UE's own (RFC 791; RFC 1122
+  # 3.2.1.7: decrement, and drop at 1); the Router has no ICMP Time Exceeded
+  # and keeps outcome counters, so that drop is silent -- docs/datapath.md.
   - name: at_dl
     mclass: ActionTable
     arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
@@ -238,11 +236,6 @@ modules:
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
-  # The downlink's decrement: the data network's hop count. The outer headers
-  # the encap builds after it are the tunnel's and carry the encap's own.
-  - name: ttl_dl
-    mclass: UpdateTTL
-
   - name: rt
     mclass: Router
   - name: enc
@@ -273,8 +266,7 @@ connections:
   # changes when that band should be marked or shed rather than passed.
   - {upstream: mt_ul, downstream: cnt_ul}
   - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
-  - {upstream: cnt_ul, downstream: ttl_ul}
-  - {upstream: ttl_ul, downstream: rt}
+  - {upstream: cnt_ul, downstream: rt}
   - {upstream: rt, downstream: n6_out}
 
   # The N6 port's ingress: l2_sort first, so ARP reaches arp_n6 (whose reply
@@ -292,8 +284,7 @@ connections:
   - {upstream: at_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
-  - {upstream: cnt_dl, downstream: ttl_dl}
-  - {upstream: ttl_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   # The egresses an instance's forwards take beyond the data network: a tunnel
   # out of the instance (N9, or the indirect-forwarding tunnel of an uplink
