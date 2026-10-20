@@ -351,3 +351,27 @@ func TestMARNoStandbyIsIneligible(t *testing.T) {
 		t.Errorf("the No Standby access is %v, want an ineligible zero entry", access[1])
 	}
 }
+
+// TestUpdateMARFullAccessStillNeedsPriority: the non-Update access IE inside
+// an Update MAR provisions an access (Table 7.5.4.16-1) and still needs the
+// fields Table 7.5.2.8-2 makes mandatory. Only the Update-access IE is a
+// field delta.
+func TestUpdateMARFullAccessStillNeedsPriority(t *testing.T) {
+	c := New(marConfig(), &recorder{}, quietLogger())
+	if got := answerCause(c.Establish(marEstablishment(0x7013, "10.45.0.23"))); got != ie.CauseRequestAccepted {
+		t.Fatalf("establishment was refused with cause %d", got)
+	}
+	mod := message.NewSessionModificationRequest(0, 0, 1, 2, 0,
+		ie.NewFSEID(0x7013, nil, nil),
+		ie.NewUpdateMAR(
+			ie.NewMARID(7),
+			ie.NewUpdateTGPPAccessForwardingActionInformation(
+				ie.NewPriority(ie.PriorityStandby)),
+			ie.NewNonTGPPAccessForwardingActionInformation(
+				ie.NewFARID(3)),
+		),
+	)
+	if got := answerCause(c.Modify(mod)); got != ie.CauseMandatoryIEMissing {
+		t.Errorf("a full access without Priority was answered with cause %d, want 61", got)
+	}
+}

@@ -730,38 +730,39 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 	// MAR policy and tunnel ids allocated by the failed merge are not in the
 	// restored model (or its removal list); return them. An id the snapshot
 	// still holds is the same reservation, not a new one.
-	liveIDs := map[uint32]bool{}
+	livePolicies := map[uint32]bool{}
+	liveTunnels := map[uint32]bool{}
 	for _, m := range append(marsInOrder(s), s.removedMARs...) {
 		if m.policyID != 0 {
-			liveIDs[m.policyID] = true
+			livePolicies[m.policyID] = true
 		}
 		for _, id := range m.tunnelIDs {
 			if id != 0 {
-				liveIDs[id] = true
+				liveTunnels[id] = true
 			}
 		}
 	}
 	for _, id := range s.retiredTunnels {
 		if id != 0 {
-			liveIDs[id] = true
+			liveTunnels[id] = true
 		}
 	}
 	policies := map[uint32]bool{}
 	tunnels := map[uint32]bool{}
 	for _, m := range failedMARs {
-		if m.policyID != 0 && !liveIDs[m.policyID] && !policies[m.policyID] {
+		if m.policyID != 0 && !livePolicies[m.policyID] && !policies[m.policyID] {
 			policies[m.policyID] = true
 			c.policies.release(m.policyID)
 		}
 		for _, id := range m.tunnelIDs {
-			if id != 0 && !liveIDs[id] && !tunnels[id] {
+			if id != 0 && !liveTunnels[id] && !tunnels[id] {
 				tunnels[id] = true
 				c.actions.release(id)
 			}
 		}
 	}
 	for _, id := range failedRetired {
-		if id != 0 && !liveIDs[id] && !tunnels[id] {
+		if id != 0 && !liveTunnels[id] && !tunnels[id] {
 			tunnels[id] = true
 			c.actions.release(id)
 		}

@@ -4089,12 +4089,14 @@ func parseMAR(i *ie.IE) (marReq, error) {
 			m.hasMode, m.mode = true, v
 		case ie.TGPPAccessForwardingActionInformation,
 			ie.UpdateTGPPAccessForwardingActionInformation:
-			if err := parseMARAccess(&m, 0, c, m.create); err != nil {
+			partial := !m.create && c.Type == ie.UpdateTGPPAccessForwardingActionInformation
+			if err := parseMARAccess(&m, 0, c, partial); err != nil {
 				return marReq{}, fmt.Errorf("3GPP access forwarding action information: %w", err)
 			}
 		case ie.NonTGPPAccessForwardingActionInformation,
 			ie.UpdateNonTGPPAccessForwardingActionInformation:
-			if err := parseMARAccess(&m, 1, c, m.create); err != nil {
+			partial := !m.create && c.Type == ie.UpdateNonTGPPAccessForwardingActionInformation
+			if err := parseMARAccess(&m, 1, c, partial); err != nil {
 				return marReq{}, fmt.Errorf("non-3GPP access forwarding action information: %w", err)
 			}
 		case ie.AccessAvailabilityControlInformation:
@@ -4118,7 +4120,7 @@ func parseMAR(i *ie.IE) (marReq, error) {
 // that makes it active or standby. The FAR ID and the priority are the fields
 // active/standby needs; a message that leaves either out cannot say which
 // access is the preferred one and is refused here.
-func parseMARAccess(m *marReq, which int, i *ie.IE, create bool) error {
+func parseMARAccess(m *marReq, which int, i *ie.IE, partial bool) error {
 	if m.haveAccess[which] {
 		return fmt.Errorf("%w: the MAR names the access twice", errNotExpressible)
 	}
@@ -4137,7 +4139,7 @@ func parseMARAccess(m *marReq, which int, i *ie.IE, create bool) error {
 	if err != nil {
 		return err
 	}
-	if !create && len(children) == 0 {
+	if partial && len(children) == 0 {
 		// A null-length Update access IE deregisters the access
 		// (Table 7.5.4.16-1): the other access stays, and the active/standby
 		// selection must still name an active one.
@@ -4166,7 +4168,7 @@ func parseMARAccess(m *marReq, which int, i *ie.IE, create bool) error {
 			access.weight, access.hasWeight = v, true
 		}
 	}
-	if create {
+	if !partial {
 		if !access.hasFarID {
 			return fmt.Errorf("%w: the access names no FAR ID", errMandatoryIE)
 		}
