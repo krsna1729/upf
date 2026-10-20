@@ -184,7 +184,7 @@ done <<< "$graphs"
 
 # --- merge the results, write the contract, render the document --------------
 python3 - "$CLAIMS" "$OUT" "$STRICT" <<'PY'
-import json, sys, datetime, re
+import json, sys, re
 
 claims_path, out, strict = sys.argv[1], sys.argv[2], sys.argv[3] == '1'
 
@@ -200,7 +200,6 @@ def table(name):
     return rows
 
 status = {'test': table('tests.tsv'), 'lane': table('lanes.tsv'), 'graph': table('graphs.tsv')}
-now = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
 doc = json.load(open(claims_path, encoding='utf-8'))
 
 def kind(tok):
@@ -227,7 +226,7 @@ for c in doc['claims']:
         st = status.get(k, {}).get(tok) if k != 'src' else src.get(tok)
         if st is None:
             continue          # not run in this pass: keep the last verdict
-        prior[tok] = {'state': st, 'at': now}
+        prior[tok] = {'state': st}
     states = [prior.get(t, {}).get('state', 'not run') for t in c.get('evidence', [])]
     if not c.get('evidence'):
         state = 'gap'
@@ -238,13 +237,11 @@ for c in doc['claims']:
     else:
         state = 'ok'
     c['result']['state'] = state
-    c['result']['at'] = now
     if state == 'FAIL':
         fail += 1
     if state in ('gap', 'FAIL'):
         gap += 1
 
-doc['updated'] = now
 json.dump(doc, open(claims_path, 'w', encoding='utf-8'), indent=1)
 open(claims_path, 'a').write('\n')
 
@@ -318,8 +315,7 @@ def render_claim(c):
         parts = []
         for tok in ev:
             s2 = c['result']['evidence'].get(tok, {}).get('state', 'not run')
-            at = c['result']['evidence'].get(tok, {}).get('at')
-            parts.append(f"`{tok}` — {s2}{' (' + at[:10] + ')' if at else ''}")
+            parts.append(f"`{tok}` — {s2}")
         lines.append('**Evidence.** ' + ' · '.join(parts))
     else:
         lines.append('**Evidence.** none — a documented gap')
@@ -397,7 +393,7 @@ lines = [
     "claim's statement, the evidence it cites and the last run's verdict are one",
     'record. Edit the JSON, run the script; never edit this file.',
     '',
-    f"Last run `{now}`: **{tot.get('ok', 0)} ok**, **{tot.get('gap', 0)} gap**, "
+    f"This pass: **{tot.get('ok', 0)} ok**, **{tot.get('gap', 0)} gap**, "
     f"**{tot.get('skip', 0)} skip**, **{tot.get('FAIL', 0)} fail**.",
     '',
     '![Claims by message](claims-overview.svg)',
