@@ -29,3 +29,9 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.83.2 // indirect
 )
+
+// go-pfcp carries every IE parser on the N4 path. The fork is v0.0.24 plus the
+// upstream IE parser fixes for #142 and #145, so a malformed PFD Contents,
+// SDF Filter or neighbour IE is refused rather than panicking the daemon.
+// It keeps the upstream module path, hence the replace form.
+replace github.com/wmnsk/go-pfcp => github.com/krsna1729/go-pfcp v0.0.25-upf.2
