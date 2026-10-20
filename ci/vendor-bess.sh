@@ -86,11 +86,40 @@ for path in sys.argv[3:]:
     print(f"vendor-bess: {path}: PMD path patched at {n} place(s)")
 PY
 
+# The installed binaries can keep the build tree's RUNPATH: meson's build_rpath
+# is the checkout's DPDK libdir ($OLD/install/lib), and an install does not
+# always strip it. It is the same absolute path, and the same in-place,
+# NUL-padded rewrite applies; the vendored tree then names build/bess/dpdk,
+# which is where the libs are.
+python3 - "$OLD/install/lib" "$NEW/install/lib" "$DEST"/stage/bin/* "$DEST"/dpdk/install/lib/* <<'PY'
+import os, sys
+old, new = sys.argv[1].encode(), sys.argv[2].encode()
+assert len(new) <= len(old), f"new DPDK path is {len(new) - len(old)} bytes too long: {new.decode()}"
+for path in sys.argv[3:]:
+    if not os.path.isfile(path):
+        continue
+    with open(path, "rb") as f:
+        data = f.read()
+    needle = old + b"\0"
+    n = data.count(needle)
+    if n == 0:
+        continue
+    data = data.replace(needle, new + b"\0" * (len(old) - len(new) + 1))
+    with open(path, "wb") as f:
+        f.write(data)
+    print(f"vendor-bess: {path}: DPDK path patched at {n} place(s)")
+PY
+
 if grep -rIlF "$SRC" "$DEST/stage" "$DEST/dpdk" 2>/dev/null | grep .; then
   echo "vendor-bess: the files above still name $SRC" >&2
   exit 1
 fi
-if grep -rlaF "$SRC" "$DEST/stage/bin" "$DEST/dpdk/install/lib" 2>/dev/null | grep .; then
+hits=$(grep -rlaF "$SRC" "$DEST/stage/bin" "$DEST/dpdk/install/lib" 2>/dev/null || true)
+if [ -n "$hits" ]; then
+  printf '%s\n' "$hits"
+  while IFS= read -r f; do
+    strings -a "$f" | grep -F "$SRC" | head -3 | sed "s|^|  $f: |"
+  done <<<"$hits"
   echo "vendor-bess: the binaries above still name $SRC" >&2
   exit 1
 fi
