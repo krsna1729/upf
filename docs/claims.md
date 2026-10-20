@@ -6,11 +6,9 @@ record. Edit the JSON, run the script; never edit this file.
 
 This pass: **45 ok**, **2 gap**, **2 skip**, **0 fail**.
 
-![Claims by message](claims-overview.svg)
-
-Each bar is a message type, split by verdict (green ok, amber gap, grey
-skipped); the number is its claims. The clause is the identity and leads every
-entry; the competitive block that scores the same capability is quoted under it.
+Entries are grouped by message, each section counting its own verdicts. The
+clause is the identity and leads every entry; the competitive block that scores
+the same capability is quoted under it.
 
 ## Open gaps
 

@@ -340,51 +340,9 @@ sections = [
     'Competition',
 ]
 
-# --- the visual overview: claims per message, by verdict ---------------------
-def xml(v):
-    return v.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
-row_h, top, width, bar_x, bar_w = 26, 58, 780, 250, 380
-chs = []
-for m in sections:
-    cs = [c for c in doc['claims'] if c.get('message') == m]
-    if not cs:
-        continue
-    cnt = {}
-    for c in cs:
-        cnt[c['result']['state']] = cnt.get(c['result']['state'], 0) + 1
-    chs.append((m, len(cs), cnt))
-height = top + row_h * len(chs) + 26
-mx = max(n for _, n, _ in chs) or 1
 tot = {}
 for c in doc['claims']:
     tot[c['result']['state']] = tot.get(c['result']['state'], 0) + 1
-svg = [
-    f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" aria-label="Claims by message">',
-    '<rect width="100%" height="100%" fill="#ffffff"/>',
-    '<style>',
-    'text{font:13px system-ui,-apple-system,Segoe UI,sans-serif;fill:#111}',
-    '.lbl{text-anchor:end;font-weight:600}.num{fill:#555}.t{font-size:15px;font-weight:700}',
-    '.ok{fill:#2e7d32}.gap{fill:#b26a00}.skip{fill:#8a8f98}.fail{fill:#c62828}',
-    
-    '</style>',
-    f'<text class="t" x="0" y="22">Claims by message — {len(doc["claims"])} total · {tot.get("ok", 0)} ok · {tot.get("gap", 0)} gap · {tot.get("skip", 0)} skip · {tot.get("FAIL", 0)} fail</text>',
-]
-for i, (m, n, cnt) in enumerate(chs):
-    y = top + i * row_h
-    svg.append(f'<text class="lbl" x="238" y="{y + 13}">{xml(m)}</text>')
-    x = bar_x
-    scale = bar_w / mx
-    for state, cls in (('ok', 'ok'), ('gap', 'gap'), ('skip', 'skip'), ('FAIL', 'fail')):
-        k = cnt.get(state, 0)
-        if not k:
-            continue
-        wpx = max(3, k * scale)
-        svg.append(f'<rect class="{cls}" x="{x:.1f}" y="{y + 3}" width="{wpx:.1f}" height="14" rx="2"/>')
-        x += wpx
-    svg.append(f'<text class="num" x="{bar_x + bar_w + 10}" y="{y + 13}">{n}</text>')
-svg.append('</svg>')
-open('docs/claims-overview.svg', 'w', encoding='utf-8').write('\n'.join(svg) + '\n')
 
 lines = [
     '# Claims: our status, and the competition',
@@ -396,11 +354,9 @@ lines = [
     f"This pass: **{tot.get('ok', 0)} ok**, **{tot.get('gap', 0)} gap**, "
     f"**{tot.get('skip', 0)} skip**, **{tot.get('FAIL', 0)} fail**.",
     '',
-    '![Claims by message](claims-overview.svg)',
-    '',
-    'Each bar is a message type, split by verdict (green ok, amber gap, grey',
-    'skipped); the number is its claims. The clause is the identity and leads every',
-    'entry; the competitive block that scores the same capability is quoted under it.',
+    'Entries are grouped by message, each section counting its own verdicts. The',
+    'clause is the identity and leads every entry; the competitive block that scores',
+    'the same capability is quoted under it.',
     '',
 ]
 
