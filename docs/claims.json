@@ -425,7 +425,7 @@
    "scope": "status",
    "evidence": [
     "TestLiveStartupSweepErasesStaleSessions",
-    "TestSweepErasesEveryReadEntryInOneTransaction",
+    "TestSweepResetsOnlyTheSessionTables",
     "TestSweepErasesInBoundedBatchesAtScale",
     "TestSweepLeavesNothingErasedWhenTheReadbackFails",
     "TestSweepNamesTheGraphsResources",
@@ -441,7 +441,7 @@
      "TestLiveStartupSweepErasesStaleSessions": {
       "state": "skip"
      },
-     "TestSweepErasesEveryReadEntryInOneTransaction": {
+     "TestSweepResetsOnlyTheSessionTables": {
       "state": "ok"
      },
      "TestSweepErasesInBoundedBatchesAtScale": {
@@ -473,7 +473,7 @@
    "clause": null,
    "part": "engineering",
    "title": "a restarted controller does not inherit its predecessor's dataplane state: `upfd` empties the session tables in bounded transactions before its PFCP socket opens, and with `-checkpoint` the journal's sessions are replayed after it, so the run holds exactly the sessions it can name",
-   "declared": "in (docs/design.md's restart wall, no PFCP clause): the sweep reads back one resource per `Contents` call (a call naming several packs them into one response, which the daemon refuses above its 64 MiB message limit: the largest single table is the interim's ceiling -- roughly 510K entries at 131 B each, no paged read, and past it the operator restarts `bessd` -- with its replacement recorded in docs/design.md as a bounded clear in the daemon, which removes the readback), erases exactly the entries it found, key by key, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse) and leaves every resource the graph itself declares; a *firewall policy* has no key to erase -- its resource is a singleton -- so a non-empty one is replaced by an empty policy (a rule's verdict is drop or pass, so one left behind would pass packets no session owns); a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
+   "declared": "in (docs/design.md's restart wall, no PFCP clause): the sweep empties the compiler's maps in the daemon with `ResetResources` (one request, batched inside the daemon: no session key is read over the wire and the 64 MiB message limit no longer bounds a table), replaces a non-empty firewall policy singleton with an empty one, and reads the ARP responder tables through `ReadResource`'s bounded pages, erasing only the entries inside the interface's declared pools, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse), and leaves every resource the graph itself declares; a *firewall policy* has no key to erase -- its resource is a singleton -- so a non-empty one is replaced by an empty policy (a rule's verdict is drop or pass, so one left behind would pass packets no session owns); a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
    "spec": "TS 29.244",
    "group": "control plane",
    "messages": [
@@ -481,12 +481,12 @@
    ],
    "message": "Cross-cutting (no message)",
    "statement": "",
-   "detail": "in (docs/design.md's restart wall, no PFCP clause): the sweep reads back one resource per `Contents` call (a call naming several packs them into one response, which the daemon refuses above its 64 MiB message limit: the largest single table is the interim's ceiling -- roughly 510K entries at 131 B each, no paged read, and past it the operator restarts `bessd` -- with its replacement recorded in docs/design.md as a bounded clear in the daemon, which removes the readback), erases exactly the entries it found, key by key, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse) and leaves every resource the graph itself declares; a *firewall policy* has no key to erase -- its resource is a singleton -- so a non-empty one is replaced by an empty policy (a rule's verdict is drop or pass, so one left behind would pass packets no session owns); a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
+   "detail": "in (docs/design.md's restart wall, no PFCP clause): the sweep empties the compiler's maps in the daemon with `ResetResources` (one request, batched inside the daemon: no session key is read over the wire and the 64 MiB message limit no longer bounds a table), replaces a non-empty firewall policy singleton with an empty one, and reads the ARP responder tables through `ReadResource`'s bounded pages, erasing only the entries inside the interface's declared pools, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse), and leaves every resource the graph itself declares; a *firewall policy* has no key to erase -- its resource is a singleton -- so a non-empty one is replaced by an empty policy (a rule's verdict is drop or pass, so one left behind would pass packets no session owns); a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
    "effect": "",
    "extra": [
     {
      "name": "evidence",
-     "value": "TestSweepNamesTheGraphsResources, TestSweepErasesEveryReadEntryInOneTransaction, TestSweepWithNothingToEraseWritesNothing, TestSweepReportsAnUnreadableDataplane, TestSweepErasesInBoundedBatchesAtScale, TestSweepStopsAtTheFirstFailedBatch, TestSweepLeavesNothingErasedWhenTheReadbackFails, TestTheSweepReplacesAStaleFirewallPolicy, TestLiveStartupSweepErasesStaleSessions; `ci/n4-path.sh`'s restart step (a second controller against a daemon still holding the first one's session: the rules go, and the packets that crossed stop being selected) and its checkpoint phase (a third run replays the journal after the same sweep, and the packets cross again)"
+     "value": "TestSweepNamesTheGraphsResources, TestSweepResetsOnlyTheSessionTables, TestSweepWithNothingToEraseWritesNothing, TestSweepReportsAnUnreadableDataplane, TestSweepErasesInBoundedBatchesAtScale, TestSweepStopsAtTheFirstFailedBatch, TestSweepLeavesNothingErasedWhenTheReadbackFails, TestTheSweepReplacesAStaleFirewallPolicy, TestLiveStartupSweepErasesStaleSessions; `ci/n4-path.sh`'s restart step (a second controller against a daemon still holding the first one's session: the rules go, and the packets that crossed stop being selected) and its checkpoint phase (a third run replays the journal after the same sweep, and the packets cross again)"
     }
    ],
    "kind": "engineering",
