@@ -15,7 +15,7 @@
 #   build/fast                 -> build/bess/fast     perf tree (bench lanes)
 #   sdk/go                     -> build/bess/sdk/go
 #
-# And what it rewrites, because three places carry the checkout's absolute
+# And what it rewrites, because these places carry the checkout's absolute
 # path and would silently keep the copy reading the original:
 #
 #   - the DPDK paths in every .pc file under stage/ and dpdk/install (bess-dev.pc
@@ -26,12 +26,19 @@
 #     has no flag for it, so without this every NIC driver loads from the
 #     checkout. The string is patched in place, NUL-padded, which is why the new
 #     path must not be longer than the old one (checked);
+#   - the DPDK libdir in the installed binaries' RUNPATH: meson's build_rpath is
+#     the checkout's deps/dpdk-*/install/lib, and an install does not always
+#     strip it. Patched the same way;
 #   - nothing in fast/: its RUNPATH names the checkout, but the lanes put
 #     build/bess/dpdk first on LD_LIBRARY_PATH, which the loader searches before
 #     RUNPATH. Rebuilding fast/ in place is not supported -- rebuild in the
 #     checkout and refresh.
 #
-# It ends by checking that nothing under stage/ or dpdk/ names the checkout.
+# It ends by checking that nothing under stage/ or dpdk/ refers to the checkout:
+# text files name no checkout path, the PMD path is gone, and no RUNPATH does.
+# DPDK's libraries are often built with -g, and their debug info (and BTF) keeps
+# source-file paths from the build tree; those are not references, and the check
+# does not treat them as such.
 
 set -euo pipefail
 
@@ -90,8 +97,10 @@ PY
 # is the checkout's DPDK libdir ($OLD/install/lib), and an install does not
 # always strip it. It is the same absolute path, and the same in-place,
 # NUL-padded rewrite applies; the vendored tree then names build/bess/dpdk,
-# which is where the libs are.
-python3 - "$OLD/install/lib" "$NEW/install/lib" "$DEST"/stage/bin/* "$DEST"/dpdk/install/lib/* <<'PY'
+# which is where the libs are. The PMD plugins live one directory down
+# (lib/dpdk/pmds-*), so walk the install rather than glob one level.
+mapfile -d '' -t vendor_binaries < <(find "$DEST/stage/bin" "$DEST/dpdk/install/lib" -type f -print0)
+python3 - "$OLD/install/lib" "$NEW/install/lib" "${vendor_binaries[@]}" <<'PY'
 import os, sys
 old, new = sys.argv[1].encode(), sys.argv[2].encode()
 assert len(new) <= len(old), f"new DPDK path is {len(new) - len(old)} bytes too long: {new.decode()}"
@@ -114,13 +123,23 @@ if grep -rIlF "$SRC" "$DEST/stage" "$DEST/dpdk" 2>/dev/null | grep .; then
   echo "vendor-bess: the files above still name $SRC" >&2
   exit 1
 fi
-hits=$(grep -rlaF "$SRC" "$DEST/stage/bin" "$DEST/dpdk/install/lib" 2>/dev/null || true)
-if [ -n "$hits" ]; then
-  printf '%s\n' "$hits"
-  while IFS= read -r f; do
-    strings -a "$f" | grep -F "$SRC" | head -3 | sed "s|^|  $f: |"
-  done <<<"$hits"
-  echo "vendor-bess: the binaries above still name $SRC" >&2
+if grep -rlaF "$PMD_OLD" "$DEST/dpdk" 2>/dev/null | grep .; then
+  echo "vendor-bess: the files above still name the checkout's PMD directory ($PMD_OLD)" >&2
   exit 1
 fi
-echo "vendor-bess: ok (stage/ and dpdk/ name nothing outside build/bess)"
+# What the loader reads is RUNPATH; what embeds the checkout in DPDK's libraries
+# is debug info. A debug build keeps source-file paths from the checkout in
+# .debug_* and .BTF, which nothing resolves through and which cannot be rewritten
+# in place without shifting those tables -- so check the dynamic section rather
+# than every byte of the file.
+bad=0
+while IFS= read -r -d '' f; do
+  if readelf -d "$f" 2>/dev/null | grep -E '\((RPATH|RUNPATH)\)' | grep -qF "$SRC"; then
+    echo "vendor-bess: $f: RUNPATH still names $SRC" >&2
+    bad=1
+  fi
+done < <(find "$DEST/stage" "$DEST/dpdk" -type f -print0)
+if [ "$bad" != 0 ]; then
+  exit 1
+fi
+echo "vendor-bess: ok (nothing under stage/ or dpdk/ refers to the checkout)"
