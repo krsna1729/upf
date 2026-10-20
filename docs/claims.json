@@ -1,29 +1,11 @@
 {
  "schema": 1,
  "generated_by": "ci/verify.sh",
- "updated": "2026-10-20T08:55:16+05:30",
+ "updated": "2026-10-20T09:11:12+05:30",
  "claims": [
   {
    "id": "status-1",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "f1"
-    },
-    {
-     "name": "part of the feature",
-     "value": "a PDI whose F-TEID IE carries the CH flag (no TEID field) is given an F-TEID"
-    },
-    {
-     "name": "state",
-     "value": "in: the compiler allocates the TEID, reports it in the Created PDR, and writes the TEID rule in front of the decap from it"
-    },
-    {
-     "name": "evidence",
-     "value": "`internal/session`: TestACHRequestIsAllocatedWhateverItsFamilyFlag, TestACHOOSEForBothFamiliesGetsTheIPv4FTEID; `internal/n4`: TestAConfiguredFeatureIsAdvertised; `ci/session-live.sh`"
-    }
-   ],
    "evidence": [
     "TestACHOOSEForBothFamiliesGetsTheIPv4FTEID",
     "TestACHRequestIsAllocatedWhateverItsFamilyFlag",
@@ -32,23 +14,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestACHOOSEForBothFamiliesGetsTheIPv4FTEID": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestACHRequestIsAllocatedWhateverItsFamilyFlag": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAConfiguredFeatureIsAdvertised": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/session-live.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -57,29 +39,26 @@
    "title": "a PDI whose F-TEID IE carries the CH flag (no TEID field) is given an F-TEID",
    "declared": "in: the compiler allocates the TEID, reports it in the Created PDR, and writes the TEID rule in front of the decap from it",
    "spec": "TS 29.244",
-   "group": "datapath and deployment"
+   "group": "datapath and deployment",
+   "messages": [
+    "Shared information elements"
+   ],
+   "message": "Shared information elements",
+   "statement": "",
+   "detail": "in: the compiler allocates the TEID, reports it in the Created PDR, and writes the TEID rule in front of the decap from it",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`internal/session`: TestACHRequestIsAllocatedWhateverItsFamilyFlag, TestACHOOSEForBothFamiliesGetsTheIPv4FTEID; `internal/n4`: TestAConfiguredFeatureIsAdvertised; `ci/session-live.sh`"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-2",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "f2"
-    },
-    {
-     "name": "part of the feature",
-     "value": "the PDIs of one PFCP session that carry the same CHOOSE ID share one F-TEID"
-    },
-    {
-     "name": "state",
-     "value": "in: the session keeps one F-TEID per CHOOSE ID and hands it to every PDI that names it; a refused modification keeps the F-TEID it allocated rather than returning it to the pool, and the SMF's retry is answered with that value (the model's mutation is not undone by a refusal, and the reservation is what keeps the value off another session until this one ends)"
-    },
-    {
-     "name": "evidence",
-     "value": "TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID, TestTwoCHOOSEIDsGetTwoFTEIDs, TestACHOOSEIDIsTheSessionsFTEIDForThatGroup, TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI, TestARefusedModificationKeepsTheCHIDItAllocated; `ci/session-live.sh`: TestLiveSessionSharesOneFTEIDPerCHOOSEID"
-    }
-   ],
    "evidence": [
     "TestACHOOSEIDIsTheSessionsFTEIDForThatGroup",
     "TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI",
@@ -91,35 +70,35 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestACHOOSEIDIsTheSessionsFTEIDForThatGroup": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestARefusedModificationKeepsTheCHIDItAllocated": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestLiveSessionSharesOneFTEIDPerCHOOSEID": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTwoCHOOSEIDsGetTwoFTEIDs": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/session-live.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -128,39 +107,36 @@
    "title": "the PDIs of one PFCP session that carry the same CHOOSE ID share one F-TEID",
    "declared": "in: the session keeps one F-TEID per CHOOSE ID and hands it to every PDI that names it; a refused modification keeps the F-TEID it allocated rather than returning it to the pool, and the SMF's retry is answered with that value (the model's mutation is not undone by a refusal, and the reservation is what keeps the value off another session until this one ends)",
    "spec": "TS 29.244",
-   "group": "datapath and deployment"
+   "group": "datapath and deployment",
+   "messages": [
+    "Session Modification"
+   ],
+   "message": "Session Modification",
+   "statement": "",
+   "detail": "in: the session keeps one F-TEID per CHOOSE ID and hands it to every PDI that names it; a refused modification keeps the F-TEID it allocated rather than returning it to the pool, and the SMF's retry is answered with that value (the model's mutation is not undone by a refusal, and the reservation is what keeps the value off another session until this one ends)",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID, TestTwoCHOOSEIDsGetTwoFTEIDs, TestACHOOSEIDIsTheSessionsFTEIDForThatGroup, TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI, TestARefusedModificationKeepsTheCHIDItAllocated; `ci/session-live.sh`: TestLiveSessionSharesOneFTEIDPerCHOOSEID"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-3",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "f3"
-    },
-    {
-     "name": "part of the feature",
-     "value": "a CHOOSE request for an address family this UP has no address for (V6 set, V4 not)"
-    },
-    {
-     "name": "state",
-     "value": "refused with cause 73, deliberately: the Created PDR would otherwise name a family the SMF did not ask for"
-    },
-    {
-     "name": "evidence",
-     "value": "TestACHOOSEForIPv6IsRefused"
-    }
-   ],
    "evidence": [
     "TestACHOOSEForIPv6IsRefused"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestACHOOSEForIPv6IsRefused": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -169,39 +145,36 @@
    "title": "a CHOOSE request for an address family this UP has no address for (V6 set, V4 not)",
    "declared": "refused with cause 73, deliberately: the Created PDR would otherwise name a family the SMF did not ask for",
    "spec": "TS 29.244",
-   "group": "datapath and deployment"
+   "group": "datapath and deployment",
+   "messages": [
+    "Shared information elements"
+   ],
+   "message": "Shared information elements",
+   "statement": "",
+   "detail": "refused with cause 73, deliberately: the Created PDR would otherwise name a family the SMF did not ask for",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestACHOOSEForIPv6IsRefused"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-4",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "a session request with no session layer configured is refused with a Cause"
-    },
-    {
-     "name": "state",
-     "value": "in"
-    },
-    {
-     "name": "evidence",
-     "value": "TestSessionRequestsWithoutSessionLayer"
-    }
-   ],
    "evidence": [
     "TestSessionRequestsWithoutSessionLayer"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestSessionRequestsWithoutSessionLayer": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -210,39 +183,36 @@
    "title": "a session request with no session layer configured is refused with a Cause",
    "declared": "in",
    "spec": "TS 29.244",
-   "group": "control plane"
+   "group": "control plane",
+   "messages": [
+    "Cross-cutting (no message)"
+   ],
+   "message": "Cross-cutting (no message)",
+   "statement": "",
+   "detail": "in",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestSessionRequestsWithoutSessionLayer"
+    }
+   ],
+   "kind": "engineering",
+   "block": 2
   },
   {
    "id": "status-5",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "a datapath refusal becomes a Cause, not a half-programmed session"
-    },
-    {
-     "name": "state",
-     "value": "in"
-    },
-    {
-     "name": "evidence",
-     "value": "TestDataplaneRefusalBecomesACause"
-    }
-   ],
    "evidence": [
     "TestDataplaneRefusalBecomesACause"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestDataplaneRefusalBecomesACause": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -251,44 +221,41 @@
    "title": "a datapath refusal becomes a Cause, not a half-programmed session",
    "declared": "in",
    "spec": "TS 29.244",
-   "group": "control plane"
+   "group": "control plane",
+   "messages": [
+    "Cross-cutting (no message)"
+   ],
+   "message": "Cross-cutting (no message)",
+   "statement": "",
+   "detail": "in",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestDataplaneRefusalBecomesACause"
+    }
+   ],
+   "kind": "engineering",
+   "block": null
   },
   {
    "id": "status-6",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "a port **range** in an SDF filter"
-    },
-    {
-     "name": "state",
-     "value": "refused **on the WildcardMatch path**, deliberately: a mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter. The opt-in firewall path carries it instead: its ports are checked after the group's masked key hits, so a range costs no group, no mask and no entry"
-    },
-    {
-     "name": "evidence",
-     "value": "TestPortRangeIsRefusedNotMatchedTooWidely (the refusal), TestAPortRangeCompilesToAFirewallRuleWithItsRange (the rule)"
-    }
-   ],
    "evidence": [
     "TestAPortRangeCompilesToAFirewallRuleWithItsRange",
     "TestPortRangeIsRefusedNotMatchedTooWidely"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAPortRangeCompilesToAFirewallRuleWithItsRange": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestPortRangeIsRefusedNotMatchedTooWidely": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -296,29 +263,26 @@
    "part": "ies",
    "title": "a port **range** in an SDF filter",
    "declared": "refused **on the WildcardMatch path**, deliberately: a mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter. The opt-in firewall path carries it instead: its ports are checked after the group's masked key hits, so a range costs no group, no mask and no entry",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Shared information elements"
+   ],
+   "message": "Shared information elements",
+   "statement": "",
+   "detail": "refused **on the WildcardMatch path**, deliberately: a mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter. The opt-in firewall path carries it instead: its ports are checked after the group's masked key hits, so a range costs no group, no mask and no entry",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestPortRangeIsRefusedNotMatchedTooWidely (the refusal), TestAPortRangeCompilesToAFirewallRuleWithItsRange (the rule)"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-7",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "a PDI naming an address or prefix that is not IPv4, and an SDF prefix whose address carries host bits"
-    },
-    {
-     "name": "state",
-     "value": "refused with cause 73 **on the WildcardMatch path** (an IPv6 address cannot be masked into four bytes, and widening it would match another session's packets); the **SDF-prefix half is lifted on the opt-in firewall path**, whose table holds both families in one policy and whose rule carries the prefix as a CIDR string, while the PDI's own IPv6 UE address and an IPv6 F-TEID stay refused (gap 6) and a rule whose two sides would be of different families is refused there too. A sloppy prefix means its network (`10.10.1.5/16` compiles to `10.10.0.0/16`) on both paths"
-    },
-    {
-     "name": "evidence",
-     "value": "TestANonIPv4PDIIsRefusedNotWidened, TestAnSDFPrefixIsAPrefixNotAnAddress, TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly, TestAMixedFamilyFirewallRuleIsRefused"
-    }
-   ],
    "evidence": [
     "TestAMixedFamilyFirewallRuleIsRefused",
     "TestANonIPv4PDIIsRefusedNotWidened",
@@ -327,23 +291,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAMixedFamilyFirewallRuleIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestANonIPv4PDIIsRefusedNotWidened": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAnSDFPrefixIsAPrefixNotAnAddress": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -351,29 +315,26 @@
    "part": "ies",
    "title": "a PDI naming an address or prefix that is not IPv4, and an SDF prefix whose address carries host bits",
    "declared": "refused with cause 73 **on the WildcardMatch path** (an IPv6 address cannot be masked into four bytes, and widening it would match another session's packets); the **SDF-prefix half is lifted on the opt-in firewall path**, whose table holds both families in one policy and whose rule carries the prefix as a CIDR string, while the PDI's own IPv6 UE address and an IPv6 F-TEID stay refused (gap 6) and a rule whose two sides would be of different families is refused there too. A sloppy prefix means its network (`10.10.1.5/16` compiles to `10.10.0.0/16`) on both paths",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Shared information elements"
+   ],
+   "message": "Shared information elements",
+   "statement": "",
+   "detail": "refused with cause 73 **on the WildcardMatch path** (an IPv6 address cannot be masked into four bytes, and widening it would match another session's packets); the **SDF-prefix half is lifted on the opt-in firewall path**, whose table holds both families in one policy and whose rule carries the prefix as a CIDR string, while the PDI's own IPv6 UE address and an IPv6 F-TEID stay refused (gap 6) and a rule whose two sides would be of different families is refused there too. A sloppy prefix means its network (`10.10.1.5/16` compiles to `10.10.0.0/16`) on both paths",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestANonIPv4PDIIsRefusedNotWidened, TestAnSDFPrefixIsAPrefixNotAnAddress, TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly, TestAMixedFamilyFirewallRuleIsRefused"
+    }
+   ],
+   "kind": "conformance",
+   "block": 9
   },
   {
    "id": "status-8",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "the **opt-in firewall path** itself (BESS's `firewall`, D-147): the match a PDR compiles to where the WildcardMatch key cannot carry it"
-    },
-    {
-     "name": "state",
-     "value": "**partly in, and unarmed.** `upfd -firewall-ul`/`-firewall-dl` name the module a direction's PDRs go into instead of `-pdr-table-*`: its `<name>/rules` singleton holds the *whole ordered policy*, so the compiler writes every live session's rules of that module (a write of one session's alone would erase the others', and a packet no rule matches is dropped), ordered by Precedence ascending -- 8.2.11's lower value wins and a firewall list applies its first matching rule, so no inversion here -- and replaces it on a deletion and in the startup sweep (an empty policy). A rule's fields are `FirewallArg.Rule`'s: `src_ip`/`dst_ip` (CIDR strings, length mandatory), `proto`, the four port-range bounds, `drop`. What it **cannot** carry is any action: the module's words are drop and pass, it writes no packet metadata, so a rule cannot name the PDR's ActionId or next hop (nor the QFI, the route domain or the tunnel), and a PDR that buffers is refused (no gate to the store). Nothing is live: the installed stage carries no `firewall` module, and a graph that names a module the daemon does not have fails to load, so no `deploy/*.yaml` graph declares one and the arms in `ci/` run the WildcardMatch path with its refusals untouched"
-    },
-    {
-     "name": "evidence",
-     "value": "TestAPortRangeCompilesToAFirewallRuleWithItsRange, TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly, TestAMixedFamilyFirewallRuleIsRefused, TestAFirewallRuleCarriesThePDRAVerdict, TestAFirewallDeploymentThatBuffersIsRefused, TestTheFirewallPolicyIsTheUnionOfTheLiveSessions, TestDeletingASessionRewritesTheFirewallPolicy, TestTheSweepReplacesAStaleFirewallPolicy, TestTheFirewallPathIsOptIn; `cmd/upfd`: TestGraphConfigMapsTheFlags"
-    }
-   ],
    "evidence": [
     "TestAFirewallDeploymentThatBuffersIsRefused",
     "TestAFirewallRuleCarriesThePDRAVerdict",
@@ -388,47 +349,47 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAFirewallDeploymentThatBuffersIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAFirewallRuleCarriesThePDRAVerdict": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAMixedFamilyFirewallRuleIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAPortRangeCompilesToAFirewallRuleWithItsRange": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestDeletingASessionRewritesTheFirewallPolicy": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestGraphConfigMapsTheFlags": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheFirewallPathIsOptIn": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheFirewallPolicyIsTheUnionOfTheLiveSessions": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheSweepReplacesAStaleFirewallPolicy": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -437,39 +398,36 @@
    "title": "the **opt-in firewall path** itself (BESS's `firewall`, D-147): the match a PDR compiles to where the WildcardMatch key cannot carry it",
    "declared": "**partly in, and unarmed.** `upfd -firewall-ul`/`-firewall-dl` name the module a direction's PDRs go into instead of `-pdr-table-*`: its `<name>/rules` singleton holds the *whole ordered policy*, so the compiler writes every live session's rules of that module (a write of one session's alone would erase the others', and a packet no rule matches is dropped), ordered by Precedence ascending -- 8.2.11's lower value wins and a firewall list applies its first matching rule, so no inversion here -- and replaces it on a deletion and in the startup sweep (an empty policy). A rule's fields are `FirewallArg.Rule`'s: `src_ip`/`dst_ip` (CIDR strings, length mandatory), `proto`, the four port-range bounds, `drop`. What it **cannot** carry is any action: the module's words are drop and pass, it writes no packet metadata, so a rule cannot name the PDR's ActionId or next hop (nor the QFI, the route domain or the tunnel), and a PDR that buffers is refused (no gate to the store). Nothing is live: the installed stage carries no `firewall` module, and a graph that names a module the daemon does not have fails to load, so no `deploy/*.yaml` graph declares one and the arms in `ci/` run the WildcardMatch path with its refusals untouched",
    "spec": "TS 29.244",
-   "group": "datapath composition"
+   "group": "datapath composition",
+   "messages": [
+    "Session Deletion"
+   ],
+   "message": "Session Deletion",
+   "statement": "",
+   "detail": "**partly in, and unarmed.** `upfd -firewall-ul`/`-firewall-dl` name the module a direction's PDRs go into instead of `-pdr-table-*`: its `<name>/rules` singleton holds the *whole ordered policy*, so the compiler writes every live session's rules of that module (a write of one session's alone would erase the others', and a packet no rule matches is dropped), ordered by Precedence ascending -- 8.2.11's lower value wins and a firewall list applies its first matching rule, so no inversion here -- and replaces it on a deletion and in the startup sweep (an empty policy). A rule's fields are `FirewallArg.Rule`'s: `src_ip`/`dst_ip` (CIDR strings, length mandatory), `proto`, the four port-range bounds, `drop`. What it **cannot** carry is any action: the module's words are drop and pass, it writes no packet metadata, so a rule cannot name the PDR's ActionId or next hop (nor the QFI, the route domain or the tunnel), and a PDR that buffers is refused (no gate to the store). Nothing is live: the installed stage carries no `firewall` module, and a graph that names a module the daemon does not have fails to load, so no `deploy/*.yaml` graph declares one and the arms in `ci/` run the WildcardMatch path with its refusals untouched",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestAPortRangeCompilesToAFirewallRuleWithItsRange, TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly, TestAMixedFamilyFirewallRuleIsRefused, TestAFirewallRuleCarriesThePDRAVerdict, TestAFirewallDeploymentThatBuffersIsRefused, TestTheFirewallPolicyIsTheUnionOfTheLiveSessions, TestDeletingASessionRewritesTheFirewallPolicy, TestTheSweepReplacesAStaleFirewallPolicy, TestTheFirewallPathIsOptIn; `cmd/upfd`: TestGraphConfigMapsTheFlags"
+    }
+   ],
+   "kind": "engineering",
+   "block": 7
   },
   {
    "id": "status-9",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "a PDI with no UE IP IE (an uplink PDR chosen by its F-TEID, or an SMF that sent the address on one direction only)"
-    },
-    {
-     "name": "state",
-     "value": "the field takes the session's UE address when another PDR names it (the address arrives on the downlink PDI, the uplink rule inherits it), and a session that names it on no PDR is refused (cause 73: the uplink rule would carry no session key) -- not served unconstrained"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestTheUplinkRuleIsKeyedOnTheSessionsUEAddress` (both arms: inheritance and the refusal)"
-    }
-   ],
    "evidence": [
     "TestTheUplinkRuleIsKeyedOnTheSessionsUEAddress"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestTheUplinkRuleIsKeyedOnTheSessionsUEAddress": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -477,29 +435,26 @@
    "part": "ies",
    "title": "a PDI with no UE IP IE (an uplink PDR chosen by its F-TEID, or an SMF that sent the address on one direction only)",
    "declared": "the field takes the session's UE address when another PDR names it (the address arrives on the downlink PDI, the uplink rule inherits it), and a session that names it on no PDR is refused (cause 73: the uplink rule would carry no session key) -- not served unconstrained",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Shared information elements"
+   ],
+   "message": "Shared information elements",
+   "statement": "",
+   "detail": "the field takes the session's UE address when another PDR names it (the address arrives on the downlink PDI, the uplink rule inherits it), and a session that names it on no PDR is refused (cause 73: the uplink rule would carry no session key) -- not served unconstrained",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`TestTheUplinkRuleIsKeyedOnTheSessionsUEAddress` (both arms: inheritance and the refusal)"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-10",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "a restarted controller does not inherit its predecessor's dataplane state: `upfd` empties the session tables in bounded transactions before its PFCP socket opens, and with `-checkpoint` the journal's sessions are replayed after it, so the run holds exactly the sessions it can name"
-    },
-    {
-     "name": "state",
-     "value": "in (docs/design.md's restart wall, no PFCP clause): the sweep reads back one resource per `Contents` call (a call naming several packs them into one response, which the daemon refuses above its 64 MiB message limit: the largest single table is the interim's ceiling -- roughly 510K entries at 131 B each, no paged read, and past it the operator restarts `bessd` -- with its replacement recorded in docs/design.md as a bounded clear in the daemon, which removes the readback), erases exactly the entries it found, key by key, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse) and leaves every resource the graph itself declares; a *firewall policy* has no key to erase -- its resource is a singleton -- so a non-empty one is replaced by an empty policy (a rule's verdict is drop or pass, so one left behind would pass packets no session owns); a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over"
-    },
-    {
-     "name": "evidence",
-     "value": "TestSweepNamesTheGraphsResources, TestSweepErasesEveryReadEntryInOneTransaction, TestSweepWithNothingToEraseWritesNothing, TestSweepReportsAnUnreadableDataplane, TestSweepErasesInBoundedBatchesAtScale, TestSweepStopsAtTheFirstFailedBatch, TestSweepLeavesNothingErasedWhenTheReadbackFails, TestTheSweepReplacesAStaleFirewallPolicy, TestLiveStartupSweepErasesStaleSessions; `ci/n4-path.sh`'s restart step (a second controller against a daemon still holding the first one's session: the rules go, and the packets that crossed stop being selected) and its checkpoint phase (a third run replays the journal after the same sweep, and the packets cross again)"
-    }
-   ],
    "evidence": [
     "TestLiveStartupSweepErasesStaleSessions",
     "TestSweepErasesEveryReadEntryInOneTransaction",
@@ -514,47 +469,47 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestLiveStartupSweepErasesStaleSessions": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestSweepErasesEveryReadEntryInOneTransaction": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestSweepErasesInBoundedBatchesAtScale": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestSweepLeavesNothingErasedWhenTheReadbackFails": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestSweepNamesTheGraphsResources": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestSweepReportsAnUnreadableDataplane": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestSweepStopsAtTheFirstFailedBatch": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestSweepWithNothingToEraseWritesNothing": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheSweepReplacesAStaleFirewallPolicy": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/n4-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -563,44 +518,41 @@
    "title": "a restarted controller does not inherit its predecessor's dataplane state: `upfd` empties the session tables in bounded transactions before its PFCP socket opens, and with `-checkpoint` the journal's sessions are replayed after it, so the run holds exactly the sessions it can name",
    "declared": "in (docs/design.md's restart wall, no PFCP clause): the sweep reads back one resource per `Contents` call (a call naming several packs them into one response, which the daemon refuses above its 64 MiB message limit: the largest single table is the interim's ceiling -- roughly 510K entries at 131 B each, no paged read, and past it the operator restarts `bessd` -- with its replacement recorded in docs/design.md as a bounded clear in the daemon, which removes the readback), erases exactly the entries it found, key by key, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse) and leaves every resource the graph itself declares; a *firewall policy* has no key to erase -- its resource is a singleton -- so a non-empty one is replaced by an empty policy (a rule's verdict is drop or pass, so one left behind would pass packets no session owns); a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
    "spec": "TS 29.244",
-   "group": "control plane"
+   "group": "control plane",
+   "messages": [
+    "Cross-cutting (no message)"
+   ],
+   "message": "Cross-cutting (no message)",
+   "statement": "",
+   "detail": "in (docs/design.md's restart wall, no PFCP clause): the sweep reads back one resource per `Contents` call (a call naming several packs them into one response, which the daemon refuses above its 64 MiB message limit: the largest single table is the interim's ceiling -- roughly 510K entries at 131 B each, no paged read, and past it the operator restarts `bessd` -- with its replacement recorded in docs/design.md as a bounded clear in the daemon, which removes the readback), erases exactly the entries it found, key by key, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse) and leaves every resource the graph itself declares; a *firewall policy* has no key to erase -- its resource is a singleton -- so a non-empty one is replaced by an empty policy (a rule's verdict is drop or pass, so one left behind would pass packets no session owns); a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestSweepNamesTheGraphsResources, TestSweepErasesEveryReadEntryInOneTransaction, TestSweepWithNothingToEraseWritesNothing, TestSweepReportsAnUnreadableDataplane, TestSweepErasesInBoundedBatchesAtScale, TestSweepStopsAtTheFirstFailedBatch, TestSweepLeavesNothingErasedWhenTheReadbackFails, TestTheSweepReplacesAStaleFirewallPolicy, TestLiveStartupSweepErasesStaleSessions; `ci/n4-path.sh`'s restart step (a second controller against a daemon still holding the first one's session: the rules go, and the packets that crossed stop being selected) and its checkpoint phase (a third run replays the journal after the same sweep, and the packets cross again)"
+    }
+   ],
+   "kind": "engineering",
+   "block": null
   },
   {
    "id": "status-11",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "session churn: an id released by a deletion is not reused until the dataplane's retire period has passed, and a restarted controller does not walk its predecessor's order"
-    },
-    {
-     "name": "state",
-     "value": "in"
-    },
-    {
-     "name": "evidence",
-     "value": "TestTheIDPoolWalksTheSpaceAndWaitsOutTheGrace; both live arms of `ci/session-path.sh` (the second one is what found it)"
-    }
-   ],
    "evidence": [
     "TestTheIDPoolWalksTheSpaceAndWaitsOutTheGrace",
     "ci/session-path.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestTheIDPoolWalksTheSpaceAndWaitsOutTheGrace": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/session-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -609,29 +561,26 @@
    "title": "session churn: an id released by a deletion is not reused until the dataplane's retire period has passed, and a restarted controller does not walk its predecessor's order",
    "declared": "in",
    "spec": "TS 29.244",
-   "group": "control plane"
+   "group": "control plane",
+   "messages": [
+    "Session Deletion"
+   ],
+   "message": "Session Deletion",
+   "statement": "",
+   "detail": "in",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestTheIDPoolWalksTheSpaceAndWaitsOutTheGrace; both live arms of `ci/session-path.sh` (the second one is what found it)"
+    }
+   ],
+   "kind": "engineering",
+   "block": 2
   },
   {
    "id": "status-12",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "one key is one rule: a second session cannot take a rule a live session holds"
-    },
-    {
-     "name": "state",
-     "value": "in (docs/design.md, \"Restart and failure semantics\"): `compile` keeps the owner of every rule key a live session holds and refuses the second claimant with cause 73 rather than letting it take the first's packets (and, on its deletion, erase the rule the first still holds); the check and the claim are one critical section, a compile that fails partway gives up only the keys it was the first to claim, and a key is given up in `settle` -- once the transaction that erases it has landed -- or in `releaseSession`, once the deletion has landed"
-    },
-    {
-     "name": "evidence",
-     "value": "TestASecondSessionsRuleCannotTakeTheFirsts (the second refused, the first untouched, the key free once it goes), TestAFailedCompileKeepsTheKeysTheSessionHeld (a compile that fails partway leaves a live session's keys its own), TestARefusedMoveKeepsTheKeysRule (a refused move keeps the old key until the retry lands, and the key is free after it), TestADeletionFreesOnlyItsOwnRuleKeys (a release frees the session's own keys and leaves another session's alone), TestAnUnansweredApplyKeepsTheSessionsKeys (an Apply whose answer never came keeps them, as its ids are kept)"
-    }
-   ],
    "evidence": [
     "TestADeletionFreesOnlyItsOwnRuleKeys",
     "TestAFailedCompileKeepsTheKeysTheSessionHeld",
@@ -641,27 +590,27 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestADeletionFreesOnlyItsOwnRuleKeys": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAFailedCompileKeepsTheKeysTheSessionHeld": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestARefusedMoveKeepsTheKeysRule": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestASecondSessionsRuleCannotTakeTheFirsts": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAnUnansweredApplyKeepsTheSessionsKeys": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -670,29 +619,26 @@
    "title": "one key is one rule: a second session cannot take a rule a live session holds",
    "declared": "in (docs/design.md, \"Restart and failure semantics\"): `compile` keeps the owner of every rule key a live session holds and refuses the second claimant with cause 73 rather than letting it take the first's packets (and, on its deletion, erase the rule the first still holds); the check and the claim are one critical section, a compile that fails partway gives up only the keys it was the first to claim, and a key is given up in `settle` -- once the transaction that erases it has landed -- or in `releaseSession`, once the deletion has landed",
    "spec": "TS 29.244",
-   "group": "control plane"
+   "group": "control plane",
+   "messages": [
+    "Session Deletion"
+   ],
+   "message": "Session Deletion",
+   "statement": "",
+   "detail": "in (docs/design.md, \"Restart and failure semantics\"): `compile` keeps the owner of every rule key a live session holds and refuses the second claimant with cause 73 rather than letting it take the first's packets (and, on its deletion, erase the rule the first still holds); the check and the claim are one critical section, a compile that fails partway gives up only the keys it was the first to claim, and a key is given up in `settle` -- once the transaction that erases it has landed -- or in `releaseSession`, once the deletion has landed",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestASecondSessionsRuleCannotTakeTheFirsts (the second refused, the first untouched, the key free once it goes), TestAFailedCompileKeepsTheKeysTheSessionHeld (a compile that fails partway leaves a live session's keys its own), TestARefusedMoveKeepsTheKeysRule (a refused move keeps the old key until the retry lands, and the key is free after it), TestADeletionFreesOnlyItsOwnRuleKeys (a release frees the session's own keys and leaves another session's alone), TestAnUnansweredApplyKeepsTheSessionsKeys (an Apply whose answer never came keeps them, as its ids are kept)"
+    }
+   ],
+   "kind": "engineering",
+   "block": 2
   },
   {
    "id": "status-13",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "`upfd`'s management surface (docs/design.md: \"what upfd owns\")"
-    },
-    {
-     "name": "state",
-     "value": "**partly in**: the numbers -- `upfd -metrics host:port` serves the session layer's counters (sessions held, establishments, modifications, deletions, refusals), the reporting loop's (reports sent, refused, held, dropped) and whether a CP function is associated, as Prometheus text at the node that measured them; the graph's shape (module names, key fields, next hops), the network instances, the reporting interval and the checkpoint file are flags. What is not in: nothing of the two the row used to name -- GTP-U echo and the end marker are the dataplane's own rows below, and DDN/BAR are the buffering's, and both are in and live-armed"
-    },
-    {
-     "name": "evidence",
-     "value": "TestTheMetricsEndpointReportsTheNodesNumbers, TestTheMetricsAddressIsBoundAtStartup, `cmd/upfd`: TestParseInstancesReadsTheDeployment and the graph-flag cases; `internal/session`: TestStatsCountWhatTheSMFAsked, and the checkpoint row below"
-    }
-   ],
    "evidence": [
     "TestParseInstancesReadsTheDeployment",
     "TestStatsCountWhatTheSMFAsked",
@@ -701,23 +647,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestParseInstancesReadsTheDeployment": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestStatsCountWhatTheSMFAsked": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheMetricsAddressIsBoundAtStartup": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheMetricsEndpointReportsTheNodesNumbers": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -726,29 +672,28 @@
    "title": "`upfd`'s management surface (docs/design.md: \"what upfd owns\")",
    "declared": "**partly in**: the numbers -- `upfd -metrics host:port` serves the session layer's counters (sessions held, establishments, modifications, deletions, refusals), the reporting loop's (reports sent, refused, held, dropped) and whether a CP function is associated, as Prometheus text at the node that measured them; the graph's shape (module names, key fields, next hops), the network instances, the reporting interval and the checkpoint file are flags. What is not in: nothing of the two the row used to name -- GTP-U echo and the end marker are the dataplane's own rows below, and DDN/BAR are the buffering's, and both are in and live-armed",
    "spec": "TS 29.244",
-   "group": "control plane"
+   "group": "control plane",
+   "messages": [
+    "Session Deletion",
+    "Session Establishment",
+    "Session Modification"
+   ],
+   "message": "Session Deletion",
+   "statement": "",
+   "detail": "**partly in**: the numbers -- `upfd -metrics host:port` serves the session layer's counters (sessions held, establishments, modifications, deletions, refusals), the reporting loop's (reports sent, refused, held, dropped) and whether a CP function is associated, as Prometheus text at the node that measured them; the graph's shape (module names, key fields, next hops), the network instances, the reporting interval and the checkpoint file are flags. What is not in: nothing of the two the row used to name -- GTP-U echo and the end marker are the dataplane's own rows below, and DDN/BAR are the buffering's, and both are in and live-armed",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestTheMetricsEndpointReportsTheNodesNumbers, TestTheMetricsAddressIsBoundAtStartup, `cmd/upfd`: TestParseInstancesReadsTheDeployment and the graph-flag cases; `internal/session`: TestStatsCountWhatTheSMFAsked, and the checkpoint row below"
+    }
+   ],
+   "kind": "engineering",
+   "block": 7
   },
   {
    "id": "status-14",
    "scope": "status",
-   "fields": [
-    {
-     "name": "\u00a7",
-     "value": "\u2014"
-    },
-    {
-     "name": "capability",
-     "value": "a restart keeps the sessions rather than losing them, when the run was given a checkpoint"
-    },
-    {
-     "name": "state",
-     "value": "in (docs/design.md's restart wall, no PFCP clause): `upfd -checkpoint <path>` journals every applied session message before the SMF is answered and replays it before the PFCP socket opens (after the sweep, so the dataplane holds the journal's sessions and nothing else); a replayed session keeps the local SEID the SMF addresses it by; a restart that restored the journal re-advertises the recorded Recovery Time Stamp, so the SMF does not re-establish sessions this node still holds, and a restart with no usable journal mints a new one and clears the file; the association's end clears it too, because the CP function's restart voids the sessions it describes"
-    },
-    {
-     "name": "evidence",
-     "value": "TestTheCheckpointReplaysSessions, TestTheCheckpointIgnoresATornRecord, TestTheCheckpointRefusesCorruption, TestTheCheckpointStampSurvivesARestart, TestTheAssociationEndingClearsTheCheckpoint; `internal/n4`: TestTheAssociationAnswerCarriesTheConfiguredRecoveryTimeStamp; `ci/n4-path.sh`'s checkpoint phase (a replayed session's packets crossing with no SMF message since the restart, and the same stamp in both runs' logs)"
-    }
-   ],
    "evidence": [
     "TestTheAssociationAnswerCarriesTheConfiguredRecoveryTimeStamp",
     "TestTheAssociationEndingClearsTheCheckpoint",
@@ -760,35 +705,35 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestTheAssociationAnswerCarriesTheConfiguredRecoveryTimeStamp": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheAssociationEndingClearsTheCheckpoint": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheCheckpointIgnoresATornRecord": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheCheckpointRefusesCorruption": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheCheckpointReplaysSessions": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheCheckpointStampSurvivesARestart": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/n4-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -797,48 +742,42 @@
    "title": "a restart keeps the sessions rather than losing them, when the run was given a checkpoint",
    "declared": "in (docs/design.md's restart wall, no PFCP clause): `upfd -checkpoint <path>` journals every applied session message before the SMF is answered and replays it before the PFCP socket opens (after the sweep, so the dataplane holds the journal's sessions and nothing else); a replayed session keeps the local SEID the SMF addresses it by; a restart that restored the journal re-advertises the recorded Recovery Time Stamp, so the SMF does not re-establish sessions this node still holds, and a restart with no usable journal mints a new one and clears the file; the association's end clears it too, because the CP function's restart voids the sessions it describes",
    "spec": "TS 29.244",
-   "group": "control plane"
+   "group": "control plane",
+   "messages": [
+    "Association",
+    "Session Establishment"
+   ],
+   "message": "Association",
+   "statement": "",
+   "detail": "in (docs/design.md's restart wall, no PFCP clause): `upfd -checkpoint <path>` journals every applied session message before the SMF is answered and replays it before the PFCP socket opens (after the sweep, so the dataplane holds the journal's sessions and nothing else); a replayed session keeps the local SEID the SMF addresses it by; a restart that restored the journal re-advertises the recorded Recovery Time Stamp, so the SMF does not re-establish sessions this node still holds, and a restart with no usable journal mints a new one and clears the file; the association's end clears it too, because the CP function's restart voids the sessions it describes",
+   "effect": "",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "TestTheCheckpointReplaysSessions, TestTheCheckpointIgnoresATornRecord, TestTheCheckpointRefusesCorruption, TestTheCheckpointStampSurvivesARestart, TestTheAssociationEndingClearsTheCheckpoint; `internal/n4`: TestTheAssociationAnswerCarriesTheConfiguredRecoveryTimeStamp; `ci/n4-path.sh`'s checkpoint phase (a replayed session's packets crossing with no SMF message since the restart, and the same stamp in both runs' logs)"
+    }
+   ],
+   "kind": "engineering",
+   "block": 1
   },
   {
    "id": "status-15",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "1"
-    },
-    {
-     "name": "spec",
-     "value": "5.2.1A.2A: the CP copies the PCF's (downlink-form) Flow Description into **both** PDRs; for Source Interface ACCESS the UP \"shall swap the source and destination address/port\""
-    },
-    {
-     "name": "what this UP does",
-     "value": "not swapped: an uplink PDR takes the filter's `from` side as the packet's source and the `to` port as its destination port (`matchValue`, `firewallRule`; both profiles)"
-    },
-    {
-     "name": "evidence",
-     "value": "code; the lanes' uplink filters are written for this reading"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "Open5GS copies the flow description unmodified into UL PDRs (`smf_bearer_tft_update`) and its **UPF swaps** for `src_if == ACCESS` (`lib/pfcp/handler.c:712`, `ogs_ipfw_rule_swap`): `from 8.8.8.8 53 to assigned` would match no uplink packet here. **High** **Fixed** (`pdr.oriented()`, read by the WildcardMatch key and `firewallRule`, which PdrMatch reuses; tests `TestAnUplinkPDRReadsTheDownlinkFormFilterSwapped` and `TestAnUplinkPDRKeysTheWildcardRuleOnTheSwappedFilter`, fail-first: the unswapped rule demanded source 8.8.8.8 and source port 53). Tests and the PdrMatch arm that wrote uplink filters in the old reading moved to the downlink form."
-    }
-   ],
    "evidence": [
     "TestAnUplinkPDRKeysTheWildcardRuleOnTheSwappedFilter",
     "TestAnUplinkPDRReadsTheDownlinkFormFilterSwapped"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAnUplinkPDRKeysTheWildcardRuleOnTheSwappedFilter": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAnUplinkPDRReadsTheDownlinkFormFilterSwapped": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -846,43 +785,36 @@
    "part": "procedures",
    "title": "not swapped: an uplink PDR takes the filter's `from` side as the packet's source and the `to` port as its destination port (`matchValue`, `firewallRule`; both profiles)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Modification"
+   ],
+   "message": "Session Modification",
+   "statement": "5.2.1A.2A: the CP copies the PCF's (downlink-form) Flow Description into **both** PDRs; for Source Interface ACCESS the UP \"shall swap the source and destination address/port\"",
+   "detail": "not swapped: an uplink PDR takes the filter's `from` side as the packet's source and the `to` port as its destination port (`matchValue`, `firewallRule`; both profiles)",
+   "effect": "Open5GS copies the flow description unmodified into UL PDRs (`smf_bearer_tft_update`) and its **UPF swaps** for `src_if == ACCESS` (`lib/pfcp/handler.c:712`, `ogs_ipfw_rule_swap`): `from 8.8.8.8 53 to assigned` would match no uplink packet here. **High** **Fixed** (`pdr.oriented()`, read by the WildcardMatch key and `firewallRule`, which PdrMatch reuses; tests `TestAnUplinkPDRReadsTheDownlinkFormFilterSwapped` and `TestAnUplinkPDRKeysTheWildcardRuleOnTheSwappedFilter`, fail-first: the unswapped rule demanded source 8.8.8.8 and source port 53). Tests and the PdrMatch arm that wrote uplink filters in the old reading moved to the downlink form.",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code; the lanes' uplink filters are written for this reading"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-16",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "2"
-    },
-    {
-     "name": "spec",
-     "value": "7.5.2.2-2 NOTE 4: several SDF Filter IEs are a list, a packet matches if it matches **any**"
-    },
-    {
-     "name": "what this UP does",
-     "value": "the last IE replaces the earlier ones"
-    },
-    {
-     "name": "evidence",
-     "value": "probe: two filters, one rule (the later)"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "a PCC rule with two flows carries one. **High**, silent **Fixed** (`pdr.variants()`: one rule per filter and QFI on every matcher; `TestSeveralSDFFiltersAreSeveralRules` and three more, fail-first against the last-wins parser; unit level, no live arm)."
-    }
-   ],
    "evidence": [
     "TestSeveralSDFFiltersAreSeveralRules"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestSeveralSDFFiltersAreSeveralRules": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -890,43 +822,36 @@
    "part": "messages",
    "title": "the last IE replaces the earlier ones",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "7.5.2.2-2 NOTE 4: several SDF Filter IEs are a list, a packet matches if it matches **any**",
+   "detail": "the last IE replaces the earlier ones",
+   "effect": "a PCC rule with two flows carries one. **High**, silent **Fixed** (`pdr.variants()`: one rule per filter and QFI on every matcher; `TestSeveralSDFFiltersAreSeveralRules` and three more, fail-first against the last-wins parser; unit level, no live arm).",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "probe: two filters, one rule (the later)"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-17",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "3"
-    },
-    {
-     "name": "spec",
-     "value": "7.5.2.2-2: several QFI IEs are a list, match any"
-    },
-    {
-     "name": "what this UP does",
-     "value": "the last IE wins"
-    },
-    {
-     "name": "evidence",
-     "value": "probe; `TestSeveralQFIsAreSeveralRules`"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "silent narrowing **Fixed** with finding 2. The firewall path, whose table has no QFI field, now refuses a PDI that names one (it matched every flow before)."
-    }
-   ],
    "evidence": [
     "TestSeveralQFIsAreSeveralRules"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestSeveralQFIsAreSeveralRules": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -934,48 +859,41 @@
    "part": "messages",
    "title": "the last IE wins",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "7.5.2.2-2: several QFI IEs are a list, match any",
+   "detail": "the last IE wins",
+   "effect": "silent narrowing **Fixed** with finding 2. The firewall path, whose table has no QFI field, now refuses a PDI that names one (it matched every flow before).",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "probe; `TestSeveralQFIsAreSeveralRules`"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-18",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "4"
-    },
-    {
-     "name": "spec",
-     "value": "5.2.1A.3: a bidirectional SDF filter is provisioned once with an SDF Filter ID; the opposite-direction PDR names the ID alone"
-    },
-    {
-     "name": "what this UP does",
-     "value": "an SDF Filter IE with no Flow Description is refused (cause 64)"
-    },
-    {
-     "name": "evidence",
-     "value": "probe"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "Open5GS sends the UL PDR of a bidirectional flow as BID + ID only (`smf_bearer_tft_update`) and its UPF resolves it by copying the opposite-direction rule and swapping it (`handler.c:646`): here the session fails. **High** **Fixed** (`resolveSDFIDs`: an ID-only filter takes the flow description another PDR of the session defines under that ID; an ID nothing defines is cause 73; `TestAnUplinkPDRThatNamesABidirectionalFilterByIDGetsItsFlowDescription`, Open5GS's shape). Limit lifted: every request's merge re-resolves the references, so a definition that changes in another PDR reaches the PDRs that use it, and a copy that changed leaves its previous form in `stale`, so the rule it no longer describes is erased with the rewrite (`TestADefinitionChangeRewritesTheReferencingPDRsRule`; measured failing before the change: the key kept port 53 and nothing was erased)."
-    }
-   ],
    "evidence": [
     "TestADefinitionChangeRewritesTheReferencingPDRsRule",
     "TestAnUplinkPDRThatNamesABidirectionalFilterByIDGetsItsFlowDescription"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestADefinitionChangeRewritesTheReferencingPDRsRule": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAnUplinkPDRThatNamesABidirectionalFilterByIDGetsItsFlowDescription": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -983,43 +901,36 @@
    "part": "procedures",
    "title": "an SDF Filter IE with no Flow Description is refused (cause 64)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Modification"
+   ],
+   "message": "Session Modification",
+   "statement": "5.2.1A.3: a bidirectional SDF filter is provisioned once with an SDF Filter ID; the opposite-direction PDR names the ID alone",
+   "detail": "an SDF Filter IE with no Flow Description is refused (cause 64)",
+   "effect": "Open5GS sends the UL PDR of a bidirectional flow as BID + ID only (`smf_bearer_tft_update`) and its UPF resolves it by copying the opposite-direction rule and swapping it (`handler.c:646`): here the session fails. **High** **Fixed** (`resolveSDFIDs`: an ID-only filter takes the flow description another PDR of the session defines under that ID; an ID nothing defines is cause 73; `TestAnUplinkPDRThatNamesABidirectionalFilterByIDGetsItsFlowDescription`, Open5GS's shape). Limit lifted: every request's merge re-resolves the references, so a definition that changes in another PDR reaches the PDRs that use it, and a copy that changed leaves its previous form in `stale`, so the rule it no longer describes is erased with the rewrite (`TestADefinitionChangeRewritesTheReferencingPDRsRule`; measured failing before the change: the key kept port 53 and nothing was erased).",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "probe"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-19",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "5"
-    },
-    {
-     "name": "spec",
-     "value": "8.2.5: ToS Traffic Class, SPI, Flow Label are match fields; 7.5.2.2-2: Application ID is a match field"
-    },
-    {
-     "name": "what this UP does",
-     "value": "ignored, so the rule is *wider* than asked. `parsePDI` and `parseFAR` are switches with no `default`: **any** IE they do not handle (Application ID, Ethernet PDU Session Information, Ethernet Packet Filter, Framed-Route, Traffic Endpoint ID, ...) is dropped without a refusal"
-    },
-    {
-     "name": "evidence",
-     "value": "probe; code"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "a rule matching more than the SMF said; the opposite of the refusal policy the compiler states. The fix is an allowlist of the IEs honoured, with every other match IE refused (cause 73) **Partly fixed**: ToS/SPI/Flow Label on an SDF Filter, and a PDI carrying Application ID, Traffic Endpoint ID, Ethernet Packet Filter or PDU Session Information, Framed-Route, Framed-Routing, Framed-IPv6-Route or IP Multicast Addressing Info, are refused with cause 73 (`TestAMatchTheUPDoesNotImplementIsRefusedNotDropped`). Not done: `parseFAR`'s silent drops (finding 10) and IEs outside that list."
-    }
-   ],
    "evidence": [
     "TestAMatchTheUPDoesNotImplementIsRefusedNotDropped"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAMatchTheUPDoesNotImplementIsRefusedNotDropped": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1027,33 +938,26 @@
    "part": "ies",
    "title": "ignored, so the rule is *wider* than asked. `parsePDI` and `parseFAR` are switches with no `default`: **any** IE they do not handle (Application ID, Ethernet PDU Session Information, Ethernet Packet Filter, Framed-Route, Traffic Endpoint ID, ...) is dropped without a refusal",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Shared information elements"
+   ],
+   "message": "Shared information elements",
+   "statement": "8.2.5: ToS Traffic Class, SPI, Flow Label are match fields; 7.5.2.2-2: Application ID is a match field",
+   "detail": "ignored, so the rule is *wider* than asked. `parsePDI` and `parseFAR` are switches with no `default`: **any** IE they do not handle (Application ID, Ethernet PDU Session Information, Ethernet Packet Filter, Framed-Route, Traffic Endpoint ID, ...) is dropped without a refusal",
+   "effect": "a rule matching more than the SMF said; the opposite of the refusal policy the compiler states. The fix is an allowlist of the IEs honoured, with every other match IE refused (cause 73) **Partly fixed**: ToS/SPI/Flow Label on an SDF Filter, and a PDI carrying Application ID, Traffic Endpoint ID, Ethernet Packet Filter or PDU Session Information, Framed-Route, Framed-Routing, Framed-IPv6-Route or IP Multicast Addressing Info, are refused with cause 73 (`TestAMatchTheUPDoesNotImplementIsRefusedNotDropped`). Not done: `parseFAR`'s silent drops (finding 10) and IEs outside that list.",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "probe; code"
+    }
+   ],
+   "kind": "conformance",
+   "block": null
   },
   {
    "id": "status-20",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "6"
-    },
-    {
-     "name": "spec",
-     "value": "7.5.2.2-1: several QER IDs on one PDR are a list; 7.5.2.5: QER Correlation ID, GBR, Packet Rate, Averaging Window are enforcement inputs"
-    },
-    {
-     "name": "what this UP does",
-     "value": "**partly fixed**: the **gates** of every QER a PDR names are folded -- a gate closed in any of them stops the rule (resolve), whichever one's rates win. The **GBR** (8.2.7) is the meter's committed rate and the **MBR** (8.2.8) its peak, so the band between them is the meter's yellow gate, wired beside green in every graph (a deployment that marks or sheds that band changes one connection); a GBR above the MBR is refused (cause 73, no meter holds it). The **Averaging Window** (8.2.115, ms) is the meter's burst, where the tree used to write a fixed tenth of a second, and a direction the SMF caps at zero gets no meter rather than a profile the module refuses. **One rule's action carries one meter id** unless the deployment asks for two: then the action names both, the flow's own rate-bearing QER first and the session's shared one after it (below). With one id, a PDR naming several *rate-bearing* QERs is policed by one of them: the session's shared QER -- the most-referenced one, which is how 5.2.1 describes the session's own rate, so the aggregate cap wins rather than whichever QER the SMF listed last -- and a PDR naming only its own flow QER keeps that one. Enforcing every QER's bucket over one packet needs two (or more) meters in the packet's path. **That composition needs no BESS change**: an ActionTable rewrites `meter_id` without consuming the action id, so a second table and a second Meter after the first -- `classifier -> at1 -> m1 -> at2 -> m2` -- give each meter its own id and its own policy, proven on this stage by `ci/meter-compose.sh` (the second meter polices with its own id; had the rewrite not landed it would find no entry and drop fail-closed). Two things that composition needs, both recorded by that lane: every stage's *writes* need a downstream reader or the framework gives them no offset and the module fails closed (`core/metadata.cc`, FillOffsetArrays) -- in the chain the next stage's table, its reader and the Router are those readers -- and the accounting differs from one pass over all buckets: a packet the first meter drops never reaches the second, so the order decides what the aggregate counts: with the flow's meter first, the session's counts only traffic the flow policed through -- the aggregate still caps everything that leaves, and the session can reach its allowance -- while with the session's meter first it also charges packets the flow's meter would have dropped, so the session's own allowance is spent on traffic it never sent (the cap holds either way; which is wanted is the compiler's decision, finding 23) and the two buckets are not updated atomically (finding 23 tracks the compiler work). **The one-action form is now in the fork**: a Meter takes an ordered list of ids (`meter_ids`), checks them in that order, and a packet a level marks red is not charged to the levels after it (BESS fork PR #44); the compiler writes the PDR's own rate-bearing QER first and the session's shared one after it when the direction's level count is 2 (`-meter-levels-ul/-dl`, `ownMeterID`/`sharedMeterID`), so one lookup polices both buckets with the flow's decision final. 0 and 1 are the historical single `meter_id`, which every deployed graph keeps because it declares no `levels`; a graph that does declares `levels: 2` on both its Meter and ActionTable -- the framework refuses a pair that disagrees, the table refuses a longer list -- and the stage this tree runs does not carry the fork change yet. **QER Correlation ID** (8.2.10) is CP-side by construction -- it correlates QERs *across PFCP sessions* -- and leaves a UP with nothing to enforce"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestAQERsGBRIsTheMetersCommittedRate`, `TestAQERsAveragingWindowIsTheMetersBurst`, `TestAGBRAboveTheMBRIsRefused`, `TestAPDRWithSeveralRateBearingQERsEnforcesTheSharedOne`, `TestAQERThatCapsOneDirectionWritesOneMeter`, `TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions`; `TestLiveGBRSplitsTheMeter` (the lane's daemon: the yellow gate is *empty* for a QER with no GBR and fills once one is provisioned, read through `bess_gate_packets_total`)"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "the usual 5GC shape -- a Session-AMBR QER plus a flow QER -- is now gated by both and policed by the aggregate cap, and a flow's guarantee is visible to the deployment instead of being policed flat. Still open: two *rate-bearing* QERs on one PDR are both enforced only where the graph declares the meter stack's `levels: 2` (fork PR #44) -- the stage this tree runs does not, so one id stays the default -- and Packet Rate (finding 22) is the *unit* half of the same fork work (PR #45)"
-    }
-   ],
    "evidence": [
     "TestAGBRAboveTheMBRIsRefused",
     "TestAPDRWithSeveralRateBearingQERsEnforcesTheSharedOne",
@@ -1066,39 +970,39 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAGBRAboveTheMBRIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAPDRWithSeveralRateBearingQERsEnforcesTheSharedOne": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAQERThatCapsOneDirectionWritesOneMeter": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAQERsAveragingWindowIsTheMetersBurst": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAQERsGBRIsTheMetersCommittedRate": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestLiveGBRSplitsTheMeter": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/meter-compose.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1106,43 +1010,36 @@
    "part": "messages",
    "title": "**partly fixed**: the **gates** of every QER a PDR names are folded -- a gate closed in any of them stops the rule (resolve), whichever one's rates win. The **GBR** (8.2.7) is the meter's committed rate and the **MBR** (8.2.8) its peak, so the band between them is the meter's yellow gate, wired beside green in every graph (a deployment that marks or sheds that band changes one connection); a GBR above the MBR is refused (cause 73, no meter holds it). The **Averaging Window** (8.2.115, ms) is the meter's burst, where the tree used to write a fixed tenth of a second, and a direction the SMF caps at zero gets no meter rather than a profile the module refuses. **One rule's action carries one meter id** unless the deployment asks for two: then the action names both, the flow's own rate-bearing QER first and the session's shared one after it (below). With one id, a PDR naming several *rate-bearing* QERs is policed by one of them: the session's shared QER -- the most-referenced one, which is how 5.2.1 describes the session's own rate, so the aggregate cap wins rather than whichever QER the SMF listed last -- and a PDR naming only its own flow QER keeps that one. Enforcing every QER's bucket over one packet needs two (or more) meters in the packet's path. **That composition needs no BESS change**: an ActionTable rewrites `meter_id` without consuming the action id, so a second table and a second Meter after the first -- `classifier -> at1 -> m1 -> at2 -> m2` -- give each meter its own id and its own policy, proven on this stage by `ci/meter-compose.sh` (the second meter polices with its own id; had the rewrite not landed it would find no entry and drop fail-closed). Two things that composition needs, both recorded by that lane: every stage's *writes* need a downstream reader or the framework gives them no offset and the module fails closed (`core/metadata.cc`, FillOffsetArrays) -- in the chain the next stage's table, its reader and the Router are those readers -- and the accounting differs from one pass over all buckets: a packet the first meter drops never reaches the second, so the order decides what the aggregate counts: with the flow's meter first, the session's counts only traffic the flow policed through -- the aggregate still caps everything that leaves, and the session can reach its allowance -- while with the session's meter first it also charges packets the flow's meter would have dropped, so the session's own allowance is spent on traffic it never sent (the cap holds either way; which is wanted is the compiler's decision, finding 23) and the two buckets are not updated atomically (finding 23 tracks the compiler work). **The one-action form is now in the fork**: a Meter takes an ordered list of ids (`meter_ids`), checks them in that order, and a packet a level marks red is not charged to the levels after it (BESS fork PR #44); the compiler writes the PDR's own rate-bearing QER first and the session's shared one after it when the direction's level count is 2 (`-meter-levels-ul/-dl`, `ownMeterID`/`sharedMeterID`), so one lookup polices both buckets with the flow's decision final. 0 and 1 are the historical single `meter_id`, which every deployed graph keeps because it declares no `levels`; a graph that does declares `levels: 2` on both its Meter and ActionTable -- the framework refuses a pair that disagrees, the table refuses a longer list -- and the stage this tree runs does not carry the fork change yet. **QER Correlation ID** (8.2.10) is CP-side by construction -- it correlates QERs *across PFCP sessions* -- and leaves a UP with nothing to enforce",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "7.5.2.2-1: several QER IDs on one PDR are a list; 7.5.2.5: QER Correlation ID, GBR, Packet Rate, Averaging Window are enforcement inputs",
+   "detail": "**partly fixed**: the **gates** of every QER a PDR names are folded -- a gate closed in any of them stops the rule (resolve), whichever one's rates win. The **GBR** (8.2.7) is the meter's committed rate and the **MBR** (8.2.8) its peak, so the band between them is the meter's yellow gate, wired beside green in every graph (a deployment that marks or sheds that band changes one connection); a GBR above the MBR is refused (cause 73, no meter holds it). The **Averaging Window** (8.2.115, ms) is the meter's burst, where the tree used to write a fixed tenth of a second, and a direction the SMF caps at zero gets no meter rather than a profile the module refuses. **One rule's action carries one meter id** unless the deployment asks for two: then the action names both, the flow's own rate-bearing QER first and the session's shared one after it (below). With one id, a PDR naming several *rate-bearing* QERs is policed by one of them: the session's shared QER -- the most-referenced one, which is how 5.2.1 describes the session's own rate, so the aggregate cap wins rather than whichever QER the SMF listed last -- and a PDR naming only its own flow QER keeps that one. Enforcing every QER's bucket over one packet needs two (or more) meters in the packet's path. **That composition needs no BESS change**: an ActionTable rewrites `meter_id` without consuming the action id, so a second table and a second Meter after the first -- `classifier -> at1 -> m1 -> at2 -> m2` -- give each meter its own id and its own policy, proven on this stage by `ci/meter-compose.sh` (the second meter polices with its own id; had the rewrite not landed it would find no entry and drop fail-closed). Two things that composition needs, both recorded by that lane: every stage's *writes* need a downstream reader or the framework gives them no offset and the module fails closed (`core/metadata.cc`, FillOffsetArrays) -- in the chain the next stage's table, its reader and the Router are those readers -- and the accounting differs from one pass over all buckets: a packet the first meter drops never reaches the second, so the order decides what the aggregate counts: with the flow's meter first, the session's counts only traffic the flow policed through -- the aggregate still caps everything that leaves, and the session can reach its allowance -- while with the session's meter first it also charges packets the flow's meter would have dropped, so the session's own allowance is spent on traffic it never sent (the cap holds either way; which is wanted is the compiler's decision, finding 23) and the two buckets are not updated atomically (finding 23 tracks the compiler work). **The one-action form is now in the fork**: a Meter takes an ordered list of ids (`meter_ids`), checks them in that order, and a packet a level marks red is not charged to the levels after it (BESS fork PR #44); the compiler writes the PDR's own rate-bearing QER first and the session's shared one after it when the direction's level count is 2 (`-meter-levels-ul/-dl`, `ownMeterID`/`sharedMeterID`), so one lookup polices both buckets with the flow's decision final. 0 and 1 are the historical single `meter_id`, which every deployed graph keeps because it declares no `levels`; a graph that does declares `levels: 2` on both its Meter and ActionTable -- the framework refuses a pair that disagrees, the table refuses a longer list -- and the stage this tree runs does not carry the fork change yet. **QER Correlation ID** (8.2.10) is CP-side by construction -- it correlates QERs *across PFCP sessions* -- and leaves a UP with nothing to enforce",
+   "effect": "the usual 5GC shape -- a Session-AMBR QER plus a flow QER -- is now gated by both and policed by the aggregate cap, and a flow's guarantee is visible to the deployment instead of being policed flat. Still open: two *rate-bearing* QERs on one PDR are both enforced only where the graph declares the meter stack's `levels: 2` (fork PR #44) -- the stage this tree runs does not, so one id stays the default -- and Packet Rate (finding 22) is the *unit* half of the same fork work (PR #45)",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`TestAQERsGBRIsTheMetersCommittedRate`, `TestAQERsAveragingWindowIsTheMetersBurst`, `TestAGBRAboveTheMBRIsRefused`, `TestAPDRWithSeveralRateBearingQERsEnforcesTheSharedOne`, `TestAQERThatCapsOneDirectionWritesOneMeter`, `TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions`; `TestLiveGBRSplitsTheMeter` (the lane's daemon: the yellow gate is *empty* for a QER with no GBR and fills once one is provisioned, read through `bess_gate_packets_total`)"
+    }
+   ],
+   "kind": "conformance",
+   "block": 5
   },
   {
    "id": "status-21",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "7"
-    },
-    {
-     "name": "spec",
-     "value": "5.2.2.3.1: at session termination the UP \"shall indicate ... in the PFCP Session Deletion Response\" the usage of each URR since its last report; NOTE 12: removing a URR always produces an immediate report; Query URR / QAURR returns reports in the Modification Response"
-    },
-    {
-     "name": "what this UP does",
-     "value": "the Deletion Response carries only a Cause (`deleteResponse`); Remove URR and Query URR produce no report"
-    },
-    {
-     "name": "evidence",
-     "value": "code"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "the final usage is lost at deletion: charging. **High** **Fixed**, all three parts: the deletion response carries a Usage Report with TERMR per URR (`terminationReports`; unit tests, and the live `TestLiveUsageReportReachesTheSMF` now deletes its session and reads the report over PFCP); Query URR and QAURR answer with IMMER reports and open the next window only once the message succeeded; Remove URR answers with a TERMR report, and an Update PDR with a Remove URR in one message now works (the removal check follows the PDR update). Limits: a URR that never had a counter reading reports an empty window (no base, so usage is under-reported, never invented); unreadable counters leave the response without reports, logged; a URR whose PDR a spent quota dropped reports an empty window."
-    }
-   ],
    "evidence": [
     "TestLiveUsageReportReachesTheSMF"
    ],
    "result": {
     "state": "skip",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestLiveUsageReportReachesTheSMF": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1150,43 +1047,38 @@
    "part": "procedures",
    "title": "the Deletion Response carries only a Cause (`deleteResponse`); Remove URR and Query URR produce no report",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Deletion",
+    "Session Modification",
+    "Session Report"
+   ],
+   "message": "Session Report",
+   "statement": "5.2.2.3.1: at session termination the UP \"shall indicate ... in the PFCP Session Deletion Response\" the usage of each URR since its last report; NOTE 12: removing a URR always produces an immediate report; Query URR / QAURR returns reports in the Modification Response",
+   "detail": "the Deletion Response carries only a Cause (`deleteResponse`); Remove URR and Query URR produce no report",
+   "effect": "the final usage is lost at deletion: charging. **High** **Fixed**, all three parts: the deletion response carries a Usage Report with TERMR per URR (`terminationReports`; unit tests, and the live `TestLiveUsageReportReachesTheSMF` now deletes its session and reads the report over PFCP); Query URR and QAURR answer with IMMER reports and open the next window only once the message succeeded; Remove URR answers with a TERMR report, and an Update PDR with a Remove URR in one message now works (the removal check follows the PDR update). Limits: a URR that never had a counter reading reports an empty window (no base, so usage is under-reported, never invented); unreadable counters leave the response without reports, logged; a URR whose PDR a spent quota dropped reports an empty window.",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code"
+    }
+   ],
+   "kind": "conformance",
+   "block": 6
   },
   {
    "id": "status-22",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "8"
-    },
-    {
-     "name": "spec",
-     "value": "TS 29.281 7.3.1: a G-PDU for an unknown tunnel is discarded **and** an Error Indication returned (TEID != 0)"
-    },
-    {
-     "name": "what this UP does",
-     "value": "**fixed**: the responder behind the TEID table's default gate answers a G-PDU on an unnamed TEID with an Error Indication -- S clear, header TEID 0, the TEID IE naming the peer's -- and drops every other type; TEID 0 stays the echo path and gets none"
-    },
-    {
-     "name": "evidence",
-     "value": "`ci/smoke-gtpu.sh` (the unknown-TEID frame's two checks, after `src_drop`)"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "the peer learns the tunnel is gone; the *receive* half (an Error Indication arriving here, and the ERIR report to the SMF) is finding 15, fixed"
-    }
-   ],
    "evidence": [
     "ci/smoke-gtpu.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "ci/smoke-gtpu.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1194,33 +1086,26 @@
    "part": "other-specs",
    "title": "**fixed**: the responder behind the TEID table's default gate answers a G-PDU on an unnamed TEID with an Error Indication -- S clear, header TEID 0, the TEID IE naming the peer's -- and drops every other type; TEID 0 stays the echo path and gets none",
    "declared": "",
-   "spec": "TS 29.281"
+   "spec": "TS 29.281",
+   "messages": [
+    "Error Indication and its report"
+   ],
+   "message": "Error Indication and its report",
+   "statement": "TS 29.281 7.3.1: a G-PDU for an unknown tunnel is discarded **and** an Error Indication returned (TEID != 0)",
+   "detail": "**fixed**: the responder behind the TEID table's default gate answers a G-PDU on an unnamed TEID with an Error Indication -- S clear, header TEID 0, the TEID IE naming the peer's -- and drops every other type; TEID 0 stays the echo path and gets none",
+   "effect": "the peer learns the tunnel is gone; the *receive* half (an Error Indication arriving here, and the ERIR report to the SMF) is finding 15, fixed",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`ci/smoke-gtpu.sh` (the unknown-TEID frame's two checks, after `src_drop`)"
+    }
+   ],
+   "kind": "conformance",
+   "block": 8
   },
   {
    "id": "status-23",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "9"
-    },
-    {
-     "name": "spec",
-     "value": "8.2.62: the UE IP address has an S/D flag (bit 3: clear is a source, set a destination), IPv6 is a prefix (default /64, IPv6D/IP6PL lengths; only the prefix part matches)"
-    },
-    {
-     "name": "what this UP does",
-     "value": "**the S/D half is in**: the bit is read (`pdr.ueIPDst`) and the address goes into the key's destination field (or the firewall rule's `dst_ip`) with the source left to the filter; a bit clear keeps the direction's own reading, which is what a PDI without it means. The bit also says an Access PDR's destination is not the session's UE address: it is neither inherited by a PDI that names none (such a session is refused, cause 73) nor asked of the interface's pool. A filter naming a destination the address is not inside is refused rather than read as one of the two. **IPv6 stands: refused**"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestAPDIsDestinationAddressGoesInTheDestinationField`, `TestADestinationAddressIsNotTheSessionsUEAddress`, `TestAPDIsDestinationAndTheSDFsMustAgree`, `TestAFirewallRulesUESideFollowsThePDIsSD`, `TestAFirewallRuleRefusesTheSDContradiction`"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "an uplink PDR matching a *destination* address (the CP function's, for DHCP/RADIUS, 5.2.1's example) is keyed on the destination it named; the IPv6 prefix half (a framed route, a /64 for prefix delegation) is still the gap `docs/design.md` records"
-    }
-   ],
    "evidence": [
     "TestADestinationAddressIsNotTheSessionsUEAddress",
     "TestAFirewallRuleRefusesTheSDContradiction",
@@ -1230,27 +1115,27 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestADestinationAddressIsNotTheSessionsUEAddress": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAFirewallRuleRefusesTheSDContradiction": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAFirewallRulesUESideFollowsThePDIsSD": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAPDIsDestinationAddressGoesInTheDestinationField": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAPDIsDestinationAndTheSDFsMustAgree": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1258,33 +1143,26 @@
    "part": "ies",
    "title": "**the S/D half is in**: the bit is read (`pdr.ueIPDst`) and the address goes into the key's destination field (or the firewall rule's `dst_ip`) with the source left to the filter; a bit clear keeps the direction's own reading, which is what a PDI without it means. The bit also says an Access PDR's destination is not the session's UE address: it is neither inherited by a PDI that names none (such a session is refused, cause 73) nor asked of the interface's pool. A filter naming a destination the address is not inside is refused rather than read as one of the two. **IPv6 stands: refused**",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Shared information elements"
+   ],
+   "message": "Shared information elements",
+   "statement": "8.2.62: the UE IP address has an S/D flag (bit 3: clear is a source, set a destination), IPv6 is a prefix (default /64, IPv6D/IP6PL lengths; only the prefix part matches)",
+   "detail": "**the S/D half is in**: the bit is read (`pdr.ueIPDst`) and the address goes into the key's destination field (or the firewall rule's `dst_ip`) with the source left to the filter; a bit clear keeps the direction's own reading, which is what a PDI without it means. The bit also says an Access PDR's destination is not the session's UE address: it is neither inherited by a PDI that names none (such a session is refused, cause 73) nor asked of the interface's pool. A filter naming a destination the address is not inside is refused rather than read as one of the two. **IPv6 stands: refused**",
+   "effect": "an uplink PDR matching a *destination* address (the CP function's, for DHCP/RADIUS, 5.2.1's example) is keyed on the destination it named; the IPv6 prefix half (a framed route, a /64 for prefix delegation) is still the gap `docs/design.md` records",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`TestAPDIsDestinationAddressGoesInTheDestinationField`, `TestADestinationAddressIsNotTheSessionsUEAddress`, `TestAPDIsDestinationAndTheSDFsMustAgree`, `TestAFirewallRulesUESideFollowsThePDIsSD`, `TestAFirewallRuleRefusesTheSDContradiction`"
+    }
+   ],
+   "kind": "conformance",
+   "block": 9
   },
   {
    "id": "status-24",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "10"
-    },
-    {
-     "name": "spec",
-     "value": "FAR 7.5.2.3: Forwarding Policy, Header Enrichment, Redirect, Proxying; Apply Action DUPL"
-    },
-    {
-     "name": "what this UP does",
-     "value": "**in, as the UP can honour them**: the Forwarding Policy (8.2.23) is read and held -- its presence is the contract where Table 7.5.2.3-2 requires it (SGi-LAN/N6-LAN), and its omission there is refused (cause 66) -- and Header Enrichment (8.2.67), Redirect Information (8.2.20), Proxying (8.2.97) and DUPL (8.2.26 bit 5) are refused with cause 73: nothing in this datapath reads L7 or branches one packet to two actions, so forwarding as if they were absent would leave the SMF believing an instruction was applied"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestAFARThatAsksForL7WorkIsRefused`, `TestAFARThatAsksToDuplicateIsRefused`; `TestAServiceLanForwardNeedsItsForwardingPolicy`"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "the refusals are the honest answer until an L7 stage exists; the Forwarding Policy's *identifier* is not applied to anything (a graph carries no service-fabric classifier)"
-    }
-   ],
    "evidence": [
     "TestAFARThatAsksForL7WorkIsRefused",
     "TestAFARThatAsksToDuplicateIsRefused",
@@ -1292,19 +1170,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAFARThatAsksForL7WorkIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAFARThatAsksToDuplicateIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAServiceLanForwardNeedsItsForwardingPolicy": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1312,33 +1190,26 @@
    "part": "messages",
    "title": "**in, as the UP can honour them**: the Forwarding Policy (8.2.23) is read and held -- its presence is the contract where Table 7.5.2.3-2 requires it (SGi-LAN/N6-LAN), and its omission there is refused (cause 66) -- and Header Enrichment (8.2.67), Redirect Information (8.2.20), Proxying (8.2.97) and DUPL (8.2.26 bit 5) are refused with cause 73: nothing in this datapath reads L7 or branches one packet to two actions, so forwarding as if they were absent would leave the SMF believing an instruction was applied",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "FAR 7.5.2.3: Forwarding Policy, Header Enrichment, Redirect, Proxying; Apply Action DUPL",
+   "detail": "**in, as the UP can honour them**: the Forwarding Policy (8.2.23) is read and held -- its presence is the contract where Table 7.5.2.3-2 requires it (SGi-LAN/N6-LAN), and its omission there is refused (cause 66) -- and Header Enrichment (8.2.67), Redirect Information (8.2.20), Proxying (8.2.97) and DUPL (8.2.26 bit 5) are refused with cause 73: nothing in this datapath reads L7 or branches one packet to two actions, so forwarding as if they were absent would leave the SMF believing an instruction was applied",
+   "effect": "the refusals are the honest answer until an L7 stage exists; the Forwarding Policy's *identifier* is not applied to anything (a graph carries no service-fabric classifier)",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`TestAFARThatAsksForL7WorkIsRefused`, `TestAFARThatAsksToDuplicateIsRefused`; `TestAServiceLanForwardNeedsItsForwardingPolicy`"
+    }
+   ],
+   "kind": "conformance",
+   "block": null
   },
   {
    "id": "status-25",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "11"
-    },
-    {
-     "name": "spec",
-     "value": "5.2.1: packet processing is *session look-up, then the highest-precedence PDR of that session*"
-    },
-    {
-     "name": "what this UP does",
-     "value": "**fixed for the deployed graph**: `deploy/upf.yaml`'s `pdr_ul` key now carries the tunnel the packet arrived on (`upf_teid`, after the 5-tuple and before the QFI), and `ci/interop/up.sh` passes the matching `-pdr-fields-ul src,dst,proto,sport,dport,teid,qfi`, so a packet from session A's tunnel cannot take session B's rule. The custom profile already keyed on the F-TEID; the graph is the generic one"
-    },
-    {
-     "name": "evidence",
-     "value": "static: the YAML parses and `pdr_ul` declares the attribute in both `upf.yaml` and the reference `veth-port.yaml`, whose decap writes it (`gtpu_decap.cc`); the 7-field table with a matching flag is live in `ci/veth-port.sh`. End to end for `deploy/upf.yaml` is `ci/interop/up.sh`, which needs docker + free5GC, so it is recorded, not run here"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "a deployment that builds its own graph must declare the field and pass the same list; the flag's default stays the 6-field shape used by the lab graphs"
-    }
-   ],
    "evidence": [
     "ci/interop/up.sh",
     "ci/veth-port.sh",
@@ -1346,19 +1217,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "deploy/upf.yaml": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/interop/up.sh": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/veth-port.sh": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1366,43 +1237,36 @@
    "part": "procedures",
    "title": "**fixed for the deployed graph**: `deploy/upf.yaml`'s `pdr_ul` key now carries the tunnel the packet arrived on (`upf_teid`, after the 5-tuple and before the QFI), and `ci/interop/up.sh` passes the matching `-pdr-fields-ul src,dst,proto,sport,dport,teid,qfi`, so a packet from session A's tunnel cannot take session B's rule. The custom profile already keyed on the F-TEID; the graph is the generic one",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "5.2.1: packet processing is *session look-up, then the highest-precedence PDR of that session*",
+   "detail": "**fixed for the deployed graph**: `deploy/upf.yaml`'s `pdr_ul` key now carries the tunnel the packet arrived on (`upf_teid`, after the 5-tuple and before the QFI), and `ci/interop/up.sh` passes the matching `-pdr-fields-ul src,dst,proto,sport,dport,teid,qfi`, so a packet from session A's tunnel cannot take session B's rule. The custom profile already keyed on the F-TEID; the graph is the generic one",
+   "effect": "a deployment that builds its own graph must declare the field and pass the same list; the flag's default stays the 6-field shape used by the lab graphs",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "static: the YAML parses and `pdr_ul` declares the attribute in both `upf.yaml` and the reference `veth-port.yaml`, whose decap writes it (`gtpu_decap.cc`); the 7-field table with a matching flag is live in `ci/veth-port.sh`. End to end for `deploy/upf.yaml` is `ci/interop/up.sh`, which needs docker + free5GC, so it is recorded, not run here"
+    }
+   ],
+   "kind": "conformance",
+   "block": 12
   },
   {
    "id": "status-26",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "13"
-    },
-    {
-     "name": "spec",
-     "value": "7.5.2.2-1: a PDR's QER IDs name QERs of the session"
-    },
-    {
-     "name": "what this UP does",
-     "value": "`if entry == nil { continue }` in the QER loop skips an ID the session does not hold, while the URR loop below it refuses the same case with cause 73"
-    },
-    {
-     "name": "evidence",
-     "value": "code (`compile.go`, the `qerIDs` loop)"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "a PDR naming a missing QER goes unpoliced, silently. **Fixed**: the loop refuses a reference the session cannot resolve, cause 73 like the URR and BAR references (`PDR %d's QER %d is not in the session`), and `TestAPDRNamingAnUnknownQERIsRefused` is the pin (fail-first: with the loop's `continue` back, the session is accepted, cause 1)"
-    }
-   ],
    "evidence": [
     "TestAPDRNamingAnUnknownQERIsRefused"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAPDRNamingAnUnknownQERIsRefused": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1410,43 +1274,36 @@
    "part": "messages",
    "title": "`if entry == nil { continue }` in the QER loop skips an ID the session does not hold, while the URR loop below it refuses the same case with cause 73",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "7.5.2.2-1: a PDR's QER IDs name QERs of the session",
+   "detail": "`if entry == nil { continue }` in the QER loop skips an ID the session does not hold, while the URR loop below it refuses the same case with cause 73",
+   "effect": "a PDR naming a missing QER goes unpoliced, silently. **Fixed**: the loop refuses a reference the session cannot resolve, cause 73 like the URR and BAR references (`PDR %d's QER %d is not in the session`), and `TestAPDRNamingAnUnknownQERIsRefused` is the pin (fail-first: with the loop's `continue` back, the session is accepted, cause 1)",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code (`compile.go`, the `qerIDs` loop)"
+    }
+   ],
+   "kind": "conformance",
+   "block": 6
   },
   {
    "id": "status-27",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "14"
-    },
-    {
-     "name": "spec",
-     "value": "8.2.26 NOCP: notify the CP function about the first buffered DL packet *only when* the flag is set; BUFF alone is a request to buffer silently (an SMF sends that while paging is in progress)"
-    },
-    {
-     "name": "what this UP does",
-     "value": "the Downlink Data Report is decided by `p.buffer && !p.ddnSent` (`downlink.go:94`): NOCP is never consulted"
-    },
-    {
-     "name": "evidence",
-     "value": "code"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "a report the SMF did not ask for, on every buffering episode. **Fixed**: `applyNOCP` (8.2.26 octet 5 bit 4) is read and the PDR carries `notify`, so the reading in `EvaluateDownlinks` asks only for buffering PDRs whose FAR asked to be told; `TestTheDownlinkReportIsOwedOncePerBufferingEpisode` now holds the two arms -- a BUFF FAR without NOCP owes nothing, and the modification that sets NOCP makes the same episode's held packet owed (`session-path`'s live arm sends BUFF\\"
-    }
-   ],
    "evidence": [
     "TestTheDownlinkReportIsOwedOncePerBufferingEpisode"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestTheDownlinkReportIsOwedOncePerBufferingEpisode": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1454,33 +1311,26 @@
    "part": "ies",
    "title": "the Downlink Data Report is decided by `p.buffer && !p.ddnSent` (`downlink.go:94`): NOCP is never consulted",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Modification"
+   ],
+   "message": "Session Modification",
+   "statement": "8.2.26 NOCP: notify the CP function about the first buffered DL packet *only when* the flag is set; BUFF alone is a request to buffer silently (an SMF sends that while paging is in progress)",
+   "detail": "the Downlink Data Report is decided by `p.buffer && !p.ddnSent` (`downlink.go:94`): NOCP is never consulted",
+   "effect": "a report the SMF did not ask for, on every buffering episode. **Fixed**: `applyNOCP` (8.2.26 octet 5 bit 4) is read and the PDR carries `notify`, so the reading in `EvaluateDownlinks` asks only for buffering PDRs whose FAR asked to be told; `TestTheDownlinkReportIsOwedOncePerBufferingEpisode` now holds the two arms -- a BUFF FAR without NOCP owes nothing, and the modification that sets NOCP makes the same episode's held packet owed (`session-path`'s live arm sends BUFF\\",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code"
+    }
+   ],
+   "kind": "conformance",
+   "block": 7
   },
   {
    "id": "status-28",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "15"
-    },
-    {
-     "name": "spec",
-     "value": "5.10, 7.5.8.4 and 8.2.21's third bit (ERIR): on receipt of a GTP-U Error Indication the UP shall send a Session Report Request with an **Error Indication Report** (Report Type ERIR) carrying the remote F-TEID"
-    },
-    {
-     "name": "what this UP does",
-     "value": "**fixed**: the responder behind the TEID table's default gate records every Error Indication the peer sends, per TEID, in a fixed-size lock-free table (`track_errors`; TS 29.281 7.3.1's receive half), and the report tick reads it once through the module's own `get_errors` (`-gtpu-errors <module>`): every count above a session's high-water mark becomes a Session Report Request whose Report Type has the ERIR bit and whose Error Indication Report IE carries the remote F-TEID of the FAR that sends into that tunnel. No capability bit is advertised for it -- 8.2.25 defines none -- so the report is sent by whatever graph tracks the indications"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestAPeerErrorIndicationBecomesAnERIRReport` (the report and its IEs, over the fake dataplane), `TestLiveErrorIndicationBecomesAnERIRReport` (the lane's own daemon: the graph's frame, the live `get_errors`, the report), `ci/smoke-gtpu.sh` (the datapath's count and the frame's TEID), `ci/session-path.sh` in all three profiles"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "the SMF learns a gNB-side tunnel is gone while the session is still up, which is what lets it move the session instead of sending into a dead tunnel"
-    }
-   ],
    "evidence": [
     "TestAPeerErrorIndicationBecomesAnERIRReport",
     "TestLiveErrorIndicationBecomesAnERIRReport",
@@ -1489,23 +1339,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAPeerErrorIndicationBecomesAnERIRReport": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestLiveErrorIndicationBecomesAnERIRReport": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/session-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/smoke-gtpu.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1513,48 +1363,42 @@
    "part": "procedures",
    "title": "**fixed**: the responder behind the TEID table's default gate records every Error Indication the peer sends, per TEID, in a fixed-size lock-free table (`track_errors`; TS 29.281 7.3.1's receive half), and the report tick reads it once through the module's own `get_errors` (`-gtpu-errors <module>`): every count above a session's high-water mark becomes a Session Report Request whose Report Type has the ERIR bit and whose Error Indication Report IE carries the remote F-TEID of the FAR that sends into that tunnel. No capability bit is advertised for it -- 8.2.25 defines none -- so the report is sent by whatever graph tracks the indications",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Error Indication and its report",
+    "Session Report"
+   ],
+   "message": "Error Indication and its report",
+   "statement": "5.10, 7.5.8.4 and 8.2.21's third bit (ERIR): on receipt of a GTP-U Error Indication the UP shall send a Session Report Request with an **Error Indication Report** (Report Type ERIR) carrying the remote F-TEID",
+   "detail": "**fixed**: the responder behind the TEID table's default gate records every Error Indication the peer sends, per TEID, in a fixed-size lock-free table (`track_errors`; TS 29.281 7.3.1's receive half), and the report tick reads it once through the module's own `get_errors` (`-gtpu-errors <module>`): every count above a session's high-water mark becomes a Session Report Request whose Report Type has the ERIR bit and whose Error Indication Report IE carries the remote F-TEID of the FAR that sends into that tunnel. No capability bit is advertised for it -- 8.2.25 defines none -- so the report is sent by whatever graph tracks the indications",
+   "effect": "the SMF learns a gNB-side tunnel is gone while the session is still up, which is what lets it move the session instead of sending into a dead tunnel",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`TestAPeerErrorIndicationBecomesAnERIRReport` (the report and its IEs, over the fake dataplane), `TestLiveErrorIndicationBecomesAnERIRReport` (the lane's own daemon: the graph's frame, the live `get_errors`, the report), `ci/smoke-gtpu.sh` (the datapath's count and the frame's TEID), `ci/session-path.sh` in all three profiles"
+    }
+   ],
+   "kind": "conformance",
+   "block": 8
   },
   {
    "id": "status-29",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "12"
-    },
-    {
-     "name": "spec",
-     "value": "38.415 5.5.3.3: QFI range is 0..63"
-    },
-    {
-     "name": "what this UP does",
-     "value": "the compiler's comment cited \"1..63 (8.2.89)\", which the clause does not say; 0 is refused because the decap writes 0 for \"no container\""
-    },
-    {
-     "name": "evidence",
-     "value": "code"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "corrected in the comment and the error text: a limit of this UP, not of the spec. TS 24.501 9.11.4.12 (whether 0 is an assignable QFI) is **unchecked**. **Fixed**: the ambiguity is gone rather than worked around -- the decap writes 255 (above the six-bit range) for a G-PDU with no PDU Session Container, so a PDI's QFI 0 is accepted like any other value in range and its rule matches only a packet that really carried QFI 0 (`datapath/pdu_session_qfi.h`; `TestAQFIIsInRangeOrRefused` pins the key's value and mask, 64 and 255 stay refused). The live proof is `ci/smoke-gtpu.sh`: a third uplink frame carries the same TEID with the E flag clear, and the lane checks the metadata byte is 255 while no packet leaves 0 there (fail-first: with the sentinel back at 0 the check reports `'11 22 33 44 00' is in a metadata block`)"
-    }
-   ],
    "evidence": [
     "TestAQFIIsInRangeOrRefused",
     "ci/smoke-gtpu.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAQFIIsInRangeOrRefused": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/smoke-gtpu.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1562,43 +1406,36 @@
    "part": "other-specs",
    "title": "the compiler's comment cited \"1..63 (8.2.89)\", which the clause does not say; 0 is refused because the decap writes 0 for \"no container\"",
    "declared": "",
-   "spec": "TS 38.415"
+   "spec": "TS 38.415",
+   "messages": [
+    "Shared information elements"
+   ],
+   "message": "Shared information elements",
+   "statement": "38.415 5.5.3.3: QFI range is 0..63",
+   "detail": "the compiler's comment cited \"1..63 (8.2.89)\", which the clause does not say; 0 is refused because the decap writes 0 for \"no container\"",
+   "effect": "corrected in the comment and the error text: a limit of this UP, not of the spec. TS 24.501 9.11.4.12 (whether 0 is an assignable QFI) is **unchecked**. **Fixed**: the ambiguity is gone rather than worked around -- the decap writes 255 (above the six-bit range) for a G-PDU with no PDU Session Container, so a PDI's QFI 0 is accepted like any other value in range and its rule matches only a packet that really carried QFI 0 (`datapath/pdu_session_qfi.h`; `TestAQFIIsInRangeOrRefused` pins the key's value and mask, 64 and 255 stay refused). The live proof is `ci/smoke-gtpu.sh`: a third uplink frame carries the same TEID with the E flag clear, and the lane checks the metadata byte is 255 while no packet leaves 0 there (fail-first: with the sentinel back at 0 the check reports `'11 22 33 44 00' is in a metadata block`)",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "status-30",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "16"
-    },
-    {
-     "name": "spec",
-     "value": "8.2.41, Figure 8.2.41-1: the Usage Report Trigger is octets 5 to 7, VOLQU/TIMQU/TERMR in octet 6"
-    },
-    {
-     "name": "what this UP does",
-     "value": "`usageReportIE` left out an empty octet 5, so a quota report's bit sat in PERIO's position and the IE had one octet"
-    },
-    {
-     "name": "evidence",
-     "value": "code; `TestAOneOctetReportingTriggersIsRead`"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "an SMF reading the trigger saw PERIO, not VOLQU. **Fixed**: three octets always; the two tests now read the trigger through go-pfcp's accessor and assert octet 5 empty and octet 6 bit 1"
-    }
-   ],
    "evidence": [
     "TestAOneOctetReportingTriggersIsRead"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAOneOctetReportingTriggersIsRead": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1606,48 +1443,41 @@
    "part": "ies",
    "title": "`usageReportIE` left out an empty octet 5, so a quota report's bit sat in PERIO's position and the IE had one octet",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Report"
+   ],
+   "message": "Session Report",
+   "statement": "8.2.41, Figure 8.2.41-1: the Usage Report Trigger is octets 5 to 7, VOLQU/TIMQU/TERMR in octet 6",
+   "detail": "`usageReportIE` left out an empty octet 5, so a quota report's bit sat in PERIO's position and the IE had one octet",
+   "effect": "an SMF reading the trigger saw PERIO, not VOLQU. **Fixed**: three octets always; the two tests now read the trigger through go-pfcp's accessor and assert octet 5 empty and octet 6 bit 1",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code; `TestAOneOctetReportingTriggersIsRead`"
+    }
+   ],
+   "kind": "conformance",
+   "block": 6
   },
   {
    "id": "status-31",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "17"
-    },
-    {
-     "name": "spec",
-     "value": "(no clause: a request the UP refuses must not change the session)"
-    },
-    {
-     "name": "what this UP does",
-     "value": "a modification refused in `merge` left its partial changes in the model, so every later message of the session failed the same way"
-    },
-    {
-     "name": "evidence",
-     "value": "probe on commit `4d39312` (a PDR naming URR 55, then a benign Update FAR: cause 73, then 73)"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "an SMF's retry, or the follow-up it sends after any refusal, was refused. **Fixed**: `modify` snapshots the model and `rollback` restores it, giving back the F-TEIDs and meters the failed merge took (`TestARefusedModificationLeavesTheSessionAsItWas`, `TestARefusedModificationGivesBackTheMetersAndTEIDsItTook`). A *dataplane* refusal (compile or apply) still keeps the model, by design: the retry re-applies it"
-    }
-   ],
    "evidence": [
     "TestARefusedModificationGivesBackTheMetersAndTEIDsItTook",
     "TestARefusedModificationLeavesTheSessionAsItWas"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestARefusedModificationGivesBackTheMetersAndTEIDsItTook": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestARefusedModificationLeavesTheSessionAsItWas": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1656,33 +1486,26 @@
    "title": "a modification refused in `merge` left its partial changes in the model, so every later message of the session failed the same way",
    "declared": "",
    "spec": "TS 29.244",
-   "group": "control plane"
+   "group": "control plane",
+   "messages": [
+    "Session Modification"
+   ],
+   "message": "Session Modification",
+   "statement": "(no clause: a request the UP refuses must not change the session)",
+   "detail": "a modification refused in `merge` left its partial changes in the model, so every later message of the session failed the same way",
+   "effect": "an SMF's retry, or the follow-up it sends after any refusal, was refused. **Fixed**: `modify` snapshots the model and `rollback` restores it, giving back the F-TEIDs and meters the failed merge took (`TestARefusedModificationLeavesTheSessionAsItWas`, `TestARefusedModificationGivesBackTheMetersAndTEIDsItTook`). A *dataplane* refusal (compile or apply) still keeps the model, by design: the retry re-applies it",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "probe on commit `4d39312` (a PDR naming URR 55, then a benign Update FAR: cause 73, then 73)"
+    }
+   ],
+   "kind": "engineering",
+   "block": 2
   },
   {
    "id": "status-32",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "18"
-    },
-    {
-     "name": "spec",
-     "value": "29.244 7.5.2.2 to 7.5.2.4 (Create FAR, QER, URR), 8.2.56, 8.2.75, 8.2.89"
-    },
-    {
-     "name": "what this UP does",
-     "value": "OMEC's pfcpsim (the PFCP simulator TOSSI CNTC drives) was refused four times, each time stopping its whole establishment: **a zero-TEID, 0.0.0.0 Outer Header Creation** on a dropping downlink FAR (read as malformed), **QER QFI 0** (refused, though 0 is in range), **QER ID 0** (read as \"no QER ID\", though 8.2.75 reserves none), and **a Measurement Period on a URR with no PERIO trigger** (refused, though 7.5.2.4 makes the period conditional on PERIO and forbids nothing else)"
-    },
-    {
-     "name": "evidence",
-     "value": "`ci/cntc-path.sh`, first run: `session: cannot read the establishment request`, once per cause, in that order"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "an SMF that numbers its session QER 0, leaves QFI at 0, or pre-creates a dropping FAR could not establish a session. **Fixed** in `40a552c`, `174bdec`, `e5cddf2`, `cb65795`, each with a test that fails on the old parser (`placeholder_test.go`, `TestAQERsQFIReachesTheTunnelRecord`, `TestAMeasurementPeriodWithoutThePeriodicTriggerIsInert`). Decisions: the placeholder reads as \"no tunnel yet\" (the compile already carries a FAR with no Outer Header Creation), QER QFI 0 marks nothing (the encap writes no container for 0), and an inert period is ignored"
-    }
-   ],
    "evidence": [
     "TestAMeasurementPeriodWithoutThePeriodicTriggerIsInert",
     "TestAQERsQFIReachesTheTunnelRecord",
@@ -1690,19 +1513,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAMeasurementPeriodWithoutThePeriodicTriggerIsInert": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAQERsQFIReachesTheTunnelRecord": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/cntc-path.sh": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1710,48 +1533,41 @@
    "part": "messages",
    "title": "OMEC's pfcpsim (the PFCP simulator TOSSI CNTC drives) was refused four times, each time stopping its whole establishment: **a zero-TEID, 0.0.0.0 Outer Header Creation** on a dropping downlink FAR (read as malformed), **QER QFI 0** (refused, though 0 is in range), **QER ID 0** (read as \"no QER ID\", though 8.2.75 reserves none), and **a Measurement Period on a URR with no PERIO trigger** (refused, though 7.5.2.4 makes the period conditional on PERIO and forbids nothing else)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "29.244 7.5.2.2 to 7.5.2.4 (Create FAR, QER, URR), 8.2.56, 8.2.75, 8.2.89",
+   "detail": "OMEC's pfcpsim (the PFCP simulator TOSSI CNTC drives) was refused four times, each time stopping its whole establishment: **a zero-TEID, 0.0.0.0 Outer Header Creation** on a dropping downlink FAR (read as malformed), **QER QFI 0** (refused, though 0 is in range), **QER ID 0** (read as \"no QER ID\", though 8.2.75 reserves none), and **a Measurement Period on a URR with no PERIO trigger** (refused, though 7.5.2.4 makes the period conditional on PERIO and forbids nothing else)",
+   "effect": "an SMF that numbers its session QER 0, leaves QFI at 0, or pre-creates a dropping FAR could not establish a session. **Fixed** in `40a552c`, `174bdec`, `e5cddf2`, `cb65795`, each with a test that fails on the old parser (`placeholder_test.go`, `TestAQERsQFIReachesTheTunnelRecord`, `TestAMeasurementPeriodWithoutThePeriodicTriggerIsInert`). Decisions: the placeholder reads as \"no tunnel yet\" (the compile already carries a FAR with no Outer Header Creation), QER QFI 0 marks nothing (the encap writes no container for 0), and an inert period is ignored",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`ci/cntc-path.sh`, first run: `session: cannot read the establishment request`, once per cause, in that order"
+    }
+   ],
+   "kind": "conformance",
+   "block": 6
   },
   {
    "id": "status-33",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "19"
-    },
-    {
-     "name": "spec",
-     "value": "29.244 7.5.4.x (Update/Remove in a Modification Request), 8.2.74/8.2.75"
-    },
-    {
-     "name": "what this UP does",
-     "value": "two **open** gaps found while reading the parser for finding 18: (a) `parseRemovals` has no `Remove QER` case, so a Remove QER IE is silently ignored (the QER, its meter and the PDRs' links stay); (b) `0` still means \"absent\" for the PDR ID (`parsePDR`), FAR ID (`parseFAR`), BAR ID (`parseBAR`) and URR ID (`parseURR`), though the spec reserves 0 for none of them (the QER ID was fixed in `e5cddf2`)"
-    },
-    {
-     "name": "evidence",
-     "value": "code read, not exercised against a client"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "(a) a CP that removes a QER leaves it enforcing; (b) an SMF numbering any of those IDs from 0 is refused. Neither is exercised by free5GC or pfcpsim (both number from 1). **Fixed**: (a) `parseRemovals` reads Remove QER (its return is the `removals` struct now), and `merge` takes the QER out -- refusing first while a PDR of the session still names it (cause 73, the order a URR removal takes), and holding the QER's meters until teardown (`removedQERs`, released in `releaseSession`), because a meter handed back at the removal would be one a refused modification restores the QER to (`TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown`, fail-first: with the reference check off the modification is accepted and the removal is undone by the refusal it triggers); (b) each parser tracks the IE with a `hasID` flag (`hasFarID` for a PDR's FAR reference, which is mandatory in a Create PDR and was read as \\u201cno FAR\\u201d at 0), and `TestZeroIsALegalRuleID` establishes a session whose five rules are all numbered 0, then pins a PDR with no FAR ID as a missing mandatory IE (cause 69)"
-    }
-   ],
    "evidence": [
     "TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown",
     "TestZeroIsALegalRuleID"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestZeroIsALegalRuleID": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1759,48 +1575,42 @@
    "part": "messages",
    "title": "two **open** gaps found while reading the parser for finding 18: (a) `parseRemovals` has no `Remove QER` case, so a Remove QER IE is silently ignored (the QER, its meter and the PDRs' links stay); (b) `0` still means \"absent\" for the PDR ID (`parsePDR`), FAR ID (`parseFAR`), BAR ID (`parseBAR`) and URR ID (`parseURR`), though the spec reserves 0 for none of them (the QER ID was fixed in `e5cddf2`)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment",
+    "Session Modification"
+   ],
+   "message": "Session Modification",
+   "statement": "29.244 7.5.4.x (Update/Remove in a Modification Request), 8.2.74/8.2.75",
+   "detail": "two **open** gaps found while reading the parser for finding 18: (a) `parseRemovals` has no `Remove QER` case, so a Remove QER IE is silently ignored (the QER, its meter and the PDRs' links stay); (b) `0` still means \"absent\" for the PDR ID (`parsePDR`), FAR ID (`parseFAR`), BAR ID (`parseBAR`) and URR ID (`parseURR`), though the spec reserves 0 for none of them (the QER ID was fixed in `e5cddf2`)",
+   "effect": "(a) a CP that removes a QER leaves it enforcing; (b) an SMF numbering any of those IDs from 0 is refused. Neither is exercised by free5GC or pfcpsim (both number from 1). **Fixed**: (a) `parseRemovals` reads Remove QER (its return is the `removals` struct now), and `merge` takes the QER out -- refusing first while a PDR of the session still names it (cause 73, the order a URR removal takes), and holding the QER's meters until teardown (`removedQERs`, released in `releaseSession`), because a meter handed back at the removal would be one a refused modification restores the QER to (`TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown`, fail-first: with the reference check off the modification is accepted and the removal is undone by the refusal it triggers); (b) each parser tracks the IE with a `hasID` flag (`hasFarID` for a PDR's FAR reference, which is mandatory in a Create PDR and was read as \\u201cno FAR\\u201d at 0), and `TestZeroIsALegalRuleID` establishes a session whose five rules are all numbered 0, then pins a PDR with no FAR ID as a missing mandatory IE (cause 69)",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code read, not exercised against a client"
+    }
+   ],
+   "kind": "conformance",
+   "block": 7
   },
   {
    "id": "status-34",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "20"
-    },
-    {
-     "name": "spec",
-     "value": "5.2.2.2.1 / 7.5.8.2: what a usage report must carry"
-    },
-    {
-     "name": "what this UP does",
-     "value": "**fixed**: a report's window is opened when the tick *decides* it (`decide`, report.go), but the message is delivered later -- the loop sends **one report per session per tick** (`cmd/upfd/main.go`) and queues the rest, so a session that ended in between reported the queued window nowhere. Each URR now carries the reading the SMF was last *told* up to (`deliveredUp/deliveredDown/deliveredAt`, moved by `ConfirmReport` on an accepted report and by `advanceAfter` for one a modification carried), the termination report is built from that base (`windowsOf(\u2026, sinceDelivery)`), and a session the layer no longer holds has its queued reports cancelled instead of sent (`Compiler.Holds`, `reportQueue.cancel`, `upf_usage_reports_total{outcome=\"cancelled\"}`)"
-    },
-    {
-     "name": "evidence",
-     "value": "measured on the free5GC run `runs/dp5` (before): URR 1 delivered 9+9+2 = 20 packets / 4560 octets (the whole traffic); URR 2 delivered 9 then 2 = 11 packets / 2508 octets, because the tick that decided its second window (2052 octets, due) sent URR 1's report first and the deletion arrived before URR 2's turn; the queued report was then refused with cause 65 (`upfd.log`: \"usage report refused ... urr=2 cause=65\"). After (`runs/dp-fix`): URR 1 = 12 delivered + 8 in the termination, URR 2 = 12 delivered + 13 in the termination, both 20 packets / 4560 octets each way"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "fixed; the test is `internal/session/delivered_test.go` (fail-first: 11 of 20 packets on the old base) and `cmd/upfd/report_test.go` (the queued report is cancelled). **One narrow case stays open**: a report already *in flight* when the deletion is processed can still be answered by the SMF after the termination report was built, so that window is counted twice -- seen once, 5 packets / 1140 octets on URR 2, when free5GC accepted a report 2 ms after answering the deletion. Closing it needs the two serialized (no report in flight while the termination report is built); it is not fixed here"
-    }
-   ],
    "evidence": [
     "TestTheTerminationReportCarriesWhatADecidedReportStillHolds",
     "TestAnUnansweredReportIsSentAgainBeforeTheNextOne"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestTheTerminationReportCarriesWhatADecidedReportStillHolds": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAnUnansweredReportIsSentAgainBeforeTheNextOne": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1808,43 +1618,38 @@
    "part": "procedures",
    "title": "**fixed**: a report's window is opened when the tick *decides* it (`decide`, report.go), but the message is delivered later -- the loop sends **one report per session per tick** (`cmd/upfd/main.go`) and queues the rest, so a session that ended in between reported the queued window nowhere. Each URR now carries the reading the SMF was last *told* up to (`deliveredUp/deliveredDown/deliveredAt`, moved by `ConfirmReport` on an accepted report and by `advanceAfter` for one a modification carried), the termination report is built from that base (`windowsOf(\u2026, sinceDelivery)`), and a session the layer no longer holds has its queued reports cancelled instead of sent (`Compiler.Holds`, `reportQueue.cancel`, `upf_usage_reports_total{outcome=\"cancelled\"}`)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Deletion",
+    "Session Modification",
+    "Session Report"
+   ],
+   "message": "Session Report",
+   "statement": "5.2.2.2.1 / 7.5.8.2: what a usage report must carry",
+   "detail": "**fixed**: a report's window is opened when the tick *decides* it (`decide`, report.go), but the message is delivered later -- the loop sends **one report per session per tick** (`cmd/upfd/main.go`) and queues the rest, so a session that ended in between reported the queued window nowhere. Each URR now carries the reading the SMF was last *told* up to (`deliveredUp/deliveredDown/deliveredAt`, moved by `ConfirmReport` on an accepted report and by `advanceAfter` for one a modification carried), the termination report is built from that base (`windowsOf(\u2026, sinceDelivery)`), and a session the layer no longer holds has its queued reports cancelled instead of sent (`Compiler.Holds`, `reportQueue.cancel`, `upf_usage_reports_total{outcome=\"cancelled\"}`)",
+   "effect": "fixed; the test is `internal/session/delivered_test.go` (fail-first: 11 of 20 packets on the old base) and `cmd/upfd/report_test.go` (the queued report is cancelled). **One narrow case stays open**: a report already *in flight* when the deletion is processed can still be answered by the SMF after the termination report was built, so that window is counted twice -- seen once, 5 packets / 1140 octets on URR 2, when free5GC accepted a report 2 ms after answering the deletion. Closing it needs the two serialized (no report in flight while the termination report is built); it is not fixed here",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "measured on the free5GC run `runs/dp5` (before): URR 1 delivered 9+9+2 = 20 packets / 4560 octets (the whole traffic); URR 2 delivered 9 then 2 = 11 packets / 2508 octets, because the tick that decided its second window (2052 octets, due) sent URR 1's report first and the deletion arrived before URR 2's turn; the queued report was then refused with cause 65 (`upfd.log`: \"usage report refused ... urr=2 cause=65\"). After (`runs/dp-fix`): URR 1 = 12 delivered + 8 in the termination, URR 2 = 12 delivered + 13 in the termination, both 20 packets / 4560 octets each way"
+    }
+   ],
+   "kind": "conformance",
+   "block": 6
   },
   {
    "id": "status-35",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "23"
-    },
-    {
-     "name": "spec",
-     "value": "7.5.2.2-1 with 7.5.2.5: a PDR naming several QERs has each one's rate enforced"
-    },
-    {
-     "name": "what this UP does",
-     "value": "the compiler enforces one of them (finding 6, the session's shared QER) and the composition is proven possible without a BESS change (`ci/meter-compose.sh`: two ActionTables and two Meters, one `meter_id` attribute)"
-    },
-    {
-     "name": "evidence",
-     "value": "`ci/meter-compose.sh`, `internal/session/qer_test.go`"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "a PDR with a Session-AMBR QER and a flow QER was enforced at one rate only. **The one-action form is done in the fork and in the compiler**: the Meter takes an ordered list of ids (BESS fork PR #44, `meter_ids`), the compiler writes `[own, shared]` behind `-meter-levels-*` = 2 -- the flow's meter first, so the session is not charged for what the flow dropped -- and the graph must declare `levels: 2` on both its Meter and ActionTable; the stage this tree runs does not, so the deployed default stays one id per action. The remaining work is that graph (and the stage's modules), not the compiler. The two facts that work rests on are probed, not assumed (2026-10-19, a scratch graph, two runs): `meter_id: 0` is \"no meter\" and the packet passes that stage unmetered (green gate 72M, red 0), and an id absent from a stage's meters resource is *refused at apply* (\"references missing mt/meters/07000000\"), the same reference check an action id gets -- so a stage's table must hold an entry for every action id, 0 where its QER is not the PDR's"
-    }
-   ],
    "evidence": [
     "ci/meter-compose.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "ci/meter-compose.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1852,85 +1657,71 @@
    "part": "messages",
    "title": "the compiler enforces one of them (finding 6, the session's shared QER) and the composition is proven possible without a BESS change (`ci/meter-compose.sh`: two ActionTables and two Meters, one `meter_id` attribute)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "7.5.2.2-1 with 7.5.2.5: a PDR naming several QERs has each one's rate enforced",
+   "detail": "the compiler enforces one of them (finding 6, the session's shared QER) and the composition is proven possible without a BESS change (`ci/meter-compose.sh`: two ActionTables and two Meters, one `meter_id` attribute)",
+   "effect": "a PDR with a Session-AMBR QER and a flow QER was enforced at one rate only. **The one-action form is done in the fork and in the compiler**: the Meter takes an ordered list of ids (BESS fork PR #44, `meter_ids`), the compiler writes `[own, shared]` behind `-meter-levels-*` = 2 -- the flow's meter first, so the session is not charged for what the flow dropped -- and the graph must declare `levels: 2` on both its Meter and ActionTable; the stage this tree runs does not, so the deployed default stays one id per action. The remaining work is that graph (and the stage's modules), not the compiler. The two facts that work rests on are probed, not assumed (2026-10-19, a scratch graph, two runs): `meter_id: 0` is \"no meter\" and the packet passes that stage unmetered (green gate 72M, red 0), and an id absent from a stage's meters resource is *refused at apply* (\"references missing mt/meters/07000000\"), the same reference check an action id gets -- so a stage's table must hold an entry for every action id, 0 where its QER is not the PDR's",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`ci/meter-compose.sh`, `internal/session/qer_test.go`"
+    }
+   ],
+   "kind": "conformance",
+   "block": 5
   },
   {
    "id": "status-36",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "22"
-    },
-    {
-     "name": "spec",
-     "value": "5.4.15, 8.2.63, and the Query Packet Rate Status exchange (7.5.4.22, 7.5.5.4, 8.2.139)"
-    },
-    {
-     "name": "what this UP does",
-     "value": "Packet Rate is a procedure of its own: a QER that caps packets per time unit, plus a status the CP function can query and the UP reports. None of it is read here -- go-pfcp does carry the IEs, so this is the tree's gap and not the library's -- and the substrate is now in the fork: a Meter's `cost: PACKETS` charges one a packet through the same buckets, bursts and colouring (BESS fork PR #45), and the ordered-id action (PR #44) lets a flow's packet rate and the session's bit rate share one lookup"
-    },
-    {
-     "name": "evidence",
-     "value": "code (grep: none in the tree)"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "a serving-PLMN or APN rate control the SMF provisions is invisible to this UPF: a UE can exceed a packet rate the CP asked to cap. The remaining work is the compiler reading the QER's Packet Rate IEs into such a meter, and the Query Packet Rate Status exchange on the reporting side"
-    }
-   ],
    "evidence": [],
    "result": {
     "state": "gap",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {}
    },
    "clause": "5.4.15",
    "part": "procedures",
    "title": "Packet Rate is a procedure of its own: a QER that caps packets per time unit, plus a status the CP function can query and the UP reports. None of it is read here -- go-pfcp does carry the IEs, so this is the tree's gap and not the library's -- and the substrate is now in the fork: a Meter's `cost: PACKETS` charges one a packet through the same buckets, bursts and colouring (BESS fork PR #45), and the ordered-id action (PR #44) lets a flow's packet rate and the session's bit rate share one lookup",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Modification"
+   ],
+   "message": "Session Modification",
+   "statement": "5.4.15, 8.2.63, and the Query Packet Rate Status exchange (7.5.4.22, 7.5.5.4, 8.2.139)",
+   "detail": "Packet Rate is a procedure of its own: a QER that caps packets per time unit, plus a status the CP function can query and the UP reports. None of it is read here -- go-pfcp does carry the IEs, so this is the tree's gap and not the library's -- and the substrate is now in the fork: a Meter's `cost: PACKETS` charges one a packet through the same buckets, bursts and colouring (BESS fork PR #45), and the ordered-id action (PR #44) lets a flow's packet rate and the session's bit rate share one lookup",
+   "effect": "a serving-PLMN or APN rate control the SMF provisions is invisible to this UPF: a UE can exceed a packet rate the CP asked to cap. The remaining work is the compiler reading the QER's Packet Rate IEs into such a meter, and the Query Packet Rate Status exchange on the reporting side",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code (grep: none in the tree)"
+    }
+   ],
+   "kind": "conformance",
+   "block": 5
   },
   {
    "id": "status-37",
    "scope": "status",
-   "fields": [
-    {
-     "name": "#",
-     "value": "21"
-    },
-    {
-     "name": "spec",
-     "value": "5.2.1: the downlink look-up names the *session*, and PDRs of different sessions \"shall not overlap\" -- here by the deployment's route domain, which is what lets two data networks hold one UE address"
-    },
-    {
-     "name": "what this UP does",
-     "value": "the selector's rule is written from the fields the graph declares, but the compiler's claim on it (`selectorClaim`) was named from the session's own (route domain, address): with a selector configured for the address alone, two sessions in two route domains claimed *different* names for *one* engine key, so the second was accepted and its rule silently took the first's packets"
-    },
-    {
-     "name": "evidence",
-     "value": "probe: `ci/pdrmatch-2dn.sh` with `route_domain` dropped from the graph's key and `-select-fields-dl dst_ip` -- window A green, then the campus session took the internet frame in window C"
-    },
-    {
-     "name": "effect on a real SMF",
-     "value": "an SMF could not tell: the second session's establishment was *accepted*, and the first session's downlink went to the second's tunnel. **Fixed**: `selectorClaim` is now the engine's key byte for byte (`selectorRuleKey`, `selectorKeyString`), so the second establishment is refused with cause 73 (\"the downlink address 2/10.45.0.2 is session 1's\"), and `TestASelectorThatIgnoresTheRouteDomainHoldsOneSessionPerAddress` proves it (without the fix it fails: cause 1, accepted)"
-    }
-   ],
    "evidence": [
     "TestASelectorThatIgnoresTheRouteDomainHoldsOneSessionPerAddress",
     "ci/pdrmatch-2dn.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestASelectorThatIgnoresTheRouteDomainHoldsOneSessionPerAddress": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/pdrmatch-2dn.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -1938,53 +1729,26 @@
    "part": "procedures",
    "title": "the selector's rule is written from the fields the graph declares, but the compiler's claim on it (`selectorClaim`) was named from the session's own (route domain, address): with a selector configured for the address alone, two sessions in two route domains claimed *different* names for *one* engine key, so the second was accepted and its rule silently took the first's packets",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "5.2.1: the downlink look-up names the *session*, and PDRs of different sessions \"shall not overlap\" -- here by the deployment's route domain, which is what lets two data networks hold one UE address",
+   "detail": "the selector's rule is written from the fields the graph declares, but the compiler's claim on it (`selectorClaim`) was named from the session's own (route domain, address): with a selector configured for the address alone, two sessions in two route domains claimed *different* names for *one* engine key, so the second was accepted and its rule silently took the first's packets",
+   "effect": "an SMF could not tell: the second session's establishment was *accepted*, and the first session's downlink went to the second's tunnel. **Fixed**: `selectorClaim` is now the engine's key byte for byte (`selectorRuleKey`, `selectorKeyString`), so the second establishment is refused with cause 73 (\"the downlink address 2/10.45.0.2 is session 1's\"), and `TestASelectorThatIgnoresTheRouteDomainHoldsOneSessionPerAddress` proves it (without the fix it fails: cause 1, accepted)",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "probe: `ci/pdrmatch-2dn.sh` with `route_domain` dropped from the graph's key and `-select-fields-dl dst_ip` -- window A green, then the campus session took the internet frame in window C"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4
   },
   {
    "id": "competition-1",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "1"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "association, heartbeat, restart detection (3)"
-    },
-    {
-     "name": "us",
-     "value": "100"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "100"
-    },
-    {
-     "name": "open5gs",
-     "value": "100"
-    },
-    {
-     "name": "free5GC",
-     "value": "100"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "100"
-    },
-    {
-     "name": "eUPF",
-     "value": "100"
-    },
-    {
-     "name": "OMEC",
-     "value": "100"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestAssociationAndHeartbeat`, `TestHeartbeatTimeoutEndsAssociation`, `TestCPRestartVoidsAssociation`"
-    }
-   ],
    "evidence": [
     "TestAssociationAndHeartbeat",
     "TestCPRestartVoidsAssociation",
@@ -1992,19 +1756,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAssociationAndHeartbeat": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestCPRestartVoidsAssociation": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestHeartbeatTimeoutEndsAssociation": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2012,68 +1776,43 @@
    "part": "competition",
    "title": "association, heartbeat, restart detection (3)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "100",
+    "OAI-CN5G": "100",
+    "open5gs": "100",
+    "free5GC": "100",
+    "UPG-VPP": "100",
+    "eUPF": "100",
+    "OMEC": "100"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 1
   },
   {
    "id": "competition-2",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "2"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "session establishment, modification, deletion (3)"
-    },
-    {
-     "name": "us",
-     "value": "100"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "100"
-    },
-    {
-     "name": "open5gs",
-     "value": "100"
-    },
-    {
-     "name": "free5GC",
-     "value": "100"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "100"
-    },
-    {
-     "name": "eUPF",
-     "value": "100"
-    },
-    {
-     "name": "OMEC",
-     "value": "100"
-    },
-    {
-     "name": "evidence",
-     "value": "`ci/session-path.sh`, `TestARefusedModificationLeavesTheSessionAsItWas`"
-    }
-   ],
    "evidence": [
     "TestARefusedModificationLeavesTheSessionAsItWas",
     "ci/session-path.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestARefusedModificationLeavesTheSessionAsItWas": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/session-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2081,68 +1820,43 @@
    "part": "competition",
    "title": "session establishment, modification, deletion (3)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "100",
+    "OAI-CN5G": "100",
+    "open5gs": "100",
+    "free5GC": "100",
+    "UPG-VPP": "100",
+    "eUPF": "100",
+    "OMEC": "100"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 2
   },
   {
    "id": "competition-3",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "3"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "Session Report Request: USAR, DLDR (2)"
-    },
-    {
-     "name": "us",
-     "value": "**100**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "100"
-    },
-    {
-     "name": "open5gs",
-     "value": "100"
-    },
-    {
-     "name": "free5GC",
-     "value": "100"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "50"
-    },
-    {
-     "name": "eUPF",
-     "value": "0"
-    },
-    {
-     "name": "OMEC",
-     "value": "0"
-    },
-    {
-     "name": "evidence",
-     "value": "`ci/session-report.sh`, `TestAPeerErrorIndicationBecomesAnERIRReport`"
-    }
-   ],
    "evidence": [
     "TestAPeerErrorIndicationBecomesAnERIRReport",
     "ci/session-report.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAPeerErrorIndicationBecomesAnERIRReport": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/session-report.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2150,53 +1864,28 @@
    "part": "competition",
    "title": "Session Report Request: USAR, DLDR (2)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**100**",
+    "OAI-CN5G": "100",
+    "open5gs": "100",
+    "free5GC": "100",
+    "UPG-VPP": "50",
+    "eUPF": "0",
+    "OMEC": "0"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 3
   },
   {
    "id": "competition-4",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "4"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5)"
-    },
-    {
-     "name": "us",
-     "value": "**80**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "\u2014"
-    },
-    {
-     "name": "open5gs",
-     "value": "\u2014"
-    },
-    {
-     "name": "free5GC",
-     "value": "\u2014"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "\u2014"
-    },
-    {
-     "name": "eUPF",
-     "value": "\u2014"
-    },
-    {
-     "name": "OMEC",
-     "value": "\u2014"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestAPDINamingAQFIKeysTheRuleOnIt`, `TestSeveralSDFFiltersAreSeveralRules`, `TestPortRangeIsRefusedNotMatchedTooWidely`, `TestAPortRangeCompilesToAFirewallRuleWithItsRange`"
-    }
-   ],
    "evidence": [
     "TestAPDINamingAQFIKeysTheRuleOnIt",
     "TestAPortRangeCompilesToAFirewallRuleWithItsRange",
@@ -2205,23 +1894,23 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAPDINamingAQFIKeysTheRuleOnIt": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAPortRangeCompilesToAFirewallRuleWithItsRange": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestPortRangeIsRefusedNotMatchedTooWidely": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestSeveralSDFFiltersAreSeveralRules": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2229,68 +1918,43 @@
    "part": "competition",
    "title": "PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**80**",
+    "OAI-CN5G": "\u2014",
+    "open5gs": "\u2014",
+    "free5GC": "\u2014",
+    "UPG-VPP": "\u2014",
+    "eUPF": "\u2014",
+    "OMEC": "\u2014"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 4
   },
   {
    "id": "competition-5",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "5"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "QER: gate, MBR, per-flow or GBR (3)"
-    },
-    {
-     "name": "us",
-     "value": "**100**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "67"
-    },
-    {
-     "name": "open5gs",
-     "value": "67"
-    },
-    {
-     "name": "free5GC",
-     "value": "33"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "0"
-    },
-    {
-     "name": "eUPF",
-     "value": "67"
-    },
-    {
-     "name": "OMEC",
-     "value": "67"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestAQERsGBRIsTheMetersCommittedRate`, `TestAQERThatCapsOneDirectionWritesOneMeter`"
-    }
-   ],
    "evidence": [
     "TestAQERThatCapsOneDirectionWritesOneMeter",
     "TestAQERsGBRIsTheMetersCommittedRate"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestAQERThatCapsOneDirectionWritesOneMeter": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAQERsGBRIsTheMetersCommittedRate": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2298,53 +1962,28 @@
    "part": "competition",
    "title": "QER: gate, MBR, per-flow or GBR (3)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**100**",
+    "OAI-CN5G": "67",
+    "open5gs": "67",
+    "free5GC": "33",
+    "UPG-VPP": "0",
+    "eUPF": "67",
+    "OMEC": "67"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 5
   },
   {
    "id": "competition-6",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "6"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "URR: volume, time, thresholds, quota + enforcement, linked (5)"
-    },
-    {
-     "name": "us",
-     "value": "**100**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "60"
-    },
-    {
-     "name": "open5gs",
-     "value": "60"
-    },
-    {
-     "name": "free5GC",
-     "value": "60"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "100"
-    },
-    {
-     "name": "eUPF",
-     "value": "0"
-    },
-    {
-     "name": "OMEC",
-     "value": "0"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestAQuotaExhaustedURRDropsItsPDRs`, `TestALinkedURRReportsItsGroupUnderOneURSEQN`, `TestAOneOctetReportingTriggersIsRead`"
-    }
-   ],
    "evidence": [
     "TestALinkedURRReportsItsGroupUnderOneURSEQN",
     "TestAOneOctetReportingTriggersIsRead",
@@ -2352,19 +1991,19 @@
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestALinkedURRReportsItsGroupUnderOneURSEQN": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAOneOctetReportingTriggersIsRead": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAQuotaExhaustedURRDropsItsPDRs": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2372,68 +2011,43 @@
    "part": "competition",
    "title": "URR: volume, time, thresholds, quota + enforcement, linked (5)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**100**",
+    "OAI-CN5G": "60",
+    "open5gs": "60",
+    "free5GC": "60",
+    "UPG-VPP": "100",
+    "eUPF": "0",
+    "OMEC": "0"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 6
   },
   {
    "id": "competition-7",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "7"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "BAR + DDN: buffering, DDN, duration, drop-buffered (4)"
-    },
-    {
-     "name": "us",
-     "value": "**100**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "75"
-    },
-    {
-     "name": "open5gs",
-     "value": "75"
-    },
-    {
-     "name": "free5GC",
-     "value": "25"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "0"
-    },
-    {
-     "name": "eUPF",
-     "value": "0"
-    },
-    {
-     "name": "OMEC",
-     "value": "25"
-    },
-    {
-     "name": "evidence",
-     "value": "`ci/buffer-path.sh`, `TestTheDownlinkReportIsOwedOncePerBufferingEpisode`"
-    }
-   ],
    "evidence": [
     "TestTheDownlinkReportIsOwedOncePerBufferingEpisode",
     "ci/buffer-path.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestTheDownlinkReportIsOwedOncePerBufferingEpisode": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/buffer-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2441,68 +2055,43 @@
    "part": "competition",
    "title": "BAR + DDN: buffering, DDN, duration, drop-buffered (4)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**100**",
+    "OAI-CN5G": "75",
+    "open5gs": "75",
+    "free5GC": "25",
+    "UPG-VPP": "0",
+    "eUPF": "0",
+    "OMEC": "25"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 7
   },
   {
    "id": "competition-8",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "8"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "GTP-U: decap, encap, echo, end marker, DSCP copy (5)"
-    },
-    {
-     "name": "us",
-     "value": "**100**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "40"
-    },
-    {
-     "name": "open5gs",
-     "value": "80"
-    },
-    {
-     "name": "free5GC",
-     "value": "40"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "40"
-    },
-    {
-     "name": "eUPF",
-     "value": "40"
-    },
-    {
-     "name": "OMEC",
-     "value": "80"
-    },
-    {
-     "name": "evidence",
-     "value": "`ci/smoke-gtpu.sh`, `ci/veth-port.sh`"
-    }
-   ],
    "evidence": [
     "ci/smoke-gtpu.sh",
     "ci/veth-port.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "ci/smoke-gtpu.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "ci/veth-port.sh": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2510,68 +2099,43 @@
    "part": "competition",
    "title": "GTP-U: decap, encap, echo, end marker, DSCP copy (5)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**100**",
+    "OAI-CN5G": "40",
+    "open5gs": "80",
+    "free5GC": "40",
+    "UPG-VPP": "40",
+    "eUPF": "40",
+    "OMEC": "80"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 8
   },
   {
    "id": "competition-9",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "9"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "IPv6: PFCP UE IP, inner + outer, N9 (3)"
-    },
-    {
-     "name": "us",
-     "value": "**0**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "0"
-    },
-    {
-     "name": "open5gs",
-     "value": "0"
-    },
-    {
-     "name": "free5GC",
-     "value": "0"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "33"
-    },
-    {
-     "name": "eUPF",
-     "value": "0"
-    },
-    {
-     "name": "OMEC",
-     "value": "0"
-    },
-    {
-     "name": "evidence",
-     "value": "`TestANonIPv4PDIIsRefusedNotWidened`, `TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly`"
-    }
-   ],
    "evidence": [
     "TestANonIPv4PDIIsRefusedNotWidened",
     "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "TestANonIPv4PDIIsRefusedNotWidened": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      },
      "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2579,120 +2143,70 @@
    "part": "competition",
    "title": "IPv6: PFCP UE IP, inner + outer, N9 (3)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**0**",
+    "OAI-CN5G": "0",
+    "open5gs": "0",
+    "free5GC": "0",
+    "UPG-VPP": "33",
+    "eUPF": "0",
+    "OMEC": "0"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 9
   },
   {
    "id": "competition-10",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "10"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "MAR / ATSSS-LL (2)"
-    },
-    {
-     "name": "us",
-     "value": "**0**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "50"
-    },
-    {
-     "name": "open5gs",
-     "value": "0"
-    },
-    {
-     "name": "free5GC",
-     "value": "0"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "50"
-    },
-    {
-     "name": "eUPF",
-     "value": "0"
-    },
-    {
-     "name": "OMEC",
-     "value": "0"
-    },
-    {
-     "name": "evidence",
-     "value": "\u2014"
-    }
-   ],
    "evidence": [],
    "result": {
     "state": "gap",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {}
    },
    "clause": null,
    "part": "competition",
    "title": "MAR / ATSSS-LL (2)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**0**",
+    "OAI-CN5G": "50",
+    "open5gs": "0",
+    "free5GC": "0",
+    "UPG-VPP": "50",
+    "eUPF": "0",
+    "OMEC": "0"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 10
   },
   {
    "id": "competition-11",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "11"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "ULCL / N9 route domains (2)"
-    },
-    {
-     "name": "us",
-     "value": "**50**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "0"
-    },
-    {
-     "name": "open5gs",
-     "value": "0"
-    },
-    {
-     "name": "free5GC",
-     "value": "0"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "0"
-    },
-    {
-     "name": "eUPF",
-     "value": "0"
-    },
-    {
-     "name": "OMEC",
-     "value": "50"
-    },
-    {
-     "name": "evidence",
-     "value": "`ci/iface-path.sh`"
-    }
-   ],
    "evidence": [
     "ci/iface-path.sh"
    ],
    "result": {
     "state": "ok",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "ci/iface-path.sh": {
       "state": "ok",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2700,63 +2214,38 @@
    "part": "competition",
    "title": "ULCL / N9 route domains (2)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**50**",
+    "OAI-CN5G": "0",
+    "open5gs": "0",
+    "free5GC": "0",
+    "UPG-VPP": "0",
+    "eUPF": "0",
+    "OMEC": "50"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 11
   },
   {
    "id": "competition-12",
    "scope": "competition",
-   "fields": [
-    {
-     "name": "#",
-     "value": "12"
-    },
-    {
-     "name": "block (sub-features scored)",
-     "value": "real-SMF interop (1)"
-    },
-    {
-     "name": "us",
-     "value": "**0**"
-    },
-    {
-     "name": "OAI-CN5G",
-     "value": "0"
-    },
-    {
-     "name": "open5gs",
-     "value": "**100**"
-    },
-    {
-     "name": "free5GC",
-     "value": "0"
-    },
-    {
-     "name": "UPG-VPP",
-     "value": "0"
-    },
-    {
-     "name": "eUPF",
-     "value": "0"
-    },
-    {
-     "name": "OMEC",
-     "value": "0"
-    },
-    {
-     "name": "evidence",
-     "value": "`ci/interop/up.sh`"
-    }
-   ],
    "evidence": [
     "ci/interop/up.sh"
    ],
    "result": {
     "state": "skip",
-    "at": "2026-10-20T08:55:16+05:30",
+    "at": "2026-10-20T09:11:12+05:30",
     "evidence": {
      "ci/interop/up.sh": {
       "state": "skip",
-      "at": "2026-10-20T08:55:16+05:30"
+      "at": "2026-10-20T09:11:12+05:30"
      }
     }
    },
@@ -2764,7 +2253,24 @@
    "part": "competition",
    "title": "real-SMF interop (1)",
    "declared": "",
-   "spec": "TS 29.244"
+   "spec": "TS 29.244",
+   "messages": [
+    "Competition"
+   ],
+   "message": "Competition",
+   "scores": {
+    "us": "**0**",
+    "OAI-CN5G": "0",
+    "open5gs": "**100**",
+    "free5GC": "0",
+    "UPG-VPP": "0",
+    "eUPF": "0",
+    "OMEC": "0"
+   },
+   "detail": "",
+   "statement": "",
+   "kind": "competition",
+   "block": 12
   }
  ]
 }
