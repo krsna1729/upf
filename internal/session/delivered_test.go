@@ -7,7 +7,7 @@
 // and the other queued behind it. A session that ends in between must report the
 // queued report's usage in its termination report -- the base of the last
 // *delivered* report, not the last one a report was made from
-// (docs/compliance.md, finding 20).
+// (docs/claims.md, finding 20).
 package session
 
 import (

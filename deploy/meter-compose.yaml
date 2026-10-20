@@ -22,7 +22,7 @@
 # other way, `m2` would charge those too (policing the offered rate instead).
 #
 # The constraint this graph also pins (found while building it, and recorded in
-# docs/compliance.md): an attribute a module *writes* is given no offset unless
+# docs/claims.md): an attribute a module *writes* is given no offset unless
 # something downstream *reads* it (core/metadata.cc, FillOffsetArrays: a scope
 # component of one module is NoWrite). A chained stage's writes are read by the
 # stage after it, so a chain needs a reader per stage -- here the MetadataTest

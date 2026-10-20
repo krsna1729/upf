@@ -996,7 +996,7 @@ func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) 
 // pair moves only here (and in advanceAfter, for a report a modification
 // carried), so a session that ends while a report is still queued is reported
 // from the last delivered reading and the usage that report held is not lost
-// (docs/compliance.md, finding 20).
+// (docs/claims.md, finding 20).
 //
 // A session's reports are delivered in order -- the loop sends the head of the
 // session's queue and holds the rest behind it -- so a delivery never moves the

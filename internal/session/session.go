@@ -219,7 +219,7 @@ type Direction struct {
 	// firewall key cannot (the QFI, the route domain, the tunnel) are not part
 	// of it. Empty, the default, is the WildcardMatch path with its refusals:
 	// the installed graph carries no firewall module yet, so no deployment
-	// names one (docs/compliance.md).
+	// names one (docs/claims.md).
 	Firewall string
 	// PdrMatch is the per-session matcher ("pdr_match_ul", "pdr_match_dl")
 	// whose "<name>/rules" *map* holds this direction's PDRs with one key per
@@ -235,7 +235,7 @@ type Direction struct {
 	// and port *ranges*; the PDI's QFI is the next step, and a PDR naming one
 	// is refused rather than matched more widely. Empty, the default, is the
 	// WildcardMatch path with its refusals, and no deployment names a PdrMatch
-	// module yet (docs/compliance.md).
+	// module yet (docs/claims.md).
 	PdrMatch string
 	// Selector is the downlink's session selector ("sel_dl"): an ExactMatch
 	// whose key is the session's own -- the UE address the packet is addressed
@@ -327,7 +327,7 @@ type Config struct {
 	// hop a forward out of it takes. Nil is the one-instance deployment: no
 	// PDI's instance is resolved, every rule is domain 0, and each direction's
 	// next hop is the deployment's own (the -n6-next-hop and -n3-next-hop
-	// flags), which is what the rows in docs/compliance.md describe until a
+	// flags), which is what the rows in docs/claims.md describe until a
 	// deployment configures more than one.
 	Instances *routing.Domains
 
@@ -360,7 +360,7 @@ type Config struct {
 	// Buffering is the graph's buffering branch (TS 29.244 7.5.2.6, 5.2.4):
 	// where the packets of a FAR whose Apply Action is BUFF and not FORW are
 	// held. Nil means the deployment buffers nothing -- such a FAR's rule drops,
-	// which is what docs/compliance.md records for a graph without a store.
+	// which is what docs/claims.md records for a graph without a store.
 	Buffering *Buffering
 
 	// MaxActions, MaxMeters and MaxTEIDs bound the id spaces: the dataplane's
@@ -1074,7 +1074,7 @@ type urr struct {
 	// Compiler.advanceAfter). A session that ends while a report is still in
 	// the queue is reported from this trio, so the usage that report held
 	// reaches the SMF in the termination report instead of going with it
-	// (docs/compliance.md, finding 20).
+	// (docs/claims.md, finding 20).
 	deliveredUp, deliveredDown Usage
 	deliveredAt                time.Time
 }

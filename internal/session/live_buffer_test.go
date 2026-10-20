@@ -117,7 +117,7 @@ func TestLiveSessionBuffersAndReleasesTheHeldPackets(t *testing.T) {
 
 	// 0. The store's own entry carries the SMF's numbers, live: 8.2.29's
 	// duration as the flow's timeout_ns and 8.2.30's Suggested Packet Count as
-	// its max_packets_per_flow (deviation 1 of docs/compliance.md's BUFF row).
+	// its max_packets_per_flow (deviation 1 of docs/claims.md's BUFF row).
 	// This is what makes the BAR cap and expire the flow rather than the graph's
 	// PacketStoreArg. The 30 s here is deliberately longer than this test's run,
 	// so nothing expires under it; what the timeout_ns *does* is the sibling

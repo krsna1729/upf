@@ -215,7 +215,7 @@ func TestTheBARsParametersAreReadWhereverTheySit(t *testing.T) {
 }
 
 // TestABufferingFlowsOwnNumbersAreWrittenToTheStore closes deviation (1) of
-// docs/compliance.md's BUFF row: the store's per-flow "flows" entry is the
+// docs/claims.md's BUFF row: the store's per-flow "flows" entry is the
 // SMF's own instruction for that flow -- 8.2.29's DL Buffering Duration as the
 // store's timeout_ns and 8.2.30's Suggested Packet Count as its
 // max_packets_per_flow -- keyed by the same ActionId the rule carries (BESS
@@ -322,7 +322,7 @@ func TestABufferingFlowsOwnNumbersAreWrittenToTheStore(t *testing.T) {
 }
 
 // TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession closes deviation
-// (3) of docs/compliance.md's BUFF row: 5.2.4.1 lets the CP function extend a
+// (3) of docs/claims.md's BUFF row: 5.2.4.1 lets the CP function extend a
 // flow's buffering when it answers a Downlink Data Report, and the Update BAR it
 // carries there is applied to the same model a Session Modification's Update BAR
 // writes -- the DL Buffering Duration (8.2.29, with the stopped-timer and

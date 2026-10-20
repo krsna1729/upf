@@ -61,7 +61,7 @@ type StatsSnapshot struct {
 
 // Holds says whether the session layer still has this session. A report the
 // reporting loop holds for one it does not is usage the session's termination
-// report already carried (docs/compliance.md, finding 20): sending it would
+// report already carried (docs/claims.md, finding 20): sending it would
 // tell the SMF the same usage twice, and an SMF mid-release may well accept it.
 func (c *Compiler) Holds(seid uint64) bool {
 	if c == nil {

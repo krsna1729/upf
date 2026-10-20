@@ -50,7 +50,7 @@
 # PortOut names the port this file declares.
 
 ports:
-  # Two DPDK ports, bound before bessd starts (docs/ports.md). One rx queue
+  # Two DPDK ports, bound before bessd starts (docs/datapath.md). One rx queue
   # each: RSS and one worker per queue are the scale path (D-097's layout);
   # a deployment with more queues sets num_rx_queues and the workers to match.
   - name: n3
@@ -226,7 +226,7 @@ modules:
   # uplink's decrement is the UE's own (RFC 791; RFC 1122 3.2.1.7: decrement,
   # and drop at 1). The module has no ICMP Time Exceeded and keeps nothing but
   # its gate counters, so that drop is silent -- recorded in docs/datapath.md
-  # and docs/compliance.md.
+  # and docs/claims.md.
   - name: ttl_ul
     mclass: UpdateTTL
   - name: at_dl

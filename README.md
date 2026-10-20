@@ -56,6 +56,13 @@ deliberately *not* copied from OMEC's `pfcpiface` (a goroutine and a
 ordering and rollback), because BESS now offers the transactional machinery
 that makes them unnecessary.
 
+What the tree *claims* -- each clause it serves, each value it refuses, the
+competitive score -- lives in one place, `docs/claims.md`, rendered from
+`docs/claims.json` by `ci/verify.sh`. That script runs every piece of evidence
+the claims cite (Go tests, lane scripts, deploy graphs), writes each verdict
+back into the JSON, and re-renders the document, so a claim and its proof
+cannot drift apart.
+
 ## Build
 
 ```sh
@@ -241,13 +248,13 @@ build/bess/stage/bin/bessctl apply deploy/upf.yaml
   crosses the dataplane; `docs/interop.md`). `ci/cntc-path.sh` drives TOSSI
   CNTC's PFCP simulator and its N3 robustness frames against `upfd` and `bessd`
   and checks the answers; it is not CNTC's verdict and earns no certificate
-  (`docs/compliance.md`, finding 18).
+  (`docs/claims.md`, finding 18).
 - The port split is in, on a veth: `deploy/veth-port.yaml` is one PMD port with
   four queues split by a `Vif` into N3/N6/N9, each with its own address and
   route domain, and `ci/veth-port.sh` proves the queues, the split and the
   compiler's downlink rule selected by the domain the port wrote. What waits for
   hardware is the placement measurement (per-pattern RSS and the line rate); a
-  veth advertises no RSS offload at all (`docs/ports.md`).
+  veth advertises no RSS offload at all (`docs/datapath.md`).
 - Next, in this order: a real SMF (open5gs or free5GC) against `upfd` for
   interop and Causes, packets over the bound N3/N6 ports (the placement
   measurement is the hardware item), then the classifier's explicit tuple budget

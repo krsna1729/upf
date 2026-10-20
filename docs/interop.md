@@ -1,5 +1,8 @@
 # Real-SMF interop: free5GC v4.3.0 against `upfd`
 
+Claims -- what is verified, and by which evidence -- live in
+`docs/claims.md`; this document explains mechanisms, not status.
+
 No test of this repository had a real 5GC SMF on the other end of N4. This
 environment puts one there (free5GC's SMF, with the rest of the core and a
 UERANSIM gNB/UE to make it create sessions) and records what it sends and what

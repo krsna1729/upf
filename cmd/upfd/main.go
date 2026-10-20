@@ -101,7 +101,7 @@ func run() error {
 			"prefixes of either family, a protocol and port *ranges*. Empty (the default): "+
 			"the WildcardMatch path, where a port range and an IPv6 prefix are refused. No "+
 			"deployed graph carries that module yet, so naming one points at a module the "+
-			"daemon does not have (docs/compliance.md)")
+			"daemon does not have (docs/claims.md)")
 	firewallDL := flag.String("firewall-dl", "",
 		"the downlink firewall module, as -firewall-ul is the uplink one")
 	pdrMatchUL := flag.String("pdr-match-ul", "",
@@ -817,7 +817,7 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	// rule into both, and the packet path reads whichever the graph wires. Only
 	// the uplink has a keyed-matcher flag: its key is the F-TEID, which names a
 	// session on N3 and nothing on N6 (the downlink's own selector is the next
-	// step, docs/scorecard.md), so a downlink one would name a rule home no
+	// step, docs/claims.md), so a downlink one would name a rule home no
 	// module provides.
 	if a.firewallUL != "" && a.pdrMatchUL != "" {
 		return session.Config{}, fmt.Errorf(

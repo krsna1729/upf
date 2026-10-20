@@ -465,7 +465,7 @@ func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.S
 }
 
 // TestABuffOnlyFARIsADrop pins what this UPF does with the one Apply Action it
-// reads but cannot honour. There is no downlink buffer (docs/compliance.md, gap
+// reads but cannot honour. There is no downlink buffer (docs/claims.md, gap
 // 4), so a FAR that asks for BUFF and not FORW takes the drop the uplink's
 // closed gate also takes. The alternative -- falling through to the forward
 // path -- would deliver the packet the SMF asked to hold, which is worse than
@@ -1226,7 +1226,7 @@ func TestACHOOSEForIPv6IsRefused(t *testing.T) {
 	// request with V6 alone is therefore for an IPv6 F-TEID, and this UP's N3
 	// address is IPv4: answering with an IPv4 one would hand the SMF a family
 	// it did not ask for. IPv6 has no form anywhere else in this tree either
-	// (docs/compliance.md), so it is refused, with a rule failure the SMF can
+	// (docs/claims.md), so it is refused, with a rule failure the SMF can
 	// act on -- not an accepted session it cannot use.
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
@@ -2632,7 +2632,7 @@ func TestANonIPv4PDIIsRefusedNotWidened(t *testing.T) {
 	// A table field is four bytes: an IPv6 UE address or SDF prefix cannot be
 	// carried by it. Compiling one as "unconstrained" would write a rule that
 	// matches every address, another session's packets included -- so the
-	// session is refused, which is what the IPv6 gap in docs/compliance.md
+	// session is refused, which is what the IPv6 gap in docs/claims.md
 	// means for a PDI that names one.
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())

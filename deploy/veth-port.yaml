@@ -4,7 +4,7 @@
 # a `Vif` splitting it into the three reference points, each with its own
 # address and its own route domain. `ci/veth-port.sh` deploys this graph on a
 # kernel veth (the af_packet PMD) and checks it; docs/design.md's port section
-# and docs/ports.md hold what that proves and what still waits for hardware.
+# and docs/datapath.md hold what that proves and what still waits for hardware.
 #
 # The port is declared here, in the manifest, because `bessd` has no DPDK-args
 # passthrough: it builds its own EAL argv (core/runtime/dpdk.cc) and hot-plugs

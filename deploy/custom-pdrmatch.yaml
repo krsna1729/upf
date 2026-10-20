@@ -29,7 +29,7 @@
 # 8.2.62's exact address): this graph is a one-instance deployment, so its key
 # is the address alone (`-select-fields-dl dst_ip`). A longest-prefix match is
 # the structure for an IPv6 UE *prefix* or a framed route, neither of which this
-# UP serves yet (docs/compliance.md).
+# UP serves yet (docs/claims.md).
 #
 # What this path refuses, as compiled today: a BUFF FAR (no buffering verdict in
 # this module), a PDI naming a QFI (its rules are the 5-tuple), the IPv6 UE
@@ -43,7 +43,7 @@
 # connections: 0 toward n6_out, 1 toward enc).
 
 ports:
-  # Two DPDK ports, bound before bessd starts (docs/ports.md).
+  # Two DPDK ports, bound before bessd starts (docs/datapath.md).
   - name: n3
     driver: PMDPort
     arg: {port_id: 0}

@@ -132,7 +132,7 @@ func qersInOrder(s *Session) []*qer {
 // but one rule's action carries one meter id: enforcing every QER's own bucket
 // over one packet needs the dataplane to hold a bucket per QER and measure the
 // packet against all of them, which this meter cannot do yet (finding 6,
-// docs/compliance.md). So the session picks one, and it picks deliberately:
+// docs/claims.md). So the session picks one, and it picks deliberately:
 // 5.2.1 attaches the session's own rate to a QER "associated to all the DL/UL
 // PDRs of the PDU session", so the most-referenced QER is the aggregate cap --
 // the one whose absence would let a session exceed its subscription -- while
@@ -1279,7 +1279,7 @@ func (c *Compiler) resolve(s *Session) error {
 		// the SMF is told they arrived. Where the deployment has a store
 		// (Config.Buffering), the rule delivers them on that branch; where it
 		// has none, they are dropped, because delivering traffic the SMF asked
-		// to hold would be worse than dropping it (docs/compliance.md's row
+		// to hold would be worse than dropping it (docs/claims.md's row
 		// over 7.5.2.6).
 		wasBuffering := p.buffer
 		// Buffering is the downlink's: a BAR is the instruction for downlink data
@@ -1467,7 +1467,7 @@ func (c *Compiler) resolve(s *Session) error {
 // instance the SMF named (TS 29.244 8.2.4), or the deployment's default when it
 // named none. A name the deployment does not configure is a rule it cannot
 // place -- before this was read, a PDI naming another instance was
-// indistinguishable from one naming ours (docs/compliance.md's row over
+// indistinguishable from one naming ours (docs/claims.md's row over
 // 8.2.89/8.2.4).
 func (c *Compiler) interfaceFor(p *pdr) (routing.Interface, error) {
 	if c.cfg.Instances == nil {
@@ -2898,7 +2898,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 // What the rule cannot carry is what a packet's 5-tuple does not have: the
 // PDI's QFI (the PdrMatch path's rule can, and takes it), the resolved route
 // domain and the tunnel. Those stay fields of the WildcardMatch path's key;
-// docs/compliance.md records what that means for a firewall deployment.
+// docs/claims.md records what that means for a firewall deployment.
 //
 // A forwarding rule names its PDR's ActionId (the message's "action_id", BESS
 // D-141): the module writes it into the packet's metadata, and the
@@ -3621,7 +3621,7 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 				// the address this UP advertises on N3 is IPv4: answering with
 				// one would hand the SMF a family it did not ask for. IPv6 is
 				// an explicit refusal everywhere else too (a PDI naming an IPv6
-				// address or prefix is cause 73, docs/compliance.md). V4|V6
+				// address or prefix is cause 73, docs/claims.md). V4|V6
 				// names both families -- either will do -- and a CH bit with no
 				// family at all names none (a shape 8.2.3 does not allow and no
 				// SMF sends), so those are answered with the IPv4 F-TEID.
@@ -3991,7 +3991,7 @@ func parseURR(i *ie.IE) (urrReq, error) {
 			// ask for what is already done, and 0 asks for nothing. MBQE asks
 			// to count before QoS enforcement, which no graph can: the
 			// counter sits after the meter, so a throttled flow's usage is the
-			// forwarded part (docs/compliance.md). Real SMFs set it on every
+			// forwarded part (docs/claims.md). Real SMFs set it on every
 			// URR (free5GC does), so refusing it refuses every real session.
 			// INAM (a paused URR) and RADI (application detection) are not
 			// built and are refused.

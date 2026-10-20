@@ -194,7 +194,7 @@ func TestTwoInstancesRouteIndependently(t *testing.T) {
 // TestAPDINamingAnUnknownInstanceIsRefused: a name the deployment does not
 // configure is a rule this UPF cannot place. Before the instance was read at
 // all, such a rule was served by the default interface -- indistinguishable
-// from one naming ours (docs/compliance.md's row over 8.2.89/8.2.4).
+// from one naming ours (docs/claims.md's row over 8.2.89/8.2.4).
 func TestAPDINamingAnUnknownInstanceIsRefused(t *testing.T) {
 	rec := &recorder{}
 	c := New(instancedConfig(t), rec, quietLogger())

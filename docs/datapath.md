@@ -1,5 +1,8 @@
 # The datapath: modules, resources and placement
 
+Claims -- what is verified, and by which evidence -- live in
+`docs/claims.md`; this document explains mechanisms, not status.
+
 Engineering reference for `datapath/` (the UPF's BESS plugin) and the graphs it
 plugs into. It is deliberately narrower than the other files:
 
@@ -7,8 +10,8 @@ plugs into. It is deliberately narrower than the other files:
 |---|---|
 | `docs/design.md` | why the deployment is shaped this way, the walls, the costs, the milestones |
 | **`docs/datapath.md`** (this) | what each module is, which resource it owns and under which key, what it takes from BESS, how packets and workers are placed |
-| `docs/compliance.md` | clause-by-clause status and the test or script that proves each row |
-| `docs/scorecard.md` | how the field scores, and what each of our numbers rests on |
+| `docs/claims.md` | clause-by-clause status and the test or script that proves each row |
+| `docs/claims.md` | how the field scores, and what each of our numbers rests on |
 | `README.md` | how to build, run and prove |
 
 ## The graph
@@ -384,8 +387,8 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | `ActionTable` | one per direction | its own resource is `<module>/actions` (a rule's `{meter_id, next_hop_id}`); it *reads* `mt_*/meters` and `rt/next_hops` and fails closed when the id it writes has no reader |
 | `Meter` | one per direction | `<module>/meters`, the QER's committed and peak rate; a closed gate compiles to the drop gate instead |
 | `Router` | one, both directions | `<module>/next_hops`, the egress gate an action names; a resolved hop's `dst_mac`/`src_mac` are written into the frame it forwards (BESS D-153, `route::RewriteL2`) |
-| `UpdateTTL` | both chains, before the `Router` | RFC 791's hop count: one decrement each way, the header checksum kept right; a packet arriving with TTL 1 is dropped, and the drop is silent -- no ICMP Time Exceeded, and BESS's per-gate counters are all that record it (`docs/compliance.md`'s hop-count row records both) |
-| `PMDPort` | `n3`, `n6`, and `upf_port` (a veth) | `num_rx_queues: 1` each in the deployment's graph; RSS and one worker per queue are the scale path. The one-port split (per-pattern RSS, `L3_SRC_ONLY` uplink / `L3_DST_ONLY` downlink) is designed in `docs/design.md`, "N3, N6, N9": `deploy/veth-port.yaml` wires it over a software device (one PMD port, four queues, a `Vif` with the three interfaces) and `ci/veth-port.sh` proves what a veth can prove of it, while the placement measurement is what a NIC is still needed for (`docs/ports.md`) |
+| `UpdateTTL` | both chains, before the `Router` | RFC 791's hop count: one decrement each way, the header checksum kept right; a packet arriving with TTL 1 is dropped, and the drop is silent -- no ICMP Time Exceeded, and BESS's per-gate counters are all that record it (`docs/claims.md`'s hop-count row records both) |
+| `PMDPort` | `n3`, `n6`, and `upf_port` (a veth) | `num_rx_queues: 1` each in the deployment's graph; RSS and one worker per queue are the scale path. The one-port split (per-pattern RSS, `L3_SRC_ONLY` uplink / `L3_DST_ONLY` downlink) is designed in `docs/design.md`, "N3, N6, N9": `deploy/veth-port.yaml` wires it over a software device (one PMD port, four queues, a `Vif` with the three interfaces) and `ci/veth-port.sh` proves what a veth can prove of it, while the placement measurement is what a NIC is still needed for (`docs/datapath.md`) |
 | `UnixSocketPort` | `cp_marker` | `SOCK_SEQPACKET`: one write from `upfd` is one End Marker frame |
 | `PortInc`/`PortOut`, `Sink`, `Source`, `Rewrite`, `Dump`, `MetadataTest` | graphs | plumbing and lab only; a `Sink` has no output gate, so it appears in no metric — the counters that prove behaviour sit on modules' *output* gates |
 | `deploy/meter-compose.yaml` / `ci/meter-compose.sh` | the composition probe: `classifier -> at1 -> m1 -> at2 -> m2`, two ActionTables rewriting one `meter_id` attribute and two Meters each reading their own id, proving that two rate policies need no module change (and pinning that a stage's writes need a downstream reader) |
@@ -569,7 +572,7 @@ cost is one hash probe and one key compare — no masks, no key construction —
 against `WildcardMatch`'s tuple-plus-masks path in the split chain.
 
 **Status: deferred behind the feature list.** The fusion is a performance
-experiment, not a capability — nothing in `docs/compliance.md`'s gaps or the
+experiment, not a capability — nothing in `docs/claims.md`'s gaps or the
 roadmap waits on it, and `docs/design.md`'s "measure before any placement change"
 makes the module and its arm the price of an *answer*, not of a feature. The
 design work above is the part that was expensive to derive, and it is recorded
@@ -632,3 +635,134 @@ the `.so` so a controller can build the messages without generated Go code.
 BESS's own `packet_store` needs no plugin; its flow key became configurable in
 96d22a8f (`packet_store: the flow key is a configured attribute, not a fixed
 pair`), which the buffering branch needs and no other graph does.
+
+---
+
+## Ports
+
+How a UPF graph gets its ports, what the port exposes to the graph, and what is
+proven about it where. `docs/design.md`'s port section ("N3, N6, N9: one port,
+three interfaces") is the argument; this section is the surface: the manifest
+fields, the drivers in use, the queue model, and the recipe for the one port
+this repo can measure without a NIC.
+
+### A port is declared in the manifest, not on the command line
+
+`bessd` has no DPDK-args passthrough: it builds its own EAL argv
+(`core/runtime/dpdk.cc`), and a port a manifest declares is hot-plugged by
+`rte_dev_probe` (`core/drivers/pmd.cc`). So a port is a graph's business:
+
+```yaml
+ports:
+  - name: n3                      # the name the graph uses: PortInc/PortOut/
+    driver: PMDPort               #   QueueInc/QueueOut name this, not the
+    num_rx_queues: 1              #   driver's device
+    num_tx_queues: 1
+    arg: {port_id: 0}             # or {vdev: "..."} for a software device
+```
+
+- `name` is the manifest's; the driver's device is named by `arg` (`port_id`
+  for a bound PCI device, `vdev` for a software PMD such as `net_af_packet`).
+- `num_rx_queues`/`num_tx_queues` are what the graph gets. For a PMD the
+  *device's* queue count is the driver's (`net_af_packet`'s comes from
+  `qpairs=` in the vdev string, **not** from the veth's `numrxqueues`), so the
+  two are stated separately and checked separately.
+- `driver: PMDPort` takes a DPDK device; `driver: UnixSocketPort` is the
+  control plane's End Marker socket (no PMD, no NIC); the deployment
+  (`deploy/upf.yaml`) uses both.
+
+`deploy/upf.yaml` binds two PMD ports (N3, N6) bound with `dpdk-devbind` before
+`bessd` starts; `deploy/veth-port.yaml` is the same declaration over a software
+device, which is what this repo can run on a host with no NIC to spare.
+
+### Queues: one task per qid, and the workers start paused
+
+`Num_rx_queues` receive queues are read by `num_rx_queues` `QueueInc` modules,
+one per `qid`, each its own task; the transmit side is `QueueOut` per `qid` (or
+`PortOut`, which uses queue 0). `PortInc` is the single-queue shorthand.
+
+Two things about this tree that bite an arm:
+
+- **`bessctl resume` is mandatory.** The workers a pipeline creates start
+  paused, so a port's rx counter stands at 0 while the interface's own kernel
+  counters climb: the frames are in the ring, not in the datapath.
+- **The kernel buffers what arrived before the PMD started.** Frames that
+  reached the interface before the port was probing are read later, so a
+  counter read immediately after `resume` is not yet "this run's traffic".
+
+RSS and one worker per queue are the scale path (`docs/design.md`, the
+placement policy; BESS `docs/decisions.md` D-097), and `docs/claims.md`'s
+multi-queue row points here for it.
+
+### One port, three interfaces
+
+The UPF's three reference points are IP-level interfaces, so one port can carry
+all three: a `Vif` (`core/modules/vif.{h,cc}`) matches a frame by `(VLAN,
+destination MAC)` -- and answers ARP for an interface's address -- and sends it
+out that interface's output gate, writing `vif_id` and `route_domain` into the
+packet's metadata on the way. The three interfaces are the manifest's, each
+with its own MAC, address, route domain and gate; the deployment's own graph
+uses one for its single N6 port (`deploy/upf.yaml`'s `vif_n6`: the data
+network's frames are the interface's) with `l2_sort` keeping the interface's
+own frames -- the ARP answer, which is not IP -- on the port instead of the
+downlink chain.
+
+Two facts a graph must respect:
+
+- **A metadata attribute with no reader gets no offset at all**
+  (`core/metadata.cc`, `FillOffsetArrays`), and the `Vif` writes `route_domain`
+  only when *both* of its attributes have one (`vif.cc`'s `write_metadata`
+  guard). A graph that wants the domain must therefore have a module that reads
+  it -- a PDR table declaring `{attr_name: route_domain, num_bytes: 4}` among
+  its `fields` does -- and, because the guard covers `vif_id` too, a reader for
+  that as well.
+- **A router's domains are created eagerly.** `Router` builds every domain's FIB
+  in `Init` (`router.cc`'s `CreateDomain` loop), and on this box a `max_domains`
+  in the tens fails to build ("route table is full"). A deployment's domain ids
+  are small and `max_domains` is just above them; `upfd -max-domains` must
+  agree with the graph's.
+
+### What is proven where
+
+**On a veth (`ci/veth-port.sh`, `deploy/veth-port.yaml`; no NIC needed).** The
+arm declares one PMD port over a kernel veth (`net_af_packet0`, `qpairs=4`,
+`fanout_mode=hash`) with four `QueueInc`s into a three-interface `Vif`
+(N3/N6/N9, each with its own address and route domain), applies the graph,
+resumes, sends real frames from the peer end, and checks:
+
+| what | how it is checked |
+|---|---|
+| the port's queue count | `bessctl status` (runtime PortInfo) **and** the active pipeline (`bessctl get -o json`), **and** DPDK's own device telemetry (`/ethdev/info`): four rx/tx queues, all four started |
+| real L2 | a frame addressed to an interface's MAC crosses the veth, is read by the port and lands on that interface's gate -- the three gates' counts are exactly the frames sent |
+| the vif split with route domains | the domain the port wrote is what the compiler's (`upfd`, over N4) downlink rule is keyed on, and the frame carrying it is selected by that rule and crosses the chain to the encap -- the same frame with no rule yet written is dropped |
+| the per-queue spread | `fanout_mode=hash` places a flow on one queue; all four `QueueInc`s move under many flows |
+
+The kernel side of the recipe is part of the arm: the veth is created with
+`numrxqueues`/`numtxqueues` (four each) if it is not already there, given an
+address on one end so frames have a source, and sent to with **permanent
+neighbours** -- the host treats an address local to an interface as its own and
+routes it to `lo`, so a ping to the port's own address never leaves the host;
+the destinations must be non-local with a neighbour entry naming the interface
+MAC the frame should carry. IPv6 on both ends is turned off before they come up
+(duplicate address detection and router solicitations are multicast and land on
+the `Vif`'s default gate), and the pair is deleted when the run ends.
+
+**On a NIC (not reproducible on a veth).** The placement measurement
+`docs/design.md` describes needs a device with an RSS engine: the af_packet PMD
+advertises none (`ethdev_rss_hf=0x0`, no hash key, no RETA, no per-queue hash
+function), so `RTE_ETH_RSS_LEVEL_INNERMOST` with `L3_SRC_ONLY`/`L3_DST_ONLY`
+(as a per-pattern `rte_flow` RSS action, since the two L3 bits are mutually
+exclusive in one `rss_hf`) cannot be configured on it, let alone measured at
+line rate. On a veth the flows are spread by the kernel's AF_PACKET fanout
+hash, which is a flow-to-queue placement but not a NIC's. What a NIC is also
+needed for, and what a veth cannot show: driver offloads, descriptor and DMA
+behaviour, and absolute throughput or latency -- every packet on a veth crosses
+the kernel's veth path and the PMD's mmap rings. Queue count is a further
+example of the limit: on a veth it is whatever `qpairs=` says, so it does not
+validate that a NIC's advertised queue count was honoured.
+
+**Multi-queue RSS, per-worker tables, RCU rule updates, no locks or allocations
+in the packet path** (`docs/claims.md`'s row) are the engine's, not this
+repo's: BESS `docs/decisions.md` and `docs/performance-contract.md` are the
+sources, and the placement policy in `docs/design.md` is what a deployment
+turns into a port-and-worker layout.
