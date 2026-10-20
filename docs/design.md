@@ -1396,9 +1396,11 @@ and `upfd -route-mode=destination`. The compiler then writes hop 0 in every
 action (`0` is the action table's "no next hop"), and the Router routes each
 packet by its own IPv4 destination in the domain its `route_domain` metadata
 names, from the graph's `rt/routes` resource; a destination with no route is
-dropped (or punted to `punt_miss_gate`). TTL and the L2 rewrite are the
-forwarding chain's in this mode, so the graph has no `UpdateTTL` module. The
-one limit the mode keeps: the lookup uses the packet's own domain, so a FAR
+dropped (or punted to `punt_miss_gate`). The TTL and, where a hop names both
+MACs, the L2 rewrite are the forwarding chain's in both modes (BESS D-153 and
+the TTL change), so no graph carries `UpdateTTL`; doing both would decrement
+twice. The one limit the mode keeps: the lookup uses the packet's own domain,
+so a FAR
 that forwards into a *different* Network Instance than the packet was
 classified in is refused by the compiler; policy hops are the way to express
 that. `deploy/route-path.yaml` is the lab graph and `ci/route-path.sh` the

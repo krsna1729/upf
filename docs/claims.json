@@ -1135,7 +1135,7 @@
       "state": "skip"
      },
      "ci/veth-port.sh": {
-      "state": "skip"
+      "state": "ok"
      }
     }
    },
@@ -1999,7 +1999,7 @@
       "state": "ok"
      },
      "ci/veth-port.sh": {
-      "state": "skip"
+      "state": "ok"
      }
     }
    },
@@ -2102,12 +2102,16 @@
    "id": "competition-11",
    "scope": "competition",
    "evidence": [
-    "ci/iface-path.sh"
+    "ci/iface-path.sh",
+    "ci/route-path.sh"
    ],
    "result": {
     "state": "ok",
     "evidence": {
      "ci/iface-path.sh": {
+      "state": "ok"
+     },
+     "ci/route-path.sh": {
       "state": "ok"
      }
     }

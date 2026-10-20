@@ -92,6 +92,7 @@ Run the lane that proves the path you touched:
 |---|---|
 | `ci/smoke-gtpu.sh` | decap, encap, echo reply, Error Indication; QFI and DSCP bytes |
 | `ci/session-path.sh` | one session programmed over the SDK; both chains and the End Marker byte-checked |
+| `ci/route-path.sh` | the same session with the Router in destination mode: the FIB, not the action's hop, picks the exit |
 | `ci/n4-path.sh` | PFCP message → compiler → one transaction → packets; restart and checkpoint replay |
 | `ci/session-report.sh` | URR reports — period, threshold, quota — over PFCP |
 | `ci/buffer-path.sh` | BAR buffering, DDN, and the duration's expiry |

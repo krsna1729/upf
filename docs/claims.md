@@ -115,7 +115,7 @@ run lacks.
 | **8** GTP-U: decap, encap, echo, end marker, DSCP copy (5) | **100** | 40 | 80 | 40 | 40 | 40 | 80 | lane ×2 |
 | **9** IPv6: PFCP UE IP, inner + outer, N9 (3) | 0 | 0 | 0 | 0 | 33 | 0 | 0 | test ×2 |
 | **10** MAR / ATSSS-LL (2) · gap | 0 | 50 | 0 | 0 | 50 | 0 | 0 | — |
-| **11** ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 | lane |
+| **11** ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 | lane ×2 |
 | **12** real-SMF interop (1) · skip | **100** | 0 | 100 | 0 | 0 | 0 | 0 | lane |
 | **mean (12 blocks)** | **78** | **56** | **65** | **43** | **46** | **31** | **42** | |
 
