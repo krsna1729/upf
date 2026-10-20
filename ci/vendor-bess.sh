@@ -74,6 +74,14 @@ while IFS= read -r -d '' f; do
 done < <(find "$DEST/stage" "$DEST/dpdk/install" -type f \
            \( -name '*.pc' -o -name rte_build_config.h \) -print0)
 
+# The stage's own .pc files declare the install prefix (/usr/local). Write the
+# vendored stage in explicitly: --define-prefix recovers it from the file's
+# location, but when meson installs to lib/<triplet>/pkgconfig it strips one
+# directory too many and yields <stage>/lib, whose include/ does not exist.
+while IFS= read -r -d '' f; do
+  sed -i "s|^prefix=.*|prefix=$DEST/stage|" "$f"
+done < <(find "$DEST/stage" -type f -name '*.pc' -print0)
+
 PMD_OLD=$(ls -d "$OLD"/install/lib/dpdk/pmds-* | head -1)
 PMD_NEW=$NEW/install/lib/dpdk/$(basename "$PMD_OLD")
 python3 - "$PMD_OLD" "$PMD_NEW" "$DEST"/dpdk/install/lib/librte_eal.* <<'PY'

@@ -97,7 +97,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/bess
-          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v1
+          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v2
 
       # The checkout and the dependency install are not part of the cache: a
       # runner is fresh every run, so the pinned fork is what install-deps.sh
@@ -200,7 +200,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: build/bess
-          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v1
+          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v2
 
       # The plugin is small, but a cache saves meson setup on every run and
       # keeps a pin bump's rebuild incremental.
@@ -218,7 +218,8 @@ jobs:
           # directory (lib/<triplet>/pkgconfig); find it rather than assuming.
           stage_pc=$(find "$PWD/build/bess/stage/lib" -type d -name pkgconfig | paste -sd: -)
           if [ ! -f datapath/build/build.ninja ]; then
-            PKG_CONFIG="pkg-config --define-prefix" \
+            # The vendored .pc carries an absolute prefix; --define-prefix
+            # would override it from the file's (possibly multiarch) location.
             PKG_CONFIG_PATH="$stage_pc" \
               meson setup datapath/build datapath
           fi
