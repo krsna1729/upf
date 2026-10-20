@@ -48,7 +48,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "an F-TEID with the CH flag (no TEID) is assigned one"
   },
   {
    "id": "status-2",
@@ -108,7 +109,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "PDIs sharing a CHOOSE ID share one F-TEID"
   },
   {
    "id": "status-3",
@@ -144,7 +146,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "a CHOOSE for an address family the UP has no address for is refused"
   },
   {
    "id": "status-4",
@@ -180,7 +183,8 @@
     }
    ],
    "kind": "engineering",
-   "block": 2
+   "block": 2,
+   "claim": "a request with no session layer configured is refused with a Cause"
   },
   {
    "id": "status-5",
@@ -216,7 +220,8 @@
     }
    ],
    "kind": "engineering",
-   "block": null
+   "block": null,
+   "claim": "a datapath refusal becomes a Cause, not a half-programmed session"
   },
   {
    "id": "status-6",
@@ -255,7 +260,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "a port range in an SDF filter matches as a range"
   },
   {
    "id": "status-7",
@@ -302,7 +308,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 9
+   "block": 9,
+   "claim": "a non-IPv4 address, or a prefix with host bits, is refused"
   },
   {
    "id": "status-8",
@@ -374,7 +381,8 @@
     }
    ],
    "kind": "engineering",
-   "block": 7
+   "block": 7,
+   "claim": "an opt-in firewall path carries the match the wildcard key cannot"
   },
   {
    "id": "status-9",
@@ -409,7 +417,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "a PDI with no UE IP IE matches by its F-TEID"
   },
   {
    "id": "status-10",
@@ -481,7 +490,8 @@
     }
    ],
    "kind": "engineering",
-   "block": null
+   "block": null,
+   "claim": "a restarted controller empties the predecessor's dataplane state"
   },
   {
    "id": "status-11",
@@ -521,7 +531,8 @@
     }
    ],
    "kind": "engineering",
-   "block": 2
+   "block": 2,
+   "claim": "a deleted session's id is not reused until the dataplane retires it"
   },
   {
    "id": "status-12",
@@ -573,7 +584,8 @@
     }
    ],
    "kind": "engineering",
-   "block": 2
+   "block": 2,
+   "claim": "one key is one rule: a live session's rule cannot be taken"
   },
   {
    "id": "status-13",
@@ -621,7 +633,8 @@
     }
    ],
    "kind": "engineering",
-   "block": 7
+   "block": 7,
+   "claim": "the management surface: metrics as text, the rest as flags"
   },
   {
    "id": "status-14",
@@ -681,7 +694,8 @@
     }
    ],
    "kind": "engineering",
-   "block": 1
+   "block": 1,
+   "claim": "a checkpointed run keeps its sessions across a restart"
   },
   {
    "id": "status-15",
@@ -720,7 +734,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "an uplink SDF filter is left as provisioned, not swapped"
   },
   {
    "id": "status-16",
@@ -755,7 +770,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "several SDF Filter IEs are a list; a packet matches any"
   },
   {
    "id": "status-17",
@@ -790,7 +806,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "several QFI IEs are a list; a packet matches any"
   },
   {
    "id": "status-18",
@@ -829,7 +846,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "an SDF Filter IE with no Flow Description is refused (cause 64)"
   },
   {
    "id": "status-19",
@@ -864,7 +882,8 @@
     }
    ],
    "kind": "conformance",
-   "block": null
+   "block": null,
+   "claim": "a match field the parser does not handle is refused, never ignored"
   },
   {
    "id": "status-20",
@@ -927,7 +946,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 5
+   "block": 5,
+   "claim": "several QERs on one PDR: a closed gate in any of them stops the rule"
   },
   {
    "id": "status-21",
@@ -962,7 +982,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 6
+   "block": 6,
+   "claim": "the Session Deletion Response reports each URR's usage"
   },
   {
    "id": "status-22",
@@ -997,7 +1018,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 8
+   "block": 8,
+   "claim": "a G-PDU on an unknown TEID is discarded and an Error Indication returned"
   },
   {
    "id": "status-23",
@@ -1048,7 +1070,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 9
+   "block": 9,
+   "claim": "the UE IP S/D bit places the address on the right side of the key"
   },
   {
    "id": "status-24",
@@ -1091,7 +1114,8 @@
     }
    ],
    "kind": "conformance",
-   "block": null
+   "block": null,
+   "claim": "FAR options: Forwarding Policy is held; L7 actions are refused (cause 73)"
   },
   {
    "id": "status-25",
@@ -1134,7 +1158,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 12
+   "block": 12,
+   "claim": "the uplink lookup names the tunnel the packet arrived on"
   },
   {
    "id": "status-26",
@@ -1169,7 +1194,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 6
+   "block": 6,
+   "claim": "a PDR naming a QER the session does not hold is refused (cause 73)"
   },
   {
    "id": "status-27",
@@ -1204,7 +1230,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 7
+   "block": 7,
+   "claim": "NOCP decides the Downlink Data Report; BUFF alone buffers silently"
   },
   {
    "id": "status-28",
@@ -1251,7 +1278,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 8
+   "block": 8,
+   "claim": "a peer Error Indication becomes an ERIR report to the SMF"
   },
   {
    "id": "status-29",
@@ -1290,7 +1318,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "QFI 0 is legal; here it means 'no container'"
   },
   {
    "id": "status-30",
@@ -1325,7 +1354,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 6
+   "block": 6,
+   "claim": "the Usage Report Trigger is octets 5-7 of its IE"
   },
   {
    "id": "status-31",
@@ -1365,7 +1395,8 @@
     }
    ],
    "kind": "engineering",
-   "block": 2
+   "block": 2,
+   "claim": "a refused modification leaves the session exactly as it was"
   },
   {
    "id": "status-32",
@@ -1408,7 +1439,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 6
+   "block": 6,
+   "claim": "pfcpsim's zero TEID, QER 0, QFI 0 and inert period are accepted"
   },
   {
    "id": "status-33",
@@ -1447,7 +1479,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 7
+   "block": 7,
+   "claim": "Remove QER is applied; rule IDs may number from 0"
   },
   {
    "id": "status-34",
@@ -1486,7 +1519,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 6
+   "block": 6,
+   "claim": "a usage report's window is the one the tick decided, not the send time"
   },
   {
    "id": "status-35",
@@ -1521,7 +1555,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 5
+   "block": 5,
+   "claim": "several QERs' rates are enforced together, not one of them"
   },
   {
    "id": "status-36",
@@ -1550,7 +1585,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 5
+   "block": 5,
+   "claim": "Packet Rate: a QER capping packets per time unit, and its queryable status"
   },
   {
    "id": "status-37",
@@ -1589,7 +1625,8 @@
     }
    ],
    "kind": "conformance",
-   "block": 4
+   "block": 4,
+   "claim": "the downlink selector is keyed byte-for-byte as the engine keys it"
   },
   {
    "id": "competition-1",
