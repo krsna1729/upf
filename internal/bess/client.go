@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -480,18 +481,103 @@ type Entry struct {
 	Value map[string]any
 }
 
+// decodeEntry turns one wire entry into the key/value maps a caller reads:
+// the packed Any decoded against the daemon's schema, then JSON fields.
+func (c *Client) decodeEntry(resource string, e *pb.ResourceEntry) (Entry, error) {
+	var key, value map[string]any
+	if e.GetKey() != nil {
+		msg, err := c.messageFrom(e.GetKey())
+		if err != nil {
+			return Entry{}, fmt.Errorf("bess: %s entry key: %w", resource, err)
+		}
+		key, err = messageMap(msg)
+		if err != nil {
+			return Entry{}, fmt.Errorf("bess: %s entry key: %w", resource, err)
+		}
+	}
+	if e.GetValue() != nil {
+		msg, err := c.messageFrom(e.GetValue())
+		if err != nil {
+			return Entry{}, fmt.Errorf("bess: %s entry value: %w", resource, err)
+		}
+		value, err = messageMap(msg)
+		if err != nil {
+			return Entry{}, fmt.Errorf("bess: %s entry value: %w", resource, err)
+		}
+	}
+	return Entry{Key: key, Value: value}, nil
+}
+
+// ResourcePages reads one resource in pages and calls visit for every entry,
+// so a table above the daemon's 64 MiB message limit is readable: no page
+// carries the whole table. The daemon snapshots the table when the call
+// starts, so the pages are one generation's. A page may be empty only for a
+// resource with no entries.
+func (c *Client) ResourcePages(ctx context.Context, name string, visit func(Entry) error) error {
+	control := c.sdk.Control()
+	if control == nil {
+		return errors.New("bess: this client has no control transport for a streamed read")
+	}
+	stream, err := control.ReadResource(ctx, &pb.ReadResourceRequest{Resource: name})
+	if err != nil {
+		return fmt.Errorf("bess: reading %s: %w", name, err)
+	}
+	for {
+		page, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("bess: reading %s: %w", name, err)
+		}
+		for _, e := range page.GetEntries() {
+			entry, err := c.decodeEntry(name, e)
+			if err != nil {
+				return err
+			}
+			if err := visit(entry); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// ResetResources empties the named map resources in the daemon, without
+// reading their keys first: the daemon converges each to no entries and
+// applies the erases in batches. Unlisted resources are untouched; a
+// singleton has no entries and is a no-op. It returns the number of entries
+// removed. The request names the daemon epoch this client last saw, so a
+// restart between the read and the reset is refused instead of erasing the
+// new daemon's tables.
+func (c *Client) ResetResources(ctx context.Context, names ...string) (uint64, error) {
+	if len(names) == 0 {
+		return 0, nil
+	}
+	control := c.sdk.Control()
+	if control == nil {
+		return 0, errors.New("bess: this client has no control transport for a reset")
+	}
+	resp, err := control.ResetResources(ctx, &pb.ResetResourcesRequest{
+		Resources:   names,
+		DaemonEpoch: c.Epoch(),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("bess: resetting %v: %w", names, err)
+	}
+	return resp.GetRemoved(), nil
+}
+
 // Contents reads the current entries of the named resources in one round trip
-// (Pipeline with include_resources), which is what a restarted controller
-// needs before it can take an earlier run's sessions out. Every name must be a
-// resource the daemon has: one it does not -- a module the graph does not load
-// -- fails the read (the daemon's ReadResources answers ENOENT, "no resource
-// ... (ListTransactionResources lists them)"), it does not come back empty.
+// (Pipeline with include_resources). Every name must be a resource the daemon
+// has: one it does not -- a module the graph does not load -- fails the read
+// (the daemon's ReadResources answers ENOENT, "no resource ...
+// (ListTransactionResources lists them)"), it does not come back empty.
 //
 // Naming several resources packs all of them into one response, and the daemon
 // refuses a response above its 64 MiB message limit with RESOURCE_EXHAUSTED
-// ("name fewer resources"). So a caller reading tables that may be large names
-// **one resource per call**: session.Compiler.Sweep does, which is what makes
-// that limit bound the largest single table instead of the sum of them.
+// ("name fewer resources"). Use ResourcePages for a table that may be large;
+// Contents is for a small table or a singleton (the firewall policy in
+// session.Compiler.Sweep).
 func (c *Client) Contents(ctx context.Context, names ...string) (map[string][]Entry, error) {
 	snap, err := c.sdk.Pipeline(ctx, sdk.WithResources(names...))
 	if err != nil {
@@ -505,28 +591,11 @@ func (c *Client) Contents(ctx context.Context, names ...string) (map[string][]En
 		unique[rc.GetName()] = true
 		entries := got[rc.GetName()]
 		for _, e := range rc.GetEntries() {
-			var key, value map[string]any
-			if e.Key != nil {
-				msg, err := c.messageFrom(e.Key)
-				if err != nil {
-					return nil, fmt.Errorf("bess: %s entry key: %w", rc.GetName(), err)
-				}
-				key, err = messageMap(msg)
-				if err != nil {
-					return nil, fmt.Errorf("bess: %s entry key: %w", rc.GetName(), err)
-				}
+			entry, err := c.decodeEntry(rc.GetName(), e)
+			if err != nil {
+				return nil, err
 			}
-			if e.Value != nil {
-				msg, err := c.messageFrom(e.Value)
-				if err != nil {
-					return nil, fmt.Errorf("bess: %s entry value: %w", rc.GetName(), err)
-				}
-				value, err = messageMap(msg)
-				if err != nil {
-					return nil, fmt.Errorf("bess: %s entry value: %w", rc.GetName(), err)
-				}
-			}
-			entries = append(entries, Entry{Key: key, Value: value})
+			entries = append(entries, entry)
 		}
 		got[rc.GetName()] = entries
 	}
