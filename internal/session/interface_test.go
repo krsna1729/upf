@@ -421,6 +421,55 @@ func TestDestinationRoutingNamesNoNextHop(t *testing.T) {
 	}
 }
 
+// TestDestinationRoutingChecksAnAccessFARsInstance: an Access forward names
+// hop 0 like every other expressible forward in destination mode, but it does
+// not skip the mode's one limit. The Router looks the packet up in the domain
+// it was classified in, and an Access FAR that forwards into another instance
+// -- or names one the deployment does not serve -- cannot be expressed by the
+// routes this compiler writes. Returning 0 for it before the check would accept
+// a rule whose packet the Router routes in the wrong table (or would send it
+// out of an exit the FAR never named).
+func TestDestinationRoutingChecksAnAccessFARsInstance(t *testing.T) {
+	cfg := egressConfig(t)
+	cfg.RouteMode = RouteByDestination
+	for _, tc := range []struct {
+		name     string
+		instance string
+	}{
+		{"another configured instance", "vn"},
+		{"an instance the deployment does not serve", "elsewhere"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			c := New(cfg, rec, quietLogger())
+			resp := c.Establish(egressEstablishment(0x7470, "10.45.0.4", 0x70, "internet",
+				farTo(ie.DstInterfaceCore),
+				farTo(ie.DstInterfaceAccess, ie.NewNetworkInstance(tc.instance))))
+			if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
+				t.Errorf("an Access forward naming %s answered cause %d, want 73", tc.name, got)
+			}
+			if len(rec.txns) != 0 {
+				t.Errorf("the refused establishment wrote %d transactions, want none", len(rec.txns))
+			}
+		})
+	}
+
+	// The same forward with no instance named falls back to the PDI's, stays in
+	// the packet's domain, and names hop 0.
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	resp := c.Establish(egressEstablishment(0x7471, "10.45.0.5", 0x71, "internet",
+		farTo(ie.DstInterfaceCore),
+		farTo(ie.DstInterfaceAccess, tunnelTo(0x22334459, "10.20.30.9"))))
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("an Access forward in the packet's own instance answered cause %d", got)
+	}
+	dl := ruleIn(t, rec.last(), cfg.Down.PDRTable)
+	if got := nextHop(t, rec.last(), actionsRes(cfg.Down), dl.actionID()); got != 0 {
+		t.Errorf("the access forward names next hop %d, want 0: the Router's FIB decides", got)
+	}
+}
+
 // TestAServiceLanForwardTakesTheServiceLanEgress: Destination Interface
 // SGi-LAN/N6-LAN is the service fabric's exit, declared per instance.
 func TestAServiceLanForwardTakesTheServiceLanEgress(t *testing.T) {

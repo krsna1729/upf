@@ -1521,10 +1521,18 @@ func (c *Compiler) forwardEgress(far *far, ifc routing.Interface) (routing.Inter
 // forwarding traffic toward an interface the deployment never built.
 //
 // A FAR that does not forward -- a drop, or a BUFF-only FAR -- makes no egress
-// decision: there is no forward to place, and the hop returned here is unused
-// (its rule delivers on the drop gate and names no action record).
+// decision: there is no forward to place, and in hop mode the hop returned here
+// is unused (its rule delivers on the drop gate). In destination mode it is not
+// unused: the action record names it as a reference to the routes table, and a
+// nonzero one would name a route the deployment need not have (a routed graph
+// with no hop for the direction's fallback hands the packet to a Router that
+// never sees the buffering branch). Hop 0 is the mode's "no next hop", so a
+// non-forwarding FAR in destination mode names that.
 func (c *Compiler) egressHop(far *far, ifc routing.Interface, dir Direction) (uint32, error) {
 	if far == nil || far.apply&applyForw == 0 {
+		if c.cfg.RouteMode == RouteByDestination {
+			return 0, nil
+		}
 		return dir.NextHop, nil
 	}
 	if c.cfg.RouteMode == RouteByDestination {
@@ -1662,16 +1670,18 @@ func (c *Compiler) egressHop(far *far, ifc routing.Interface, dir Direction) (ui
 // it; destination mode refuses it rather than routing in the wrong table.
 func (c *Compiler) destinationHop(far *far, ifc routing.Interface) (uint32, error) {
 	switch far.destIfc {
-	case ie.DstInterfaceAccess, ie.DstInterfaceCPFunction, ie.DstInterfaceLIFunction:
-		// Access is the deployment's own exit (the encap, or the indirect
-		// tunnel); destination mode reaches it by a route to its hop, so the
-		// action names none. CP-function and LI are refusals, as in hop mode.
-		if far.destIfc == ie.DstInterfaceAccess {
-			return 0, nil
-		}
+	case ie.DstInterfaceCPFunction, ie.DstInterfaceLIFunction:
+		// CP-function and LI are refusals, as in hop mode.
 		return c.destinationRefusal(far)
 
-	case ie.DstInterfaceCore, ie.DstInterfaceSGiLANN6LAN, ie.DstInterface5GVNInternal:
+	case ie.DstInterfaceAccess, ie.DstInterfaceCore, ie.DstInterfaceSGiLANN6LAN, ie.DstInterface5GVNInternal:
+		// Every expressible forward names hop 0: Access is the deployment's own
+		// exit (the encap, or the indirect tunnel) and destination mode reaches
+		// it by a route to its hop, so the action names none. The instance
+		// check applies to Access too -- an Access FAR that names another
+		// instance is exactly as unexpressible as a Core one: the Router routes
+		// in the packet's own domain, and only the FAR's own egress being in
+		// that domain keeps the access exit reachable.
 		if far.destIfc == ie.DstInterface5GVNInternal && far.hasOuter {
 			return 0, fmt.Errorf(
 				"%w: a forward toward 5G VN Internal (Destination Interface 5) re-enters this UP's own chain and adds no outer header",

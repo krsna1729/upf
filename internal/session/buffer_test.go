@@ -92,6 +92,59 @@ func TestABuffFARIsGatedToTheStoreAndCounted(t *testing.T) {
 	}
 }
 
+// TestARoutedBuffFARNamesNoNextHop: destination mode's action record names its
+// next hop as a reference to the routes table, so a BUFF-only FAR -- which
+// forwards nowhere -- must name hop 0. Hop mode never noticed: its non-forwarding
+// fallback is the direction's own hop, which its drop-gated rule never reads. In
+// destination mode the same fallback wrote a nonzero resource reference, and a
+// routed graph that declares no hop for that direction (no default policy hop
+// ids) rejected a valid buffering session. The record still has to name 0
+// explicitly: the release path reads it when the store re-enters the action
+// path.
+func TestARoutedBuffFARNamesNoNextHop(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		noHops bool
+	}{
+		{name: "a graph with the default hop ids"},
+		{name: "a graph without the default hop ids", noHops: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := bufferingConfig()
+			cfg.RouteMode = RouteByDestination
+			if tc.noHops {
+				cfg.Up.NextHop = 0
+				cfg.Down.NextHop = 0
+			}
+			rec := &recorder{}
+			c := New(cfg, rec, quietLogger())
+
+			resp := c.Establish(buffEstablishment(0x7102, "10.45.0.8")).(*message.SessionEstablishmentResponse)
+			if got := cause(t, resp); got != ie.CauseRequestAccepted {
+				t.Fatalf("the establishment answered cause %d, want 83: a routed BUFF FAR forwards nowhere", got)
+			}
+			changes := rec.last()
+			r := ruleCarrying(t, changes, fieldDstIP, []byte{10, 45, 0, 8})
+			if got := r.gate(); got != 1 {
+				t.Errorf("a BUFF FAR's rule gates %d, want the buffering gate 1", got)
+			}
+			flow := r.actionID()
+			if flow == 0 {
+				t.Fatal("a BUFF FAR's rule carries no ActionId")
+			}
+			action := find(t, changes, actionsRes(cfg.Down), "id", flow)
+			if got := action.Value["next_hop_id"]; got != uint32(0) {
+				t.Errorf("a routed BUFF FAR's action names next hop %v, want 0", got)
+			}
+			for _, ch := range changes {
+				if ch.Resource == c.cfg.Down.Tunnels {
+					t.Errorf("a BUFF FAR wrote a tunnel record in %s", ch.Resource)
+				}
+			}
+		})
+	}
+}
+
 // TestDeletingABufferingSessionErasesItsBufferCounter pins the other half of
 // the entry's life: it is written so that "a later erase has something to
 // erase", and a deletion is that later erase. It is what the live arm needs to
