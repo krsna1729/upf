@@ -58,6 +58,10 @@ func run() error {
 
 	bessAddr := flag.String("bess", "", "bessd's control_v2 gRPC address (host:port); empty: no datapath, sessions are refused")
 	n3Addr := flag.String("n3-addr", "", "the UPF's N3 IPv4 address, advertised as the uplink F-TEID; required with -bess")
+	n9Addr := flag.String("n9-addr", "", "the optional local N9 IPv4 address, advertised for Core-side F-TEIDs")
+	var transports, fteidAddresses entryList
+	flag.Var(&transports, "tunnel-transport", "repeatable next-hop=<id>,gate=<gate>,addr=<local IPv4>,mac=<local MAC>,peer-mac=<peer MAC>[,end-marker=<socket>]; config/environment entries are ';'-separated")
+	flag.Var(&fteidAddresses, "fteid-address", "repeatable instance=<name>,addr=<local IPv4> override for advertised F-TEIDs; config/environment entries are ';'-separated")
 	n3MAC := flag.String("n3-mac", "02:00:00:00:00:01", "the N3 port's Ethernet address, for the outer header of a downlink packet")
 	peerMAC := flag.String("peer-mac", "02:00:00:00:00:02", "the N3 peer's Ethernet address (the transport next hop)")
 	capacity := flag.Uint("capacity", 1<<16,
@@ -87,12 +91,12 @@ func run() error {
 	instances := flag.String("instances", "",
 		"the deployment's network instances (TS 29.244 8.2.4), ';'-separated, each "+
 			"\"name=<instance>,domain=<route domain>[,next-hop=<id>][,tunnel-next-hop=<id>]\"+"+
-			"\"[,sgi-lan-next-hop=<id>][,vn-next-hop=<id>][,pool=<prefix>][,arp=<module>]\"+"+
+			"\"[,access-next-hop=<id>][,sgi-lan-next-hop=<id>][,vn-next-hop=<id>][,pool=<prefix>][,arp=<module>]\"+"+
 			"\"[,arp-mac=<xx:xx:xx:xx:xx:xx>]\"; the *-next-hop keys are the instance's "+
 			"egresses, one per FAR Destination Interface value (8.2.24) and per outer header "+
-			"creation: a plain forward toward the data network, a tunneled one (N9, indirect "+
-			"forwarding), one toward the service LAN and one that re-enters the subscriber "+
-			"side. With -route-mode=destination the *-next-hop keys are unnecessary (the Router's "+
+			"creation: a plain forward toward Core, a tunnel toward Core, a tunnel toward Access "+
+			"(N3 or N9), one toward the service LAN and one that re-enters the subscriber side. "+
+			"With -route-mode=destination the *-next-hop keys are unnecessary (the Router's "+
 			"routes are the egress table) and an instance line may name no egress. empty: the "+
 			"one-instance deployment, where no PDI's Network Instance is read")
 	maxDomains := flag.Uint("max-domains", 1,
@@ -170,8 +174,6 @@ func run() error {
 		"the PDR table gate that delivers on the buffering branch")
 	teidTable := flag.String("teid-table", "teid",
 		"the WildcardMatch module whose rules are the F-TEID match")
-	teidGate := flag.Uint("teid-gate", 0,
-		"the gate a TEID rule delivers on: the decap's output gate")
 	gtpuErrors := flag.String("gtpu-errors", "",
 		"the GtpuResponder module whose error table is read once per -urr-interval "+
 			"tick: the responder behind the TEID table's default gate, which is where "+
@@ -193,7 +195,7 @@ func run() error {
 	endMarker := flag.String("end-marker", "",
 		"the graph's unix_port socket an End Marker packet is written to when a "+
 			"modification's SNDEM flag moves a tunnel out from under a session "+
-			"(TS 29.244 5.3.2); empty: this UPF constructs none and advertises no EMPU")
+			"(TS 29.244 5.3.2); empty: the default N3 transport constructs none")
 	// The config file's own flag: its value is read back from the flag set
 	// (applyLayers), because it must be layered like any other flag before the
 	// file it names is read.
@@ -324,7 +326,8 @@ func run() error {
 				*bufferStore)
 		}
 		graph, err := graphConfig(profileArgs(prof, given, graphArgs{
-			n3: *n3Addr, n3MAC: *n3MAC, peerMAC: *peerMAC,
+			n3: *n3Addr, n9: *n9Addr, n3MAC: *n3MAC, peerMAC: *peerMAC,
+			transports: transports, fteidAddresses: fteidAddresses,
 			capacity:  uint32(*capacity),
 			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			accessNextHop: uint32(*accessNextHop),
@@ -337,7 +340,7 @@ func run() error {
 			selectFieldsDL: *selectFieldsDL,
 			pdrFieldsUL:    *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
-			teidTable: *teidTable, teidGate: uint32(*teidGate),
+			teidTable: *teidTable,
 			gtpuErrors: *gtpuErrors,
 			endMarker:  *endMarker,
 			metersUL:   *metersUL,
@@ -412,10 +415,9 @@ func run() error {
 		// MNOP (8.2.25 octet 7, bit 5): the session layer's reports carry the
 		// packet counts, so the feature is as real as the layer itself.
 		cfg.UPFunctionFeatures[2] |= n4.MNOP
-		if graph.EndMarker != "" {
-			// EMPU (TS 29.244 5.3.2, 8.2.25 octet 6 bit 1): this UPF
-			// constructs End Marker packets, and says so only where the graph
-			// takes them -- the port the flag names is the whole mechanism.
+		if hasEndMarker(graph) {
+			// EMPU (TS 29.244 5.3.2, 8.2.25 octet 6 bit 1): advertise
+			// construction when a default or mapped transport has a socket.
 			cfg.UPFunctionFeatures[1] |= n4.EMPU
 		}
 		ready := []any{"bess", *bessAddr, "bess_version", client.Version(),
@@ -769,7 +771,10 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 
 // graphArgs is the flag set graphConfig turns into a session.Config.
 type graphArgs struct {
-	n3, n3MAC, peerMAC string
+	n3, n3MAC, peerMAC  string
+	n9                 string
+	transports         entryList
+	fteidAddresses     entryList
 	capacity           uint32
 	n6NextHop          uint32
 	n3NextHop          uint32
@@ -789,7 +794,6 @@ type graphArgs struct {
 	pdrFieldsUL        string
 	pdrFieldsDL        string
 	teidTable          string
-	teidGate           uint32
 	gtpuErrors         string
 	metersUL           string
 	metersDL           string
@@ -809,6 +813,21 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	addr, err := netip.ParseAddr(n3)
 	if err != nil || !addr.Is4() {
 		return session.Config{}, fmt.Errorf("-n3-addr %q: an IPv4 address is required with -bess", n3)
+	}
+	var n9 netip.Addr
+	if a.n9 != "" {
+		n9, err = parseLocalIPv4(a.n9)
+		if err != nil {
+			return session.Config{}, fmt.Errorf("-n9-addr: %w", err)
+		}
+	}
+	transports, err := parseTransports(a.transports)
+	if err != nil {
+		return session.Config{}, fmt.Errorf("-tunnel-transport: %w", err)
+	}
+	fteidAddrs, err := parseFTEIDAddresses(a.fteidAddresses)
+	if err != nil {
+		return session.Config{}, fmt.Errorf("-fteid-address: %w", err)
 	}
 	// One direction holds its rules in one structure: the profile selects which
 	// (or the deployment, through the module flags), and two of the three named
@@ -881,7 +900,6 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	graph := session.Config{
 		RouteMode: a.routeMode,
 		TEIDTable: a.teidTable,
-		TEIDGate:  a.teidGate,
 		// The responder that counts the peer's Error Indications, when the
 		// graph's has tracking on (TS 29.244 5.10).
 		GTPUErrors: a.gtpuErrors,
@@ -934,8 +952,11 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			NextHop:        a.n3NextHop,
 			Tunnels:        a.tunnels,
 		},
-		Instances: domains,
-		N3Addr:    addr,
+		Instances:  domains,
+		N3Addr:     addr,
+		N9Addr:     n9,
+		Transports: transports,
+		FTEIDAddrs: fteidAddrs,
 		// Where a forward whose FAR names Destination Interface Access leaves
 		// by, whichever direction the PDR is on: a downlink forward's encap,
 		// and the indirect-forwarding tunnel an uplink forward leaves through

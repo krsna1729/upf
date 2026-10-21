@@ -17,7 +17,7 @@ import (
 // on the data network.
 func TestParseInstancesReadsTheEgresses(t *testing.T) {
 	d, err := parseInstances(
-		"name=internet,domain=1,next-hop=1,tunnel-next-hop=3,sgi-lan-next-hop=4,arp=arp_n6,arp-mac=02:00:00:00:06:01;"+
+		"name=internet,domain=1,next-hop=1,tunnel-next-hop=3,access-next-hop=6,sgi-lan-next-hop=4,arp=arp_n6,arp-mac=02:00:00:00:06:01;"+
 			" name=vn,domain=2,vn-next-hop=5", 4, session.RouteByHop)
 	if err != nil {
 		t.Fatalf("the deployment was refused: %v", err)
@@ -33,6 +33,7 @@ func TestParseInstancesReadsTheEgresses(t *testing.T) {
 	}{
 		{"a plain forward toward the data network", routing.Egress{DestIfc: 1}, 1},
 		{"a tunnel out of the instance", routing.Egress{DestIfc: 1, Tunnel: true}, 3},
+		{"a tunnel toward Access", routing.Egress{DestIfc: 0, Tunnel: true}, 6},
 		{"a forward to the service LAN", routing.Egress{DestIfc: 2}, 4},
 	} {
 		if hop, ok := internet.Hop(c.e); !ok || hop != c.want {
@@ -201,5 +202,107 @@ func TestParsePDRFieldsNamesTheGraphsKey(t *testing.T) {
 	}
 	if _, err := parsePDRFields(" , "); err == nil {
 		t.Error("a flag naming no field was accepted")
+	}
+}
+
+func TestParseTunnelTransports(t *testing.T) {
+	const transport = "next-hop=3,gate=1,addr=192.0.2.9,mac=02:00:00:00:00:09,peer-mac=02:00:00:00:00:0a"
+	transports, err := parseTransports(entryList{transport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := transports[3]; got.Gate != 1 || got.Addr != netip.MustParseAddr("192.0.2.9") ||
+		got.MAC != [6]byte{2, 0, 0, 0, 0, 9} || got.PeerMAC != [6]byte{2, 0, 0, 0, 0, 10} || got.EndMarker != "" {
+		t.Fatalf("unexpected transport: %+v", got)
+	}
+	for _, key := range []string{"next-hop=3", "gate=1", "addr=192.0.2.9", "mac=02:00:00:00:00:09", "peer-mac=02:00:00:00:00:0a"} {
+		t.Run("missing "+key, func(t *testing.T) {
+			var fields []string
+			for _, field := range strings.Split(transport, ",") {
+				if field != key {
+					fields = append(fields, field)
+				}
+			}
+			if _, err := parseTransports(entryList{strings.Join(fields, ",")}); err == nil {
+				t.Fatal("missing explicit transport field accepted")
+			}
+		})
+	}
+	for _, tc := range []struct{ old, replacement string }{
+		{"next-hop=3", "next-hop=4294967296"},
+		{"gate=1", "gate=8192"},
+		{"gate=1", "gate=-1"},
+		{"addr=192.0.2.9", "addr=2001:db8::9"},
+		{"addr=192.0.2.9", "addr=0.0.0.0"},
+		{"addr=192.0.2.9", "addr=224.0.0.1"},
+		{"addr=192.0.2.9", "addr=255.255.255.255"},
+		{"mac=02:00:00:00:00:09", "mac=invalid"},
+		{"peer-mac=02:00:00:00:00:0a", "peer-mac=02:00:00:00:00:00:00:0a"},
+	} {
+		t.Run(tc.replacement, func(t *testing.T) {
+			if _, err := parseTransports(entryList{strings.Replace(transport, tc.old, tc.replacement, 1)}); err == nil {
+				t.Fatal("invalid transport accepted")
+			}
+		})
+	}
+	for _, entries := range []entryList{
+		{transport, transport},
+		{transport + ",gate=2"},
+		{transport + ",unknown=value"},
+		{transport + ",invalid"},
+	} {
+		if _, err := parseTransports(entries); err == nil {
+			t.Fatalf("invalid mapping accepted: %v", entries)
+		}
+	}
+	if _, err := parseTransports(entryList{strings.Replace(transport, "gate=1", "gate=8191", 1)}); err != nil {
+		t.Fatalf("last valid gate rejected: %v", err)
+	}
+}
+
+func TestParseFTEIDAddresses(t *testing.T) {
+	addresses, err := parseFTEIDAddresses(entryList{"instance=foo,addr=192.0.2.9", "instance=bar,addr=192.0.2.10"})
+	if err != nil || len(addresses) != 2 || addresses["foo"] != netip.MustParseAddr("192.0.2.9") ||
+		addresses["bar"] != netip.MustParseAddr("192.0.2.10") {
+		t.Fatalf("address overrides: %v, error %v", addresses, err)
+	}
+	for _, entries := range []entryList{
+		{"instance=foo"},
+		{"addr=192.0.2.9"},
+		{"instance=,addr=192.0.2.9"},
+		{"instance=foo,addr=::1"},
+		{"instance=foo,addr=0.0.0.0"},
+		{"instance=foo,addr=192.0.2.9,addr=192.0.2.10"},
+		{"instance=foo,addr=192.0.2.9", "instance=foo,addr=192.0.2.10"},
+		{"instance=foo,addr=192.0.2.9,unknown=value"},
+		{"instance=foo,addr=192.0.2.9,invalid"},
+	} {
+		if _, err := parseFTEIDAddresses(entries); err == nil {
+			t.Fatalf("invalid override accepted: %v", entries)
+		}
+	}
+}
+
+func TestParseInstancesAccessTunnelEgress(t *testing.T) {
+	domains, err := parseInstances("name=direct,domain=0,access-next-hop=2;name=indirect,domain=1,access-next-hop=3", 2, session.RouteByHop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]uint32{"direct": 2, "indirect": 3} {
+		ifc, ok := domains.Lookup(name)
+		if !ok {
+			t.Fatalf("missing instance %q", name)
+		}
+		if got, ok := ifc.Hop(routing.Egress{DestIfc: 0, Tunnel: true}); !ok || got != want {
+			t.Errorf("%s Access tunnel hop %d (found %v), want %d", name, got, ok, want)
+		}
+		if _, ok := ifc.Hop(routing.Egress{DestIfc: 0}); ok {
+			t.Errorf("%s tunnel-only Access mapping also matched plain Access", name)
+		}
+	}
+	for _, value := range []string{"-1", "4294967296", "not-a-hop"} {
+		if _, err := parseInstances("name=invalid,domain=0,access-next-hop="+value, 1, session.RouteByHop); err == nil {
+			t.Errorf("invalid Access hop %q accepted", value)
+		}
 	}
 }

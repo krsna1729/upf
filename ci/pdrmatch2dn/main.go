@@ -689,7 +689,6 @@ func config() session.Config {
 	}
 	return session.Config{
 		TEIDTable: "teid",
-		TEIDGate:  0,
 		Up: session.Direction{
 			// No PDRTable: this direction's rules are the map's.
 			PdrMatch: upModule,

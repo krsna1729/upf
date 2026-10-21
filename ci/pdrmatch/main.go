@@ -301,7 +301,6 @@ func downlink(ctx context.Context, client *bess.Client, fseid *ie.FSEIDFields) e
 func config() session.Config {
 	return session.Config{
 		TEIDTable: "teid",
-		TEIDGate:  0,
 		Up: session.Direction{
 			// No PDRTable: this direction's rules are the map's, and the
 			// WildcardMatch form of them is not built (compile).

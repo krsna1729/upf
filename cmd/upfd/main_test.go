@@ -20,7 +20,7 @@ func validArgs() graphArgs {
 		pdrTableUL: "pdr_ul", pdrTableDL: "pdr_dl",
 		pdrFieldsUL: "src,dst,proto,sport,dport,qfi", pdrFieldsDL: "src,dst,proto,sport,dport",
 		selectFieldsDL: "dst_ip",
-		teidTable:      "teid", teidGate: 0,
+		teidTable: "teid",
 		metersUL: "mt_ul", metersDL: "mt_dl",
 		// One encap module, both directions: the deployed daemon writes an
 		// uplink forward's tunnel record there too.
@@ -87,8 +87,8 @@ func TestGraphConfigMapsTheFlags(t *testing.T) {
 		t.Errorf("id spaces: actions %d, meters %d, teids %d",
 			cfg.MaxActions, cfg.MaxMeters, cfg.MaxTEIDs)
 	}
-	if cfg.TEIDTable != "teid" || cfg.TEIDGate != 0 {
-		t.Errorf("teid table %q gate %d", cfg.TEIDTable, cfg.TEIDGate)
+	if cfg.TEIDTable != "teid" {
+		t.Errorf("teid table %q", cfg.TEIDTable)
 	}
 	if got := cfg.N3Addr.String(); got != "192.0.2.9" {
 		t.Errorf("n3 address %q", got)
@@ -208,5 +208,61 @@ func TestAtsssNeedsTheMatcher(t *testing.T) {
 	args.atsss = "atsss_dl"
 	if _, err := graphConfig(args); err == nil {
 		t.Fatal("graphConfig accepted -atsss without -pdr-match-dl")
+	}
+}
+
+func TestGraphConfigTunnelTransports(t *testing.T) {
+	args := validArgs()
+	args.n9 = "192.0.2.19"
+	args.transports = entryList{"next-hop=3,gate=1,addr=192.0.2.19,mac=02:00:00:00:00:09,peer-mac=02:00:00:00:00:0a,end-marker=/tmp/upf-end-marker-n9.sock"}
+	args.fteidAddresses = entryList{"instance=foo,addr=192.0.2.19"}
+	cfg, err := graphConfig(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.N9Addr.String() != args.n9 || cfg.FTEIDAddrs["foo"] != cfg.N9Addr {
+		t.Fatalf("local tunnel addresses lost: N9 %v, overrides %v", cfg.N9Addr, cfg.FTEIDAddrs)
+	}
+	transport, ok := cfg.Transports[3]
+	if !ok || transport.Gate != 1 || transport.Addr != cfg.N9Addr ||
+		transport.MAC != [6]byte{2, 0, 0, 0, 0, 9} ||
+		transport.PeerMAC != [6]byte{2, 0, 0, 0, 0, 10} ||
+		transport.EndMarker != "/tmp/upf-end-marker-n9.sock" {
+		t.Fatalf("transport did not reach compiler: %+v", transport)
+	}
+	if cfg.EndMarker != "" || !hasEndMarker(cfg) {
+		t.Fatal("a mapped End Marker socket must advertise EMPU without a default socket")
+	}
+	cfg, err = graphConfig(validArgs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.N9Addr.IsValid() || len(cfg.Transports) != 0 || len(cfg.FTEIDAddrs) != 0 || hasEndMarker(cfg) {
+		t.Fatalf("default N3 deployment gained N9 configuration: %+v", cfg)
+	}
+	cfg.EndMarker = "/tmp/upf-end-marker.sock"
+	if !hasEndMarker(cfg) {
+		t.Fatal("default N3 End Marker socket must still advertise EMPU")
+	}
+}
+
+func TestGraphConfigRejectsInvalidN9Flags(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		change func(*graphArgs)
+		want string
+	}{
+		{"IPv6 N9", func(a *graphArgs) { a.n9 = "2001:db8::9" }, "-n9-addr"},
+		{"unspecified N9", func(a *graphArgs) { a.n9 = "0.0.0.0" }, "-n9-addr"},
+		{"invalid transport", func(a *graphArgs) { a.transports = entryList{"next-hop=3"} }, "-tunnel-transport"},
+		{"invalid F-TEID", func(a *graphArgs) { a.fteidAddresses = entryList{"instance=foo,addr=::1"} }, "-fteid-address"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := validArgs()
+			tc.change(&args)
+			if _, err := graphConfig(args); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %s error, got %v", tc.want, err)
+			}
+		})
 	}
 }

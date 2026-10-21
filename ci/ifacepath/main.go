@@ -1141,7 +1141,6 @@ func config() session.Config {
 	}
 	return session.Config{
 		TEIDTable: "teid",
-		TEIDGate:  0,
 		Up: session.Direction{
 			PDRTable:  upModule,
 			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto, session.SrcPort, session.DstPort, session.QFI},

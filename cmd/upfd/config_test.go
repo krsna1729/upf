@@ -279,3 +279,73 @@ func TestALayeredFlagCountsAsNamedForAProfile(t *testing.T) {
 		t.Error("a flag no source named counts as named")
 	}
 }
+
+func TestTunnelFlagLayersAndRoundTrip(t *testing.T) {
+	const first = "next-hop=3,gate=1,addr=192.0.2.9,mac=02:00:00:00:00:09,peer-mac=02:00:00:00:00:0a"
+	const second = "next-hop=4,gate=0,addr=192.0.2.10,mac=02:00:00:00:00:0b,peer-mac=02:00:00:00:00:0c"
+	const overrides = "instance=foo,addr=192.0.2.9;instance=bar,addr=192.0.2.10"
+	for _, source := range []string{"file", "environment", "command line"} {
+		t.Run(source, func(t *testing.T) {
+			fs := layeredFlags()
+			var transports, addresses entryList
+			fs.Var(&transports, "tunnel-transport", "transport mappings")
+			fs.Var(&addresses, "fteid-address", "F-TEID addresses")
+			fs.String("n9-addr", "", "local N9 address")
+			fileValue := first + ";" + second
+			path := writeConfig(t, `{"n9-addr":"192.0.2.9","tunnel-transport":"`+fileValue+`","fteid-address":"`+overrides+`"}`)
+			t.Setenv("UPFD_TUNNEL_TRANSPORT", "")
+			t.Setenv("UPFD_FTEID_ADDRESS", "")
+			t.Setenv("UPFD_N9_ADDR", "")
+			t.Setenv("UPFD_CONFIG", path)
+			var args []string
+			switch source {
+			case "environment":
+				t.Setenv("UPFD_TUNNEL_TRANSPORT", second+";"+first)
+				t.Setenv("UPFD_FTEID_ADDRESS", overrides)
+				t.Setenv("UPFD_N9_ADDR", "192.0.2.19")
+				fileValue = second + ";" + first
+			case "command line":
+				// Lower layers must not append mappings to CLI values.
+				t.Setenv("UPFD_TUNNEL_TRANSPORT", first)
+				args = []string{"-tunnel-transport", second, "-tunnel-transport", first,
+					"-fteid-address", "instance=foo,addr=192.0.2.9",
+					"-fteid-address", "instance=bar,addr=192.0.2.10"}
+				fileValue = second + ";" + first
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := applyLayers(fs); err != nil {
+				t.Fatal(err)
+			}
+			if len(transports) != 2 || transports.String() != fileValue || addresses.String() != overrides {
+				t.Fatalf("layers merged or lost mappings: transports %v, addresses %v", transports, addresses)
+			}
+			if _, err := parseTransports(transports); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := parseFTEIDAddresses(addresses); err != nil {
+				t.Fatal(err)
+			}
+			wantN9 := "192.0.2.9"
+			if source == "environment" {
+				wantN9 = "192.0.2.19"
+			}
+			if got := fs.Lookup("n9-addr").Value.String(); got != wantN9 {
+				t.Fatalf("N9 address %q, want %q", got, wantN9)
+			}
+			printed, err := effectiveConfig(fs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			values, err := readConfig(writeConfig(t, string(printed)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored entryList
+			if err := restored.Set(values["tunnel-transport"]); err != nil || restored.String() != transports.String() {
+				t.Fatalf("print-config did not round-trip transports: %v, %v", restored, err)
+			}
+		})
+	}
+}
