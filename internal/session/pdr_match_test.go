@@ -149,10 +149,14 @@ func TestTheUplinkOptInWritesOneKeyPerSession(t *testing.T) {
 	if !ok || action == 0 {
 		t.Fatalf("the rule's action_id is %v, and a matching packet leaves with one", list[0]["action_id"])
 	}
-	// The id is a record the same transaction writes: a rule naming an action
-	// nothing upserts is refused by the engine's reference check.
-	if _, ok := find0(rec.last(), "at_ul/actions", "id", action); !ok {
-		t.Errorf("the rule names action %d, and the transaction writes no such record", action)
+	// The same rule carries the result the matcher writes directly: two meter
+	// levels and the Router next hop, not a reference to an action table.
+	ids, ok := list[0]["meter_ids"].([]uint32)
+	if !ok || len(ids) != 2 {
+		t.Errorf("the rule's meter levels are %v, want two slots (this PDR names no QER)", list[0]["meter_ids"])
+	}
+	if got := list[0]["next_hop_id"]; got != uint32(1) {
+		t.Errorf("the rule's next hop is %v, want the uplink's (1)", got)
 	}
 	// A change naming no key would be a write of the whole map, which is not
 	// this resource: the map is upserted one session at a time.

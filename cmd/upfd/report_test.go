@@ -127,13 +127,13 @@ func reportConfig() session.Config {
 	return session.Config{
 		TEIDTable: "teid",
 		Up: session.Direction{
-			PDRTable: "pdr_ul", Actions: "at_ul", Meters: "mt_ul", Counters: "cnt_ul",
+			PDRTable: "pdr_ul", Meters: "mt_ul", Counters: "cnt_ul",
 			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto,
 				session.SrcPort, session.DstPort, session.QFI},
 			NextHop: 1,
 		},
 		Down: session.Direction{
-			PDRTable: "pdr_dl", Actions: "at_dl", Meters: "mt_dl", Counters: "cnt_dl",
+			PDRTable: "pdr_dl", Meters: "mt_dl", Counters: "cnt_dl",
 			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto,
 				session.SrcPort, session.DstPort},
 			NextHop: 2, Tunnels: "enc",

@@ -24,7 +24,6 @@ func liveConfig() Config {
 	cfg.Up = Direction{
 		PDRTable:  "pdr_ul",
 		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, QFI},
-		Actions:   "at_ul",
 		Meters:    "mt_ul",
 		Counters:  "cnt_ul",
 		NextHop:   1,
@@ -36,7 +35,6 @@ func liveConfig() Config {
 	cfg.Down = Direction{
 		PDRTable:  "pdr_dl",
 		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
-		Actions:   "at_dl",
 		Meters:    "mt_dl",
 		Counters:  "cnt_dl",
 		NextHop:   2,
@@ -53,7 +51,6 @@ func liveConfig() Config {
 		cfg.Down.PDRTable, cfg.Down.PDRFields = "", nil
 		cfg.Down.PdrMatch = "pdr_match_dl"
 		cfg.Down.Selector = "sel_dl"
-		cfg.Down.SelectorActions = "sel_at"
 		cfg.Down.SelectorFields = []Field{DstIP}
 	}
 	// UPF_ROUTE_MODE=destination is the routed lab (deploy/route-path.yaml):

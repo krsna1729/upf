@@ -120,7 +120,6 @@ func TestSweepNamesTheGraphsResources(t *testing.T) {
 	c := New(cfg, &sweepFake{}, quietLogger())
 	want := map[string]bool{
 		"teid/rules": true, "pdr_ul/rules": true, "pdr_dl/rules": true,
-		"at_ul/actions": true, "at_dl/actions": true,
 		"mt_ul/meters": true, "mt_dl/meters": true,
 		"cnt_ul/counters": true, "cnt_dl/counters": true, "enc/tunnels": true,
 	}

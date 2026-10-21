@@ -17,7 +17,7 @@ go 1.27.2
 // released; the fork's docs/control-sdk.md has the details.
 
 require (
-	github.com/krsna1729/bess/sdk/go v0.0.0-20261020103822-c8ffb3badbc7
+	github.com/krsna1729/bess/sdk/go v0.0.0-20261021041603-e96ceb3d8bb2
 	github.com/wmnsk/go-pfcp v0.0.24
 	google.golang.org/protobuf v1.36.11
 )

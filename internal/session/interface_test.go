@@ -133,8 +133,8 @@ func TestASubscriberSideValueIsKeyedByItsAddressInTheKeyedMatcher(t *testing.T) 
 	if len(key) != 1 || len(key[0]) != 4 || key[0][3] != 9 {
 		t.Errorf("the selector's key is %v, want the PDI's UE address 10.45.0.9", key)
 	}
-	if got := mine[0].Value["action_id"]; got != uint32(seid) {
-		t.Errorf("the selector's action_id is %v, want the session id %d", got, seid)
+	if got := selectorActionID(t, mine[0]); got != uint32(seid) {
+		t.Errorf("the selector's result is %d, want the session id %d", got, seid)
 	}
 	entry := oneMapChange(t, rec.last(), "pdr_match_dl/rules", uint32(seid))
 	if rules := pdrMatchRules(t, entry); len(rules) != 1 {

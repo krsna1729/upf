@@ -38,7 +38,7 @@ type Interface struct {
 
 	// NextHop is the Router next hop (the graph's next_hops resource id) a
 	// forward out of this interface leaves by. 0 is a graph whose chain has no
-	// Router next hop at all -- a deployment without an ActionTable -- and is
+	// Router next hop at all -- a deployment whose rules name no next hop -- and is
 	// only correct there.
 	NextHop uint32
 

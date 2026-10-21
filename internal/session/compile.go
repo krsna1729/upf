@@ -2453,17 +2453,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 		if k, ok := selectorKeyOf(p); ok && !liveSelector[claimOf(c.cfg.Down, k)] {
 			// The session's downlink no longer names this address: the rule
-			// goes. Its action record goes only with the last rule that
-			// references it -- a session whose other address is still live
-			// holds a rule naming the same record, and the engine refuses to
-			// remove an action a live rule names (D-021).
+			// goes. Its result is metadata, not a resource reference, so no
+			// record follows it.
 			if key, err := selectorRuleKey(c.cfg.Down, k); err == nil {
 				erase(bess.Change{Resource: selectorRes(c.cfg.Down), Key: key})
-			}
-			if len(liveSelector) == 0 {
-				if id, err := selectorID(s); err == nil && c.cfg.Down.SelectorActions != "" {
-					erase(bess.Change{Resource: selectorActionsRes(c.cfg.Down), Key: map[string]any{"id": id}})
-				}
 			}
 		}
 		if e, ok := c.arpEntryOf(p); ok && !liveARP[e.claim()] {
@@ -2471,9 +2464,6 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// session: the entry goes with it, or the segment would keep
 			// resolving an address this UPF no longer carries.
 			erase(e.erasure())
-		}
-		if p.actionID != 0 {
-			erase(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
 		}
 		for _, t := range p.tunnels {
 			erase(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
@@ -2544,16 +2534,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			}
 		}
 		if k, ok := selectorKeyOf(old); ok && !liveSelector[claimOf(c.cfg.Down, k)] {
-			// A replaced form whose UE address moved: its selector rule goes,
-			// and the action record only with the last rule that names it --
-			// the same guard as the removed form above.
+			// A replaced form whose UE address moved: its selector rule goes.
 			if key, err := selectorRuleKey(c.cfg.Down, k); err == nil {
 				erase(bess.Change{Resource: selectorRes(c.cfg.Down), Key: key})
-			}
-			if len(liveSelector) == 0 {
-				if id, err := selectorID(s); err == nil && c.cfg.Down.SelectorActions != "" {
-					erase(bess.Change{Resource: selectorActionsRes(c.cfg.Down), Key: map[string]any{"id": id}})
-				}
 			}
 		}
 		if e, ok := c.arpEntryOf(old); ok && !liveARP[e.claim()] {
@@ -2713,30 +2696,20 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 					p.actionID = id
 				}
 				action = p.actionID
-				// The record is written here, after the id exists, because the
-				// engine validates a rule's action_id as a *reference* whatever
-				// gate the rule takes (D-021, transaction_engine.cc's reference
-				// check on the transaction's end state): a rule naming an id
-				// nothing upserts is refused and the session is lost, which is
-				// what the live arm found. It is also the record the release
-				// path reads -- the store's gate 0 re-enters the action path --
-				// and the modification that stops buffering updates this same
-				// key in place.
-				changes = append(changes, bess.Change{
-					Resource: actionsRes(dir),
-					Key:      map[string]any{"id": p.actionID},
-					Value:    actionValue(dir, p),
-				})
 			}
 			if dir.Firewall == "" && dir.PdrMatch == "" {
+				result := make([]byte, resultSize)
+				if action != 0 {
+					result = pdrResult(p)
+				}
 				for _, key := range keys {
 					changes = append(changes, bess.Change{
 						Resource: rulesRes(dir),
 						Key:      key,
 						Value: map[string]any{
-							"priority":  rulePriority(p.precedence),
-							"gate":      gate,
-							"action_id": action,
+							"priority": rulePriority(p.precedence),
+							"gate":     gate,
+							"result":   result,
 						},
 					})
 				}
@@ -2760,12 +2733,6 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			}
 			p.actionID = id
 		}
-
-		changes = append(changes, bess.Change{
-			Resource: actionsRes(dir),
-			Key:      map[string]any{"id": p.actionID},
-			Value:    actionValue(dir, p),
-		})
 
 		// A PDR a URR measures carries one counter entry, keyed by the same
 		// ActionId: the module counts what the chain forwards for that rule,
@@ -2827,9 +2794,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 						// flow, and which PDR serves it stays the SMF's decision --
 						// the more specific rule is not raised above the one the SMF
 						// gave the higher Precedence.
-						"priority":  rulePriority(p.precedence),
-						"gate":      uint64(0),
-						"action_id": p.actionID,
+						"priority": rulePriority(p.precedence),
+						"gate":     uint64(0),
+						"result":   pdrResult(p),
 					},
 				})
 			}
@@ -3395,6 +3362,18 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 // rule does. Each PDR has its own id, so the policy, one resource for every
 // session, holds one id per rule. A rule that drops names none (the module
 // refuses a drop with one).
+// firewallResult is the firewall rule's result record: the same two meter
+// levels and next hop a WildcardMatch result carries. The firewall module
+// writes the action id through its own action_attr; this record is the rest.
+func firewallResult(p *pdr) []byte {
+	b := make([]byte, 12)
+	own, shared := meterSlots(p)
+	binary.BigEndian.PutUint32(b[0:], own)
+	binary.BigEndian.PutUint32(b[4:], shared)
+	binary.BigEndian.PutUint32(b[8:], p.nextHop)
+	return b
+}
+
 func firewallRule(p *pdr) (map[string]any, error) {
 	if p.sdf != nil && p.sdf.bare {
 		return nil, fmt.Errorf("%w: SDF Filter ID %d was never resolved to a flow description", errNotExpressible, p.sdf.id)
@@ -3503,6 +3482,7 @@ func firewallRule(p *pdr) (map[string]any, error) {
 		return nil, fmt.Errorf("%w: PDR %d forwards and has no action id", errNotExpressible, p.id)
 	}
 	rule["action_id"] = p.actionID
+	rule["result"] = firewallResult(p)
 	return rule, nil
 }
 
@@ -5336,8 +5316,20 @@ func pdrMatchRule(p *pdr) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The firewall's rule carries a raw result record; the PdrMatch rule
+	// carries typed fields instead, and the module writes them itself.
+	delete(rule, "result")
 	if p.hasQFI {
 		rule["qfi"] = uint32(p.qfi)
+	}
+	if !p.drop && !p.buffer {
+		// The result the matcher writes directly, as a WildcardMatch rule's
+		// result record does: the PDR's action id (for the counter and the
+		// encap), its two meter levels and its Router next hop. A drop never
+		// reaches a downstream module, so it carries none.
+		own, shared := meterSlots(p)
+		rule["meter_ids"] = []uint32{own, shared}
+		rule["next_hop_id"] = p.nextHop
 	}
 	if p.hasMAR && !p.drop && !p.buffer {
 		// The policy ID the PDR matcher writes into the steering attribute;

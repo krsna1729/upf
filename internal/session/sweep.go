@@ -67,9 +67,6 @@ func (c *Compiler) resources() []string {
 			// one).
 			add(pdrMatchRes(d))
 		}
-		if d.Actions != "" {
-			add(actionsRes(d))
-		}
 		if d.Meters != "" {
 			add(metersRes(d))
 		}

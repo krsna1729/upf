@@ -365,9 +365,9 @@ func pathUrrEstablishment(cpSEID uint64, ueIP string, urr *ie.IE) *message.Sessi
 // daemon, end to end: the compiler's URR is measured by the graph's counting
 // module, Evaluate reads that module's own command, the quota the test
 // provisioned is spent, and the packet path stops carrying the session's
-// traffic -- which is what the counter says, and what the action table's own
-// gate counter says (it keeps rising before the evaluation and stands still
-// after it, while the graph's source runs on).
+// traffic -- which is what the counter says, and what the meter's own gate
+// counter says (it keeps rising before the evaluation and stands still after
+// it, while the graph's source runs on).
 func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 	target := os.Getenv("UPF_BESS_TARGET")
 	if target == "" {
@@ -446,22 +446,22 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 	}
 
 	// The enforcement reached the packet path: over the same interval the
-	// source keeps producing and the action table sees nothing.
+	// source keeps producing and the meter sees nothing.
 	produced := gatePackets(t, ctx, client, "src_up")
-	forwarded := gatePackets(t, ctx, client, "at_ul")
+	forwarded := gatePackets(t, ctx, client, "mt_ul")
 	time.Sleep(500 * time.Millisecond)
 	producedAfter := gatePackets(t, ctx, client, "src_up")
-	forwardedAfter := gatePackets(t, ctx, client, "at_ul")
+	forwardedAfter := gatePackets(t, ctx, client, "mt_ul")
 	if producedAfter == produced {
 		t.Fatalf("the graph's source stopped producing (%v packets): this test says nothing about the drop", produced)
 	}
 	if forwardedAfter != forwarded {
-		t.Errorf("after the quota ran out %v more packets reached the action table; "+
+		t.Errorf("after the quota ran out %v more packets reached the meter; "+
 			"the PDRs that name the URR must drop (source produced %v in the same interval)",
 			forwardedAfter-forwarded, producedAfter-produced)
 	}
 	t.Logf("the report: %d packets, %d octets, trigger %v; the source produced %v packets "+
-		"after the enforcement and the action table saw none",
+		"after the enforcement and the meter saw none",
 		report.Up.Packets, report.Up.Octets, report.Trigger, producedAfter-produced)
 }
 

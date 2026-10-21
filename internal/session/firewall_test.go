@@ -10,6 +10,7 @@ package session
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"testing"
 
@@ -215,14 +216,12 @@ func TestAFirewallRuleCarriesThePDRAVerdict(t *testing.T) {
 	}
 }
 
-func TestAForwardingFirewallRuleNamesItsAction(t *testing.T) {
+func TestAForwardingFirewallRuleCarriesItsResult(t *testing.T) {
 	// The stock module writes a rule's action_id into the packet's metadata
-	// (BESS D-141), so an ActionTable behind it can resolve the PDR's meter and
-	// next hop. Each PDR has its own id, so the policy -- one resource for
-	// every session -- carries many ids, one per rule. The rule must name the
-	// id of the record the same transaction writes (the engine refuses a rule
-	// whose action it cannot find), and a rule that drops names none (the
-	// module refuses a drop with one).
+	// (BESS D-141) and its result record into the meter and next-hop
+	// attributes. Each PDR has its own id, so the policy -- one resource for
+	// every session -- carries many ids, one per rule. A rule that drops names
+	// neither.
 	rec := &recorder{}
 	c := New(firewallConfig("", "fw_dl"), rec, quietLogger())
 	req := firewallEstablishment(0x5f06, "10.45.0.9", 10, "permit out udp from any to assigned 53")
@@ -234,14 +233,12 @@ func TestAForwardingFirewallRuleNamesItsAction(t *testing.T) {
 	if !ok || id == 0 {
 		t.Fatalf("a forwarding rule carries action_id %v, want a non-zero id", policy[0]["action_id"])
 	}
-	var found bool
-	for _, ch := range changesFor(rec.last(), "at_dl/actions") {
-		if ch.Key["id"] == id && ch.Value != nil {
-			found = true
-		}
+	result, ok := policy[0]["result"].([]byte)
+	if !ok || len(result) != 12 {
+		t.Fatalf("the forwarding rule carries result %v, want two meter levels and a next hop", policy[0]["result"])
 	}
-	if !found {
-		t.Errorf("the rule names action %d, which the transaction does not write", id)
+	if hop := binary.BigEndian.Uint32(result[8:]); hop != 2 {
+		t.Errorf("the rule's result takes next hop %d, want the access side's (2)", hop)
 	}
 
 	rec = &recorder{}
@@ -251,8 +248,12 @@ func TestAForwardingFirewallRuleNamesItsAction(t *testing.T) {
 	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a DROP FAR answered cause %d", got)
 	}
-	if got, ok := firewallPolicy(t, rec.last(), "fw_dl/rules")[0]["action_id"]; ok {
+	drop := firewallPolicy(t, rec.last(), "fw_dl/rules")[0]
+	if got, ok := drop["action_id"]; ok {
 		t.Errorf("a dropping rule names the action %v", got)
+	}
+	if got, ok := drop["result"]; ok {
+		t.Errorf("a dropping rule carries the result %v", got)
 	}
 }
 

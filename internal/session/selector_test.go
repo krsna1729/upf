@@ -14,6 +14,7 @@ package session
 
 import (
 	"bytes"
+	"encoding/binary"
 	"log/slog"
 	"strings"
 	"testing"
@@ -37,7 +38,6 @@ func selectorConfig(fields ...Field) Config {
 	cfg.Down.PDRTable, cfg.Down.PDRFields = "", nil
 	cfg.Down.PdrMatch = "pdr_match_dl"
 	cfg.Down.Selector = "sel_dl"
-	cfg.Down.SelectorActions = "sel_at"
 	cfg.Down.SelectorFields = fields
 	return cfg
 }
@@ -59,6 +59,17 @@ func selectorKeyOfChange(t *testing.T, ch bess.Change) [][]byte {
 		out = append(out, value)
 	}
 	return out
+}
+
+// selectorActionID is the session id a selector rule's result carries: the
+// ExactMatch writes it into `action_id`, which the matcher behind it reads.
+func selectorActionID(t *testing.T, ch bess.Change) uint32 {
+	t.Helper()
+	b, _ := ch.Value["result"].([]byte)
+	if len(b) < 4 {
+		t.Fatalf("the selector rule carries no result record: %v", ch.Value)
+	}
+	return binary.BigEndian.Uint32(b)
 }
 
 // The address the selector names a session by, and the session id it writes:
@@ -84,20 +95,11 @@ func TestTheSelectorNamesTheSessionByItsUEAddress(t *testing.T) {
 	if len(key) != 1 || !bytes.Equal(key[0], []byte{10, 45, 0, 6}) {
 		t.Errorf("the selector's key is %v, want the UE address alone (the graph declares one field)", key)
 	}
-	if got := mine[0].Value["action_id"]; got != uint32(seid) {
-		t.Errorf("the selector's action_id is %v, want the session id %d", got, seid)
+	if got := selectorActionID(t, mine[0]); got != uint32(seid) {
+		t.Errorf("the selector's result is %d, want the session id %d", got, seid)
 	}
 	if got := mine[0].Value["gate"]; got != uint64(0) {
 		t.Errorf("the selector's gate is %v, want 0: the graph's connection to the matcher", got)
-	}
-	// The rule's action id is a reference into the selector's own action
-	// table: a rule naming an action nothing upserts is refused by the engine.
-	record, ok := find0(rec.last(), "sel_at/actions", "id", uint32(seid))
-	if !ok {
-		t.Fatalf("the rule names action %d, and the transaction writes no such record", seid)
-	}
-	if record.Value["meter_id"] != 0 || record.Value["next_hop_id"] != 0 {
-		t.Errorf("the selector's action record is %v, want no meter and no next hop: the selector's gate is the matcher", record.Value)
 	}
 
 	// The matcher's map is keyed by the session, not by a tunnel: this
@@ -121,7 +123,6 @@ func TestTheSelectorKeyCarriesTheRouteDomainWhereTheGraphHasOne(t *testing.T) {
 	cfg := instancedConfig(t)
 	cfg.Down.PdrMatch = "pdr_match_dl"
 	cfg.Down.Selector = "sel_dl"
-	cfg.Down.SelectorActions = "sel_at"
 	cfg.Down.SelectorFields = []Field{RouteDomain, DstIP}
 	c := New(cfg, rec, quietLogger())
 	// The same address in both instances: two sessions, two rules, two domains.
@@ -158,7 +159,6 @@ func TestASelectorThatIgnoresTheRouteDomainHoldsOneSessionPerAddress(t *testing.
 	cfg := instancedConfig(t)
 	cfg.Down.PdrMatch = "pdr_match_dl"
 	cfg.Down.Selector = "sel_dl"
-	cfg.Down.SelectorActions = "sel_at"
 	cfg.Down.SelectorFields = []Field{DstIP} // the graph reads no route domain
 	c := New(cfg, rec, slog.New(slog.NewTextHandler(&logged, nil)))
 
@@ -274,8 +274,8 @@ func TestAModificationThatMovesTheUEAddressMovesTheSelectorsRule(t *testing.T) {
 			continue
 		}
 		written = append(written, key[0])
-		if got := ch.Value["action_id"]; got != uint32(seid) {
-			t.Errorf("the new rule's action_id is %v, want the session id %d", got, seid)
+		if got := selectorActionID(t, ch); got != uint32(seid) {
+			t.Errorf("the new rule's result is %d, want the session id %d", got, seid)
 		}
 	}
 	if len(erased) != 1 || !bytes.Equal(erased[0], []byte{10, 45, 0, 6}) {
@@ -331,54 +331,6 @@ func TestTheSelectorCarriesADownlinkPortRange(t *testing.T) {
 	}
 }
 
-// A session with two downlink addresses has two selector rules and one action
-// record: the record is the session's, so it goes only when the last rule that
-// references it goes. Erasing it early would leave a live rule naming an action
-// the engine no longer holds -- which the engine refuses outright.
-func TestTheActionRecordGoesOnlyWithTheLastSelectorRule(t *testing.T) {
-	rec := &recorder{}
-	c := New(selectorConfig(DstIP), rec, quietLogger())
-	est := pdrMatchEstablishment(0x7601, "10.45.0.6", 0x81, 100, "")
-	est.CreatePDR = append(est.CreatePDR,
-		ie.NewCreatePDR(ie.NewPDRID(5), ie.NewPrecedence(100),
-			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.9", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
-			ie.NewFARID(2)))
-	resp := c.Establish(est).(*message.SessionEstablishmentResponse)
-	if got := cause(t, resp); got != ie.CauseRequestAccepted {
-		t.Fatalf("the establishment answered cause %d", got)
-	}
-	seid := upFSEID(t, resp)
-	if n := len(changesFor(rec.last(), "sel_dl/rules")); n != 2 {
-		t.Fatalf("the transaction wrote %d selector rules, want one per downlink address", n)
-	}
-
-	// One of the two goes: its rule is erased, the record stays -- the other
-	// address still names it.
-	remove := message.NewSessionModificationRequest(0, 0, seid, 2, 0,
-		ie.NewRemovePDR(ie.NewPDRID(5)))
-	if got := cause(t, c.Modify(remove)); got != ie.CauseRequestAccepted {
-		t.Fatalf("removing one of the two downlink PDRs answered cause %d", got)
-	}
-	changes := rec.last()
-	// The transaction erases the address that went and upserts the one that
-	// stayed (a compile writes the session's keys as they are).
-	if erased, written := selectorOps(t, changes, "sel_dl/rules"); len(erased) != 1 || len(written) != 1 {
-		t.Errorf("the removal wrote %d erases and %d rules, want the removed address erased and the kept one written",
-			len(erased), len(written))
-	}
-	if erased, _ := selectorOps(t, changes, "sel_at/actions"); len(erased) != 0 {
-		t.Errorf("the removal erased the action record while a rule still names it")
-	}
-
-	// And the last one takes the record with it.
-	deleteAndParse(t, c, seid)
-	if erased, _ := selectorOps(t, rec.last(), "sel_at/actions"); len(erased) != 1 {
-		t.Errorf("the deletion wrote %d action-record erases, want the session's record erased", len(erased))
-	}
-}
-
 // selectorOps splits one resource's changes into the erases (a change with no
 // value) and the writes.
 func selectorOps(t *testing.T, changes []bess.Change, resource string) (erased, written []bess.Change) {
@@ -391,34 +343,4 @@ func selectorOps(t *testing.T, changes []bess.Change, resource string) (erased, 
 		written = append(written, ch)
 	}
 	return erased, written
-}
-
-// A session that ends takes its selector rule with it, and the rule goes before
-// the action record it references: the engine refuses to remove an action a
-// live rule names (D-021).
-func TestTheDeletionErasesTheSelectorRuleBeforeItsAction(t *testing.T) {
-	rec := &recorder{}
-	c := New(selectorConfig(DstIP), rec, quietLogger())
-	resp := c.Establish(pdrMatchEstablishment(0x7401, "10.45.0.9", 0x61, 100, "")).(*message.SessionEstablishmentResponse)
-	seid := upFSEID(t, resp)
-	deleteAndParse(t, c, seid)
-
-	// The rule goes before the action record it references: the engine refuses
-	// to remove an action a live rule names (D-021). The map key is this
-	// session's own and no record references it, so its place is free.
-	at := func(resource string) int {
-		for i, ch := range rec.last() {
-			if ch.Resource == resource {
-				return i
-			}
-		}
-		return -1
-	}
-	rule, action, mapped := at("sel_dl/rules"), at("sel_at/actions"), at("pdr_match_dl/rules")
-	if rule < 0 || action < 0 || mapped < 0 {
-		t.Fatalf("the deletion names rule=%d action=%d map=%d, want all three erased", rule, action, mapped)
-	}
-	if rule > action {
-		t.Errorf("the deletion removes the action record (at %d) before the rule that names it (at %d)", action, rule)
-	}
 }

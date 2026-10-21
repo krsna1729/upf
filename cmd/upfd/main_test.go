@@ -21,8 +21,7 @@ func validArgs() graphArgs {
 		pdrFieldsUL: "src,dst,proto,sport,dport,qfi", pdrFieldsDL: "src,dst,proto,sport,dport",
 		selectFieldsDL: "dst_ip",
 		teidTable:      "teid", teidGate: 0,
-		actionsUL: "at_ul", metersUL: "mt_ul",
-		actionsDL: "at_dl", metersDL: "mt_dl",
+		metersUL: "mt_ul", metersDL: "mt_dl",
 		// One encap module, both directions: the deployed daemon writes an
 		// uplink forward's tunnel record there too.
 		tunnels: "enc", tunnelsUL: "enc",
@@ -41,9 +40,6 @@ func TestGraphConfigMapsTheFlags(t *testing.T) {
 	}
 	if cfg.Up.PDRTable != "pdr_ul" || cfg.Down.PDRTable != "pdr_dl" {
 		t.Errorf("rule tables: up %q, down %q", cfg.Up.PDRTable, cfg.Down.PDRTable)
-	}
-	if cfg.Up.Actions != "at_ul" || cfg.Down.Actions != "at_dl" {
-		t.Errorf("action tables: up %q, down %q", cfg.Up.Actions, cfg.Down.Actions)
 	}
 	if cfg.Up.Meters != "mt_ul" || cfg.Down.Meters != "mt_dl" {
 		t.Errorf("meters: up %q, down %q", cfg.Up.Meters, cfg.Down.Meters)
@@ -145,19 +141,16 @@ func TestGraphConfigRefusesBadInput(t *testing.T) {
 		// session's: a field of one PDR cannot be in it.
 		{"a selector with no matcher", func(a *graphArgs) { a.selectDL = "sel_dl" }, "-pdr-match-dl"},
 		{"a matcher with no selector", func(a *graphArgs) { a.pdrMatchDL = "pdr_match_dl" }, "-select-dl"},
-		{"a selector with no action table", func(a *graphArgs) {
-			a.pdrMatchDL, a.selectDL = "pdr_match_dl", "sel_dl"
-		}, "-select-actions-dl"},
 		{"a selector keyed by a PDR's port", func(a *graphArgs) {
-			a.pdrMatchDL, a.selectDL, a.selectActionsDL = "pdr_match_dl", "sel_dl", "sel_at"
+			a.pdrMatchDL, a.selectDL = "pdr_match_dl", "sel_dl"
 			a.selectFieldsDL = "dport"
 		}, "a field of one PDR"},
 		{"a selector keyed by a field the graph has no name for", func(a *graphArgs) {
-			a.pdrMatchDL, a.selectDL, a.selectActionsDL = "pdr_match_dl", "sel_dl", "sel_at"
+			a.pdrMatchDL, a.selectDL = "pdr_match_dl", "sel_dl"
 			a.selectFieldsDL = "udp"
 		}, "-select-fields-dl"},
 		{"two homes for the downlink", func(a *graphArgs) {
-			a.pdrMatchDL, a.selectDL, a.selectActionsDL = "pdr_match_dl", "sel_dl", "sel_at"
+			a.pdrMatchDL, a.selectDL = "pdr_match_dl", "sel_dl"
 			a.firewallDL = "fw_dl"
 		}, "one rule home"},
 	}

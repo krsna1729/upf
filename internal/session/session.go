@@ -23,6 +23,7 @@ package session
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -274,14 +275,6 @@ type Direction struct {
 	// configured with a PdrMatch and no Selector is refused rather than served
 	// by a key no module writes. Empty for the uplink, which needs none.
 	Selector string
-	// SelectorActions is the ActionTable whose "actions" resource the
-	// selector's rules reference: BESS validates a rule's action id as a
-	// reference into that table (D-021), so every session id the selector
-	// writes needs a record there. It must be a table of its own -- those ids
-	// are the sessions', not the action ids this direction's own records are
-	// numbered with -- and the record carries neither meter nor next hop,
-	// because the selector's gate goes to the matcher, not to the table.
-	SelectorActions string
 	// SelectorFields is the selector's key, in the graph's order. Only a field
 	// of the *session* can key one: the UE address, and the route domain where
 	// the deployment has one (deploy/veth-port.yaml's Vif writes it). A field
@@ -289,26 +282,16 @@ type Direction struct {
 	// session would then need two keys and the selector would no longer name
 	// the session.
 	SelectorFields []Field
-	// Actions is the ActionTable module the direction's action records live
-	// in ("at_ul", "at_dl").
-	Actions string
-	// Meters is the Meter module its QER meters live in.
+	// Meters is the Meter module its QER meters live in. The module is
+	// built with `levels: 2`: the classifier's result writes the PDR's own
+	// rate-bearing QER first and the session's shared one second, so a packet
+	// the flow's bucket drops is not charged to the session's.
 	Meters string
-	// MeterLevels is how many meter ids one action carries: 0 and 1 are the
-	// historical single-meter record. With 2, the flow's own rate-bearing QER
-	// goes in the first slot and the session's shared one after it, and the
-	// Meter polices them in that order -- a packet the flow's bucket drops is
-	// not charged to the session's. It requires a Meter and ActionTable built
-	// with `levels: 2` (MeterArg.levels); the framework refuses a pair of
-	// modules that disagree, and the action table refuses a list longer than
-	// its levels.
-	MeterLevels uint32
 	// NextHop is the Router next hop a forward leaves by, for either
-	// direction: the uplink's is the N6 route, the downlink's the N3 one.
-	// Every chain that holds an ActionTable must route on the id it writes --
-	// the module fails closed (drops every packet) when the attribute has no
-	// reader, and a Router drops an id it does not know -- so 0 here is only
-	// correct for a graph whose chain has no ActionTable at all.
+	// direction: the uplink's is the N6 route, the downlink's the N3 one. The
+	// classifier's result writes it into the packet's `next_hop_id` attribute,
+	// and the Router downstream reads it; an id the Router does not know is a
+	// drop.
 	NextHop uint32
 	// Tunnels is the GtpuEncap module whose per-session records the direction
 	// writes: the downlink's GTP-U tunnel toward the gNB, and an uplink forward
@@ -1440,30 +1423,50 @@ func firewallRes(d Direction) string { return d.Firewall + "/rules" }
 func pdrMatchRes(d Direction) string { return d.PdrMatch + "/rules" }
 func selectorRes(d Direction) string { return d.Selector + "/rules" }
 
-// selectorActionsRes is the action resource a selector rule's action id is
-// validated against: an ActionTable's own record set, which the selector's
-// session ids live in and the direction's own action table does not.
-func selectorActionsRes(d Direction) string { return d.SelectorActions + "/actions" }
-
 func (c *Compiler) teidRes() string { return c.cfg.TEIDTable + "/rules" }
-func actionsRes(d Direction) string { return d.Actions + "/actions" }
 func metersRes(d Direction) string  { return d.Meters + "/meters" }
 
-// actionValue is the action record's resource value: the next hop, and the
-// meter or meters its chain polices. One level is the historical single
-// `meter_id`; two name the flow's own rate-bearing QER first and the session's
-// shared one after it, so the Meter stops a red packet before the session's
-// bucket is charged. The list needs a Meter and ActionTable built with
-// `levels: 2`; a table with fewer levels refuses a longer list when the action
-// is written.
-func actionValue(d Direction, p *pdr) map[string]any {
-	v := map[string]any{"next_hop_id": p.nextHop}
-	if d.MeterLevels <= 1 {
-		v["meter_id"] = p.meterID
-		return v
+// The classifier's result record, as every deployed graph declares it:
+// action_id (4), meter_id for the meter stack (8: the PDR's own QER, then the
+// session's, big-endian), and next_hop_id (4). BESS writes the record straight
+// into metadata (`result_fields`); no action table is in the chain.
+const (
+	resultActionID  = 0
+	resultMeterID   = 4
+	resultNextHopID = 12
+	resultSize      = 16
+)
+
+// pdrResult is one PDR rule's result record. The meter stack has two levels in
+// every deployment: the second is 0 when the PDR names no shared QER, which
+// the Meter skips.
+func pdrResult(p *pdr) []byte {
+	b := make([]byte, resultSize)
+	binary.BigEndian.PutUint32(b[resultActionID:], p.actionID)
+	own, shared := meterSlots(p)
+	binary.BigEndian.PutUint32(b[resultMeterID:], own)
+	binary.BigEndian.PutUint32(b[resultMeterID+4:], shared)
+	binary.BigEndian.PutUint32(b[resultNextHopID:], p.nextHop)
+	return b
+}
+
+// meterSlots is the two-level meter stack a PDR carries: its own rate-bearing
+// QER first, the session's shared one second. A PDR that names only the shared
+// QER puts it in the first slot -- there is no flow bucket to police before
+// it, and a meter id in level 1 is what every graph read before the stack.
+func meterSlots(p *pdr) (uint32, uint32) {
+	if p.ownMeterID == 0 {
+		return p.sharedMeterID, 0
 	}
-	v["meter_ids"] = []uint32{p.ownMeterID, p.sharedMeterID}
-	return v
+	return p.ownMeterID, p.sharedMeterID
+}
+
+// selectorResult is the selector's result: the session id, which the downlink
+// PdrMatch reads as its key. The matcher writes every other result field.
+func selectorResult(id uint32) []byte {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, id)
+	return b
 }
 func tunnelsRes(d Direction) string  { return d.Tunnels + "/tunnels" }
 func countersRes(d Direction) string { return d.Counters + "/counters" }
@@ -1561,9 +1564,6 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	}
 	for _, p := range all {
 		dir := c.direction(p.srcIfc)
-		if p.actionID != 0 {
-			add(bess.Change{Resource: actionsRes(dir), Key: map[string]any{"id": p.actionID}})
-		}
 		for _, t := range p.tunnels {
 			add(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
 		}

@@ -65,12 +65,10 @@ type Strategy struct {
 	PdrMatch string
 	// Selector is the module that names a session for a packet that carries no
 	// tunnel (the downlink's): the keyed map holds one key per session, and
-	// something has to turn a packet into that key. SelectorActions is the
-	// ActionTable its rules reference, and SelectorFields the key it matches,
-	// as the graph declares it.
-	Selector        string
-	SelectorActions string
-	SelectorFields  []Field
+	// something has to turn a packet into that key. SelectorFields is the key
+	// it matches, as the graph declares it; its rule's result is the session id.
+	Selector       string
+	SelectorFields []Field
 }
 
 // String is the strategy as an operator reads it: the structure and the module
@@ -98,7 +96,7 @@ func (s Strategy) String() string {
 func (d Direction) Strategy() Strategy {
 	return Strategy{
 		Table: d.PDRTable, Firewall: d.Firewall, PdrMatch: d.PdrMatch,
-		Selector: d.Selector, SelectorActions: d.SelectorActions, SelectorFields: d.SelectorFields,
+		Selector: d.Selector, SelectorFields: d.SelectorFields,
 	}
 }
 
@@ -150,10 +148,9 @@ func ProfileFor(name string) (Profile, error) {
 			Modules: []string{"GtpuDecap", "GtpuEncap", "GtpuResponder", "UrrCount", "PdrMatch", "AtsssSteer"},
 			Up:      Strategy{PdrMatch: "pdr_match_ul"},
 			Down: Strategy{
-				PdrMatch:        "pdr_match_dl",
-				Selector:        "sel_dl",
-				SelectorActions: "sel_at",
-				SelectorFields:  []Field{DstIP},
+				PdrMatch:       "pdr_match_dl",
+				Selector:       "sel_dl",
+				SelectorFields: []Field{DstIP},
 			},
 		}, nil
 	}

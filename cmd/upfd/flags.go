@@ -228,9 +228,6 @@ func profileArgs(p session.Profile, given map[string]bool, a graphArgs) graphArg
 	if !given["select-dl"] {
 		a.selectDL = p.Down.Selector
 	}
-	if !given["select-actions-dl"] {
-		a.selectActionsDL = p.Down.SelectorActions
-	}
 	if !given["select-fields-dl"] {
 		a.selectFieldsDL = fieldList(p.Down.SelectorFields, a.selectFieldsDL)
 	}

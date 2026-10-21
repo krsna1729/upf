@@ -123,13 +123,10 @@ func selectorID(s *Session) (uint32, error) {
 	return uint32(s.LocalSEID), nil
 }
 
-// selectorChanges is the selector's writes for one session: the action record
-// its rules reference, and one rule per key the session's downlink PDRs name.
-//
-// The record exists because BESS validates a rule's action id as a reference
-// into the action resource the module declares (D-021): it carries neither meter
-// nor next hop, because a packet the selector matches leaves on the module's own
-// gate -- the matcher -- and the table is never in the packet path at all.
+// selectorChanges is the selector's writes for one session: one rule per key
+// the session's downlink PDRs name. The rule's result is the session id; the
+// ExactMatch writes it into `action_id`, which the downlink PdrMatch reads as
+// its key. The selector is never in the packet path beyond that write.
 func (c *Compiler) selectorChanges(s *Session) ([]bess.Change, error) {
 	d := c.cfg.Down
 	if d.Selector == "" {
@@ -146,14 +143,7 @@ func (c *Compiler) selectorChanges(s *Session) ([]bess.Change, error) {
 	if err != nil {
 		return nil, err
 	}
-	changes := make([]bess.Change, 0, len(keys)+1)
-	if d.SelectorActions != "" {
-		changes = append(changes, bess.Change{
-			Resource: selectorActionsRes(d),
-			Key:      map[string]any{"id": id},
-			Value:    map[string]any{"meter_id": 0, "next_hop_id": 0},
-		})
-	}
+	changes := make([]bess.Change, 0, len(keys))
 	for _, k := range keys {
 		key, err := selectorRuleKey(d, k)
 		if err != nil {
@@ -162,15 +152,18 @@ func (c *Compiler) selectorChanges(s *Session) ([]bess.Change, error) {
 		changes = append(changes, bess.Change{
 			Resource: selectorRes(d),
 			Key:      key,
-			Value:    map[string]any{"gate": uint64(0), "action_id": id},
+			Value: map[string]any{
+				"gate":   uint64(0),
+				"result": selectorResult(id),
+			},
 		})
 	}
 	return changes, nil
 }
 
 // selectorErases is what a deletion (or a replaced form) withdraws: every rule
-// the session's keys name, and the action record they referenced -- the rule
-// first, because the engine refuses to remove an action a live rule names.
+// the session's keys name. The rule's result is metadata, not a resource
+// reference, so there is no record to erase after it.
 func (c *Compiler) selectorErases(s *Session) ([]bess.Change, error) {
 	d := c.cfg.Down
 	if d.Selector == "" {
@@ -185,23 +178,13 @@ func (c *Compiler) selectorErases(s *Session) ([]bess.Change, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	changes := make([]bess.Change, 0, len(keys)+1)
+	changes := make([]bess.Change, 0, len(keys))
 	for _, k := range keys {
 		key, err := selectorRuleKey(d, k)
 		if err != nil {
 			return nil, err
 		}
 		changes = append(changes, bess.Change{Resource: selectorRes(d), Key: key})
-	}
-	if d.SelectorActions != "" {
-		id, err := selectorID(s)
-		if err != nil {
-			return nil, err
-		}
-		changes = append(changes, bess.Change{
-			Resource: selectorActionsRes(d),
-			Key:      map[string]any{"id": id},
-		})
 	}
 	return changes, nil
 }

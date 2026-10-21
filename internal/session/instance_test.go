@@ -107,15 +107,40 @@ func ruleIn(t *testing.T, changes []bess.Change, table string) rule {
 	return rule{}
 }
 
-// nextHop is the Router next hop an action record names.
-func nextHop(t *testing.T, changes []bess.Change, resource string, actionID uint32) uint32 {
+// nextHop is the Router next hop the rule carrying actionID writes into its
+// result. The rule is found by its result, not by a separate action resource:
+// the classifier writes the next hop itself.
+func nextHop(t *testing.T, changes []bess.Change, _ string, actionID uint32) uint32 {
 	t.Helper()
-	c := find(t, changes, resource, "id", actionID)
-	hop, ok := c.Value["next_hop_id"].(uint32)
-	if !ok {
-		t.Fatalf("the action in %s names no next hop: %v", resource, c.Value)
+	for _, r := range rules(changes) {
+		if r.actionID() == actionID && len(r.result()) >= 16 {
+			return r.nextHop()
+		}
 	}
-	return hop
+	t.Fatalf("no rule carries action %d, so no result names a next hop", actionID)
+	return 0
+}
+
+// actionFields is the action data a rule's result carries, in the shape tests
+// used when it lived in an ActionTable record.
+func actionFields(t *testing.T, changes []bess.Change, dir Direction, actionID uint32) map[string]any {
+	t.Helper()
+	for _, r := range rules(changes) {
+		if !strings.HasPrefix(r.change.Resource, rulesRes(dir)) {
+			continue
+		}
+		if r.actionID() != actionID {
+			continue
+		}
+		ids := r.meterIDs()
+		return map[string]any{
+			"meter_id":    ids[0],
+			"meter_ids":   []uint32{ids[0], ids[1]},
+			"next_hop_id": r.nextHop(),
+		}
+	}
+	t.Fatalf("no rule in %s carries action %d", rulesRes(dir), actionID)
+	return nil
 }
 
 // TestTwoInstancesRouteIndependently is docs/design.md's milestone 4: two
@@ -595,3 +620,8 @@ func TestADestinationAddressIsNotTheSessionsUEAddress(t *testing.T) {
 		t.Error("a refused session wrote to the dataplane")
 	}
 }
+
+// actionsRes is retained only for call sites that identify a rule by the
+// action it carries; the classifier's result is the record now, not a
+// separate resource.
+func actionsRes(Direction) string { return "" }

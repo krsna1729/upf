@@ -62,11 +62,11 @@ func run() error {
 	peerMAC := flag.String("peer-mac", "02:00:00:00:00:02", "the N3 peer's Ethernet address (the transport next hop)")
 	capacity := flag.Uint("capacity", 1<<16,
 		"the id spaces the session compiler keeps: the capacity of the graph's "+
-			"Meter, ActionTable and GtpuEncap tables, which refuse an id beyond it")
+			"Meter and GtpuEncap tables, which refuse an id beyond it")
 	n6NextHop := flag.Uint("n6-next-hop", 1, "the Router next hop an uplink forward leaves by")
 	n3NextHop := flag.Uint("n3-next-hop", 2,
 		"the Router next hop a downlink forward leaves by: the encap's gate "+
-			"(a chain with an ActionTable fails closed when its action names none)")
+			"(the classifier's result names it)")
 	atsss := flag.String("atsss", "",
 		"the AtsssSteer module whose policies a MAR-steered PDR uses (TS 29.244 7.5.2.8): "+
 			"its \"<name>/policies\" resource is written with the MAR's two access actions, and the "+
@@ -136,30 +136,14 @@ func run() error {
 			"rule per (route domain, UE address) a session's downlink PDRs name, whose value is the "+
 			"session id it writes into the packet's \"action_id\" metadata -- the key "+
 			"-pdr-match-dl reads. It is what names a session for a packet that carries no tunnel "+
-			"(TS 29.244 5.2.1), and it needs -select-actions-dl and -pdr-match-dl")
-	selectActionsDL := flag.String("select-actions-dl", "",
-		"the ActionTable whose \"<name>/actions\" resource the selector's rules reference: BESS "+
-			"validates a rule's action id as a reference into that table, so every session id "+
-			"-select-dl writes needs a record there. It must be a table of its own, and it is never "+
-			"in the packet path: the selector's gate goes to the matcher")
+			"(TS 29.244 5.2.1), and it needs -pdr-match-dl")
 	selectFieldsDL := flag.String("select-fields-dl", "dst_ip",
 		"the selector's key, in the graph's order, from the same field names -pdr-fields-dl takes. "+
 			"Only a field of the session can be in it: dst_ip (the UE address the packet is "+
 			"addressed to) and, in a deployment with more than one network instance, route_domain "+
 			"(the interface the packet arrived on classified it). A field of one PDR (proto, "+
 			"sport, dport) is refused")
-	actionsUL := flag.String("actions-ul", "at_ul", "the uplink ActionTable module")
 	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
-	meterLevelsUL := flag.Uint("meter-levels-ul", 0,
-		"how many meter ids one uplink action carries: 0 and 1 are the historical single `meter_id` "+
-			"record (the default); 2 names the flow's own rate-bearing QER first and the session's "+
-			"shared QER after it, so the Meter stops a red packet before the session's bucket is "+
-			"charged. It needs the graph's Meter and ActionTable to be built with levels: 2 (the "+
-			"multi-level meter, the meter-stack fork), and an action table refuses a longer list than "+
-			"its own levels")
-	meterLevelsDL := flag.Uint("meter-levels-dl", 0,
-		"the downlink's level count, as -meter-levels-ul is the uplink's")
-	actionsDL := flag.String("actions-dl", "at_dl", "the downlink ActionTable module")
 	metersDL := flag.String("meters-dl", "mt_dl", "the downlink Meter module")
 	countersUL := flag.String("counters-ul", "cnt_ul",
 		"the uplink UrrCount module (per-rule usage counters); empty: the graph charges nothing")
@@ -349,18 +333,16 @@ func run() error {
 			pdrTableUL:    *pdrTableUL, pdrTableDL: *pdrTableDL,
 			firewallUL: *firewallUL, firewallDL: *firewallDL,
 			pdrMatchUL: *pdrMatchUL, pdrMatchDL: *pdrMatchDL,
-			selectDL: *selectDL, selectActionsDL: *selectActionsDL,
+			selectDL:       *selectDL,
 			selectFieldsDL: *selectFieldsDL,
 			pdrFieldsUL:    *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			teidTable: *teidTable, teidGate: uint32(*teidGate),
 			gtpuErrors: *gtpuErrors,
 			endMarker:  *endMarker,
-			actionsUL:  *actionsUL, metersUL: *metersUL,
-			meterLevelsUL: uint32(*meterLevelsUL),
-			actionsDL:     *actionsDL, metersDL: *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
-			meterLevelsDL: uint32(*meterLevelsDL),
-			countersUL:    *countersUL, countersDL: *countersDL,
+			metersUL:   *metersUL,
+			metersDL:   *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
+			countersUL: *countersUL, countersDL: *countersDL,
 			bufferStore: *bufferStore, bufferCounter: *bufferCounter, bufferGate: uint32(*bufferGate),
 		}))
 		if err != nil {
@@ -803,16 +785,13 @@ type graphArgs struct {
 	pdrMatchUL         string
 	pdrMatchDL         string
 	selectDL           string
-	selectActionsDL    string
 	selectFieldsDL     string
 	pdrFieldsUL        string
 	pdrFieldsDL        string
 	teidTable          string
 	teidGate           uint32
 	gtpuErrors         string
-	actionsUL          string
 	metersUL           string
-	actionsDL          string
 	metersDL           string
 	countersUL         string
 	bufferStore        string
@@ -821,8 +800,6 @@ type graphArgs struct {
 	countersDL         string
 	tunnels            string
 	tunnelsUL          string
-	meterLevelsUL      uint32
-	meterLevelsDL      uint32
 	endMarker          string
 }
 
@@ -872,24 +849,10 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			"-select-dl %q and -pdr-match-dl %q are one path: the selector writes the session id the "+
 				"matcher reads as its key", a.selectDL, a.pdrMatchDL)
 	}
-	if a.selectDL != "" && a.selectActionsDL == "" {
-		return session.Config{}, fmt.Errorf(
-			"-select-dl %q needs -select-actions-dl: a rule's action id is validated as a reference "+
-				"into an ActionTable's actions resource", a.selectDL)
-	}
 	if a.selectDL != "" && a.firewallDL != "" {
 		return session.Config{}, fmt.Errorf(
 			"the downlink has one rule home: -firewall-dl %q and -pdr-match-dl %q both name one",
 			a.firewallDL, a.pdrMatchDL)
-	}
-	// A level is a meter id slot in one action. The Meter's and ActionTable's
-	// modules declare how many there are (`levels` in their args) and the
-	// framework refuses a pair that disagrees; 16 is the meter_id attribute's
-	// own bound (64 bytes / 4), and 0 and 1 are the single-meter record.
-	if a.meterLevelsUL > 16 || a.meterLevelsDL > 16 {
-		return session.Config{}, fmt.Errorf(
-			"-meter-levels-ul %d and -meter-levels-dl %d: at most 16 meter ids fit in one meter_id "+
-				"attribute", a.meterLevelsUL, a.meterLevelsDL)
 	}
 	// The selector's key is the session's, so only the fields a session has can
 	// be in it: the UE address, and the route domain the deployment classified
@@ -944,13 +907,8 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			// The three are one home each (the check above).
 			Firewall: a.firewallUL,
 			PdrMatch: a.pdrMatchUL,
-			Actions:  a.actionsUL,
 			Meters:   a.metersUL,
-			// How many meter ids one action carries: 0/1 is the single
-			// meter_id the graphs had; 2 names the flow's own QER and the
-			// session's shared one, and needs the meter stack's modules.
-			MeterLevels: a.meterLevelsUL,
-			Counters:    a.countersUL,
+			Counters: a.countersUL,
 			// An uplink forward can add an outer header of its own: indirect
 			// data forwarding (Destination Interface Access) and the uplink of
 			// an N9 tunnel (Destination Interface Core with an Outer Header
@@ -968,16 +926,13 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			// whose map is keyed by the session id the selector writes: the
 			// three names are one path (the check above), because a matcher
 			// nothing selects a session for matches nothing at all.
-			PdrMatch:        a.pdrMatchDL,
-			Selector:        a.selectDL,
-			SelectorActions: a.selectActionsDL,
-			SelectorFields:  selectFields,
-			Actions:         a.actionsDL,
-			Meters:          a.metersDL,
-			MeterLevels:     a.meterLevelsDL,
-			Counters:        a.countersDL,
-			NextHop:         a.n3NextHop,
-			Tunnels:         a.tunnels,
+			PdrMatch:       a.pdrMatchDL,
+			Selector:       a.selectDL,
+			SelectorFields: selectFields,
+			Meters:         a.metersDL,
+			Counters:       a.countersDL,
+			NextHop:        a.n3NextHop,
+			Tunnels:        a.tunnels,
 		},
 		Instances: domains,
 		N3Addr:    addr,

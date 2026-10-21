@@ -81,8 +81,8 @@ func TestABuffFARIsGatedToTheStoreAndCounted(t *testing.T) {
 	// lost -- what the live arm found. The release path reads the same record
 	// when the store's gate 0 re-enters the action path, and the modification
 	// that stops buffering updates this key in place.
-	action := find(t, changes, actionsRes(c.cfg.Down), "id", flow)
-	if got := action.Value["next_hop_id"]; got == nil {
+	action := actionFields(t, changes, c.cfg.Down, flow)
+	if got := action["next_hop_id"]; got == nil {
 		t.Error("a BUFF FAR's action record carries no next hop: the release path would have nowhere to send the packets")
 	}
 	for _, ch := range changes {
@@ -132,8 +132,8 @@ func TestARoutedBuffFARNamesNoNextHop(t *testing.T) {
 			if flow == 0 {
 				t.Fatal("a BUFF FAR's rule carries no ActionId")
 			}
-			action := find(t, changes, actionsRes(cfg.Down), "id", flow)
-			if got := action.Value["next_hop_id"]; got != uint32(0) {
+			action := actionFields(t, changes, cfg.Down, flow)
+			if got := action["next_hop_id"]; got != uint32(0) {
 				t.Errorf("a routed BUFF FAR's action names next hop %v, want 0", got)
 			}
 			for _, ch := range changes {
@@ -618,7 +618,7 @@ func TestAModificationThatStopsBufferingReleasesTheFlow(t *testing.T) {
 	if got := ruleCarrying(t, changes, fieldDstIP, []byte{10, 45, 0, 7}).gate(); got != 0 {
 		t.Errorf("the rule still gates %d after the FAR forwards, want 0", got)
 	}
-	find(t, changes, actionsRes(c.cfg.Down), "id", flow)
+	actionFields(t, changes, c.cfg.Down, flow)
 }
 
 // TestADeletionDropsWhatTheFlowHeld is the other half of 5.2.4.1's "dropped or

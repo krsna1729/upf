@@ -45,7 +45,7 @@ func TestAProfileNamesItsStrategies(t *testing.T) {
 	if custom.Down.PdrMatch == "" || custom.Down.Table != "" {
 		t.Errorf("the custom profile's downlink is not the keyed map: %v", custom.Down)
 	}
-	if custom.Down.Selector == "" || custom.Down.SelectorActions == "" {
+	if custom.Down.Selector == "" {
 		t.Errorf("the custom profile's downlink names no selector, and a keyed map needs one: %v", custom.Down)
 	}
 	if len(custom.Down.SelectorFields) == 0 {

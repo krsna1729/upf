@@ -5,6 +5,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -260,8 +261,40 @@ func (r rule) mask(i int) []byte { b, _ := r.masks[i]["value_bin"].([]byte); ret
 // value is the value of the rule's field at index i.
 func (r rule) value(i int) []byte { b, _ := r.values[i]["value_bin"].([]byte); return b }
 
-// actionID is the ActionId the rule delivers.
-func (r rule) actionID() uint32 { v, _ := r.change.Value["action_id"].(uint32); return v }
+// result is the classifier's result record: what a matching packet carries
+// into the downstream modules (action id, two meter levels, next hop).
+func (r rule) result() []byte { b, _ := r.change.Value["result"].([]byte); return b }
+
+// actionID is the ActionId the rule's result carries.
+func (r rule) actionID() uint32 {
+	b := r.result()
+	if len(b) < 4 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b)
+}
+
+// meterIDs are the two meter levels the rule's result carries, in policing
+// order. A result shorter than the meter field (a selector rule) has none.
+func (r rule) meterIDs() [2]uint32 {
+	var ids [2]uint32
+	b := r.result()
+	if len(b) < 12 {
+		return ids
+	}
+	ids[0] = binary.BigEndian.Uint32(b[4:])
+	ids[1] = binary.BigEndian.Uint32(b[8:])
+	return ids
+}
+
+// nextHop is the Router next hop the rule's result carries.
+func (r rule) nextHop() uint32 {
+	b := r.result()
+	if len(b) < 16 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b[12:])
+}
 
 // gate is the gate the rule delivers.
 func (r rule) gate() uint64 { v, _ := r.change.Value["gate"].(uint64); return v }
@@ -372,7 +405,6 @@ func testConfig() Config {
 		Up: Direction{
 			PDRTable:  "pdr_ul",
 			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, QFI},
-			Actions:   "at_ul",
 			Meters:    "mt_ul",
 			Counters:  "cnt_ul",
 			NextHop:   1,
@@ -384,7 +416,6 @@ func testConfig() Config {
 		Down: Direction{
 			PDRTable:  "pdr_dl",
 			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
-			Actions:   "at_dl",
 			Meters:    "mt_dl",
 			// The access-side route: the downlink's chain holds an ActionTable
 			// too, and a chain whose action names no next hop is a chain the
@@ -490,10 +521,9 @@ func TestABuffOnlyFARIsADrop(t *testing.T) {
 	if got := r.gate(); got != dropGate {
 		t.Errorf("a BUFF-only FAR gates %d, want the drop gate %d", got, dropGate)
 	}
-	actions := actionsRes(c.cfg.Down)
 	for _, ch := range rec.last() {
-		if ch.Resource == actions {
-			t.Errorf("a BUFF-only FAR wrote an action record in %s", actions)
+		if strings.HasSuffix(ch.Resource, "/actions") {
+			t.Errorf("a BUFF-only FAR wrote an action record in %s", ch.Resource)
 		}
 		if ch.Resource == c.cfg.Down.Tunnels {
 			t.Errorf("a BUFF-only FAR wrote a tunnel record in %s", ch.Resource)
@@ -599,9 +629,6 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	if _, ok := teidRule(onlyErases(erases), testConfig().TEIDTable+"/rules", 0x22222222); !ok {
 		t.Error("the removed PDR's TEID rule is still programmed")
 	}
-	if n := len(actionsErased(erases)); n != 1 {
-		t.Errorf("%d action records erased, want the removed PDR's one", n)
-	}
 	// The QER outlives the PDR, and compile writes a meter for every QER the
 	// session still holds: erasing that meter here would name one key twice in
 	// one transaction, which the engine rejects. It goes when the session does.
@@ -654,9 +681,6 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	}
 	if n := len(metersErased(erases)); n != 0 {
 		t.Errorf("%d meter records erased, want none: the surviving PDR uses the meter", n)
-	}
-	if n := len(actionsErased(erases)); n != 1 {
-		t.Errorf("%d action records erased, want the removed PDR's one", n)
 	}
 }
 
@@ -755,8 +779,8 @@ func TestAnUpdateThatChangesTheKeyErasesTheOldRule(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	old := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0})
-	actionID := old.change.Value["action_id"]
-	if actionID == nil || actionID == uint32(0) {
+	actionID := old.actionID()
+	if actionID == 0 {
 		t.Fatalf("the establishment gave the PDR no action (%v)", actionID)
 	}
 
@@ -778,7 +802,7 @@ func TestAnUpdateThatChangesTheKeyErasesTheOldRule(t *testing.T) {
 	if written.change.Value == nil {
 		t.Fatal("the new key was not written")
 	}
-	if got := written.change.Value["action_id"]; got != actionID {
+	if got := written.actionID(); got != actionID {
 		t.Errorf("the update gave the PDR action %v, want the one it had (%v)", got, actionID)
 	}
 	assertNoRepeat(t, txn)
@@ -854,7 +878,7 @@ func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	actionID := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0}).change.Value["action_id"]
+	actionID := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0}).actionID()
 
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
@@ -876,7 +900,7 @@ func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
 	if written.change.Value == nil {
 		t.Fatal("the update did not write the rule")
 	}
-	if got := written.change.Value["action_id"]; got != actionID {
+	if got := written.actionID(); got != actionID {
 		t.Errorf("the update gave the PDR action %v, want the one it had (%v)", got, actionID)
 	}
 }
@@ -1563,8 +1587,8 @@ func TestAPDINamingAQFIKeysTheRuleOnIt(t *testing.T) {
 	if got := r.actionID(); got == 0 {
 		t.Fatal("the rule names no action")
 	}
-	action := find(t, rec.last(), testConfig().Up.Actions+"/actions", "id", r.actionID())
-	if got := action.Value["next_hop_id"]; got != uint32(1) {
+	action := actionFields(t, rec.last(), testConfig().Up, r.actionID())
+	if got := action["next_hop_id"]; got != uint32(1) {
 		t.Errorf("the rule's action takes next hop %v, want the uplink's", got)
 	}
 }
@@ -1692,9 +1716,8 @@ func TestTwoQFIKeyedPDRsGetTheirOwnMeters(t *testing.T) {
 	if specific.actionID() == general.actionID() {
 		t.Fatal("the two flows share one action, so one QER would serve both")
 	}
-	up := testConfig().Up.Actions + "/actions"
 	meter := func(r rule) any {
-		return find(t, rec.last(), up, "id", r.actionID()).Value["meter_id"]
+		return actionFields(t, rec.last(), testConfig().Up, r.actionID())["meter_id"]
 	}
 	first, second := meter(specific), meter(general)
 	if first == uint32(0) || second == uint32(0) {
@@ -1705,73 +1728,6 @@ func TestTwoQFIKeyedPDRsGetTheirOwnMeters(t *testing.T) {
 	}
 }
 
-// assertActionRecords holds the daemon's own invariant: a rule's action_id is a
-// *reference* (D-021; transaction_engine.cc checks it on the transaction's end
-// state), so every rule naming an id must be joined by an upsert of that id in
-// the same transaction. The buffering path broke it -- it allocated the flow's
-// store key as an ActionId and wrote no record -- and only the live arm showed
-// it, because nothing in the unit tests walked the transaction looking for the
-// reference.
-func assertActionRecords(t *testing.T, cfg Config, changes []bess.Change) {
-	t.Helper()
-	for _, dir := range []struct{ rules, actions string }{
-		{rulesRes(cfg.Up), actionsRes(cfg.Up)},
-		{rulesRes(cfg.Down), actionsRes(cfg.Down)},
-	} {
-		written := map[uint32]bool{}
-		for _, ch := range changes {
-			if ch.Resource == dir.actions {
-				if id, ok := ch.Key["id"].(uint32); ok {
-					written[id] = true
-				}
-			}
-		}
-		for _, ch := range changes {
-			if ch.Resource != dir.rules {
-				continue
-			}
-			id, _ := ch.Value["action_id"].(uint32)
-			if id != 0 && !written[id] {
-				t.Errorf("a rule in %s names action %d, and no upsert in %s writes it: the daemon refuses the transaction",
-					dir.rules, id, dir.actions)
-			}
-		}
-	}
-}
-
-// TestEveryRulesActionIdHasAnActionRecord runs the invariant over a fresh
-// establishment of each kind -- forwarding and buffering -- because that is the
-// shape the live arm failed on.
-func TestEveryRulesActionIdHasAnActionRecord(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		cfg  Config
-		req  *message.SessionEstablishmentRequest
-	}{
-		{"a forwarding session", testConfig(), establishment(0x9201, "10.45.0.9")},
-		{"a buffering session", bufferingConfig(), buffEstablishment(0x9202, "10.45.0.9")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := &recorder{}
-			c := New(tc.cfg, rec, quietLogger())
-			if got := cause(t, c.Establish(tc.req)); got != ie.CauseRequestAccepted {
-				t.Fatalf("the establishment answered cause %d", got)
-			}
-			assertActionRecords(t, tc.cfg, rec.last())
-		})
-	}
-}
-
-// TestThePrecedenceIsInvertedIntoTheClassifiersPriority: PFCP orders PDRs one
-// way and the classifier the other. 8.2.11: "the lower precedence values
-// indicate higher precedence of the PDR, and the higher precedence values
-// indicate lower precedence of the PDR when matching a packet"; WildcardMatch:
-// "the rule with higher priority will be applied" (module_msg.proto:347). A
-// compiler that copied the Precedence into the priority would therefore invert
-// the SMF's ordering -- of two overlapping PDRs (an SDF-specific rule the SMF
-// gave 10 beside a catch-all it gave 20) the catch-all would take the flow's
-// traffic. Every rule carries the inversion: the PDR rules and the TEID rule in
-// front of the decap.
 func TestThePrecedenceIsInvertedIntoTheClassifiersPriority(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
@@ -1808,8 +1764,8 @@ func TestThePrecedenceIsInvertedIntoTheClassifiersPriority(t *testing.T) {
 		t.Errorf("the SMF's higher-precedence PDR carries priority %d, not above the other's %d: the ordering is inverted",
 			flow.priority(), general.priority())
 	}
-	if action := find(t, rec.last(), actionsRes(testConfig().Up), "id", flow.actionID()); action.Value["next_hop_id"] != uint32(1) {
-		t.Errorf("the winning rule's action is not its PDR's: %v", action.Value)
+	if action := actionFields(t, rec.last(), testConfig().Up, flow.actionID()); action["next_hop_id"] != uint32(1) {
+		t.Errorf("the winning rule's result is not its PDR's: %v", action)
 	}
 	// The TEID rule in front of the decap is inverted the same way: it is
 	// written once for the session, from the first PDR's Precedence (PDR 1's
@@ -2109,17 +2065,13 @@ func TestAClosedGateDropsWithoutAnAction(t *testing.T) {
 	if got := r.gate(); got != dropGate {
 		t.Errorf("a closed gate's rule gates %d, want the drop gate %d", got, dropGate)
 	}
-	// The action_id the compiler writes for a drop is a uint32 zero; a check
-	// against a value of another type would pass whatever the field held.
-	if got, ok := r.change.Value["action_id"].(uint32); !ok || got != 0 {
-		t.Errorf("a closed gate's rule names action %v (%T), want none", got, r.change.Value["action_id"])
+	// A drop's result is all zero: no action id, no meter and no next hop.
+	if got := r.actionID(); got != 0 {
+		t.Errorf("a closed gate's rule names action %d, want none", got)
 	}
-	// The resource is the compiler's own name for the uplink's actions: a
-	// literal here would keep passing if the config named the table otherwise.
-	actions := actionsRes(c.cfg.Up)
 	for _, ch := range rec.last() {
-		if ch.Resource == actions {
-			t.Errorf("a closed gate wrote an action record in %s", actions)
+		if strings.HasSuffix(ch.Resource, "/actions") {
+			t.Errorf("a closed gate wrote an action record in %s", ch.Resource)
 		}
 	}
 }
@@ -2164,8 +2116,8 @@ func TestAQuotaExhaustedURRDropsItsPDRs(t *testing.T) {
 	if got := enforced.gate(); got != dropGate {
 		t.Errorf("with the URR's quota used up the rule gates %d, want the drop gate %d", got, dropGate)
 	}
-	if got, ok := enforced.change.Value["action_id"].(uint32); !ok || got != 0 {
-		t.Errorf("the dropped rule names action %v (%T), want none", got, enforced.change.Value["action_id"])
+	if got := enforced.actionID(); got != 0 {
+		t.Errorf("the dropped rule names action %d, want none", got)
 	}
 
 	// A new quota is the SMF's own lever for re-opening the traffic
@@ -2297,15 +2249,15 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 	}
 
 	// The action resolves the FAR and the QER.
-	ulAction := find(t, changes, testConfig().Up.Actions+"/actions", "id", ul.actionID())
-	if got := ulAction.Value["next_hop_id"]; got != uint32(1) {
+	ulAction := actionFields(t, changes, testConfig().Up, ul.actionID())
+	if got := ulAction["next_hop_id"]; got != uint32(1) {
 		t.Errorf("the uplink action's next hop is %v, want the N6 next hop", got)
 	}
-	if got := ulAction.Value["meter_id"]; got == uint32(0) {
+	if got := ulAction["meter_id"]; got == uint32(0) {
 		t.Error("a PDR whose QER has an MBR must name its meter")
 	}
-	dlAction := find(t, changes, testConfig().Down.Actions+"/actions", "id", dl.actionID())
-	if got := dlAction.Value["next_hop_id"]; got != uint32(2) {
+	dlAction := actionFields(t, changes, testConfig().Down, dl.actionID())
+	if got := dlAction["next_hop_id"]; got != uint32(2) {
 		t.Errorf("the downlink action's next hop is %v, want the access side's (2)", got)
 	}
 
@@ -2380,19 +2332,10 @@ func TestDeleteRemovesWhatTheSessionProgrammed(t *testing.T) {
 	}
 	// The ids are the compiler's to choose (its pool walks the space), so the
 	// reading is what the establishment wrote: a deletion that leaves any of
-	// them behind is state the dataplane keeps for a session that is gone.
+	// the session's records behind is state the dataplane keeps for a session
+	// that is gone. Rules, meters, tunnels and the TEID rule are those records;
+	// the action id lives in a rule's result, not in a resource of its own.
 	est := rec.txns[0]
-	for _, resource := range []string{testConfig().Up.Actions + "/actions",
-		testConfig().Down.Actions + "/actions"} {
-		for _, ch := range est {
-			if ch.Resource != resource {
-				continue
-			}
-			if _, ok := find0(rec.last(), resource, "id", ch.Key["id"]); !ok {
-				t.Errorf("the deletion leaves %s id %v behind", resource, ch.Key["id"])
-			}
-		}
-	}
 	for _, ch := range est {
 		if ch.Resource != testConfig().TEIDTable+"/rules" {
 			continue
@@ -2447,8 +2390,10 @@ func TestDropFARNeedsNoActionRecord(t *testing.T) {
 	if got := ul[0].actionID(); got != 0 {
 		t.Errorf("a DROP FAR needs no action record, but the rule names %v", got)
 	}
-	if _, ok := find0(rec.last(), testConfig().Down.Actions+"/actions", "id", uint32(1)); ok {
-		t.Error("a DROP FAR wrote an action record")
+	for _, ch := range rec.last() {
+		if strings.HasSuffix(ch.Resource, "/actions") {
+			t.Error("a DROP FAR wrote an action record")
+		}
 	}
 }
 
@@ -3260,9 +3205,8 @@ func TestClosingAGateDropsThePacketsOfALivePDR(t *testing.T) {
 	if got := r.gate(); got != dropGate {
 		t.Errorf("a closed gate's rule gates %d, want the drop gate %d", got, dropGate)
 	}
-	if got, ok := r.change.Value["action_id"].(uint32); !ok || got != 0 {
-		t.Errorf("a closed gate's rule names action %v (%T), want none",
-			r.change.Value["action_id"], r.change.Value["action_id"])
+	if got := r.actionID(); got != 0 {
+		t.Errorf("a closed gate's rule names action %d, want none", got)
 	}
 }
 
