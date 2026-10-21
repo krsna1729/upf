@@ -107,7 +107,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/bess
-          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v2
+          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('.github/bess-firewall-result.patch') }}-v3
 
       # The checkout and the dependency install are not part of the cache: a
       # runner is fresh every run, so the pinned fork is what install-deps.sh
@@ -122,6 +122,9 @@ jobs:
           git -C .ci/bess fetch -q --depth 1 origin '${{ steps.pin.outputs.sha }}'
           git -C .ci/bess checkout -q FETCH_HEAD
           git -C .ci/bess rev-parse HEAD
+          # The firewall's rule result is a fork change not yet upstream: apply
+          # it to the pinned commit so the fork's own pin stays a real ref.
+          git -C .ci/bess apply "$GITHUB_WORKSPACE/.github/bess-firewall-result.patch"
 
       # Ubuntu 24.04's default g++ is 13, and the pinned fork's bessctl uses
       # <print> (C++23), which GCC 13 does not have: build with gcc-14/g++-14.
@@ -210,7 +213,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: build/bess
-          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v2
+          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('.github/bess-firewall-result.patch') }}-v3
 
       # The plugin is small, but a cache saves meson setup on every run and
       # keeps a pin bump's rebuild incremental.
