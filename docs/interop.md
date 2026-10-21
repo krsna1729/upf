@@ -93,11 +93,22 @@ ones, in `deploy/interop/free5gc/`; changes from stock are the SMF's UPF
 address and Node ID (`@UPF_IP@`, `@SMF_IP@`, `@SMF_NODE_ID@`), one slice and
 one PDU session for the UE, and `urrPeriod/urrThreshold` made switchable.
 
-```
-host                                          docker network upf-interop-net 10.77.88.0/24
-  bessd (own gRPC port, build/bess)             bridge upfinterop0 = 10.77.88.1  <- upfd N4 binds here only
-  upfd  -n4 10.77.88.1:8805 -node-id 10.77.88.1   10.77.88.10  upf-interop-smf (fixed)
-  tcpdump on upfinterop0 (udp 8805)               10.77.88.128+ every other container
+```mermaid
+flowchart LR
+    subgraph HOST["Host System"]
+        BESS["bessd (own gRPC port)"]
+        UPFD["upfd (-n4 10.77.88.1:8805)"]
+    end
+    
+    subgraph DOCKER["Docker Network: upf-interop-net (10.77.88.0/24)"]
+        BRIDGE["bridge: upfinterop0 (10.77.88.1)<br/>tcpdump on udp 8805"]
+        SMF["upf-interop-smf (10.77.88.10)"]
+        CONTAINERS["Other NFs & Containers (10.77.88.128+)"]
+    end
+    
+    UPFD <--> BRIDGE
+    BRIDGE <--> SMF
+    BRIDGE <--> CONTAINERS
 ```
 
 | file | role |

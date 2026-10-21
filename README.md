@@ -7,18 +7,17 @@ becomes one transaction. The UPF-specific datapath is a BESS plugin in
 router. A rule's result writes the action id, the meter stack and the next hop
 straight into metadata; there is no action table in the chain.
 
-```
-                 PFCP/N4 (UDP 8805)
-   SMF  <───────────────────────────────>  upfd (Go)
-                                             │  control_v2 over gRPC
-                                             │  desired state: Pipeline
-                                             │  per session: one transaction
-                                             ▼
-                                    bessd (C++ + upf datapath)
-                                    ├── classifier → {gate, action, meters, next hop}
-                                    ├── tunnel: GTP-U decap / encap
-                                    └── Router (N3 / N6 / N9 domains)
-   N3 (gNB) ──▶ bessd ──▶ N6 (data network) ──▶ bessd ──▶ N3
+```mermaid
+flowchart TD
+    SMF["SMF (Control Plane)"] <-->|"PFCP / N4 (UDP 8805)"| UPFD["upfd (Go Controller)"]
+    UPFD -->|"control_v2 over gRPC<br/>• Desired state: Pipeline<br/>• Per session: one transaction"| BESS["bessd (C++ Dataplane + Plugin)<br/>• Classifier &rarr; {gate, action_id, meter_ids, next_hop_id}<br/>• GTP-U decap / encap &amp; Echo Responder<br/>• Router (N3 / N6 / N9 domains)"]
+
+    subgraph TRAFFIC["User Plane Traffic Path"]
+        direction LR
+        N3["N3 (Access / gNB)"] <-->|"GTP-U"| BESS
+        BESS <-->|"Plain IPv4"| N6["N6 (Data Network)"]
+        BESS <-->|"GTP-U"| N9["N9 (Peer UPF)"]
+    end
 ```
 
 ## Pipeline

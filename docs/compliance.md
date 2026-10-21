@@ -5,7 +5,7 @@ names, and with the subscriber's ARP identity. It is the operational reading of
 `internal/session/compile.go`; `docs/claims.json` is the machine-checked
 contract and names the tests.
 
-Causes are PFCP causes: **61** is "mandatory IE missing", **73** is "rule
+Causes are PFCP causes: **66** is "mandatory IE missing", **73** is "rule
 creation/modification failure", **75** is "no resources available".
 
 ## Source Interface (TS 29.244 8.2.2, Table 8.2.2-1)
@@ -45,7 +45,7 @@ back to the direction's own hop for the values it has always served.
 |---|---|---|---|
 | 0 | Access | Downlink encap, or the access-side hop (`-access-next-hop`, else the downlink direction's hop). A FAR that adds an outer header here is indirect data forwarding (8.2.2 NOTE 2): it needs a tunnel record (`-tunnels-ul` on an uplink PDR, `-tunnels` on a downlink one). | Cause 73 if the tunnel module is unset. |
 | 1 | Core | Plain IP: the instance's own next hop, or the declared `next-hop=`. With an Outer Header Creation: the instance's `tunnel-next-hop=`, i.e. N9 or an indirect tunnel. | Cause 73 if the instance declares no such egress, or the tunnel module is unset. |
-| 2 | SGi-LAN/N6-LAN | The instance's `sgi-lan-next-hop=` (plain or tunneled by the same key's `Tunnel` bit). The Forwarding Policy IE is mandatory toward this value (Table 7.5.2.3-2). | Cause 61 if the Forwarding Policy is absent; cause 73 if the deployment declares no service-LAN egress. |
+| 2 | SGi-LAN/N6-LAN | The instance's `sgi-lan-next-hop=` (plain or tunneled by the same key's `Tunnel` bit). The Forwarding Policy IE is mandatory toward this value (Table 7.5.2.3-2). | Cause 66 if the Forwarding Policy is absent; cause 73 if the deployment declares no service-LAN egress. |
 | 3 | CP-function | Not served. | Cause 73. |
 | 4 | LI function | Not served; an X3 copy is a duplication action, not this forward. | Cause 73. |
 | 5 | 5G VN internal | Re-injection into the subscriber side; the instance's `vn-next-hop=`. An outer header is refused: this is the UPF's own chain, not a tunnel. | Cause 73 for a missing egress or an outer header. |
@@ -53,7 +53,7 @@ back to the direction's own hop for the values it has always served.
 
 A FAR whose Apply Action forwards must carry Forwarding Parameters (Table
 7.5.2.3-1) and a Destination Interface (Table 7.5.2.3-2); either omission is
-cause 61. An Update FAR carries only what changes, so the check is made on the
+cause 66. An Update FAR carries only what changes, so the check is made on the
 merged FAR, not on the message's own IEs.
 
 Destination Interface 1 with an Outer Header Creation, and Destination Interface
