@@ -595,6 +595,11 @@ type Session struct {
 	// answers it -- the report queue holds it until the SMF does (5.10).
 	erirSent map[uint32]uint64
 
+	// Cached sorted slices for hot compile paths; invalidated on mutation.
+	cachedPDRs []*pdr
+	cachedQERs []*qer
+	cachedMARs []*mar
+
 	// removed holds the PDRs a modification took out of the model: their
 	// records are still in the dataplane, and the next transaction that
 	// compiles the session erases them (compile), so the SMF is never told a
@@ -705,6 +710,7 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 
 	s.UEIP = snap.ueIP
 	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs, s.MARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars, snap.mars
+	s.invalidateOrderCache()
 	s.removed, s.stale, s.ending = snap.removed, snap.stale, snap.ending
 	s.removedMARs = snap.removedMARs
 	s.retiredTunnels = snap.retiredTunnels
@@ -1901,5 +1907,14 @@ func (c *Compiler) releaseSession(s *Session) {
 			meters[q.meterDL] = true
 			c.meters.release(q.meterDL)
 		}
+	}
+}
+
+// invalidateOrderCache clears the sorted slices cached during compilation.
+func (s *Session) invalidateOrderCache() {
+	if s != nil {
+		s.cachedPDRs = nil
+		s.cachedQERs = nil
+		s.cachedMARs = nil
 	}
 }

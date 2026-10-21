@@ -107,28 +107,50 @@ func heldFlows(s *Session) []uint32 {
 	return append(out, removedFlows(s)...)
 }
 
-// pdrsInOrder and qersInOrder are the session's objects in id order.
+// pdrsInOrder, marsInOrder and qersInOrder are the session's objects in id order,
+// cached on the session for repeated accesses within a compilation.
 func pdrsInOrder(s *Session) []*pdr {
+	if s == nil {
+		return nil
+	}
+	if s.cachedPDRs != nil {
+		return s.cachedPDRs
+	}
 	out := make([]*pdr, 0, len(s.PDRs))
 	for _, id := range idsOf(s.PDRs) {
 		out = append(out, s.PDRs[id])
 	}
+	s.cachedPDRs = out
 	return out
 }
 
 func marsInOrder(s *Session) []*mar {
+	if s == nil {
+		return nil
+	}
+	if s.cachedMARs != nil {
+		return s.cachedMARs
+	}
 	out := make([]*mar, 0, len(s.MARs))
 	for _, id := range idsOf(s.MARs) {
 		out = append(out, s.MARs[id])
 	}
+	s.cachedMARs = out
 	return out
 }
 
 func qersInOrder(s *Session) []*qer {
+	if s == nil {
+		return nil
+	}
+	if s.cachedQERs != nil {
+		return s.cachedQERs
+	}
 	out := make([]*qer, 0, len(s.QERs))
 	for _, id := range idsOf(s.QERs) {
 		out = append(out, s.QERs[id])
 	}
+	s.cachedQERs = out
 	return out
 }
 
@@ -878,6 +900,8 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	urrs []urrReq, mars []marReq, rm removals) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	s.invalidateOrderCache()
+	defer s.invalidateOrderCache()
 
 	for _, q := range qers {
 		entry := s.QERs[q.id]
