@@ -38,7 +38,7 @@ modules:
     mclass: SetMetadata
     arg:
       attrs:
-        # The action table's next hop in a real graph. AtsssSteer writes the
+        # The next hop in a real graph. AtsssSteer writes the
         # same attribute afterwards; this proves the two writers compose.
         - {name: next_hop_id, size: 4, value_bin: "AAAAAQ=="}
   - name: atsss
@@ -82,7 +82,7 @@ resources:
       value:
         rules:
           # The rule carries the MAR id; the matcher writes it into
-          # steering_policy_id. action_id 0 is "no action table", which this
+          # steering_policy_id. action_id 0 is "no action", which this
           # graph does not have.
           - {steering_policy_id: 1}
   atsss/health:

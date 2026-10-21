@@ -82,7 +82,7 @@ check "the inner packet is the UE's" "$UP_HEX" "0a 2d 00 02 08 08 08 08"
 # And on the router's N6 gate, which only a match can reach: the TEID table
 # drops a G-PDU no session names, and the module drops a packet the session's
 # rules do not match, so these bytes are the module's verdict plus the
-# ActionTable's, in a frame -- with the deployment's N6 addresses (the Router's
+# result's next hop, in a frame -- with the deployment's N6 addresses (the Router's
 # hop 1, BESS D-153) and the uplink chain's decremented TTL, as in
 # ci/session-path.sh.
 check "the matched packet left the router by its N6 gate" "$N6_HEX" \

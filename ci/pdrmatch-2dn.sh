@@ -261,7 +261,7 @@ contains "the selector holds a rule keyed by route domain 2 (the campus instance
 contains "both of the selector's keys name the one UE address the two sessions share" \
       "$(cat "$WORK/driver.log")" '"valueBin":"Ci0AAg=="'
 contains "the campus session's rule names session 2, not the internet session's 1" \
-      "$(cat "$WORK/driver.log")" '"actionId":2'
+      "$(cat "$WORK/driver.log")" '"result":"AAAAAg=="'
 
 # The daemon stops the way an operator would (SIGTERM), and a daemon that aborts
 # on teardown has freed something it should not have.

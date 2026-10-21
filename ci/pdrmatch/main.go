@@ -23,8 +23,8 @@
 //  5. waits for `pdr_match_ul`'s own output gate to count a packet -- a packet
 //     the module does not match is dropped, never emitted, so that gate is what
 //     says the match happened in the module -- and then for the same packets to
-//     reach the router's N6 gate, which is what says the ActionId the module
-//     wrote was resolved by the ActionTable and the meter passed the packet;
+//     reach the router's N6 gate, which is what says the rule's own result
+//     named a next hop and the meter passed the packet;
 //  6. deletes the session, so the daemon's state ends where it started.
 //
 // It exits non-zero on the first thing that is not what the claim says.
@@ -32,6 +32,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -70,7 +72,6 @@ const (
 	// the selector names by the UE address.
 	module      = "pdr_match_ul"
 	rulesRes    = module + "/rules"
-	actionsUL   = "at_ul"
 	downModule  = "pdr_match_dl"
 	downRes     = downModule + "/rules"
 	selector    = "sel_dl"
@@ -109,16 +110,16 @@ func run(target string) error {
 
 	// The control arm, before the daemon holds any session.
 	before := map[string]float64{}
-	for _, m := range []string{module, actionsUL, router, selector, downModule} {
+	for _, m := range []string{module, router, selector, downModule} {
 		n, err := gatePackets(ctx, client, m, n6Gate)
 		if err != nil {
 			return err
 		}
 		before[m] = n
 	}
-	fmt.Printf("pdrmatch: before any session: %s out=%v, %s out=%v, %s gate %s=%v\n",
-		module, before[module], actionsUL, before[actionsUL], router, n6Gate, before[router])
-	for _, m := range []string{module, actionsUL, router} {
+	fmt.Printf("pdrmatch: before any session: %s out=%v, %s gate %s=%v\n",
+		module, before[module], router, n6Gate, before[router])
+	for _, m := range []string{module, router} {
 		if before[m] != 0 {
 			return fmt.Errorf("%s had already emitted %v packets: the graph's source runs from the moment it is applied, so this is a session's state and not the control arm",
 				m, before[m])
@@ -193,23 +194,19 @@ func run(target string) error {
 	fmt.Printf("pdrmatch: ok: the module matched the session's packet: %s gate %s carried %v more packets\n",
 		module, n6Gate, matched)
 
-	// And the ActionId reached the packet path: the ActionTable resolved it and
-	// the router left by the next hop it named.
+	// And the result reached the packet path: the router left by the next hop
+	// the rule itself named.
 	id := fmt.Sprintf("ok: the module wrote ActionId %v on the packet", action)
 	if _, err := waitFor(ctx, client, router, n6Gate, before[router]); err != nil {
-		return fmt.Errorf("the packet never reached %s gate %s (the ActionTable did not resolve the ActionId): %w",
+		return fmt.Errorf("the packet never reached %s gate %s (the rule result did not resolve): %w",
 			router, n6Gate, err)
-	}
-	resolved, err := gatePackets(ctx, client, actionsUL, n6Gate)
-	if err != nil {
-		return err
 	}
 	uplink, err := gatePackets(ctx, client, router, n6Gate)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("pdrmatch: %s: %s gate %s carried %v, %s gate %s carried %v, %s left by the action's next hop\n",
-		id, actionsUL, n6Gate, resolved, router, n6Gate, uplink, router)
+	fmt.Printf("pdrmatch: %s: %s gate %s carried %v: the rule's result left by its next hop\n",
+		id, router, n6Gate, uplink)
 	if err := qfiFlows(ctx, client); err != nil {
 		return err
 	}
@@ -239,12 +236,17 @@ func downlink(ctx context.Context, client *bess.Client, fseid *ie.FSEIDFields) e
 		return err
 	}
 	fmt.Printf("pdrmatch: %s holds %s\n", selectorRes, line)
-	action, ok := entries[0].Value["actionId"].(json.Number)
+	result, ok := entries[0].Value["result"].(string)
 	if !ok {
-		return fmt.Errorf("%s: the rule carries no action id: %v", selectorRes, entries[0].Value)
+		return fmt.Errorf("%s: the rule carries no result: %v", selectorRes, entries[0].Value)
 	}
-	if fmt.Sprint(action) != fmt.Sprint(fseid.SEID) {
-		return fmt.Errorf("%s names session %v, want the session's id %d", selectorRes, action, fseid.SEID)
+	raw, err := base64.StdEncoding.DecodeString(result)
+	if err != nil || len(raw) < 4 {
+		return fmt.Errorf("%s: the rule's result %q is not a session id: %w", selectorRes, result, err)
+	}
+	action := binary.BigEndian.Uint32(raw)
+	if action != uint32(fseid.SEID) {
+		return fmt.Errorf("%s names session %d, want the session's id %d", selectorRes, action, fseid.SEID)
 	}
 
 	// The matcher's own map, keyed by that same id: the selector writes the key
@@ -277,11 +279,11 @@ func downlink(ctx context.Context, client *bess.Client, fseid *ie.FSEIDFields) e
 	if _, err := waitFor(ctx, client, downModule, n6Gate, 0); err != nil {
 		return fmt.Errorf("the downlink matcher never matched the session's packet: %w", err)
 	}
-	// And the ActionId reached the packet path: the ActionTable resolved it, the
+	// And the result reached the packet path: the rule named the next hop, the
 	// meter passed the packet, and the encap left by the N3 next hop.
 	carried, err := waitFor(ctx, client, router, n3Gate, 0)
 	if err != nil {
-		return fmt.Errorf("the downlink packet never reached %s gate %s (the ActionTable did not resolve the ActionId): %w",
+		return fmt.Errorf("the downlink packet never reached %s gate %s (the rule's result did not resolve): %w",
 			router, n3Gate, err)
 	}
 	matched, err := gatePackets(ctx, client, downModule, n6Gate)
@@ -304,7 +306,6 @@ func config() session.Config {
 			// No PDRTable: this direction's rules are the map's, and the
 			// WildcardMatch form of them is not built (compile).
 			PdrMatch: module,
-			Actions:  actionsUL,
 			Meters:   "mt_ul",
 			Counters: "cnt_ul",
 			NextHop:  1,
@@ -314,15 +315,13 @@ func config() session.Config {
 			// by the selector in front of the matcher: the UE address the
 			// packet is addressed to (this graph is a one-instance deployment,
 			// so the route domain is not a field of the key).
-			PdrMatch:        downModule,
-			Selector:        selector,
-			SelectorActions: "sel_at",
-			SelectorFields:  []session.Field{session.DstIP},
-			Actions:         "at_dl",
-			Meters:          "mt_dl",
-			Counters:        "cnt_dl",
-			NextHop:         2,
-			Tunnels:         "enc",
+			PdrMatch:       downModule,
+			Selector:       selector,
+			SelectorFields: []session.Field{session.DstIP},
+			Meters:         "mt_dl",
+			Counters:       "cnt_dl",
+			NextHop:        2,
+			Tunnels:        "enc",
 		},
 		N3Addr:  netip.MustParseAddr("192.0.2.1"),
 		N3MAC:   [6]byte{2, 0, 0, 0, 0, 1},
@@ -462,28 +461,33 @@ func readback(ctx context.Context, client *bess.Client, fseid *ie.FSEIDFields, t
 	return action, nil
 }
 
-// resolve prints the action record the rule's ActionId names: the point where
-// the id stops being a field the module wrote and becomes a next hop. The
-// ActionTable's own entry, read back from the daemon, so the counters below are
-// tied to an id the compiler wrote and the daemon holds.
+// resolve prints the result the rule itself carries: the point where the
+// ActionId stops being a field the module wrote and becomes the meter levels
+// and next hop it wrote with it.
 func resolve(ctx context.Context, client *bess.Client, action json.Number) error {
-	got, err := client.Contents(ctx, actionsUL+"/actions")
+	got, err := client.Contents(ctx, rulesRes)
 	if err != nil {
-		return fmt.Errorf("reading %s/actions: %w", actionsUL, err)
+		return fmt.Errorf("reading %s: %w", rulesRes, err)
 	}
-	for _, e := range got[actionsUL+"/actions"] {
-		if fmt.Sprint(e.Key["id"]) != fmt.Sprint(action) {
+	for _, e := range got[rulesRes] {
+		if fmt.Sprint(e.Key["session"]) != fmt.Sprint(upTEID) {
 			continue
 		}
-		line, err := json.Marshal(e)
-		if err != nil {
-			return err
+		list, _ := e.Value["rules"].([]any)
+		for _, raw := range list {
+			rule, _ := raw.(map[string]any)
+			if fmt.Sprint(rule["actionId"]) != fmt.Sprint(action) {
+				continue
+			}
+			line, err := json.Marshal(rule)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("pdrmatch: %s rule for action %v carries its result: %s\n", rulesRes, action, line)
+			return nil
 		}
-		fmt.Printf("pdrmatch: %s/actions names that id: %s\n", actionsUL, line)
-		return nil
 	}
-	return fmt.Errorf("%s/actions holds no action %v: the rule names an id nothing resolves",
-		actionsUL, action)
+	return fmt.Errorf("%s holds no rule with action %v: the rule names an id nothing resolves", rulesRes, action)
 }
 
 // empty fails when the resource holds anything: the control arm for the map

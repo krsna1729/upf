@@ -1,49 +1,19 @@
 # SPDX-License-Identifier: BSD-3-Clause
-# Two QERs on one PDR, enforced, with one `meter_id` attribute (finding 6).
+# Two QERs on one PDR, enforced through one classifier result and one Meter
+# with two levels: the meter stack the compiler writes for every PDR.
 #
 # The point of this graph: a PDR may name several QERs (TS 29.244 7.5.2.2-1),
-# each with its own rates, but an action carries one meter id. It does not have
-# to stay that way: an ActionTable maps an action id to {meter_id, next_hop_id}
-# *without consuming* the action id, so a second table can rewrite `meter_id`
-# for the same packet and a second Meter, further down the chain, reads its own
-# id. Two independent rate policies, no BESS change.
+# each with its own rates. The classifier's result carries both meter ids in
+# policing order -- the flow's first, the session's second -- and one Meter
+# built with `levels: 2` checks them in that order. A packet the first level
+# drops is not charged to the second.
 #
 # What the graph proves, measured by ci/meter-compose.sh:
-#   - `m1` is generous (1 Gbit/s), so its green gate carries the traffic:
+#   - `m1` is generous (10 GB/s), so its green gate carries the traffic:
 #     gate 0 > 0.
-#   - `at2` rewrote `meter_id` to 2 and `m2` -- whose table holds only id 2 --
-#     policed with it: gate 2 > 0. Had the rewrite not landed, `m2` would read
-#     id 1, find no entry, and drop fail-closed: no gate-2 count at all.
-#
-# The order is the compiler's to choose, and this graph wires the flow's meter
-# first: a meter only sees what the stage before it passed, so `m2` counts the
-# traffic `m1` policed through -- the aggregate's cap still holds over what
-# leaves, and its allowance is not spent on packets `m1` dropped. Wired the
-# other way, `m2` would charge those too (policing the offered rate instead).
-#
-# The constraint this graph also pins (found while building it, and recorded in
-# docs/claims.md): an attribute a module *writes* is given no offset unless
-# something downstream *reads* it (core/metadata.cc, FillOffsetArrays: a scope
-# component of one module is NoWrite). A chained stage's writes are read by the
-# stage after it, so a chain needs a reader per stage -- here the MetadataTest
-# modules, in a real deployment the next ActionTable's Router and the meter's
-# own consumer.
+#   - `m2` is 1 byte/s with a one-byte bucket: its red gate is > 0. Had the
+#     second level not been read, m2 would count nothing.
 modules:
-  # Only for its next_hops resource, which ActionTable declares as a parent.
-  - name: rt
-    mclass: Router
-  - name: m1
-    mclass: Meter
-    arg: {capacity: 64}
-  - name: m2
-    mclass: Meter
-    arg: {capacity: 64}
-  - name: at1
-    mclass: ActionTable
-    arg: {capacity: 16, meters: m1/meters, next_hops: rt/next_hops}
-  - name: at2
-    mclass: ActionTable
-    arg: {capacity: 16, meters: m2/meters, next_hops: rt/next_hops}
   - name: src
     mclass: Source
     arg: {pkt_size: 64, burst: 32}
@@ -58,54 +28,34 @@ modules:
     arg:
       fields:
         - {offset: 0, num_bytes: 1}
-      # The table writes `action_id` into metadata, which both ActionTables read.
-      action_resource: at1/actions
-  # The readers that make each stage's `next_hop_id` write materialize.
-  - name: mt_hop1
-    mclass: MetadataTest
-    arg: {read: {next_hop_id: 4}}
-  - name: mt_end
-    mclass: MetadataTest
-    arg: {read: {next_hop_id: 4}}
-  - name: sink_r1
+      # The two levels, big-endian: meter 1 then meter 2, from the rule's
+      # result. The Meter reads the same attribute with levels: 2.
+      result_fields:
+        - {attr_name: meter_id, value_offset: 0, num_bytes: 8, reference: mt/meters, reference_key: BE32, reference_count: 2}
+  - name: mt
+    mclass: Meter
+    arg: {capacity: 64, levels: 2}
+  - name: sink_pass
     mclass: Sink
-  - name: sink_r2
+  - name: sink_yellow
     mclass: Sink
-  - name: sink
+  - name: sink_red
     mclass: Sink
 connections:
   - {upstream: src, downstream: rw}
   - {upstream: rw, downstream: cls}
-  - {upstream: cls, downstream: at1}
-  - {upstream: at1, downstream: m1}
-  # Green and yellow both go on to the second stage, as the deployment's graphs
-  # wire them; red is the first meter's own drop.
-  - {upstream: m1, downstream: mt_hop1}
-  - {upstream: m1, downstream: mt_hop1, ogate: 1}
-  - {upstream: m1, downstream: sink_r1, ogate: 2}
-  - {upstream: mt_hop1, downstream: at2}
-  - {upstream: at2, downstream: m2}
-  - {upstream: m2, downstream: mt_end}
-  - {upstream: m2, downstream: sink_r2, ogate: 2}
-  - {upstream: mt_end, downstream: sink}
+  - {upstream: cls, downstream: mt}
+  - {upstream: mt, downstream: sink_pass}
+  - {upstream: mt, downstream: sink_yellow, ogate: 1}
+  - {upstream: mt, downstream: sink_red, ogate: 2}
 resources:
   cls/rules:
     - key: {values: [{value_bin: "Ag=="}], masks: [{value_bin: "/w=="}]}
-      value: {priority: 1, gate: 0, action_id: 1}
-  at1/actions:
-    - key: {id: 1}
-      value: {meter_id: 1, next_hop_id: 0}
-  at2/actions:
-    - key: {id: 1}
-      value: {meter_id: 2, next_hop_id: 0}
-  # 10 GB/s, well above the 64-byte source (about 1.1 GB/s at this graph's
-  # measured rate): the first meter must not drop, and at 1 GB/s it sat on the
-  # boundary once the graph got faster.
-  m1/meters:
+      value: {priority: 1, gate: 0, result: "AAAAAQAAAAI="}
+  mt/meters:
     - key: {id: 1}
       value:
         tr_tcm: {committed_rate: 10000000000, committed_burst: 1000000000, peak_rate: 10000000000, peak_burst: 1000000000}
-  m2/meters:
     - key: {id: 2}
       value:
         tr_tcm: {committed_rate: 1, committed_burst: 1, peak_rate: 1, peak_burst: 1}

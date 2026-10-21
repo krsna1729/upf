@@ -117,7 +117,7 @@ if [ "$MODE" = full ]; then
   echo "bessd up ($DAEMON_PID), graph $GRAPH applied"
   UPFD_ARGS+=(-bess "127.0.0.1:$BESS_PORT" -n3-addr "$N3_ADDR"
     -pdr-table-ul pdr_ul -pdr-table-dl pdr_dl -teid-table teid -teid-gate 0
-    -actions-ul at_ul -meters-ul mt_ul -actions-dl at_dl -meters-dl mt_dl -tunnels enc)
+    -meters-ul mt_ul -meters-dl mt_dl -tunnels enc)
 else
   echo "== N4 only: no -bess, so session messages are refused (cause 64): the"
   echo "   numbers below are the node's ceiling on that path"

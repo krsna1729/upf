@@ -44,6 +44,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -560,11 +562,15 @@ func selectorHolds(ctx context.Context, client *bess.Client, seid uint64) error 
 	entries := got[selectorRules]
 	found := false
 	for _, e := range entries {
-		action, ok := e.Value["actionId"].(json.Number)
+		encoded, ok := e.Value["result"].(string)
 		if !ok {
-			return fmt.Errorf("%s: a rule carries no action id: %v", selectorRules, e.Value)
+			return fmt.Errorf("%s: a rule carries no result: %v", selectorRules, e.Value)
 		}
-		if fmt.Sprint(action) == fmt.Sprint(seid) {
+		raw, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || len(raw) < 4 {
+			return fmt.Errorf("%s: a rule's result is not an action record: %v (%v)", selectorRules, e.Value, err)
+		}
+		if binary.BigEndian.Uint32(raw) == uint32(seid) {
 			found = true
 		}
 	}
@@ -687,7 +693,6 @@ func config() session.Config {
 		Up: session.Direction{
 			// No PDRTable: this direction's rules are the map's.
 			PdrMatch: upModule,
-			Actions:  "at_ul",
 			Meters:   "mt_ul",
 			Counters: "cnt_ul",
 			NextHop:  1,
@@ -695,15 +700,13 @@ func config() session.Config {
 			Tunnels: "enc_peer",
 		},
 		Down: session.Direction{
-			PdrMatch:        downModule,
-			Selector:        selector,
-			SelectorActions: "sel_at",
-			SelectorFields:  []session.Field{session.RouteDomain, session.DstIP},
-			Actions:         "at_dl",
-			Meters:          "mt_dl",
-			Counters:        "cnt_dl",
-			NextHop:         2,
-			Tunnels:         "enc",
+			PdrMatch:       downModule,
+			Selector:       selector,
+			SelectorFields: []session.Field{session.RouteDomain, session.DstIP},
+			Meters:         "mt_dl",
+			Counters:       "cnt_dl",
+			NextHop:        2,
+			Tunnels:        "enc",
 		},
 		Instances: instances,
 		N3Addr:    netip.MustParseAddr(n3Addr),

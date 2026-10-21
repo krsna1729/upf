@@ -5,8 +5,8 @@
 # "the keyed write"). Everything else is that graph's, so the two can be read
 # side by side and the one difference is the thing under test.
 #
-# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_match_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
-# downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> sel_dl -> pdr_match_dl -> at_dl -> mt_dl -> cnt_dl -> rt -> enc -> dump_d -> sink_n3
+# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_match_ul -> mt_ul -> cnt_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
+# downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> sel_dl -> pdr_match_dl -> mt_dl -> cnt_dl -> rt -> enc -> dump_d -> sink_n3
 #
 # The uplink chain is the claim: `pdr_match_ul` is the only module that reads
 # the decapsulated packet's 5-tuple (there is no WildcardMatch in the chain,
@@ -15,8 +15,8 @@
 # map `PdrMatch` holds, keyed by the F-TEID the decap wrote to `upf_teid`, one
 # key per session. What the module hands downstream is the rule's ActionId in
 # the packet's `action_id` metadata (BESS D-141), exactly what the WildcardMatch
-# path hands it: `at_ul` reads that id, the meter passes the packet, and the
-# router leaves by the next hop the action names.
+# path hands it: the rule result writes the meter ids and the next hop, the
+# meter passes the packet, and the router leaves by that next hop.
 #
 # Nothing here is a session. `ci/pdrmatch-path.sh` establishes one over the
 # control plane with the compiler's `PdrMatch` opt-in -- one upsert of the
@@ -82,7 +82,7 @@ modules:
   # allocated once and never resized.
   - name: pdr_match_ul
     mclass: PdrMatch
-    arg: {key_attr: upf_teid, max_sessions: 65536}
+    arg: {key_attr: upf_teid, max_sessions: 65536, meter_attr: meter_id, next_hop_attr: next_hop_id}
   - name: dump_u
     mclass: Dump
     arg: {interval: 1}
@@ -126,12 +126,9 @@ modules:
         # records the Error Indications the peer sends (5.10).
         - {offset: 46, num_bytes: 4}
       default_gate: 1
-  - name: at_ul
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
   - name: mt_ul
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -185,19 +182,14 @@ modules:
     arg:
       fields:
         - {offset: 30, num_bytes: 4}
-      action_resource: sel_at/actions
-  - name: sel_at
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
   - name: pdr_match_dl
     mclass: PdrMatch
-    arg: {key_attr: action_id, max_sessions: 65536}
-  - name: at_dl
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+    arg: {key_attr: action_id, max_sessions: 65536, meter_attr: meter_id, next_hop_attr: next_hop_id}
   - name: mt_dl
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -234,8 +226,7 @@ connections:
   - {upstream: rewrite_err, downstream: teid}
   - {upstream: decap0, downstream: dump_u}
   - {upstream: dump_u, downstream: pdr_match_ul}
-  - {upstream: pdr_match_ul, downstream: at_ul}
-  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: pdr_match_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
   # changes when that band should be marked or shed rather than passed.
@@ -253,8 +244,7 @@ connections:
   - {upstream: l2_sort, downstream: merge_n6}
   - {upstream: vif_n6, downstream: sink_other}
   - {upstream: sel_dl, downstream: pdr_match_dl}
-  - {upstream: pdr_match_dl, downstream: at_dl}
-  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: pdr_match_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
   - {upstream: cnt_dl, downstream: rt}

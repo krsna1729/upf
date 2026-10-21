@@ -185,7 +185,10 @@ modules:
       # session's rules take (one variant per existing shape), so the number the
       # five-field list was sized for no longer covers a table with it.
       max_tuples: 16
-      action_resource: at_ul/actions
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_ul/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
   - name: pdr_dl
     mclass: WildcardMatch
     arg:
@@ -199,26 +202,25 @@ modules:
       # exact addresses, prefixes, ports -- and each is one hash lookup per
       # batch. Declared rather than defaulted: it is a UPF decision.
       max_tuples: 8
-      action_resource: at_dl/actions
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_dl/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
 
   # -- the two chains ----------------------------------------------------------
-  # Both directions' actions name the next hop of their FAR's destination
-  # interface, and the one Router below resolves it: uplink toward N6,
-  # downlink to the encap, which writes the tunnel the same action names. A
-  # chain whose action names no next hop would be dropped wholesale -- the
-  # ActionTable fails closed when the id it writes has no reader -- so the
-  # downlink does not go straight from the table to the encap. Meters are
-  # per-chain for the same reason the tables are.
+  # Both directions' rule results name the next hop of their FAR's
+  # destination interface, and the one Router below resolves it: uplink
+  # toward N6, downlink to the encap, which writes the tunnel. A result with
+  # no next hop would be dropped wholesale by the Router, so the downlink does
+  # not go straight from the classifier to the encap. Meters are per-chain for
+  # the same reason the tables are.
   # The capacities are the id spaces the session compiler's config names: the
-  # Meter and ActionTable defaults are 1024 each, and a session whose meter id
-  # is beyond the capacity is refused as an invalid id. A deployment that wants
-  # a different number changes it here and in upfd's -capacity together.
-  - name: at_ul
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
+  # Meter's default is 1024, and a session whose meter id is beyond the
+  # capacity is refused as an invalid id. A deployment that wants a different
+  # number changes it here and in upfd's -capacity together.
   - name: mt_ul
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -227,12 +229,9 @@ modules:
   # is in the chain. The uplink's decrement is the UE's own (RFC 791; RFC 1122
   # 3.2.1.7: decrement, and drop at 1); the Router has no ICMP Time Exceeded
   # and keeps outcome counters, so that drop is silent -- docs/datapath.md.
-  - name: at_dl
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
   - name: mt_dl
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -259,8 +258,7 @@ connections:
   - {upstream: echo0, downstream: n3_out}
   - {upstream: decap0, downstream: mt_ul_read}
   - {upstream: mt_ul_read, downstream: pdr_ul}
-  - {upstream: pdr_ul, downstream: at_ul}
-  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
   # changes when that band should be marked or shed rather than passed.
@@ -280,8 +278,7 @@ connections:
   - {upstream: vif_n6, downstream: pdr_dl, ogate: 1}
   - {upstream: vif_n6, downstream: sink_other}
 
-  - {upstream: pdr_dl, downstream: at_dl}
-  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: pdr_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
   - {upstream: cnt_dl, downstream: rt}

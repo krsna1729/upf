@@ -7,9 +7,9 @@
 # this arm lives in its own file rather than moving that baseline.
 #
 #   uplink    src_up  -> rewrite_up  -\
-#                                      > merge_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> sink_n6 / sink_n9
+#                                      > merge_up -> teid -> decap0 -> pdr_ul -> mt_ul -> cnt_ul -> rt -> sink_n6 / sink_n9
 #             src_up2 -> rewrite_up2 -/
-#   downlink  src_dn -> rewrite_dn -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> enc -> sink_n3
+#   downlink  src_dn -> rewrite_dn -> pdr_dl -> mt_dl -> cnt_dl -> enc -> sink_n3
 #
 # Two uplink streams with one UE address and two tunnels. That is what a
 # deployment serving two network instances looks like from N3: the same private
@@ -118,13 +118,13 @@ modules:
       # session's rules take (one variant per existing shape), so the number the
       # field list without it was sized for no longer covers the table.
       max_tuples: 16
-      action_resource: at_ul/actions
-  - name: at_ul
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_ul/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
   - name: mt_ul
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -162,13 +162,13 @@ modules:
       # exact addresses, prefixes, ports -- and each is one hash lookup per
       # batch. Declared rather than defaulted: it is a UPF decision.
       max_tuples: 8
-      action_resource: at_dl/actions
-  - name: at_dl
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_dl/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
   - name: mt_dl
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -192,8 +192,7 @@ connections:
   - {upstream: decap0, downstream: mt_md}
   - {upstream: mt_md, downstream: dump_u}
   - {upstream: dump_u, downstream: pdr_ul}
-  - {upstream: pdr_ul, downstream: at_ul}
-  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
   # changes when that band should be marked or shed rather than passed.
@@ -205,8 +204,7 @@ connections:
 
   - {upstream: src_dn, downstream: rewrite_dn}
   - {upstream: rewrite_dn, downstream: pdr_dl}
-  - {upstream: pdr_dl, downstream: at_dl}
-  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: pdr_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
   - {upstream: cnt_dl, downstream: rt}
@@ -219,7 +217,7 @@ workers:
 
 resources:
   # The actions' next hops: the deployment's, not a session's (a session's
-  # action names them by id). Every chain with an ActionTable routes on the id
+  # action names them by id). Every chain's result writes the next hop
   # it writes -- the module fails closed when the attribute has no reader -- so
   # both directions have one: the uplink's leaves by gate 0 toward N6, the
   # downlink's by gate 1 toward the encap. A `Router`'s `routes` table is not on

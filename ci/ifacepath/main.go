@@ -1145,7 +1145,6 @@ func config() session.Config {
 		Up: session.Direction{
 			PDRTable:  upModule,
 			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto, session.SrcPort, session.DstPort, session.QFI},
-			Actions:   "at_ul",
 			Meters:    "mt_ul",
 			Counters:  "cnt_ul",
 			NextHop:   hopN6,
@@ -1157,7 +1156,6 @@ func config() session.Config {
 		Down: session.Direction{
 			PDRTable:  downModule,
 			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto, session.SrcPort, session.DstPort},
-			Actions:   "at_dl",
 			Meters:    "mt_dl",
 			Counters:  "cnt_dl",
 			NextHop:   hopAccess,

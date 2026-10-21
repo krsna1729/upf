@@ -6,14 +6,14 @@
 # compiler is the deployment's own (-instances' egress table), one session per
 # case.
 #
-#   uplink    src_up  -> rewrite_up  -> teid -> decap0 -> mt_md -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt
+#   uplink    src_up  -> rewrite_up  -> teid -> decap0 -> mt_md -> pdr_ul -> mt_ul -> cnt_ul -> rt
 #             src_up2 -> rewrite_up2 -/                                                            rt -> dump_n6      (ogate 0, N6)
 #             src_up3 -> rewrite_up3 -/
 #             src_ulcl_n6, src_ulcl_n9 -> rewrite_ulcl_* -/                                       (one session, two PDRs)
 #                                                                                                 rt -> enc -> dump_n3 (ogates 1, 2)
 #             src_vn  -> rewrite_vn  -/                                                            rt -> dump_lan     (ogate 3, the service LAN)
 #                                                                                                 rt -> pdr_dl       (ogate 4, the 5G VN re-injection)
-#   downlink  src_dn -> rewrite_dn -> l2_sort -> vif_n6 -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> rt
+#   downlink  src_dn -> rewrite_dn -> l2_sort -> vif_n6 -> pdr_dl -> mt_dl -> cnt_dl -> rt
 #             src_arp -> rewrite_arp -> l2_sort -> arp_n6 -> dump_arp -> merge_n6 -> dump_n6 -> sink_n6
 #             (src_arp2 -> rewrite_arp2, the pair of addresses one session holds)
 #
@@ -148,13 +148,13 @@ modules:
         - {offset: 36, num_bytes: 2}  # destination port
         - {attr_name: qfi, num_bytes: 1}
       max_tuples: 16
-      action_resource: at_ul/actions
-  - name: at_ul
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_ul/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
   - name: mt_ul
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -249,13 +249,13 @@ modules:
         - {offset: 34, num_bytes: 2}
         - {offset: 36, num_bytes: 2}
       max_tuples: 8
-      action_resource: at_dl/actions
-  - name: at_dl
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_dl/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
   - name: mt_dl
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -275,8 +275,7 @@ connections:
   - {upstream: teid, downstream: decap0}
   - {upstream: decap0, downstream: mt_md}
   - {upstream: mt_md, downstream: pdr_ul}
-  - {upstream: pdr_ul, downstream: at_ul}
-  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
   # changes when that band should be marked or shed rather than passed.
@@ -312,8 +311,7 @@ connections:
   - {upstream: merge_n6, downstream: dump_n6}
   - {upstream: dump_n6, downstream: sink_n6}
 
-  - {upstream: pdr_dl, downstream: at_dl}
-  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: pdr_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
   - {upstream: cnt_dl, downstream: rt}

@@ -95,7 +95,7 @@ modules:
   # (upfd's -capacity is the id space the compiler allocates in).
   - name: pdr_match_ul
     mclass: PdrMatch
-    arg: {key_attr: upf_teid, max_sessions: 65536}
+    arg: {key_attr: upf_teid, max_sessions: 65536, meter_attr: meter_id, next_hop_attr: next_hop_id}
 
   # The downlink's selector and matcher, in place of upf.yaml's shared table: a
   # packet from the data network carries no tunnel, so the session it belongs to
@@ -111,39 +111,33 @@ modules:
     arg:
       fields:
         - {offset: 30, num_bytes: 4}
-      action_resource: sel_at/actions
-  - name: sel_at
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
   - name: pdr_match_dl
     mclass: PdrMatch
     arg:
       key_attr: action_id
       max_sessions: 65536
+      meter_attr: meter_id
+      next_hop_attr: next_hop_id
       # The MAR ID of a matched rule, where the rule has one. AtsssSteer reads
       # this attribute; a rule without a MAR writes 0 and is not steered.
       steering_attr: steering_policy_id
 
   # -- the two chains ----------------------------------------------------------
   # The matcher writes the matched rule's ActionId into the packet's "action_id"
-  # metadata and passes it on: the ActionTable downstream selects the action,
+  # metadata and passes it on: the PdrMatch downstream selects the action,
   # exactly as the wildcard table's rules do (D-141). The capacities are the id
   # spaces upfd's -capacity names.
-  - name: at_ul
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
   - name: mt_ul
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
-  - name: at_dl
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
   - name: mt_dl
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -179,8 +173,7 @@ connections:
   - {upstream: teid, downstream: echo0, ogate: 1}
   - {upstream: echo0, downstream: n3_out}
   - {upstream: decap0, downstream: pdr_match_ul}
-  - {upstream: pdr_match_ul, downstream: at_ul}
-  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: pdr_match_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
   # changes when that band should be marked or shed rather than passed.
@@ -191,8 +184,7 @@ connections:
 
   - {upstream: n6_in, downstream: sel_dl}
   - {upstream: sel_dl, downstream: pdr_match_dl}
-  - {upstream: pdr_match_dl, downstream: at_dl}
-  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: pdr_match_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
   - {upstream: cnt_dl, downstream: atsss_dl}
