@@ -347,6 +347,19 @@ message PdrMatchArg {
   // this to the attribute AtsssSteerArg.policy_attr names; a rule without a
   // MAR writes 0, which steers nothing.
   string steering_attr = 3;
+
+  // The metadata attribute a matched rule's meter stack is written to, 8
+  // bytes: the PDR's own rate-bearing QER first, the session's shared one
+  // second, both big-endian. Empty writes none. A graph with a Meter sets this
+  // to its id_attr (normally "meter_id"); the meter module reads the same
+  // attribute with levels: 2.
+  string meter_attr = 4;
+
+  // The metadata attribute a matched rule's Router next hop is written to, 4
+  // bytes, network order. Empty writes none. A graph with a Router sets this
+  // to "next_hop_id" (the Router's own attribute); a rule that drops carries
+  // none.
+  string next_hop_attr = 5;
 }
 
 // PdrMatchSettings is the module's own settings, beside the map: the singleton
@@ -411,6 +424,18 @@ message PdrMatchRule {
   // writes it into the graph's steering attribute, where AtsssSteer selects
   // the access. A rule that drops cannot carry one.
   uint32 steering_policy_id = 11;
+
+  // The two meter levels the rule carries, in policing order: the PDR's own
+  // rate-bearing QER first, the session's shared one second. 0 is "no meter
+  // at this level", which the Meter passes. Both are written, big-endian, into
+  // the graph's meter attribute (8 bytes), which a Meter built with levels: 2
+  // reads.
+  repeated uint32 meter_ids = 12;
+
+  // The Router next hop the rule's forward leaves by, 0 for none. The module
+  // writes it into the graph's next-hop attribute; a rule that drops carries
+  // none.
+  uint32 next_hop_id = 13;
 }
 
 // PdrMatchEntry is one session's rule list, in the session's precedence order:

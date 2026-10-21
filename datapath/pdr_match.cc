@@ -92,6 +92,20 @@ CommandResponse PdrMatch::Init(const upf::pb::PdrMatchArg &arg) {
       return CommandFailure(-steering_attr_, "add_metadata_attr() failed");
     }
   }
+  if (!arg.meter_attr().empty()) {
+    meter_attr_ = AddMetadataAttr(arg.meter_attr(), 2 * sizeof(be32_t),
+                                  AccessMode::kWrite);
+    if (meter_attr_ < 0) {
+      return CommandFailure(-meter_attr_, "add_metadata_attr() failed");
+    }
+  }
+  if (!arg.next_hop_attr().empty()) {
+    next_hop_attr_ = AddMetadataAttr(arg.next_hop_attr(), sizeof(be32_t),
+                                     AccessMode::kWrite);
+    if (next_hop_attr_ < 0) {
+      return CommandFailure(-next_hop_attr_, "add_metadata_attr() failed");
+    }
+  }
 
   // The QoS flow, as the decap read it out of the PDU Session Container (0 when
   // none was carried): what a rule that names a QFI is matched against. Read
@@ -252,6 +266,13 @@ void PdrMatch::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       steering_attr_ >= 0 ? attr_offset(steering_attr_) : -1;
   const bool publish_steering =
       bess::metadata::IsValidOffset(steering_offset);
+  const bess::metadata::mt_offset_t meter_offset =
+      meter_attr_ >= 0 ? attr_offset(meter_attr_) : -1;
+  const bool publish_meter = bess::metadata::IsValidOffset(meter_offset);
+  const bess::metadata::mt_offset_t next_hop_offset =
+      next_hop_attr_ >= 0 ? attr_offset(next_hop_attr_) : -1;
+  const bool publish_next_hop =
+      bess::metadata::IsValidOffset(next_hop_offset);
   // The QFI is read only for a session that has a rule naming one; with no
   // writer the attribute has no offset, and a packet is of no QFI at all --
   // kNoPduSessionQfi, the value no container can carry, so a rule naming a
@@ -311,6 +332,20 @@ void PdrMatch::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       // rule_id is 1-based, in the list the packet was matched against.
       const uint32_t id = list->action_ids[match.rule_id - 1];
       _set_attr_with_offset<be32_t>(action_offset, pkt, be32_t(id));
+    }
+    if (publish_meter) {
+      // Two levels, in policing order: the PDR's own QER, then the session's
+      // shared one. A zero level is "no meter" and the Meter passes it.
+      const auto &ids = list->meter_ids[match.rule_id - 1];
+      _set_attr_with_offset<be32_t>(meter_offset, pkt, be32_t(ids[0]));
+      _set_attr_with_offset<be32_t>(
+          static_cast<bess::metadata::mt_offset_t>(meter_offset +
+                                                   sizeof(be32_t)),
+          pkt, be32_t(ids[1]));
+    }
+    if (publish_next_hop) {
+      const uint32_t hop = list->next_hop_ids[match.rule_id - 1];
+      _set_attr_with_offset<be32_t>(next_hop_offset, pkt, be32_t(hop));
     }
     if (publish_steering) {
       const uint32_t mar = list->steering_ids[match.rule_id - 1];

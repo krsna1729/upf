@@ -86,10 +86,12 @@ class PdrMatch final : public Module {
     std::string name;
   };
 
-  int key_attr_ = -1;      // the session key, read
-  int action_attr_ = -1;   // the "action_id" the match carries, written
-  int qfi_attr_ = -1;      // the decap's "qfi", read only when a rule names one
-  int steering_attr_ = -1; // the MAR ID a match carries, written when configured
+  int key_attr_ = -1;       // the session key, read
+  int action_attr_ = -1;    // the "action_id" the match carries, written
+  int qfi_attr_ = -1;       // the decap's "qfi", read only when a rule names one
+  int steering_attr_ = -1;  // the MAR ID a match carries, written when configured
+  int meter_attr_ = -1;     // the two meter ids, written when configured
+  int next_hop_attr_ = -1;  // the Router next hop, written when configured
   std::string key_attr_name_;
   std::unique_ptr<upf::pdr_match::SessionResource> resource_;
   bess::framework::ResourceBinding binding_;  // after resource_ (D-044)

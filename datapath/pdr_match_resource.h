@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +41,10 @@ struct QfiRules {
   std::vector<uint32_t> action_ids;
   // The MAR ID of each rule, in the same order: 0 for a rule that names none.
   std::vector<uint32_t> steering_ids;
+  // The Router next hop of each rule, 0 for none.
+  std::vector<uint32_t> next_hop_ids;
+  // The two meter levels of each rule, in policing order (own, then shared).
+  std::vector<std::array<uint32_t, 2>> meter_ids;
 };
 
 // One session's rules, published whole: the structures that match them, and
@@ -119,6 +124,8 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
     FirewallRule rule;
     std::optional<uint8_t> qfi;
     uint32_t steering_id = 0;
+    uint32_t next_hop_id = 0;
+    std::array<uint32_t, 2> meter_ids{0, 0};
   };
   std::vector<Parsed> rules;
   rules.reserve(static_cast<size_t>(entry.rules_size()));
@@ -184,6 +191,15 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
           where + "a rule that drops cannot name a MAR - the packet never "
                   "reaches the steering module");
     }
+    if (rule.drop() &&
+        (rule.next_hop_id() != 0 || rule.meter_ids_size() != 0)) {
+      return std::unexpected(
+          where + "a rule that drops cannot name a meter or next hop - the "
+                  "packet never reaches the module that would enforce it");
+    }
+    if (rule.meter_ids_size() > 2) {
+      return std::unexpected(where + "at most two meter levels fit a rule");
+    }
 
     std::optional<uint8_t> qfi;
     if (rule.has_qfi()) {
@@ -211,7 +227,12 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
     parsed.dst_port_high = static_cast<uint16_t>(dst_high);
     parsed.action = rule.drop() ? kDrop : kPass;
     parsed.action_id = rule.action_id();
-    rules.push_back({parsed, qfi, rule.steering_policy_id()});
+    Parsed out_rule{parsed, qfi, rule.steering_policy_id(),
+                    rule.next_hop_id(), {0, 0}};
+    for (int m = 0; m < rule.meter_ids_size(); m++) {
+      out_rule.meter_ids[m] = rule.meter_ids(m);
+    }
+    rules.push_back(out_rule);
     i++;
   }
 
@@ -227,6 +248,8 @@ inline std::expected<std::unique_ptr<const Rules>, std::string> CompileRules(
         list.push_back(p.rule);
         out.action_ids.push_back(p.rule.action_id);
         out.steering_ids.push_back(p.steering_id);
+        out.next_hop_ids.push_back(p.next_hop_id);
+        out.meter_ids.push_back(p.meter_ids);
       }
     }
     auto matcher = MakeSessionMatcher(std::move(list));
