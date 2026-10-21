@@ -2813,8 +2813,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 					Resource: c.teidRes(),
 					Key:      teidRuleKey(p.teid),
 					Value: map[string]any{
-						"priority": rulePriority(p.precedence),
-						"gate":     uint64(c.cfg.TEIDGate),
+						"gate": uint64(c.cfg.TEIDGate),
 					},
 				})
 			}

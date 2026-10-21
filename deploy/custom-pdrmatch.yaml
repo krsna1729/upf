@@ -79,7 +79,7 @@ modules:
   # module (the only message that reaches a UPF on a TEID no session names is an
   # Echo Request, TS 29.281 7.2); a G-PDU no session names is still dropped.
   - name: teid
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         - {offset: 46, num_bytes: 4}

@@ -144,7 +144,7 @@ modules:
   # Indication (the module drops every other message type it is handed). Its
   # output is the decap.
   - name: teid
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         - {offset: 46, num_bytes: 4}

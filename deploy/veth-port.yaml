@@ -75,7 +75,7 @@ modules:
   # The F-TEID match, one rule per session, written by the controller. A TEID no
   # rule names is dropped: this graph has no echo module (upf.yaml's has).
   - name: teid
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         # Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's flags/type/length

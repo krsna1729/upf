@@ -346,18 +346,18 @@ func onlyErases(changes []bess.Change) []bess.Change {
 }
 
 // teidRule is the change carrying a session's TEID rule, or false: the rule's
-// key holds the TEID in one field, values and masks in two lists.
+// key holds the TEID in one field.
 func teidRule(changes []bess.Change, resource string, teid uint32) (bess.Change, bool) {
 	want := []byte{byte(teid >> 24), byte(teid >> 16), byte(teid >> 8), byte(teid)}
 	for _, c := range changes {
 		if c.Resource != resource {
 			continue
 		}
-		values, _ := c.Key["values"].([]map[string]any)
-		if len(values) != 1 {
+		fields, _ := c.Key["fields"].([]map[string]any)
+		if len(fields) != 1 {
 			continue
 		}
-		if b, _ := values[0]["value_bin"].([]byte); bytes.Equal(b, want) {
+		if b, _ := fields[0]["value_bin"].([]byte); bytes.Equal(b, want) {
 			return c, true
 		}
 	}
@@ -1763,8 +1763,8 @@ func TestThePrecedenceIsInvertedIntoTheClassifiersPriority(t *testing.T) {
 	if !ok {
 		t.Fatal("no TEID rule for the pinned F-TEID")
 	}
-	if want := int64(math.MaxUint32) - 10; teid.Value["priority"] != want {
-		t.Errorf("the TEID rule's priority is %v, want Precedence 10's %d", teid.Value["priority"], want)
+	if got, _ := teid.Value["gate"].(uint64); got != 0 {
+		t.Errorf("the TEID rule's gate is %v, want 0", got)
 	}
 }
 
@@ -2202,10 +2202,14 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 	if got := rule.Value["gate"]; got != uint64(testConfig().TEIDGate) {
 		t.Errorf("the TEID rule delivers on gate %v, want the decap's", got)
 	}
-	masks, _ := rule.Key["masks"].([]map[string]any)
-	mask, _ := masks[0]["value_bin"].([]byte)
-	if !bytes.Equal(mask, []byte{0xff, 0xff, 0xff, 0xff}) {
-		t.Errorf("the TEID rule's mask is %v, want all ones", mask)
+	fields, _ := rule.Key["fields"].([]map[string]any)
+	if len(fields) != 1 {
+		t.Fatalf("the TEID rule has %d fields, want 1", len(fields))
+	}
+	teidBytes, _ := fields[0]["value_bin"].([]byte)
+	wantTEID := []byte{byte(fteid.TEID >> 24), byte(fteid.TEID >> 16), byte(fteid.TEID >> 8), byte(fteid.TEID)}
+	if !bytes.Equal(teidBytes, wantTEID) {
+		t.Errorf("the TEID rule's key is %v, want %v", teidBytes, wantTEID)
 	}
 
 	// One rule per PDR: the uplink matches the UE as the source, the downlink
@@ -2328,12 +2332,13 @@ func TestDeleteRemovesWhatTheSessionProgrammed(t *testing.T) {
 		if ch.Resource != testConfig().TEIDTable+"/rules" {
 			continue
 		}
-		masks, _ := ch.Key["masks"].([]map[string]any)
-		mask, _ := masks[0]["value_bin"].([]byte)
-		values, _ := ch.Key["values"].([]map[string]any)
-		value, _ := values[0]["value_bin"].([]byte)
-		if len(mask) != 4 || len(value) != 4 {
-			t.Fatalf("the TEID rule's key is not four bytes: %v / %v", value, mask)
+		fields, _ := ch.Key["fields"].([]map[string]any)
+		if len(fields) != 1 {
+			continue
+		}
+		value, _ := fields[0]["value_bin"].([]byte)
+		if len(value) != 4 {
+			t.Fatalf("the TEID rule's key is not four bytes: %v", value)
 		}
 		teid := uint32(value[0])<<24 | uint32(value[1])<<16 | uint32(value[2])<<8 | uint32(value[3])
 		if _, ok := teidRule(rec.last(), testConfig().TEIDTable+"/rules", teid); !ok {

@@ -116,7 +116,7 @@ modules:
       templates:
         - "AgAAAAACAgAAAAABCABFAABRAAFAAEARUIQKFB4CwAACAQhoCGgAPQAANP8ALREiM0QAAACFARAJAEUAACUAAUAAQBEgiQotAAIICAgIE4gANQARAABxZmk5LXVwZiE="
   - name: teid
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         # The G-PDU's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's

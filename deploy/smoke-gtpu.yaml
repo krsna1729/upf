@@ -58,7 +58,7 @@ modules:
         # was, so the decap's own checks below still read it.
         - "AgAAAAABAgAAAAACCABFAABRAAFAAEAR6nAKFB4BChQeAghoCGgAPQAANP8ALREiM0QAAACFARAFAEUAACUAAUAAQBEgtwoAAAEICAgIBNIANQARAABoZWxsby11cGY="
   - name: teid
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         # The outer frame's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U

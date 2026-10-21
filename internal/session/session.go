@@ -311,7 +311,7 @@ type Direction struct {
 // Config is the deployed graph's shape and the constants a session's resources
 // point at.
 type Config struct {
-	// TEIDTable is the WildcardMatch module whose rules are the F-TEID match
+	// TEIDTable is the ExactMatch module whose rules are the F-TEID match
 	// ("teid"): one rule per session, holding the TEID at the offset the
 	// module's own argument gives it (Eth 14 + IPv4 20 + UDP 8 + the GTP-U
 	// header's flags, type and length 4). The decap behind it decapsulates
@@ -1471,14 +1471,12 @@ func selectorResult(id uint32) []byte {
 func tunnelsRes(d Direction) string  { return d.Tunnels + "/tunnels" }
 func countersRes(d Direction) string { return d.Counters + "/counters" }
 
-// teidRuleKey is the key of a session's TEID rule: the four bytes of the TEID,
-// masked all ones. One field, so the table's field order is its argument's.
+// teidRuleKey is the key of a session's TEID rule: the four bytes of the TEID.
+// ExactMatch takes the field value directly without masks.
 func teidRuleKey(teid uint32) map[string]any {
 	value := []byte{byte(teid >> 24), byte(teid >> 16), byte(teid >> 8), byte(teid)}
-	mask := []byte{0xff, 0xff, 0xff, 0xff}
 	return map[string]any{
-		"values": []map[string]any{{"value_bin": value}},
-		"masks":  []map[string]any{{"value_bin": mask}},
+		"fields": []map[string]any{{"value_bin": value}},
 	}
 }
 

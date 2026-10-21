@@ -85,7 +85,7 @@ modules:
     mclass: Dump
     arg: {interval: 1}
   - name: teid
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         # The G-PDU's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's
