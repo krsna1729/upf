@@ -313,23 +313,17 @@ resources:
   # the mask all ones). WildcardMatchRuleKey holds the values and the masks in
   # two lists, one FieldData per field, and a bytes field is base64.
   teid/rules:
-    - key:
-        values: [{value_bin: "ESIzRA=="}]
-        masks: [{value_bin: "/////w=="}]
-      value: {priority: 100, gate: 0}
+    - key: {fields: [{value_bin: "ESIzRA=="}]}
+      value: {gate: 0}
     # TEID 0: the echo path (7.1). Its own gate and responder, so the reply
     # has a Dump to itself.
-    - key:
-        values: [{value_bin: "AAAAAA=="}]
-        masks: [{value_bin: "/////w=="}]
-      value: {priority: 100, gate: 3}
+    - key: {fields: [{value_bin: "AAAAAA=="}]}
+      value: {gate: 3}
     # The container-less frame's TEID (0x11223345), whose rule takes the
     # table's second gate: its own decap, reader and Dump, so its metadata is
     # printed whatever the first chain is doing.
-    - key:
-        values: [{value_bin: "ESIzRQ=="}]
-        masks: [{value_bin: "/////w=="}]
-      value: {priority: 100, gate: 2}
+    - key: {fields: [{value_bin: "ESIzRQ=="}]}
+      value: {gate: 2}
   # The session's downlink path: the gNB's F-TEID and outer address, and the
   # two Ethernet addresses (base64: 02:00:00:00:00:01 and :02).
   encap0/tunnels:
