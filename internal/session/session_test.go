@@ -304,18 +304,6 @@ func (r rule) gate() uint64 { v, _ := r.change.Value["gate"].(uint64); return v 
 // between two rules of the table that both match a packet.
 func (r rule) priority() int64 { v, _ := r.change.Value["priority"].(int64); return v }
 
-// actionsErased is the action records a transaction takes out: a change with no
-// value, which is what an erase is.
-func actionsErased(changes []bess.Change) []bess.Change {
-	var out []bess.Change
-	for _, ch := range changes {
-		if ch.Value == nil && strings.HasSuffix(ch.Resource, "/actions") {
-			out = append(out, ch)
-		}
-	}
-	return out
-}
-
 // metersErased is actionsErased for meters.
 func metersErased(changes []bess.Change) []bess.Change {
 	var out []bess.Change

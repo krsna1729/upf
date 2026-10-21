@@ -110,7 +110,7 @@ func ruleIn(t *testing.T, changes []bess.Change, table string) rule {
 // nextHop is the Router next hop the rule carrying actionID writes into its
 // result. The rule is found by its result, not by a separate action resource:
 // the classifier writes the next hop itself.
-func nextHop(t *testing.T, changes []bess.Change, _ string, actionID uint32) uint32 {
+func nextHop(t *testing.T, changes []bess.Change, actionID uint32) uint32 {
 	t.Helper()
 	for _, r := range rules(changes) {
 		if r.actionID() == actionID && len(r.result()) >= 16 {
@@ -200,18 +200,18 @@ func TestTwoInstancesRouteIndependently(t *testing.T) {
 	}
 
 	// And the forwards leave by each instance's own egress.
-	if got := nextHop(t, internet, "at_ul/actions", ulInternet.actionID()); got != 1 {
+	if got := nextHop(t, internet, ulInternet.actionID()); got != 1 {
 		t.Errorf("the internet session's uplink forward takes next hop %d, want its instance's 1", got)
 	}
-	if got := nextHop(t, ims, "at_ul/actions", ulIMS.actionID()); got != 3 {
+	if got := nextHop(t, ims, ulIMS.actionID()); got != 3 {
 		t.Errorf("the ims session's uplink forward takes next hop %d, want its instance's 3", got)
 	}
 	// The downlink keeps the access side's hop: a forward toward the UE leaves
 	// through the encap whatever instance the PDI named.
-	if got := nextHop(t, internet, "at_dl/actions", dlInternet.actionID()); got != 2 {
+	if got := nextHop(t, internet, dlInternet.actionID()); got != 2 {
 		t.Errorf("the internet session's downlink forward takes next hop %d, want the access side's 2", got)
 	}
-	if got := nextHop(t, ims, "at_dl/actions", dlIMS.actionID()); got != 2 {
+	if got := nextHop(t, ims, dlIMS.actionID()); got != 2 {
 		t.Errorf("the ims session's downlink forward takes next hop %d, want the access side's 2", got)
 	}
 }
@@ -247,7 +247,7 @@ func TestAPDIWithoutAnInstanceTakesTheDefault(t *testing.T) {
 	if got := binary.BigEndian.Uint32(dl.value(5)); got != 0 {
 		t.Errorf("the default interface's domain is %d, want the first configured one's (0)", got)
 	}
-	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 1 {
+	if got := nextHop(t, changes, ul.actionID()); got != 1 {
 		t.Errorf("the default interface's uplink forward takes next hop %d, want its own (1)", got)
 	}
 }
@@ -324,7 +324,7 @@ func TestTheForwardsNetworkInstanceChoosesTheEgress(t *testing.T) {
 	if got := binary.BigEndian.Uint32(ul.value(5)); got != 0x11223344 {
 		t.Errorf("the rule's tunnel field is %#x, want the session's own TEID", got)
 	}
-	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 3 {
+	if got := nextHop(t, changes, ul.actionID()); got != 3 {
 		t.Errorf("the forward takes next hop %d, want the FAR's instance's 3", got)
 	}
 
@@ -425,7 +425,7 @@ func TestAnUpdateFARKeepsWhatItDoesNotCarry(t *testing.T) {
 		}
 		changes := rec.last()
 		ul := ruleIn(t, changes, "pdr_ul")
-		return nextHop(t, changes, "at_ul/actions", ul.actionID())
+		return nextHop(t, changes, ul.actionID())
 	}
 
 	// The Apply Action, with the forwarding parameters a forwarding FAR must
@@ -498,10 +498,10 @@ func TestAOneInstanceDeploymentIsUnchanged(t *testing.T) {
 		t.Errorf("the rules carry %d and %d fields, want the tables' own six and five",
 			len(ul.values), len(dl.values))
 	}
-	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 1 {
+	if got := nextHop(t, changes, ul.actionID()); got != 1 {
 		t.Errorf("the uplink forward takes next hop %d, want -n6-next-hop's 1", got)
 	}
-	if got := nextHop(t, changes, "at_dl/actions", dl.actionID()); got != 2 {
+	if got := nextHop(t, changes, dl.actionID()); got != 2 {
 		t.Errorf("the downlink forward takes next hop %d, want -n3-next-hop's 2", got)
 	}
 }
@@ -620,8 +620,3 @@ func TestADestinationAddressIsNotTheSessionsUEAddress(t *testing.T) {
 		t.Error("a refused session wrote to the dataplane")
 	}
 }
-
-// actionsRes is retained only for call sites that identify a rule by the
-// action it carries; the classifier's result is the record now, not a
-// separate resource.
-func actionsRes(Direction) string { return "" }

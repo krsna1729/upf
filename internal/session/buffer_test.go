@@ -82,7 +82,7 @@ func TestABuffFARIsGatedToTheStoreAndCounted(t *testing.T) {
 	// when the store's gate 0 re-enters the action path, and the modification
 	// that stops buffering updates this key in place.
 	action := actionFields(t, changes, c.cfg.Down, flow)
-	if got := action["next_hop_id"]; got == nil {
+	if got, _ := action["next_hop_id"].(uint32); got == 0 {
 		t.Error("a BUFF FAR's action record carries no next hop: the release path would have nowhere to send the packets")
 	}
 	for _, ch := range changes {

@@ -2653,14 +2653,14 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			}
 			c.rules[claim] = s.LocalSEID
 		}
-		if dir.Firewall != "" && p.buffer {
+		if (dir.Firewall != "" || dir.PdrMatch != "") && p.buffer {
 			// A buffering PDR's packets are held by the store the rule
-			// delivers them to, and a firewall rule has no gate: its verdict
-			// is drop or pass on the output the packet arrived on. Serving
-			// the session would leave the SMF believing its downlink is held
-			// while nothing holds it, so the rule is refused instead.
+			// delivers them to, and neither a firewall nor a pdr_match rule
+			// has a buffering gate. Serving the session would leave the SMF
+			// believing its downlink is held while nothing holds it, so the
+			// rule is refused instead.
 			return nil, nil, fmt.Errorf(
-				"%w: a BUFF PDR is delivered on the buffering branch's gate, and a firewall rule has only the input gate",
+				"%w: a BUFF PDR is delivered on the buffering branch's gate, and this module has only the input gate",
 				errNotExpressible)
 		}
 		if p.drop || p.buffer {
@@ -3357,7 +3357,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 //
 // A forwarding rule names its PDR's ActionId (the message's "action_id", BESS
 // D-141): the module writes it into the packet's metadata, and the
-// ActionTable behind it resolves the PDR's meter, next hop and tunnel from it
+// rule result writes the PDR's meter, next hop and tunnel directly
 // -- so a rule of the policy reaches its own next hop, as a WildcardMatch
 // rule does. Each PDR has its own id, so the policy, one resource for every
 // session, holds one id per rule. A rule that drops names none (the module

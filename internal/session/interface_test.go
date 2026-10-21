@@ -96,7 +96,7 @@ func TestASubscriberSideSourceInterfaceValueIsMatchedTowardTheSubscriber(t *test
 			}
 			// The direction's own egress is the fallback: the FAR names
 			// Destination Interface Access, so it leaves through the encap.
-			if got := nextHop(t, changes, actionsRes(cfg.Down), r.actionID()); got != cfg.Down.NextHop {
+			if got := nextHop(t, changes, r.actionID()); got != cfg.Down.NextHop {
 				t.Errorf("the forward takes next hop %d, want the access side's %d", got, cfg.Down.NextHop)
 			}
 			// The other PDR -- the uplink one -- is the uplink's alone.
@@ -314,12 +314,12 @@ func TestAForwardTowardTheAccessSideEncapsulatesWhicheverDirection(t *testing.T)
 	}
 	changes := rec.last()
 	ul := ruleIn(t, changes, cfg.Up.PDRTable)
-	if got := nextHop(t, changes, actionsRes(cfg.Up), ul.actionID()); got != cfg.AccessNextHop {
+	if got := nextHop(t, changes, ul.actionID()); got != cfg.AccessNextHop {
 		t.Errorf("the uplink forward toward the access side takes next hop %d, want the access side's %d",
 			got, cfg.AccessNextHop)
 	}
 	dl := ruleIn(t, changes, cfg.Down.PDRTable)
-	if got := nextHop(t, changes, actionsRes(cfg.Down), dl.actionID()); got != cfg.AccessNextHop {
+	if got := nextHop(t, changes, dl.actionID()); got != cfg.AccessNextHop {
 		t.Errorf("the downlink forward toward the access side takes next hop %d, want the access side's %d",
 			got, cfg.AccessNextHop)
 	}
@@ -336,7 +336,7 @@ func TestAForwardTowardTheAccessSideEncapsulatesWhicheverDirection(t *testing.T)
 		t.Fatalf("the establishment with no -access-next-hop answered cause %d", got)
 	}
 	ul = ruleIn(t, rec.last(), cfg.Up.PDRTable)
-	if got := nextHop(t, rec.last(), actionsRes(cfg.Up), ul.actionID()); got != cfg.Down.NextHop {
+	if got := nextHop(t, rec.last(), ul.actionID()); got != cfg.Down.NextHop {
 		t.Errorf("with no access hop declared the forward takes %d, want the downlink direction's %d",
 			got, cfg.Down.NextHop)
 	}
@@ -359,7 +359,7 @@ func TestATunnelOutOfAnInstanceTakesTheTunnelEgress(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	dl := ruleIn(t, rec.last(), cfg.Down.PDRTable)
-	if got := nextHop(t, rec.last(), actionsRes(cfg.Down), dl.actionID()); got != 3 {
+	if got := nextHop(t, rec.last(), dl.actionID()); got != 3 {
 		t.Errorf("the tunneled forward takes next hop %d, want the instance's tunnel egress 3", got)
 	}
 
@@ -397,11 +397,11 @@ func TestDestinationRoutingNamesNoNextHop(t *testing.T) {
 	}
 	changes := rec.last()
 	ul := ruleIn(t, changes, cfg.Up.PDRTable)
-	if got := nextHop(t, changes, actionsRes(cfg.Up), ul.actionID()); got != 0 {
+	if got := nextHop(t, changes, ul.actionID()); got != 0 {
 		t.Errorf("the uplink action names next hop %d, want 0: the Router's FIB decides", got)
 	}
 	dl := ruleIn(t, changes, cfg.Down.PDRTable)
-	if got := nextHop(t, changes, actionsRes(cfg.Down), dl.actionID()); got != 0 {
+	if got := nextHop(t, changes, dl.actionID()); got != 0 {
 		t.Errorf("the downlink action names next hop %d, want 0: the Router's FIB decides", got)
 	}
 
@@ -465,7 +465,7 @@ func TestDestinationRoutingChecksAnAccessFARsInstance(t *testing.T) {
 		t.Fatalf("an Access forward in the packet's own instance answered cause %d", got)
 	}
 	dl := ruleIn(t, rec.last(), cfg.Down.PDRTable)
-	if got := nextHop(t, rec.last(), actionsRes(cfg.Down), dl.actionID()); got != 0 {
+	if got := nextHop(t, rec.last(), dl.actionID()); got != 0 {
 		t.Errorf("the access forward names next hop %d, want 0: the Router's FIB decides", got)
 	}
 }
@@ -483,7 +483,7 @@ func TestAServiceLanForwardTakesTheServiceLanEgress(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	dl := ruleIn(t, rec.last(), cfg.Down.PDRTable)
-	if got := nextHop(t, rec.last(), actionsRes(cfg.Down), dl.actionID()); got != 4 {
+	if got := nextHop(t, rec.last(), dl.actionID()); got != 4 {
 		t.Errorf("the service-LAN forward takes next hop %d, want the service LAN's egress 4", got)
 	}
 }
@@ -522,7 +522,7 @@ func TestAFiveGVNInternalForwardTakesTheReInjectionGate(t *testing.T) {
 		t.Fatalf("the 5G VN establishment answered cause %d", got)
 	}
 	dl := ruleIn(t, rec.last(), cfg.Down.PDRTable)
-	if got := nextHop(t, rec.last(), actionsRes(cfg.Down), dl.actionID()); got != 5 {
+	if got := nextHop(t, rec.last(), dl.actionID()); got != 5 {
 		t.Errorf("the re-injected forward takes next hop %d, want the re-injection gate 5", got)
 	}
 
@@ -557,7 +557,7 @@ func TestAnUplinkForwardWithAnOuterHeaderWritesTheTunnelRecord(t *testing.T) {
 	changes := rec.last()
 	ul := ruleIn(t, changes, cfg.Up.PDRTable)
 	// The rule delivers on the instance's tunnel egress ...
-	if got := nextHop(t, changes, actionsRes(cfg.Up), ul.actionID()); got != 3 {
+	if got := nextHop(t, changes, ul.actionID()); got != 3 {
 		t.Errorf("the uplink forward takes next hop %d, want the instance's tunnel egress 3", got)
 	}
 	// ... and the record the encap resolves by that action carries the FAR's

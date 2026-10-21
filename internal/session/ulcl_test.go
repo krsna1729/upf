@@ -99,7 +99,7 @@ func TestULCLOneSessionBranchesByDestination(t *testing.T) {
 	}
 	hops := map[uint32]uint32{}
 	for _, r := range ulRules {
-		hops[r.actionID()] = nextHop(t, rec.last(), "at_ul/actions", r.actionID())
+		hops[r.actionID()] = nextHop(t, rec.last(), r.actionID())
 	}
 	want := map[uint32]bool{1: true, 3: true}
 	for _, hop := range hops {
