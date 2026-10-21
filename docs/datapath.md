@@ -35,8 +35,7 @@ flowchart TB
     teid -->|"1 · default gate"| echo["echo0 · GtpuResponder<br/>Echo Request → reply<br/>unknown G-PDU → Error Indication"]
     decap -->|0| mt["mt_ul_read · MetadataTest<br/>reads upf_teid, so the write<br/>gets a metadata offset"]
     mt -->|0| pdr["pdr_ul · WildcardMatch<br/>key: inner 5-tuple (+ QFI)"]
-    pdr -->|0| at["at_ul · ActionTable<br/>{meter id, next hop id}"]
-    at -->|0| meter["mt_ul · Meter<br/>two-rate three-colour"]
+    pdr -->|0| meter["mt_ul · Meter<br/>two-rate three-colour<br/>two levels"]
     meter -->|"0, 1 · green, yellow"| cnt["cnt_ul · UrrCount"]
     meter -->|"2 · red, unwired"| drop(("drop"))
     cnt -->|0| rt["rt · Router"]
@@ -44,21 +43,25 @@ flowchart TB
     echo -->|0| n3out["n3_out · PortOut → N3"]
 ```
 
-The ActionTable's own resource is `at_ul/actions`; the meters and next hops it
-names are resources it reads. A metadata attribute nothing reads is never given
-an offset (`core/metadata.cc`), which is why `mt_ul_read` sits after the decap.
+The classifier's rule result writes the action id, the two meter levels and the
+next hop into metadata; the Meter and Router read them. A metadata attribute
+nothing reads is never given an offset (`core/metadata.cc`), which is why
+`mt_ul_read` sits after the decap.
 
 ### Downlink
 
 ```mermaid
 flowchart TB
-    n6in["n6_in · PortInc"] -->|0| pdr["pdr_dl · WildcardMatch<br/>key: inner 5-tuple"]
-    pdr -->|0| at["at_dl · ActionTable"]
+    n6in["n6_in · PortInc"] -->|0| l2["l2_sort · WildcardMatch"]
+    l2 -->|"ogate 0 · ARP"| arp["arp_n6 · ArpResponder"]
+    arp -->|0| n6out["n6_out · PortOut → N6"]
+    l2 -->|"ogate 1 · IP"| vif["vif_n6 · Vif"]
+    vif -->|1| pdr["pdr_dl · WildcardMatch<br/>key: inner 5-tuple"]
+    pdr -->|0| meter["mt_dl · Meter<br/>two levels"]
     pdr -->|"1 · BUFF (buffer-path only)"| cb["cnt_buf · UrrCount"]
     cb -->|0| buf["buf · PacketStore<br/>key_attrs: [action_id]"]
-    buf -->|"0 · release"| at
+    buf -->|"0 · release"| meter
     buf -->|"1 · eviction, unwired"| drop(("drop"))
-    at -->|0| meter["mt_dl · Meter"]
     meter -->|"0, 1 · green, yellow"| cnt["cnt_dl · UrrCount"]
     meter -->|"2 · red, unwired"| drop
     cnt -->|0| rt["rt · Router"]
@@ -67,7 +70,7 @@ flowchart TB
 ```
 
 The buffering branch exists only in `deploy/buffer-path.yaml` (and its
-`pdrmatch` twin). Release feeds the packet back into `at_dl`, so the SMF's new
+`pdrmatch` twin). Release feeds the packet back into `mt_dl`, so the SMF's new
 instruction is what moves it; the store's eviction and overflow leave by gate 1,
 which nothing wires — the daemon's gate counters are what see them.
 
@@ -355,13 +358,13 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | module | where | the configuration that matters |
 |---|---|---|
 | `WildcardMatch` | both PDR tables, the TEID table | `action_resource: <at_*/actions>` (D-141: the rule's action id goes to the packet's `action_id`), `fields` = the graph's key in the order the compiler's `PDRFields` names, `max_tuples` |
-| `ActionTable` | one per direction | its own resource is `<module>/actions` (a rule's `{meter_id, next_hop_id}`); it *reads* `mt_*/meters` and `rt/next_hops` and fails closed when the id it writes has no reader |
-| `Router` | one, both directions | hop mode (the default): `<module>/next_hops`, the egress gate an action names; destination mode (`ROUTE_MODE_DESTINATION`, `-route-mode=destination`): `<module>/routes`, `<module>/groups` and the packet's own `route_domain`. Both modes write a resolved hop's `dst_mac`/`src_mac` (BESS D-153) and the IPv4 hop count: one decrement each way, the checksum kept right, a packet arriving with TTL 1 dropped. The drop is silent -- no ICMP Time Exceeded; the Router's `ttl_expired` counter records it. No graph carries `UpdateTTL`; doing both would decrement twice |
+| `WildcardMatch` result | one per PDR table | `result_fields` writes the action id, the two meter levels and the next hop from the rule's `result`; the Meter and Router read them |
+| `Router` | one, both directions | hop mode (the default): `<module>/next_hops`, the egress gate an action names; destination mode (`ROUTE_MODE_DESTINATION`, `-route-mode=destination`): `<module>/routes`, `<module>/groups` and the packet's own `route_domain`. Both modes write a resolved hop's `dst_mac`/`src_mac` (BESS D-153) and the IPv4 hop count: one decrement each way, the checksum kept right, a packet arriving with TTL 1 dropped. The drop is silent -- no ICMP Time Exceeded; the Router's `ttl_expired` counter records it. No graph carries `UpdateTTL`; doing both would decrement twice. `deploy/upf.yaml` wires gate 2 to the encap for an uplink tunnel and gate 4 back into `pdr_dl` for the 5G VN re-injection |
 | `SetMetadata` | the uplink of `route-path.yaml` | writes `route_domain: 0` after the decap. The Router reads the domain on both directions, and BESS marks a read attribute with an unwritten upstream path unreadable; the downlink's `Vif` writes domain 1 |
 | `PMDPort` | `n3`, `n6`, and `upf_port` (a veth) | `num_rx_queues: 1` each in the deployment's graph; RSS and one worker per queue are the scale path. The one-port split (per-pattern RSS, `L3_SRC_ONLY` uplink / `L3_DST_ONLY` downlink) is designed in `docs/design.md`, "N3, N6, N9": `deploy/veth-port.yaml` wires it over a software device (one PMD port, four queues, a `Vif` with the three interfaces) and `ci/veth-port.sh` proves what a veth can prove of it, while the placement measurement is what a NIC is still needed for (`docs/datapath.md`) |
 | `UnixSocketPort` | `cp_marker` | `SOCK_SEQPACKET`: one write from `upfd` is one End Marker frame |
 | `PortInc`/`PortOut`, `Sink`, `Source`, `Rewrite`, `Dump`, `MetadataTest` | graphs | plumbing and lab only; a `Sink` has no output gate, so it appears in no metric — the counters that prove behaviour sit on modules' *output* gates |
-| `deploy/meter-compose.yaml` / `ci/meter-compose.sh` | the composition probe: `classifier -> at1 -> m1 -> at2 -> m2`, two ActionTables rewriting one `meter_id` attribute and two Meters each reading their own id, proving that two rate policies need no module change (and pinning that a stage's writes need a downstream reader) |
+| `deploy/meter-compose.yaml` / `ci/meter-compose.sh` | the composition probe: `classifier -> mt (levels: 2)`, two meter ids in one result record, proving that the stack polices the flow's bucket then the session's |
 | `Meter` | one per direction | `<module>/meters`, the QER's committed and peak rate; a closed gate compiles to the drop gate. The model is a two-rate three-colour meter: `committed_rate`/`peak_rate` are the QER's GBR/MBR and the bursts its Averaging Window, and the packet leaves on the gate that is its colour — 0 green, 1 yellow (between the guarantee and the ceiling), 2 red. The graphs connect 0 and 1 to the chain and leave 2 unwired, which is the drop; an unwired gate has no Track hook, so red's drops are read from the module's own state rather than `bess_gate_packets_total` |
 | `PacketStore` | the buffering branch (`buffer-path.yaml`) | `key_attrs: ["action_id"]`, `max_packets`, `max_packets_per_flow`, `timeout_ms`; one owner task, any number of workers. `release`/`drop`/`clear` are commands that enqueue into the store's own request ring (`Command::THREAD_SAFE` since BESS `cdeb4e77`), and its `flows` table is live configuration (`requires_paused_workers: false`), so neither a command nor a flow write is refused with EBUSY or RESOURCE_BUSY and nothing stops the datapath; a command is **accepted, not completed** -- the store's owner task applies it on a later run -- so a caller that needs the effect reads it back (`ps/flows`, the drop and release counters, `GetDesc`). A flow the store holds nothing for is a no-op (ENOENT is gone; the only refusal left is ENOSPC, a full request ring), an upsert or an erase moves no packet, and an erase removes configuration only -- `drop` is what frees what a flow holds (BESS's note: `packet_store: the flow key is a configured attribute, not a fixed pair`, 96d22a8f). The `flows` entries are the SMF's own numbers: `internal/session` writes one per buffering rule (`writeFlowEntry`), keyed by the rule's ActionId, with `timeout_ns` from 8.2.29's DL Buffering Duration and `max_packets_per_flow` from 8.2.30's Suggested Packet Count, each left out where the SMF named none; a modification's Update BAR rewrites it, a deletion erases it, and the startup sweep names the table. BESS's `LimitsFor` resolves it per flow; the store then enforces the cap on every arrival (`StoreBatch`) and, when `total_packets_` reaches `max_packets`, ages each flow's packets past its `timeout_ns` out with `bess::PacketFree` in `EvictExpired` -- a silent discard (no gate, no metric; only `GetDesc`'s stored count falls), distinct from the `drop` command's counted free and from the gate-1 eviction the cap uses |
 | `Vif` | `deploy/upf.yaml` (the N6 interface), `deploy/veth-port.yaml` | the module that splits one port into the reference points: an interface per reference point (`(VLAN, destination MAC)`, ARP answered for its address), each writing `vif_id`/`route_domain` into the packet and sending it out its own gate, so a PDR key can carry the domain the frame arrived with (`docs/design.md`, "N3, N6, N9"; `ci/veth-port.sh` proves the split and the rule selected by it). The deployment uses it for its one N6 port (`vif_n6`): the data network's frames are the interface's, and the interface's own frames leave by the port through `l2_sort` instead of entering the downlink chain (`ci/session-path.sh` runs the frames through it). The interface's *own* ARP answer is inert in `deploy/upf.yaml`, where `l2_sort` diverts ARP to `arp_n6` first -- that module answers for the interface's address and for every live session's, so the Vif's answer is left to the graphs that put it first (`core/modules/vif_test.cc` covers it) |
@@ -406,7 +409,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
   interfaces in the module's argument, which belongs to the apply that pauses
   the workers, not to a write into a running one); every
   resource the session path writes is a concurrent slot-table resource applied
-  live (`WildcardMatch`'s rules, `ActionTable`'s actions, `Meter`'s meters,
+  live (`WildcardMatch`'s rules, the result fields, `Meter`'s meters,
   `Router`'s next hops, `enc/tunnels`, `cnt_*/counters`).
 
   The store was the one exception, and BESS `cdeb4e77` removed it: the module
@@ -471,7 +474,7 @@ counted rule and +1.34 ns for a miss.
 | fusion | what it removes per packet | what it costs |
 |---|---|---|
 | `teid` ⊕ `gtpu_decap` | one wildcard lookup and one batch dispatch — the decap already parses the header the lookup keys on | the decap would own a rule table and its TEID id space; today it owns none (its header comment says so) |
-| `pdr_ul` ⊕ `at_ul` | one ActionTable lookup | the ActionId stops being the single id the meter, counter, tunnel and store flow all key on — the saving is one lookup, the cost is the whole downstream contract, so this is the fusion *not* to make |
+| ~~`pdr_ul` ⊕ `at_ul`~~ | ~~one ActionTable lookup~~ | removed: the classifier's result writes the downstream fields directly, so there is no action table to fuse |
 | `mt_ul` ⊕ `cnt_ul` | one lookup and one dispatch | one module holding both the policer's bucket and the counter cells; both primitives are available to us (BESS's meter, our counters), and the cells' per-worker planes are the thing that must survive |
 | `rt` ⊕ `enc` | the router's lookup on the downlink | the encap gains the route table; on a single-port N3/N6/N9 deployment (docs/design.md's port section) the next hop is a queue rather than a port, which is exactly the case where this fusion starts to look right |
 

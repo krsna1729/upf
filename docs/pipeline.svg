@@ -1,0 +1,307 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 760" width="100%" height="100%">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--muted, #656d76)"/>
+    </marker>
+    <marker id="arr-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--accent, #0969da)"/>
+    </marker>
+    <marker id="arr-warning" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--warning, #9a6700)"/>
+    </marker>
+    <marker id="arr-error" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--error, #cf222e)"/>
+    </marker>
+  </defs>
+
+  <style>
+    :root {
+      --fg: #1f2328;
+      --muted: #656d76;
+      --border: #d0d7de;
+      --surface: #ffffff;
+      --accent: #0969da;
+      --warning: #9a6700;
+      --error: #cf222e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #e6edf3;
+        --muted: #848d97;
+        --border: #30363d;
+        --surface: #0d1117;
+        --accent: #2f81f7;
+        --warning: #d29922;
+        --error: #f85149;
+      }
+    }
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .label { font-size: 13px; font-weight: 600; fill: var(--fg, #1f2328); }
+    .sub { font-size: 10px; fill: var(--muted, #656d76); }
+    .gate { font-size: 10px; font-weight: 700; fill: var(--accent, #0969da); }
+    .tag { font-size: 9px; font-weight: 700; }
+    .flow-line { fill: none; stroke: var(--muted, #656d76); stroke-width: 1.5; marker-end: url(#arr); }
+    .flow-accent { fill: none; stroke: var(--accent, #0969da); stroke-width: 1.75; marker-end: url(#arr-accent); }
+    .flow-warning { fill: none; stroke: var(--warning, #9a6700); stroke-width: 1.5; stroke-dasharray: 4 3; marker-end: url(#arr-warning); }
+    .flow-error { fill: none; stroke: var(--error, #cf222e); stroke-width: 1.5; marker-end: url(#arr-error); }
+    .box { fill: var(--surface, #ffffff); stroke: var(--border, #d0d7de); stroke-width: 1.5; rx: 5; }
+    .box-hl { fill: var(--surface, #ffffff); stroke: var(--accent, #0969da); stroke-width: 2; rx: 5; }
+    .box-port { fill: var(--surface, #ffffff); stroke: var(--fg, #1f2328); stroke-width: 2; rx: 4; }
+    .box-drop { fill: var(--surface, #ffffff); stroke: var(--error, #cf222e); stroke-width: 1.5; stroke-dasharray: 3 3; rx: 4; }
+    .pill { rx: 3; stroke-width: 1; }
+  </style>
+
+  <!-- ================= UPLINK CHAIN ================= -->
+  <g transform="translate(30, 20)">
+    <text x="0" y="16" class="label" font-size="15">UPLINK PIPELINE (N3 ──▶ N6 / N9)</text>
+    <text x="0" y="32" class="sub">GTP-U encapsulated traffic from gNB to data network or peer UPF</text>
+
+    <!-- N3 PortInc -->
+    <g transform="translate(0, 50)">
+      <rect class="box-port" width="105" height="48"/>
+      <text x="52" y="22" text-anchor="middle" class="label">n3_in</text>
+      <text x="52" y="38" text-anchor="middle" class="sub">PortInc (N3)</text>
+    </g>
+
+    <!-- teid (WildcardMatch) -->
+    <g transform="translate(135, 50)">
+      <rect class="box" width="115" height="48"/>
+      <text x="57" y="22" text-anchor="middle" class="label">teid</text>
+      <text x="57" y="38" text-anchor="middle" class="sub">WildcardMatch</text>
+    </g>
+
+    <!-- decap0 (GtpuDecap) -->
+    <g transform="translate(280, 50)">
+      <rect class="box" width="115" height="48"/>
+      <text x="57" y="22" text-anchor="middle" class="label">decap0</text>
+      <text x="57" y="38" text-anchor="middle" class="sub">GtpuDecap</text>
+    </g>
+
+    <!-- mt_ul_read (MetadataTest) -->
+    <g transform="translate(425, 50)">
+      <rect class="box" width="115" height="48"/>
+      <text x="57" y="22" text-anchor="middle" class="label">mt_ul_read</text>
+      <text x="57" y="38" text-anchor="middle" class="sub">MetadataTest</text>
+    </g>
+
+    <!-- pdr_ul (WildcardMatch) with direct result -->
+    <g transform="translate(570, 42)">
+      <rect class="box-hl" width="145" height="64"/>
+      <text x="72" y="20" text-anchor="middle" class="label" fill="var(--accent, #0969da)">pdr_ul</text>
+      <text x="72" y="34" text-anchor="middle" class="sub">WildcardMatch</text>
+      <rect x="8" y="42" width="129" height="16" class="pill" fill="var(--surface, #ffffff)" stroke="var(--accent, #0969da)"/>
+      <text x="72" y="53" text-anchor="middle" class="tag" fill="var(--accent, #0969da)">result_fields (16B)</text>
+    </g>
+
+    <!-- mt_ul (Meter levels: 2) -->
+    <g transform="translate(745, 42)">
+      <rect class="box" width="150" height="64"/>
+      <text x="75" y="20" text-anchor="middle" class="label">mt_ul</text>
+      <text x="75" y="34" text-anchor="middle" class="sub">Meter (levels: 2)</text>
+      <text x="75" y="52" text-anchor="middle" class="sub">flow_id, ambr_id</text>
+    </g>
+
+    <!-- Connections Row 1 -->
+    <path class="flow-line" d="M 105 74 L 135 74"/>
+    <path class="flow-line" d="M 250 74 L 280 74"/>
+    <text x="265" y="68" class="gate">g0</text>
+    <path class="flow-line" d="M 395 74 L 425 74"/>
+    <path class="flow-line" d="M 540 74 L 570 74"/>
+    <path class="flow-accent" d="M 715 74 L 745 74"/>
+
+    <!-- TEID Miss / Echo branch -->
+    <g transform="translate(135, 140)">
+      <rect class="box" width="115" height="42"/>
+      <text x="57" y="18" text-anchor="middle" class="label">echo0</text>
+      <text x="57" y="32" text-anchor="middle" class="sub">GtpuResponder</text>
+    </g>
+    <path class="flow-warning" d="M 192 98 L 192 140"/>
+    <text x="198" y="122" class="gate" fill="var(--warning, #9a6700)">g1 (miss)</text>
+
+    <g transform="translate(0, 140)">
+      <rect class="box-port" width="105" height="42"/>
+      <text x="52" y="18" text-anchor="middle" class="label">n3_out</text>
+      <text x="52" y="32" text-anchor="middle" class="sub">PortOut (N3)</text>
+    </g>
+    <path class="flow-warning" d="M 135 161 L 105 161"/>
+
+    <!-- Meter Red Drop -->
+    <g transform="translate(795, 140)">
+      <rect class="box-drop" width="50" height="28"/>
+      <text x="25" y="18" text-anchor="middle" class="tag" fill="var(--error, #cf222e)">DROP</text>
+    </g>
+    <path class="flow-error" d="M 820 106 L 820 140"/>
+    <text x="826" y="124" class="tag" fill="var(--error, #cf222e)">g2 (red)</text>
+
+    <!-- cnt_ul (UrrCount) -->
+    <g transform="translate(745, 190)">
+      <rect class="box" width="150" height="48"/>
+      <text x="75" y="21" text-anchor="middle" class="label">cnt_ul</text>
+      <text x="75" y="37" text-anchor="middle" class="sub">UrrCount (URR metrics)</text>
+    </g>
+    <!-- Meter Green/Yellow to Counter -->
+    <path class="flow-line" d="M 775 106 L 775 190"/>
+    <text x="742" y="148" class="gate">g0, g1</text>
+
+    <!-- rt (Router) -->
+    <g transform="translate(565, 190)">
+      <rect class="box" width="150" height="48"/>
+      <text x="75" y="21" text-anchor="middle" class="label">rt</text>
+      <text x="75" y="37" text-anchor="middle" class="sub">Router (L2 / TTL / egress)</text>
+    </g>
+    <path class="flow-line" d="M 745 214 L 715 214"/>
+
+    <!-- Router Exits -->
+    <!-- N6 Out -->
+    <g transform="translate(380, 185)">
+      <rect class="box-port" width="145" height="48"/>
+      <text x="72" y="21" text-anchor="middle" class="label">n6_out</text>
+      <text x="72" y="37" text-anchor="middle" class="sub">PortOut (Plain N6)</text>
+    </g>
+    <path class="flow-line" d="M 565 208 L 525 208"/>
+    <text x="535" y="202" class="gate">hop 1</text>
+
+    <!-- N9 Tunnel Egress -->
+    <g transform="translate(380, 245)">
+      <rect class="box" width="145" height="42"/>
+      <text x="72" y="18" text-anchor="middle" class="label">enc</text>
+      <text x="72" y="32" text-anchor="middle" class="sub">GtpuEncap (N9/ULCL)</text>
+    </g>
+    <path class="flow-line" d="M 585 238 L 585 266 L 525 266"/>
+    <text x="548" y="260" class="gate">hop 3 (g2)</text>
+
+    <g transform="translate(230, 245)">
+      <rect class="box-port" width="115" height="42"/>
+      <text x="57" y="18" text-anchor="middle" class="label">n9_out / n3_out</text>
+      <text x="57" y="32" text-anchor="middle" class="sub">PortOut (Peer UPF)</text>
+    </g>
+    <path class="flow-line" d="M 380 266 L 345 266"/>
+  </g>
+
+  <!-- ================= DIVIDER ================= -->
+  <line x1="30" y1="365" x2="930" y2="365" stroke="var(--border, #d0d7de)" stroke-width="1.5" stroke-dasharray="6 4"/>
+
+  <!-- ================= DOWNLINK CHAIN ================= -->
+  <g transform="translate(30, 390)">
+    <text x="0" y="16" class="label" font-size="15">DOWNLINK PIPELINE (N6 ──▶ N3)</text>
+    <text x="0" y="32" class="sub">Data network IP/ARP ingress, subscriber isolation, rate policing, and GTP-U encapsulation</text>
+
+    <!-- N6 Ingress -->
+    <g transform="translate(0, 50)">
+      <rect class="box-port" width="100" height="48"/>
+      <text x="50" y="22" text-anchor="middle" class="label">n6_in</text>
+      <text x="50" y="38" text-anchor="middle" class="sub">PortInc (N6)</text>
+    </g>
+
+    <!-- l2_sort (WildcardMatch) -->
+    <g transform="translate(130, 50)">
+      <rect class="box" width="110" height="48"/>
+      <text x="55" y="22" text-anchor="middle" class="label">l2_sort</text>
+      <text x="55" y="38" text-anchor="middle" class="sub">WildcardMatch</text>
+    </g>
+    <path class="flow-line" d="M 100 74 L 130 74"/>
+
+    <!-- ARP branch -->
+    <g transform="translate(130, 140)">
+      <rect class="box-hl" width="110" height="44"/>
+      <text x="55" y="18" text-anchor="middle" class="label" fill="var(--accent, #0969da)">arp_n6</text>
+      <text x="55" y="32" text-anchor="middle" class="sub">ArpResponder</text>
+    </g>
+    <path class="flow-accent" d="M 185 98 L 185 140"/>
+    <text x="190" y="122" class="gate">g0 (ARP)</text>
+
+    <g transform="translate(0, 140)">
+      <rect class="box-port" width="100" height="44"/>
+      <text x="50" y="18" text-anchor="middle" class="label">n6_out</text>
+      <text x="50" y="32" text-anchor="middle" class="sub">Reply (own MAC)</text>
+    </g>
+    <path class="flow-accent" d="M 130 162 L 100 162"/>
+
+    <!-- vif_n6 (Vif) -->
+    <g transform="translate(270, 50)">
+      <rect class="box" width="115" height="48"/>
+      <text x="57" y="22" text-anchor="middle" class="label">vif_n6</text>
+      <text x="57" y="38" text-anchor="middle" class="sub">Vif (route_domain)</text>
+    </g>
+    <path class="flow-line" d="M 240 74 L 270 74"/>
+    <text x="245" y="68" class="gate">g1</text>
+
+    <!-- pdr_dl (WildcardMatch / PdrMatch) with direct result -->
+    <g transform="translate(415, 42)">
+      <rect class="box-hl" width="145" height="64"/>
+      <text x="72" y="20" text-anchor="middle" class="label" fill="var(--accent, #0969da)">pdr_dl</text>
+      <text x="72" y="34" text-anchor="middle" class="sub">Classifier / Matcher</text>
+      <rect x="8" y="42" width="129" height="16" class="pill" fill="var(--surface, #ffffff)" stroke="var(--accent, #0969da)"/>
+      <text x="72" y="53" text-anchor="middle" class="tag" fill="var(--accent, #0969da)">result_fields (16B)</text>
+    </g>
+    <path class="flow-line" d="M 385 74 L 415 74"/>
+    <text x="392" y="68" class="gate">g1</text>
+
+    <!-- mt_dl (Meter levels: 2) -->
+    <g transform="translate(590, 42)">
+      <rect class="box" width="140" height="64"/>
+      <text x="70" y="20" text-anchor="middle" class="label">mt_dl</text>
+      <text x="70" y="34" text-anchor="middle" class="sub">Meter (levels: 2)</text>
+      <text x="70" y="52" text-anchor="middle" class="sub">flow_id, ambr_id</text>
+    </g>
+    <path class="flow-accent" d="M 560 74 L 590 74"/>
+
+    <!-- Meter Red Drop -->
+    <g transform="translate(635, 140)">
+      <rect class="box-drop" width="50" height="28"/>
+      <text x="25" y="18" text-anchor="middle" class="tag" fill="var(--error, #cf222e)">DROP</text>
+    </g>
+    <path class="flow-error" d="M 660 106 L 660 140"/>
+    <text x="666" y="124" class="tag" fill="var(--error, #cf222e)">g2 (red)</text>
+
+    <!-- Buffering branch (buffer-path) -->
+    <g transform="translate(415, 140)">
+      <rect class="box" width="145" height="44"/>
+      <text x="72" y="18" text-anchor="middle" class="label">buf</text>
+      <text x="72" y="32" text-anchor="middle" class="sub">PacketStore (BUFF)</text>
+    </g>
+    <path class="flow-warning" d="M 460 106 L 460 140"/>
+    <text x="466" y="125" class="gate" fill="var(--warning, #9a6700)">g1 (buff)</text>
+    <!-- Release into meter directly (no action table) -->
+    <path class="flow-warning" d="M 560 162 L 600 162 L 600 106"/>
+    <text x="565" y="154" class="sub">release</text>
+
+    <!-- cnt_dl (UrrCount) -->
+    <g transform="translate(760, 50)">
+      <rect class="box" width="135" height="48"/>
+      <text x="67" y="22" text-anchor="middle" class="label">cnt_dl</text>
+      <text x="67" y="38" text-anchor="middle" class="sub">UrrCount</text>
+    </g>
+    <path class="flow-line" d="M 730 74 L 760 74"/>
+    <text x="734" y="68" class="gate">g0, g1</text>
+
+    <!-- rt (Router) -->
+    <g transform="translate(760, 140)">
+      <rect class="box" width="135" height="48"/>
+      <text x="67" y="22" text-anchor="middle" class="label">rt</text>
+      <text x="67" y="38" text-anchor="middle" class="sub">Router (hop 2)</text>
+    </g>
+    <path class="flow-line" d="M 827 98 L 827 140"/>
+
+    <!-- enc (GtpuEncap) -->
+    <g transform="translate(760, 230)">
+      <rect class="box" width="135" height="48"/>
+      <text x="67" y="22" text-anchor="middle" class="label">enc</text>
+      <text x="67" y="38" text-anchor="middle" class="sub">GtpuEncap (N3)</text>
+    </g>
+    <path class="flow-line" d="M 827 188 L 827 230"/>
+    <text x="833" y="212" class="gate">g1</text>
+
+    <!-- 5G VN Re-injection path back to pdr_dl -->
+    <path class="flow-line" d="M 760 164 L 720 164 L 720 205 L 360 205 L 360 85 L 415 85"/>
+    <text x="550" y="200" class="gate">rt ogate 4 (5G VN internal re-injection)</text>
+
+    <!-- n3_out (PortOut) -->
+    <g transform="translate(580, 230)">
+      <rect class="box-port" width="135" height="48"/>
+      <text x="67" y="22" text-anchor="middle" class="label">n3_out</text>
+      <text x="67" y="38" text-anchor="middle" class="sub">PortOut (N3 gNB)</text>
+    </g>
+    <path class="flow-line" d="M 760 254 L 715 254"/>
+  </g>
+</svg>

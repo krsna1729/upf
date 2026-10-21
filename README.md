@@ -3,8 +3,9 @@
 One Go controller (`upfd`) speaks PFCP/N4 to the SMF and drives one `bessd`
 through control_v2: the graph is applied once, and every PFCP session change
 becomes one transaction. The UPF-specific datapath is a BESS plugin in
-`datapath/`; the rest of the pipeline is BESS's own classifier, action table,
-meter and router.
+`datapath/`; the rest of the pipeline is BESS's own classifier, meter and
+router. A rule's result writes the action id, the meter stack and the next hop
+straight into metadata; there is no action table in the chain.
 
 ```
                  PFCP/N4 (UDP 8805)
@@ -14,12 +15,17 @@ meter and router.
                                              │  per session: one transaction
                                              ▼
                                     bessd (C++ + upf datapath)
-                                    ├── classifier → {gate, ActionId}
-                                    ├── ActionTable → meters / next hops
+                                    ├── classifier → {gate, action, meters, next hop}
                                     ├── tunnel: GTP-U decap / encap
                                     └── Router (N3 / N6 / N9 domains)
    N3 (gNB) ──▶ bessd ──▶ N6 (data network) ──▶ bessd ──▶ N3
 ```
+
+## Pipeline
+
+<p align="center">
+  <img src="docs/pipeline.svg" alt="UPF Processing Pipeline" width="100%" />
+</p>
 
 ## Onboarding
 

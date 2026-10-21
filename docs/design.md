@@ -123,16 +123,16 @@ next hop's `dst_mac`/`src_mac` into the frame it forwards (BESS D-153) -- so a
 frame leaving N6 names the data network's next hop and the interface it left by
 (`deploy/upf.yaml`'s hop 1, byte-checked by `ci/session-path.sh` at `dump_n6`).
 
-**Two chains, one per direction.** A module has one output gate per path, and a rule
-names an `ActionId` that resolves against the actions resource its table declares
-(D-141). One classifier table and one action table therefore cannot serve both
-directions: the uplink's meter feeds the router toward N6 and the downlink's feeds the
-tunnel toward N3, and a downlink rule's action lives in the downlink table. The graph
-has `pdr_ul → at_ul → mt_ul → rt` and `pdr_dl → at_dl → mt_dl → enc`, each table
-declaring its own chain's actions resource, so every rule's reference is exact.
-`deploy/session-live.yaml` is that graph (module names: the session layer's `Config`).
+**Two chains, one per direction.** A module has one output gate per path: the
+uplink's meter feeds the router toward N6 and the downlink's feeds the tunnel
+toward N3. A rule's result is one record the classifier writes -- the action id,
+the two meter levels and the Router next hop -- so no action table sits between
+the classifier and the meter. The graph has `pdr_ul → mt_ul → rt` and
+`pdr_dl → mt_dl → enc`; each PDR table declares the same result fields.
+`deploy/session-live.yaml` is that graph (module names: the session layer's
+`Config`).
 
-Both results — the gate and the ActionId — come from one lookup
+Both results — the gate and the classifier's result record — come from one lookup
 (`{gate, ActionId}`, the BESS-side item *Classifier result model*).
 
 **The firewall path (opt-in).** A direction may name a BESS `firewall` module
@@ -204,7 +204,7 @@ costs the arms below are expected to confirm:
 | echo (TS 29.281 path management) | one parse and a 67-byte reply, on a message no session's rule matched | 0 |
 
 **State policy (the path to 400G).** What the *controller* writes is shared and read,
-never written, by the packet path: one classifier table and one `ActionTable` per
+never written, by the packet path: one classifier table and its result fields per
 direction (`classifier::ConcurrentMaskedTable`, `dataplane::SlotTable` -- a rule or a
 record exists once for every worker, and a configuration change is published as a new
 generation), so a session's rules cost memory once rather than once per worker. What
@@ -395,7 +395,7 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 
 - The compiler's id spaces (actions, meters, TEIDs) are bounded by
   `upfd -capacity`, and the graph's tables must be at least that wide: the
-  ActionTable and the Meter take `capacity`, the GtpuEncap takes `max_tunnels`
+  Meter takes `capacity`, the GtpuEncap takes `max_tunnels`
   (and the decap's session table its own default), and a module refuses an id
   beyond its limit as invalid -- a mismatch is a session the SMF sees refused,
   not a slow path.
@@ -887,11 +887,11 @@ Four guardrails, because a profile is a strategy selection and not a fork:
 **One gap the profiles make visible**, and it belongs in `generic-firewall`'s
 envelope rather than in a footnote: **our compiler does not emit a firewall
 rule's `action_id` yet.** The stock module writes a per-rule `action_id` into
-packet metadata and an `ActionTable` downstream resolves it (D-141), so stock
+packet metadata, and the rule result carries the meter and next hop, so stock
 BESS *can* carry a range or IPv6 PDR that forwards to its own FAR's next hop —
 but `firewallRule` emits only the verdict and the match, so that path cannot
 serve such a PDR until the compiler emits the id and the graph points the
-firewall's output at the ActionTable it already has. Stated as a limitation
+firewall's own result fields. Stated as a limitation
 with its consequence, and as the next item after the keyed module. Any comment
 claiming a firewall rule cannot carry an id usefully is wrong: each rule
 carries its own.
@@ -951,7 +951,7 @@ structure this design uses, so the arithmetic below is that table at this shape
 | per session | state in BESS | measured bytes | at 10^6 sessions |
 |---|---|---|---|
 | 4 PDR | WildcardMatch rule (one masked table, shared by the workers) | not measured: 16-byte key, mask, value, priority, result, cuckoo body | about 360 MB (2.9 GB only if the table were copied per worker, which it is not) |
-| 4 FAR | ActionTable record (`dataplane::SlotTable<ActionId, Action>`, one cache line per record) | 64 B/object | 256 MB |
+| 4 FAR | classifier result record (the action id, two meter ids, the next hop) | 16 B/rule | 64 MB |
 | 2 QER | `MeterSet` | 64 B state + 8 B pointer | 144 MB (1,048,576 meters measure 64 MiB) |
 | 2 URR | `CounterSet` block | 4 KiB for three counters (each slot per worker: 64 slots) | the wall: 8 GB if each URR owns a full per-worker block |
 | 1 MAR (ATSSS, P1) | per-session record | not measured, small | about 64 MB |
