@@ -224,7 +224,7 @@ modules:
   - name: merge_n6
     mclass: Merge
   - name: l2_sort
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         - {offset: 12, num_bytes: 2}  # the frame's EtherType (Eth)
@@ -341,10 +341,8 @@ resources:
 
   # l2_sort's one rule: ARP (0x0806) is the responder's.
   l2_sort/rules:
-    - key:
-        values: [{value_bin: "CAY="}]
-        masks: [{value_bin: "//8="}]
-      value: {priority: 100, gate: 0}
+    - key: {fields: [{value_bin: "CAY="}]}
+      value: {gate: 0}
 
   # The interface's own ARP entry. The sessions' entries are the driver's: one
   # per session per UE address, claimed and erased with the session.

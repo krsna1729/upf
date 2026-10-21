@@ -91,7 +91,7 @@ modules:
   # be dropped before arp_n6 (the deployment's ARP proxy, and the only answer
   # for the subscriber addresses) could read it.
   - name: l2_sort
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         # The frame's EtherType: Eth (12).
@@ -322,10 +322,8 @@ resources:
   # l2_sort's one rule: ARP (0x0806) is the responder's. Everything else is
   # the interface's (the table's default gate, 1).
   l2_sort/rules:
-    - key:
-        values: [{value_bin: "CAY="}]
-        masks: [{value_bin: "//8="}]
-      value: {priority: 100, gate: 0}
+    - key: {fields: [{value_bin: "CAY="}]}
+      value: {gate: 0}
 
   # The ARP proxy's own entry: the interface's address, so the data network can
   # resolve the link's gateway even before a session exists. The subscriber

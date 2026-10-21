@@ -193,11 +193,11 @@
       <text x="50" y="38" text-anchor="middle" class="sub">PortInc (N6)</text>
     </g>
 
-    <!-- l2_sort (WildcardMatch) -->
+    <!-- l2_sort (ExactMatch) -->
     <g transform="translate(130, 50)">
       <rect class="box" width="110" height="48"/>
       <text x="55" y="22" text-anchor="middle" class="label">l2_sort</text>
-      <text x="55" y="38" text-anchor="middle" class="sub">WildcardMatch</text>
+      <text x="55" y="38" text-anchor="middle" class="sub">ExactMatch</text>
     </g>
     <path class="flow-line" d="M 100 74 L 130 74"/>
 

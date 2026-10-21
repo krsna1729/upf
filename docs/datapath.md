@@ -52,7 +52,7 @@ nothing reads is never given an offset (`core/metadata.cc`), which is why
 
 ```mermaid
 flowchart TB
-    n6in["n6_in · PortInc"] -->|0| l2["l2_sort · WildcardMatch"]
+    n6in["n6_in · PortInc"] -->|0| l2["l2_sort · ExactMatch"]
     l2 -->|"ogate 0 · ARP"| arp["arp_n6 · ArpResponder"]
     arp -->|0| n6out["n6_out · PortOut → N6"]
     l2 -->|"ogate 1 · IP"| vif["vif_n6 · Vif"]
