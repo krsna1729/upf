@@ -21,8 +21,12 @@ func liveConfig() Config {
 	cfg := testConfig()
 	cfg.TEIDTable = "teid"
 	cfg.Up = Direction{
-		PDRTable:  "pdr_ul",
-		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, QFI},
+		PDRTable: "pdr_ul",
+		// The tunnel the packet arrived on joins the key (`upf_teid`, the
+		// decap's own attribute): the graph's table reads it, and a second
+		// session whose UE address and flows coincide with the first's cannot
+		// take the first's rules.
+		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI},
 		Meters:    "mt_ul",
 		Counters:  "cnt_ul",
 		NextHop:   1,

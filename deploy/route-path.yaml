@@ -118,6 +118,10 @@ modules:
         - {offset: 23, num_bytes: 1}  # protocol
         - {offset: 34, num_bytes: 2}  # source port
         - {offset: 36, num_bytes: 2}  # destination port
+        # The tunnel the packet arrived on, which the decap read (5.2.1's
+        # session look-up before the PDR look-up: a packet from session A's
+        # tunnel carrying session B's source address must not take B's rule).
+        - {attr_name: upf_teid, num_bytes: 4}
         # The QoS flow the packet belongs to, as the decap read it out of the
         # G-PDU's PDU Session Container (TS 29.244 8.2.89): what tells a
         # session's several uplink PDRs for one F-TEID apart. It is last, so the

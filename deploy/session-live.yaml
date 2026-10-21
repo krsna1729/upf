@@ -15,6 +15,10 @@
 modules:
   - name: decap0
     mclass: GtpuDecap
+  - name: mt_md
+    mclass: MetadataTest
+    arg:
+      read: {upf_teid: 4}
   - name: teid
     mclass: ExactMatch
     arg:
@@ -32,6 +36,10 @@ modules:
         - {offset: 23, num_bytes: 1}  # protocol
         - {offset: 34, num_bytes: 2}  # source port
         - {offset: 36, num_bytes: 2}  # destination port
+        # The tunnel the packet arrived on, which the decap read (5.2.1's
+        # session look-up before the PDR look-up: a packet from session A's
+        # tunnel carrying session B's source address must not take B's rule).
+        - {attr_name: upf_teid, num_bytes: 4}
         # The QoS flow the packet belongs to, as the decap read it out of the
         # G-PDU's PDU Session Container (TS 29.244 8.2.89): what tells a
         # session's several uplink PDRs for one F-TEID apart. It is last, so the
@@ -93,7 +101,8 @@ modules:
 
 connections:
   - {upstream: teid, downstream: decap0}
-  - {upstream: decap0, downstream: pdr_ul}
+  - {upstream: decap0, downstream: mt_md}
+  - {upstream: mt_md, downstream: pdr_ul}
   - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment

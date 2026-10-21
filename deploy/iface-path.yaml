@@ -146,6 +146,7 @@ modules:
         - {offset: 23, num_bytes: 1}  # protocol
         - {offset: 34, num_bytes: 2}  # source port
         - {offset: 36, num_bytes: 2}  # destination port
+        - {attr_name: upf_teid, num_bytes: 4}
         - {attr_name: qfi, num_bytes: 1}
       max_tuples: 16
       result_fields:
