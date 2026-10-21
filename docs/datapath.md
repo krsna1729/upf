@@ -52,10 +52,9 @@ nothing reads is never given an offset (`core/metadata.cc`), which is why
 
 ```mermaid
 flowchart TB
-    n6in["n6_in · PortInc"] -->|0| l2["l2_sort · ExactMatch"]
-    l2 -->|"ogate 0 · ARP"| arp["arp_n6 · ArpResponder"]
-    arp -->|0| n6out["n6_out · PortOut → N6"]
-    l2 -->|"ogate 1 · IP"| vif["vif_n6 · Vif"]
+    n6in["n6_in · PortInc"] --> arp["arp_n6 · UpfArpResponder<br/>Approach B"]
+    arp -->|"gate 0 · ARP reply"| n6out["n6_out · PortOut → N6"]
+    arp -->|"gate 1 · IPv4"| vif["vif_n6 · Vif"]
     vif -->|1| pdr["pdr_dl · WildcardMatch<br/>key: inner 5-tuple"]
     pdr -->|0| meter["mt_dl · Meter<br/>two levels"]
     pdr -->|"1 · BUFF (buffer-path only)"| cb["cnt_buf · UrrCount"]
@@ -91,9 +90,9 @@ lane can byte-check it.
 
 | graph | used by | what differs |
 |---|---|---|
-| `deploy/upf.yaml` | the deployment | PMD ports `n3`/`n6` (one rx queue each), the N6 ingress' first stop (`l2_sort`: an ARP frame is diverted to `arp_n6` before any interface sees it, because a request names the broadcast MAC no `Vif` matches, and the IP frames go on to the interface), the responder that answers for the interface's own address and for every live session's UE address (`arp_n6`, our `UpfArpResponder`), the N6 interface (`vif_n6`), the Router's hop count and next-hop table, the uplink tunnel and the 5G VN re-injection as `rt` gates 2 and 4, `MetadataTest` after the decap, the marker port; **no buffering branch** |
-| `deploy/iface-path.yaml` | `ci/iface-path.sh` | no NIC: Sources, Rewrites, Dumps and Sinks, one stream per interface-grammar case. Both chains, the five egress gates (`rt/next_hops` 1-5: the data network's hop with its L2 pair, the access side's, a tunnel out of an instance, the service LAN's, the 5G VN re-injection), the ARP branch (`l2_sort` -> `arp_n6` -> a Dump) and the re-injection (`rt` gate 4 -> `pdr_dl`). One session carries two uplink PDRs that differ only in destination -- the general port-53 filter and the specific 10.46.0.2 one -- so the same TEID's frames leave by the data network's hop and by an N9 tunnel (ULCL). One session carries *two* addresses (its downlink PDRs' hashes collide in the responder's table), both answered and both erased. Its instances are the lane's own: `internet` (plain, tunnel and service-LAN hops) and `vn` (the re-injection) |
-| `deploy/session-path.yaml` | `ci/session-path.sh`, `ci/n4-path.sh`, `ci/session-report.sh` | Sources `src_up`/`src_dn`, `Rewrite`, `Dump`, `Sink`; the deployment's N6 side (`vif_n6`, `l2_sort`, `sink_other`, `merge_n6`, `dump_n6`); frames fixed so a test can byte-check them; no buffering branch |
+| `deploy/upf.yaml` | the deployment | PMD ports `n3`/`n6` (one rx queue each), the N6 ingress' first stop (`arp_n6`: Approach B answers ARP before the Vif and forwards IPv4 on gate 1), the responder that answers for the interface's own address and every live session's UE address (`arp_n6`, our `UpfArpResponder`), the N6 interface (`vif_n6`), the Router's hop count and next-hop table, the uplink tunnel and the 5G VN re-injection as `rt` gates 2 and 4, `MetadataTest` after the decap, the marker port; **no buffering branch** |
+| `deploy/iface-path.yaml` | `ci/iface-path.sh` | no NIC: Sources, Rewrites, Dumps and Sinks, one stream per interface-grammar case. Both chains, the five egress gates (`rt/next_hops` 1-5: the data network's hop with its L2 pair, the access side's, a tunnel out of an instance, the service LAN's, the 5G VN re-injection), the Approach B ARP/IPv4 split (`arp_n6`: gate 0 to the ARP dump and N6 port, gate 1 to `vif_n6`) and the re-injection (`rt` gate 4 -> `pdr_dl`). One session carries two uplink PDRs that differ only in destination -- the general port-53 filter and the specific 10.46.0.2 one -- so the same TEID's frames leave by the data network's hop and by an N9 tunnel (ULCL). One session carries *two* addresses (its downlink PDRs' hashes collide in the responder's table), both answered and both erased. Its instances are the lane's own: `internet` (plain, tunnel and service-LAN hops) and `vn` (the re-injection) |
+| `deploy/session-path.yaml` | `ci/session-path.sh`, `ci/n4-path.sh`, `ci/session-report.sh` | Sources `src_up`/`src_dn`, `Rewrite`, `Dump`, `Sink`; the deployment's N6 side (`arp_n6`, `vif_n6`, `sink_other`, `merge_n6`, `dump_n6`), with ARP replies and router frames sharing the port and IPv4 routed through Vif; frames fixed so a test can byte-check them; no buffering branch |
 | `deploy/route-path.yaml` | `ci/route-path.sh` | `session-path.yaml` with the Router in `ROUTE_MODE_DESTINATION`: two FIBs (uplink domain 0, the N6 Vif's domain 1), a route in each, `SetMetadata` writing the uplink's domain 0, and no `UpdateTTL` (the Router decrements). The same frames and byte checks prove the FIB chose the gate, not the action's hop |
 | `deploy/buffer-path.yaml` | `ci/buffer-path.sh` | `session-path.yaml` **plus** `cnt_buf`/`buf` and the `pdr_dl` ogate-1 connection; needs a daemon with BESS's packet store key attribute |
 | `deploy/pdrmatch-buffer-path.yaml` | `PROFILE=custom ci/buffer-path.sh` | `pdrmatch-path.yaml` **plus** the same buffering branch as `buffer-path.yaml`, in the same place (the placement is TS 29.244 5.2.4.2's, so both profiles share it) |
@@ -321,13 +320,13 @@ under the engine's lock, and a replaced entry retired, not freed, while a reader
 may still hold it (`arp_responder_resource.h` carries the reasoning; the idiom
 is `pdr_match_resource.h`'s).
 
-* **The packet path** rewrites the request in place into the reply (the fork's
+* **The packet path** passes IPv4 frames out `ip_gate`. On gate 0, an ARP
+  request for a held address is rewritten in place into the reply (the fork's
   own, `core/modules/arp_responder.cc`): the opcode flips, the Ethernet
   addresses swap, the requester's hardware address and address become the
-  reply's target, and the entry's become its sender. It answers a request only;
-  a non-ARP frame, a reply, and a request whose target address no entry holds
-  are dropped, so **the module belongs on an ARP branch and nowhere else** --
-  `deploy/upf.yaml`'s `l2_sort` is that branch, ahead of the `Vif`.
+  reply's target, and the entry's become its sender. ARP replies, unknown ARP
+  requests, and other packet types are dropped; the module sits before the Vif
+  on N6 ingress, not on an ARP-only branch.
 * **The entries** are the deployment's own address (one resource line in the
   graph) and one per live session per UE address, written and erased in the
   session's own transaction (`internal/session/arp.go`), so a refused message
@@ -359,7 +358,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 |---|---|---|
 | `WildcardMatch` | both PDR tables, the TEID table | `action_resource: <at_*/actions>` (D-141: the rule's action id goes to the packet's `action_id`), `fields` = the graph's key in the order the compiler's `PDRFields` names, `max_tuples` |
 | `WildcardMatch` result | one per PDR table | `result_fields` writes the action id, the two meter levels and the next hop from the rule's `result`; the Meter and Router read them |
-| `Router` | one, both directions | hop mode (the default): `<module>/next_hops`, the egress gate an action names; destination mode (`ROUTE_MODE_DESTINATION`, `-route-mode=destination`): `<module>/routes`, `<module>/groups` and the packet's own `route_domain`. Both modes write a resolved hop's `dst_mac`/`src_mac` (BESS D-153) and the IPv4 hop count: one decrement each way, the checksum kept right, a packet arriving with TTL 1 dropped. The drop is silent -- no ICMP Time Exceeded; the Router's `ttl_expired` counter records it. No graph carries `UpdateTTL`; doing both would decrement twice. `deploy/upf.yaml` wires gate 2 to the encap for an uplink tunnel and gate 4 back into `pdr_dl` for the 5G VN re-injection |
+| `Router` | one, both directions | hop mode (the default): `<module>/next_hops`, the egress gate an action names; destination mode (`ROUTE_MODE_DESTINATION`, `-route-mode=destination`): `<module>/routes`, `<module>/groups` and the packet's own `route_domain`. Both modes write a resolved hop's `dst_mac`/`src_mac` (BESS D-153) and the IPv4 hop count: one decrement each way, the checksum kept right, a packet arriving with TTL 1 dropped. The drop is silent -- no ICMP Time Exceeded; the Router's `ttl_expired` counter records it. In unconstrained carrier deployments, outer transport routing occurs post-encapsulation (`enc -> Router`) on the outer gNB/peer destination IP, allowing dynamic ARP resolution and preserving inner subscriber TTL across multi-hop backhaul. `deploy/upf.yaml` wires gate 2 to the encap for an uplink tunnel and gate 4 back into `pdr_dl` for the 5G VN re-injection, supporting all 6 canonical 3GPP modes simultaneously |
 | `SetMetadata` | the uplink of `route-path.yaml` | writes `route_domain: 0` after the decap. The Router reads the domain on both directions, and BESS marks a read attribute with an unwritten upstream path unreadable; the downlink's `Vif` writes domain 1 |
 | `PMDPort` | `n3`, `n6`, and `upf_port` (a veth) | `num_rx_queues: 1` each in the deployment's graph; RSS and one worker per queue are the scale path. The one-port split (per-pattern RSS, `L3_SRC_ONLY` uplink / `L3_DST_ONLY` downlink) is designed in `docs/design.md`, "N3, N6, N9": `deploy/veth-port.yaml` wires it over a software device (one PMD port, four queues, a `Vif` with the three interfaces) and `ci/veth-port.sh` proves what a veth can prove of it, while the placement measurement is what a NIC is still needed for (`docs/datapath.md`) |
 | `UnixSocketPort` | `cp_marker` | `SOCK_SEQPACKET`: one write from `upfd` is one End Marker frame |
@@ -367,7 +366,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | `deploy/meter-compose.yaml` / `ci/meter-compose.sh` | the composition probe: `classifier -> mt (levels: 2)`, two meter ids in one result record, proving that the stack polices the flow's bucket then the session's |
 | `Meter` | one per direction | `<module>/meters`, the QER's committed and peak rate; a closed gate compiles to the drop gate. The model is a two-rate three-colour meter: `committed_rate`/`peak_rate` are the QER's GBR/MBR and the bursts its Averaging Window, and the packet leaves on the gate that is its colour — 0 green, 1 yellow (between the guarantee and the ceiling), 2 red. The graphs connect 0 and 1 to the chain and leave 2 unwired, which is the drop; an unwired gate has no Track hook, so red's drops are read from the module's own state rather than `bess_gate_packets_total` |
 | `PacketStore` | the buffering branch (`buffer-path.yaml`) | `key_attrs: ["action_id"]`, `max_packets`, `max_packets_per_flow`, `timeout_ms`; one owner task, any number of workers. `release`/`drop`/`clear` are commands that enqueue into the store's own request ring (`Command::THREAD_SAFE` since BESS `cdeb4e77`), and its `flows` table is live configuration (`requires_paused_workers: false`), so neither a command nor a flow write is refused with EBUSY or RESOURCE_BUSY and nothing stops the datapath; a command is **accepted, not completed** -- the store's owner task applies it on a later run -- so a caller that needs the effect reads it back (`ps/flows`, the drop and release counters, `GetDesc`). A flow the store holds nothing for is a no-op (ENOENT is gone; the only refusal left is ENOSPC, a full request ring), an upsert or an erase moves no packet, and an erase removes configuration only -- `drop` is what frees what a flow holds (BESS's note: `packet_store: the flow key is a configured attribute, not a fixed pair`, 96d22a8f). The `flows` entries are the SMF's own numbers: `internal/session` writes one per buffering rule (`writeFlowEntry`), keyed by the rule's ActionId, with `timeout_ns` from 8.2.29's DL Buffering Duration and `max_packets_per_flow` from 8.2.30's Suggested Packet Count, each left out where the SMF named none; a modification's Update BAR rewrites it, a deletion erases it, and the startup sweep names the table. BESS's `LimitsFor` resolves it per flow; the store then enforces the cap on every arrival (`StoreBatch`) and, when `total_packets_` reaches `max_packets`, ages each flow's packets past its `timeout_ns` out with `bess::PacketFree` in `EvictExpired` -- a silent discard (no gate, no metric; only `GetDesc`'s stored count falls), distinct from the `drop` command's counted free and from the gate-1 eviction the cap uses |
-| `Vif` | `deploy/upf.yaml` (the N6 interface), `deploy/veth-port.yaml` | the module that splits one port into the reference points: an interface per reference point (`(VLAN, destination MAC)`, ARP answered for its address), each writing `vif_id`/`route_domain` into the packet and sending it out its own gate, so a PDR key can carry the domain the frame arrived with (`docs/design.md`, "N3, N6, N9"; `ci/veth-port.sh` proves the split and the rule selected by it). The deployment uses it for its one N6 port (`vif_n6`): the data network's frames are the interface's, and the interface's own frames leave by the port through `l2_sort` instead of entering the downlink chain (`ci/session-path.sh` runs the frames through it). The interface's *own* ARP answer is inert in `deploy/upf.yaml`, where `l2_sort` diverts ARP to `arp_n6` first -- that module answers for the interface's address and for every live session's, so the Vif's answer is left to the graphs that put it first (`core/modules/vif_test.cc` covers it) |
+| `Vif` | `deploy/upf.yaml` (the N6 interface), `deploy/veth-port.yaml` | the module that splits one port into the reference points: an interface per reference point (`(VLAN, destination MAC)`, ARP answered for its address), each writing `vif_id`/`route_domain` into the packet and sending it out its own gate, so a PDR key can carry the domain the frame arrived with (`docs/design.md`, "N3, N6, N9"; `ci/veth-port.sh` proves the split and the rule selected by it). In the UPF graph, `arp_n6` handles ARP before `vif_n6`, so Vif receives IPv4 on gate 1 and writes the interface metadata; its own ARP answer remains used by graphs that put Vif first |
 
 ## Framework and library surface we use
 
@@ -676,9 +675,9 @@ out that interface's output gate, writing `vif_id` and `route_domain` into the
 packet's metadata on the way. The three interfaces are the manifest's, each
 with its own MAC, address, route domain and gate; the deployment's own graph
 uses one for its single N6 port (`deploy/upf.yaml`'s `vif_n6`: the data
-network's frames are the interface's) with `l2_sort` keeping the interface's
-own frames -- the ARP answer, which is not IP -- on the port instead of the
-downlink chain.
+network's frames are the interface's) with `arp_n6` before it: the responder
+answers ARP to gate 0 (the N6 port) and passes IPv4 to gate 1 (the Vif), so
+Vif's own ARP answer is bypassed and no ARP reply enters the downlink chain.
 
 Two facts a graph must respect:
 

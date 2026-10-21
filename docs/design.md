@@ -61,6 +61,85 @@ The datapath therefore never chases relations: the PFCP side resolves
 `PDR → QER/FAR` once, at programming time, and the packet carries an
 `ActionId` that names the resolved object graph.
 
+### Control and Reporting Pipeline: Dataplane ──▶ Controller ──▶ SMF
+
+Complementary architecture: dataplane events, `upfd` state handlers, and PFCP report messages (TS 29.244):
+
+```mermaid
+flowchart LR
+    subgraph BESS["1. Dataplane Event (BESS)"]
+        direction TB
+        E1["<b>1. First DL packet in IDLE</b><br/>FAR apply_action: BUFF<br/>pkt queued in PacketStore"]
+        E2["<b>2. URR Quota / Threshold Hit</b><br/>UrrCount (cnt_ul / cnt_dl)<br/>VOLQU, TIMQU, VOLTH, START/STOP"]
+        E3["<b>3. GTP-U Error Indication</b><br/>Peer gNB/UPF lost tunnel<br/>GtpuResponder intercepts Msg 26"]
+        E4["<b>4. GTP-U End Marker Received</b><br/>Handover path switch<br/>ingress_ul detects Type 254"]
+        E5["<b>5. GTP-U Path Failure</b><br/>Echo Req timeout &amp; max retries<br/>GtpuResponder peer unreachable"]
+        E6["<b>6. FAR Dest = CP-Function</b><br/>Subscriber DHCP / IPv6 RA<br/>PDR matches signaling SDF"]
+    end
+
+    subgraph UPFD["2. UPF Controller (upfd)"]
+        direction TB
+        C1["<b>session.Compiler.ddnSent</b><br/>One notification per episode<br/>Arms buffering release hook"]
+        C2["<b>report.go (URR Reader)</b><br/>Reads BESS counter registers<br/>Calculates consumed volume/time"]
+        C3["<b>erir.go (Peer+TEID Tracker)</b><br/>Correlates remote TEID &amp; peer<br/>Deduplicates repeated errors"]
+        C4["<b>endmarker.go (EMPU handler)</b><br/>Matches session &amp; arrival interface<br/>Guards against stale echoes"]
+        C5["<b>n4.Server (Node Health)</b><br/>Tracks peer path failure<br/>Node-level state, not session"]
+        C6["<b>CP Punting Tunnel Worker</b><br/>Decapsulates &amp; queues payload<br/>Encapsulates into N4-u stream"]
+    end
+
+    subgraph SMF["3. SMF N4 Report Message"]
+        direction TB
+        M1["<b>Downlink Data Report</b><br/>PFCP Session Report (PDR ID)<br/>SMF pages UE &amp; switches to FORW"]
+        M2["<b>Usage Report</b><br/>PFCP Session Report (URR ID)<br/>Volume/duration accounting &amp; quota"]
+        M3["<b>Error Indication Report</b><br/>PFCP Session Report (F-TEID)<br/>SMF initiates bearer repair/delete"]
+        M4["<b>End Marker Reception Report</b><br/>PFCP Session Report (PDR ID)<br/>SMF confirms path switch to RAN"]
+        M5["<b>User Plane Path Failure Report</b><br/>PFCP Node Report (Peer IP)<br/>SMF reroutes sessions around node"]
+        M6["<b>N4-u User Data / G-PDU</b><br/>GTP-U tunnel to SMF F-TEID<br/>SMF internal DHCP / IP server"]
+    end
+
+    E1 --> C1 --> M1
+    E2 --> C2 --> M2
+    E3 --> C3 --> M3
+    E4 --> C4 --> M4
+    E5 --> C5 --> M5
+    E6 --> C6 --> M6
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DP as Dataplane (BESS)
+    participant UPFD as UPF Controller (upfd)
+    participant SMF as Control Plane (SMF)
+
+    Note over DP,SMF: Event 1: Downlink Data Notification (Paging)
+    DP->>UPFD: First DL packet buffered in PacketStore
+    UPFD->>SMF: PFCP Session Report Request (Downlink Data Report)
+    SMF->>UPFD: PFCP Session Modification Request (FAR: FORW, apply buffered)
+    UPFD->>DP: Release buffered packets to encap/gNB
+
+    Note over DP,SMF: Event 2: URR Quota / Threshold Monitoring
+    DP->>UPFD: UrrCount exceeds threshold (VOLTH / VOLQU)
+    UPFD->>SMF: PFCP Session Report Request (Usage Report: Volume/Duration)
+    SMF->>UPFD: PFCP Session Modification Request (Grant new quota / Terminate)
+
+    Note over DP,SMF: Event 3: GTP-U Error Indication (Broken Remote Tunnel)
+    DP->>UPFD: GtpuResponder catches Error Indication (remote TEID)
+    UPFD->>SMF: PFCP Session Report Request (Error Indication Report: F-TEID)
+
+    Note over DP,SMF: Event 4: Handover End Marker Switch
+    DP->>UPFD: End Marker (Type 254) arrives on old path
+    UPFD->>SMF: PFCP Session Report Request (End Marker Reception Report)
+
+    Note over DP,SMF: Event 5: GTP-U Path Failure (Echo Heartbeat Timeout)
+    DP->>UPFD: Peer Echo Request unanswered after N retries
+    UPFD->>SMF: PFCP Node Report Request (User Plane Path Failure Report)
+
+    Note over DP,SMF: Event 6: CP-Function Punting (DHCP / Router Solicitation)
+    DP->>UPFD: PDR matches signaling packet (Dest = CP-Function)
+    UPFD->>SMF: Forward over N4-u GTP-U tunnel to SMF F-TEID
+```
+
 ## The packet path, and how its cost is proven
 
 The mapping above is a claim about *structure*. This section is the claim about
@@ -599,16 +678,13 @@ module and the MAC) is where a session's UE address is answered from. The packet
 half is the vif's `route_domain` -- a rule's key can carry the domain only where
 something writes it into the packet -- and it is in: `deploy/veth-port.yaml`
 declares the three interfaces on one port and the tables that read what they
-write. The deployed graph wires the same module for its one N6 port: `vif_n6`
-matches the data network's frames by `(VLAN, MAC)`, and `l2_sort` sorts by
-EtherType ahead of it -- an ARP request names the broadcast MAC that no `Vif`
-matches, so it is diverted to `arp_n6` (`upf_arp_responder`, this repo's own
-module, `docs/datapath.md`), which answers for the interface's own address *and*
-for every live session's UE address, while the IP frames continue to the
-interface and its downlink chain. The `Vif`'s own ARP answer is inert in that
-graph (the graphs that put a `Vif` first still use it), and nothing there reads
-the domain it writes (`deploy/upf.yaml`; `ci/session-path.sh` and
-`ci/iface-path.sh` send the frames through it). A deployment that has no vif still tells two instances apart by what the
+write. The deployed graph puts `arp_n6` (`UpfArpResponder`, this repo's own
+module, `docs/datapath.md`) before `vif_n6`: it answers ARP for the interface's
+own address and every live session's UE address on gate 0, and passes IPv4 to
+the Vif on gate 1. The Vif writes the route domain for the downlink chain; its
+own ARP answer is bypassed in this graph. Nothing here reads the domain it
+writes (`deploy/upf.yaml`; `ci/session-path.sh` and `ci/iface-path.sh` send the
+frames through it). A deployment that has no vif still tells two instances apart by what the
 ingress writes on its own: on the uplink the tunnel the G-PDU arrived on
 (`upf_teid`, the decap's own attribute), which is
 what `deploy/session-instances.yaml` declares and `ci/session-instances.sh`
@@ -617,6 +693,79 @@ figures of the arm that produced them. That is a fact about the key, not luck:
 two instances serving one subscriber prefix are two rules because the tunnel
 they arrived on is part of what selects them, and a graph whose key leaves it
 out is refused the second claim (see "Restart and failure semantics").
+
+### Canonical Modes Coexistence and Unconstrained Carrier Transport
+
+The deployment supports the simultaneous coexistence of all six 3GPP canonical modes on a single running `upfd` instance without mutual exclusivity:
+
+1. **Mode 1 (Standard PSA: N3 <-> N6)**: Uplink decapsulated to plain N6; Downlink matched and encapsulated to gNB F-TEID.
+2. **Mode 2 (I-UPF / UL CL: N3 <-> N9, N3 -> N6)**: Uplink branching by destination IP/prefix between local N6 and peer N9 tunnel; Downlink from peer N9 tunneled back to gNB.
+3. **Mode 3 (Chained PSA: N9 <-> N6)**: Uplink from peer UPF decapsulated and routed to N6; Downlink from N6 encapsulated over N9 to peer UPF.
+4. **Mode 4 (Cascaded I-UPFs: N9 <-> N9)**: Intermediate UPF bridging between two peer UPFs with bidirectional GTP-U tunnel adaptation.
+5. **Mode 5 (5G VN Inter-UE LAN Loopback)**: Downlink traffic targeting another UE on the same 5G LAN is re-injected via the internal loopback gate back into the subscriber-side classifier (`pdr_dl`).
+6. **Mode 6 (Indirect Data Forwarding)**: Handover in-flight packets forwarded across access or core tunnels via FARs specifying `Outer Header Creation` with `DestInterface = Access` or `Core`.
+
+```mermaid
+flowchart TD
+    subgraph INGRESS["Multi-Port / Multi-VIF Ingress"]
+        P_N3["PMDPort 0 (N3 Access)"] --> M_GTPU["Merge"]
+        P_N9["PMDPort 1 (N9 Transit)"] --> M_GTPU
+        P_SHR["PMDPort 2 (VLAN Trunk)"] --> VIF["Vif Demux"]
+        VIF -->|"VLAN 100"| M_GTPU
+        VIF -->|"VLAN 300"| ARP_N6["arp_n6 (ARP Proxy)"]
+        P_N6["PMDPort 3 (Plain N6)"] --> ARP_N6
+    end
+
+    M_GTPU --> DEC["ingress_ul (GTP-U Decap & Admission)"]
+    DEC -->|"gate 0 (UL)"| PDR_UL["pdr_ul (Uplink Matcher)"]
+    DEC -->|"gate 1 (N9 DL)"| PDR_DL["pdr_dl (Downlink Matcher)"]
+    ARP_N6 -->|"IPv4 payload"| PDR_DL
+
+    subgraph SIX_MODES["6 Canonical Forwarding Modes"]
+        PDR_UL -->|Mode 1: PSA| RT_N6["Hop 1: Plain N6 Exit"]
+        PDR_UL -->|Mode 2: UL CL / I-UPF| ENC_N9["Hop 3: N9 Core Encap &rarr; Peer UPF"]
+        PDR_UL -->|Mode 6: Indirect Forward UL| ENC_N3_UL["Hop 2: N3 Access Encap &rarr; Target gNB"]
+        
+        PDR_DL -->|Mode 1, 2: Access DL| ENC_N3_DL["Hop 2: N3 Access Encap &rarr; gNB"]
+        PDR_DL -->|Mode 3, 4: Chained PSA / Cascaded| ENC_N9_DL["Hop 3: N9 Core Encap &rarr; Peer UPF"]
+        PDR_DL -->|Mode 5: 5G VN LAN Loopback| REINJECT["Hop 5: Gate 4 Re-injection &rarr; pdr_dl"]
+    end
+```
+
+#### Unconstrained Transport Routing (Post-Encap Transport FIB)
+In standard carrier networks, placing the Router strictly *before* encapsulation forces the controller to hardcode static L2 MAC addresses in every session's tunnel record and prevents dynamic multi-hop backhaul routing.
+
+For full carrier fidelity:
+- **Inner Policy Routing**: Occurs at the PDR/FAR stage to select destination interface, QoS meters, and counter resources.
+- **Outer Transport Routing**: Occurs *after* `GtpuEncap`. Once wrapped in outer GTP-U and IP headers, the packet is routed according to its outer destination IP (gNodeB or peer UPF). The transport router looks up the gateway in the transport FIB, decrements the outer transport TTL (preserving the inner subscriber TTL), and resolves next-hop MACs dynamically via ARP/ND.
+
+
+```mermaid
+flowchart TD
+    subgraph SESSION_FORWARDING["1. Session Forwarding Decision (Inner PDU)"]
+        PDR["PDR Match"] --> FAR["FAR Decision (Destination Interface)"]
+        
+        FAR -->|"Dest = N6 (Plain Forward)"| RT_INNER["Inner IP Router / FIB<br/>(Route on Inner Dest IP)"]
+        FAR -->|"Dest = Access (N3) / Core (N9)<br/>Outer Header Creation"| ENC["enc (GtpuEncap)<br/>Prepend GTP-U + Outer IPv4 (gNB/Peer IP)"]
+        FAR -->|"Dest = 5G VN Internal"| REINJECT["Re-injection Loopback &rarr; pdr_dl"]
+    end
+
+    subgraph TRANSPORT_ROUTING["2. Transport Routing & Interface Selection (Outer IP)"]
+        ENC --> RT_OUTER["Transport Router / Multi-FIB<br/>Longest Prefix Match on Outer gNB/Peer IP<br/>Decrements Outer Transport TTL<br/>Resolves Gateway L2 MAC via Dynamic ARP"]
+        
+        RT_INNER --> PMD_N6["PMD Port (N6 Internet)"]
+        RT_INNER --> VIF_IMS["Vif (VLAN 400 IMS)"]
+        
+        RT_OUTER -->|"Next Hop: gNB direct"| PMD_N3["PMD Port 0 (N3 gNB)"]
+        RT_OUTER -->|"Next Hop: L3 Gateway"| VIF_N3_VLAN["Vif (VLAN 100 Carrier Backhaul)"]
+        RT_OUTER -->|"Next Hop: Peer UPF"| PMD_N9["PMD Port 1 (N9 Transit)"]
+    end
+```
+#### Multi-PMD and VIF Isolation Harness (`ci/veth-port.sh`)
+To verify unconstrained operation without requiring physical hardware:
+- `deploy/veth-port.yaml` and `ci/veth-port.sh` configure a DPDK `PMDPort` over Linux `veth` interfaces in promiscuous mode with 4 receive/transmit queues.
+- A `Vif` demuxes traffic across N3, N9, and N6 interfaces, writing distinct `route_domain` attributes into packet metadata.
+- DPDK telemetry confirms multi-queue RSS spread, promiscuous mode operation, and domain-isolated PDR rule matching across instances sharing identical subscriber IP subnets.
 
 **A plain NIC cannot put both halves of a session on one worker, and the port
 count is not the reason.** The uplink arrives as GTP-U and the downlink as the

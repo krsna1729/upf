@@ -76,7 +76,7 @@ this UPF's.
 | Claims | The entry is a compiler claim, like a rule key: two sessions cannot answer for the same address on one interface; the second is refused with cause 73. |
 | Lifecycle | The entry is written when a subscriber-side PDR names the address and erased when that PDR or the session goes. A session with downlink PDRs on two instances answers on both. |
 | IPv6 | No entry is written for an IPv6 address; no ND responder is implemented. |
-| Placement | The fork's `ArpResponder` drops every non-ARP frame, so it belongs on the ARP branch of the N6 ingress (`l2_sort -> arp_n6 -> N6 port`) and nowhere on the IP path (`deploy/upf.yaml`, `ci/iface-path.sh`). |
+| Placement | `UpfArpResponder` answers ARP on gate 0 and passes IPv4 on `ip_gate`; it must sit on N6 ingress before the Vif (`deploy/upf.yaml`, `ci/iface-path.sh`). Other packet types are dropped. |
 
 TS 23.501 6.2.3 makes the ARP/ND responder a UPF function for Ethernet PDU
 sessions. For IP PDU sessions this is not an SMF-visible function at all: it is
