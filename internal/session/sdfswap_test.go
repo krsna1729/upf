@@ -42,7 +42,6 @@ func TestAnUplinkPDRReadsTheDownlinkFormFilterSwapped(t *testing.T) {
 		res  string
 	}{
 		{"firewall", firewallConfig("fw_ul", ""), "fw_ul/rules"},
-		{"pdrmatch", pdrMatchConfig("pdr_match_ul"), "pdr_match_ul/rules"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &recorder{}
@@ -50,17 +49,7 @@ func TestAnUplinkPDRReadsTheDownlinkFormFilterSwapped(t *testing.T) {
 			if got := cause(t, c.Establish(uplinkWithDLForm(dlForm))); got != ie.CauseRequestAccepted {
 				t.Fatalf("the establishment answered cause %d", got)
 			}
-			var rule map[string]any
-			for _, ch := range changesFor(rec.last(), tc.res) {
-				if tc.name == "firewall" {
-					rule = firewallPolicy(t, rec.last(), tc.res)[0]
-				} else {
-					rule = pdrMatchRules(t, ch)[0]
-				}
-			}
-			if rule == nil {
-				t.Fatalf("no rule written for %s", tc.res)
-			}
+			rule := firewallPolicy(t, rec.last(), tc.res)[0]
 			if got := rule["src_ip"]; got != "10.45.0.6/32" {
 				t.Errorf("src_ip is %v, want the UE's host route (the filter's `to assigned`, swapped)", got)
 			}

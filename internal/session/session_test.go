@@ -249,6 +249,17 @@ func rules(changes []bess.Change) []rule {
 	return out
 }
 
+// changesFor is every change of a transaction naming one resource.
+func changesFor(changes []bess.Change, resource string) []bess.Change {
+	var out []bess.Change
+	for _, ch := range changes {
+		if ch.Resource == resource {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
 type rule struct {
 	change bess.Change
 	values []map[string]any
@@ -262,7 +273,8 @@ func (r rule) mask(i int) []byte { b, _ := r.masks[i]["value_bin"].([]byte); ret
 func (r rule) value(i int) []byte { b, _ := r.values[i]["value_bin"].([]byte); return b }
 
 // result is the classifier's result record: what a matching packet carries
-// into the downstream modules (action id, two meter levels, next hop).
+// into the downstream modules (action id, two meter levels, next hop, and --
+// on the downlink -- the steering policy id).
 func (r rule) result() []byte { b, _ := r.change.Value["result"].([]byte); return b }
 
 // actionID is the ActionId the rule's result carries.
@@ -275,7 +287,7 @@ func (r rule) actionID() uint32 {
 }
 
 // meterIDs are the two meter levels the rule's result carries, in policing
-// order. A result shorter than the meter field (a selector rule) has none.
+// order.
 func (r rule) meterIDs() [2]uint32 {
 	var ids [2]uint32
 	b := r.result()
@@ -294,6 +306,16 @@ func (r rule) nextHop() uint32 {
 		return 0
 	}
 	return binary.BigEndian.Uint32(b[12:])
+}
+
+// steeringID is the MAR steering policy id a downlink rule's result carries
+// (0 without a MAR).
+func (r rule) steeringID() uint32 {
+	b := r.result()
+	if len(b) < 20 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b[16:])
 }
 
 // gate is the gate the rule delivers.

@@ -109,8 +109,7 @@ func TestLiveErrorIndicationBecomesAnERIRReport(t *testing.T) {
 	// The daemon is shared with the lane's other tests, and each of them
 	// allocates its session's ids from its own pool: a session left behind
 	// would put two sessions on one action id, and the next test's deletion
-	// would be refused for the rule this one still holds (the custom profile's
-	// selector is where that shows first).
+	// would be refused for the rule this one still holds.
 	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 2, 0))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}

@@ -43,18 +43,6 @@ func run() error {
 	n4Addr := flag.String("n4", "0.0.0.0:8805", "PFCP (N4) UDP listen address")
 	nodeID := flag.String("node-id", "", "Node ID this UP function advertises (IP address or FQDN); default: the -n4 address")
 	level := flag.String("log-level", "info", "log level: debug, info, warn, error")
-	profile := flag.String("profile", session.GenericProfile,
-		"the deployment's dataplane strategy, by name (docs/design.md, \"Profiles\"): "+
-			strings.Join(session.ProfileNames(), " or ")+". It resolves once, at startup, to "+
-			"where each direction's PDR rules live, the graph carrying that composition and the "+
-			"module list the daemon must have loaded -- all logged with the session layer's "+
-			"readiness, and printed alone by -print-profile. The module-name flags below stay as "+
-			"overrides: the profile is their default and not a replacement, so -pdr-table-ul, "+
-			"-firewall-ul/-dl and -pdr-match-ul name one structure's module while the profile "+
-			"picks which structure a direction uses")
-	printProfile := flag.Bool("print-profile", false,
-		"print the resolved profile -- the graph to apply, the module list the daemon must have "+
-			"loaded, and each direction's rule home -- and exit, without dialing anything")
 
 	bessAddr := flag.String("bess", "", "bessd's control_v2 gRPC address (host:port); empty: no datapath, sessions are refused")
 	n3Addr := flag.String("n3-addr", "", "the UPF's N3 IPv4 address, advertised as the uplink F-TEID; required with -bess")
@@ -108,6 +96,7 @@ func run() error {
 			"teid (the decap's upf_teid)")
 	pdrFieldsDL := flag.String("pdr-fields-dl", "src,dst,proto,sport,dport",
 		"the downlink PDR table's fields, in the graph's order")
+	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
 	pdrTableUL := flag.String("pdr-table-ul", "pdr_ul",
 		"the WildcardMatch module holding the uplink PDR rules")
 	pdrTableDL := flag.String("pdr-table-dl", "pdr_dl",
@@ -121,33 +110,6 @@ func run() error {
 			"daemon does not have (docs/claims.md)")
 	firewallDL := flag.String("firewall-dl", "",
 		"the downlink firewall module, as -firewall-ul is the uplink one")
-	pdrMatchUL := flag.String("pdr-match-ul", "",
-		"the uplink keyed per-session matcher module whose \"<name>/rules\" *map* holds the uplink "+
-			"PDRs instead of -pdr-table-ul: one key per session, keyed by the F-TEID the decap "+
-			"wrote (its \"upf_teid\" metadata), whose value is that session's rules in the SMF's "+
-			"precedence order, so a session change is one upsert of O(that session's rules). The "+
-			"rules carry the 5-tuple with prefixes and port *ranges*, and a PDI naming a QFI is "+
-			"refused rather than matched more widely. Empty (the default): the WildcardMatch path. "+
-			"There is no downlink counterpart here: a downlink packet carries no tunnel to name its "+
-			"session with, so the downlink's own selector is what names it (-select-dl)")
-	pdrMatchDL := flag.String("pdr-match-dl", "",
-		"the downlink keyed per-session matcher module, as -pdr-match-ul is the uplink one: its map "+
-			"holds one key per session, keyed by the session id -select-dl writes into the packet's "+
-			"\"action_id\" metadata. It needs -select-dl: a downlink packet carries no tunnel, so "+
-			"nothing else could name its session")
-	selectDL := flag.String("select-dl", "",
-		"the downlink session selector: an ExactMatch module whose \"<name>/rules\" map holds one "+
-			"rule per (route domain, UE address) a session's downlink PDRs name, whose value is the "+
-			"session id it writes into the packet's \"action_id\" metadata -- the key "+
-			"-pdr-match-dl reads. It is what names a session for a packet that carries no tunnel "+
-			"(TS 29.244 5.2.1), and it needs -pdr-match-dl")
-	selectFieldsDL := flag.String("select-fields-dl", "dst_ip",
-		"the selector's key, in the graph's order, from the same field names -pdr-fields-dl takes. "+
-			"Only a field of the session can be in it: dst_ip (the UE address the packet is "+
-			"addressed to) and, in a deployment with more than one network instance, route_domain "+
-			"(the interface the packet arrived on classified it). A field of one PDR (proto, "+
-			"sport, dport) is refused")
-	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
 	metersDL := flag.String("meters-dl", "mt_dl", "the downlink Meter module")
 	countersUL := flag.String("counters-ul", "cnt_ul",
 		"the uplink UrrCount module (per-rule usage counters); empty: the graph charges nothing")
@@ -222,11 +184,10 @@ func run() error {
 	flag.Parse()
 
 	// Which flags any source named -- the command line, the environment or the
-	// config file: the profile is what a flag that names nothing resolves to,
-	// so an override is a flag a source named, not one whose value happens to
-	// differ from its default. It is resolved before anything reads a flag.
-	given, err := applyLayers(flag.CommandLine)
-	if err != nil {
+	// config file: an override is a flag a source named, not one whose value
+	// happens to differ from its default. It is resolved before anything reads
+	// a flag.
+	if _, err := applyLayers(flag.CommandLine); err != nil {
 		return err
 	}
 	if *printConfig {
@@ -238,33 +199,12 @@ func run() error {
 			return err
 		}
 		fmt.Printf("%s\n", out)
-		if !*printProfile {
-			return nil
-		}
+		return nil
 	}
 
 	mode, err := session.ParseRouteMode(*routeMode)
 	if err != nil {
 		return fmt.Errorf("-route-mode: %w", err)
-	}
-
-	// The profile, before anything else this run does: it is a start-time
-	// choice, and a name that is not a profile must not fall back to the
-	// default -- a deployment whose rules land in a structure nobody chose is
-	// exactly what naming the profile is for. What it resolves to is read here
-	// and never again: the packet path holds no profile check.
-	prof, err := session.ProfileFor(*profile)
-	if err != nil {
-		return err
-	}
-	if *printProfile {
-		// The resolution itself, for an operator or an arm (ci/profile.sh):
-		// the graph to apply and the modules the daemon must have loaded for
-		// this profile, printed before either exists. It is printed from here
-		// rather than repeated in ci/ so that the profile is defined once.
-		fmt.Printf("profile\t%s\ngraph\t%s\nmodules\t%s\nuplink\t%s\ndownlink\t%s\n",
-			prof.Name, prof.Graph, strings.Join(prof.Modules, ","), prof.Up.String(), prof.Down.String())
-		return nil
 	}
 
 	var lvl slog.Level
@@ -325,7 +265,7 @@ func run() error {
 			return fmt.Errorf("-buffer-store %q needs a positive -urr-interval: the Downlink Data Report is what that loop's reading of the buffering counters owes the SMF",
 				*bufferStore)
 		}
-		graph, err := graphConfig(profileArgs(prof, given, graphArgs{
+		graph, err := graphConfig(graphArgs{
 			n3: *n3Addr, n9: *n9Addr, n3MAC: *n3MAC, peerMAC: *peerMAC,
 			transports: transports, fteidAddresses: fteidAddresses,
 			capacity:  uint32(*capacity),
@@ -335,19 +275,16 @@ func run() error {
 			routeMode:     mode,
 			pdrTableUL:    *pdrTableUL, pdrTableDL: *pdrTableDL,
 			firewallUL: *firewallUL, firewallDL: *firewallDL,
-			pdrMatchUL: *pdrMatchUL, pdrMatchDL: *pdrMatchDL,
-			selectDL:       *selectDL,
-			selectFieldsDL: *selectFieldsDL,
-			pdrFieldsUL:    *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
+			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
-			teidTable: *teidTable,
+			teidTable:  *teidTable,
 			gtpuErrors: *gtpuErrors,
 			endMarker:  *endMarker,
 			metersUL:   *metersUL,
 			metersDL:   *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
 			countersUL: *countersUL, countersDL: *countersDL,
 			bufferStore: *bufferStore, bufferCounter: *bufferCounter, bufferGate: uint32(*bufferGate),
-		}))
+		})
 		if err != nil {
 			return err
 		}
@@ -422,15 +359,10 @@ func run() error {
 		}
 		ready := []any{"bess", *bessAddr, "bess_version", client.Version(),
 			"daemon_epoch", client.Epoch(), "n3", graph.N3Addr.String(),
-			// The profile, as the one thing this run resolved it to: the rule
-			// home each direction uses, the graph that carries it and the
-			// modules the daemon must have loaded. Reported here because this
-			// is the only moment it exists -- there is no profile in the packet
-			// path or the session path to ask (docs/design.md).
-			"profile", prof.Name, "graph", prof.Graph,
-			"modules", strings.Join(prof.Modules, ","),
-			"uplink", graph.Up.Strategy().String(),
-			"downlink", graph.Down.Strategy().String()}
+			// The rule home each direction uses: the WildcardMatch table, or
+			// the firewall opt-in the deployment named.
+			"uplink", ruleHome(graph.Up),
+			"downlink", ruleHome(graph.Down)}
 		if graph.Instances != nil {
 			ready = append(ready, "network_instances", strings.Join(graph.Instances.Names(), ","))
 		}
@@ -771,7 +703,7 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 
 // graphArgs is the flag set graphConfig turns into a session.Config.
 type graphArgs struct {
-	n3, n3MAC, peerMAC  string
+	n3, n3MAC, peerMAC string
 	n9                 string
 	transports         entryList
 	fteidAddresses     entryList
@@ -787,10 +719,6 @@ type graphArgs struct {
 	pdrTableDL         string
 	firewallUL         string
 	firewallDL         string
-	pdrMatchUL         string
-	pdrMatchDL         string
-	selectDL           string
-	selectFieldsDL     string
 	pdrFieldsUL        string
 	pdrFieldsDL        string
 	teidTable          string
@@ -805,6 +733,14 @@ type graphArgs struct {
 	tunnels            string
 	tunnelsUL          string
 	endMarker          string
+}
+
+// ruleHome names a direction's rule home, for the readiness log.
+func ruleHome(d session.Direction) string {
+	if d.Firewall != "" {
+		return "firewall:" + d.Firewall
+	}
+	return "wildcard:" + d.PDRTable
 }
 
 // graphConfig is the deployed graph's shape, from the flags.
@@ -829,19 +765,6 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	if err != nil {
 		return session.Config{}, fmt.Errorf("-fteid-address: %w", err)
 	}
-	// One direction holds its rules in one structure: the profile selects which
-	// (or the deployment, through the module flags), and two of the three named
-	// at once would be two writers of one chain -- the compiler writes each
-	// rule into both, and the packet path reads whichever the graph wires. Only
-	// the uplink has a keyed-matcher flag: its key is the F-TEID, which names a
-	// session on N3 and nothing on N6 (the downlink's own selector is the next
-	// step, docs/claims.md), so a downlink one would name a rule home no
-	// module provides.
-	if a.firewallUL != "" && a.pdrMatchUL != "" {
-		return session.Config{}, fmt.Errorf(
-			"the uplink has one rule home: -firewall-ul %q and -pdr-match-ul %q both name one",
-			a.firewallUL, a.pdrMatchUL)
-	}
 	// Each table matches the inner IPv4 packet: the UE address on the side the
 	// PDI names, and the SDF tuple where a filter constrains it
 	// (docs/design.md, "The key"). A graph that also classifies by route domain
@@ -854,42 +777,6 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	downFields, err := parsePDRFields(a.pdrFieldsDL)
 	if err != nil {
 		return session.Config{}, fmt.Errorf("-pdr-fields-dl: %w", err)
-	}
-	// One path or none: a selector writes the key a matcher reads, so a
-	// deployment that names one without the other would either select sessions
-	// nothing matches or match a key nothing writes.
-	if a.atsss != "" && a.pdrMatchDL == "" {
-		return session.Config{}, fmt.Errorf(
-			"-atsss %q needs -pdr-match-dl: the matcher writes the MAR id into the steering attribute, "+
-				"and the wildcard table has no rule field for it", a.atsss)
-	}
-	if (a.selectDL == "") != (a.pdrMatchDL == "") {
-		return session.Config{}, fmt.Errorf(
-			"-select-dl %q and -pdr-match-dl %q are one path: the selector writes the session id the "+
-				"matcher reads as its key", a.selectDL, a.pdrMatchDL)
-	}
-	if a.selectDL != "" && a.firewallDL != "" {
-		return session.Config{}, fmt.Errorf(
-			"the downlink has one rule home: -firewall-dl %q and -pdr-match-dl %q both name one",
-			a.firewallDL, a.pdrMatchDL)
-	}
-	// The selector's key is the session's, so only the fields a session has can
-	// be in it: the UE address, and the route domain the deployment classified
-	// the packet in. A field of one PDR would need one rule per PDR, and the
-	// selector would no longer name the session the matcher holds rules under.
-	var selectFields []session.Field
-	if a.selectDL != "" {
-		selectFields, err = parsePDRFields(a.selectFieldsDL)
-		if err != nil {
-			return session.Config{}, fmt.Errorf("-select-fields-dl: %w", err)
-		}
-		for _, f := range selectFields {
-			if f != session.DstIP && f != session.RouteDomain {
-				return session.Config{}, fmt.Errorf(
-					"-select-fields-dl: the %s is a field of one PDR, and the selector's key is the session's "+
-						"(dst_ip, and route_domain where the deployment has one)", f)
-			}
-		}
 	}
 	var domains *routing.Domains
 	if a.instances != "" {
@@ -920,11 +807,9 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			PDRFields: upFields,
 			// The uplink's PDRs may live in a firewall module instead of the
 			// WildcardMatch table (BESS's `firewall`, whose rules carry port
-			// ranges and both address families), or in the keyed per-session
-			// matcher, whose map holds one key per session; empty is the table.
-			// The three are one home each (the check above).
+			// ranges and both address families); empty is the table. The two
+			// are one home each (the check above).
 			Firewall: a.firewallUL,
-			PdrMatch: a.pdrMatchUL,
 			Meters:   a.metersUL,
 			Counters: a.countersUL,
 			// An uplink forward can add an outer header of its own: indirect
@@ -940,17 +825,10 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			PDRTable:  a.pdrTableDL,
 			PDRFields: downFields,
 			Firewall:  a.firewallDL,
-			// The downlink's PDRs may live in the keyed per-session matcher,
-			// whose map is keyed by the session id the selector writes: the
-			// three names are one path (the check above), because a matcher
-			// nothing selects a session for matches nothing at all.
-			PdrMatch:       a.pdrMatchDL,
-			Selector:       a.selectDL,
-			SelectorFields: selectFields,
-			Meters:         a.metersDL,
-			Counters:       a.countersDL,
-			NextHop:        a.n3NextHop,
-			Tunnels:        a.tunnels,
+			Meters:    a.metersDL,
+			Counters:  a.countersDL,
+			NextHop:   a.n3NextHop,
+			Tunnels:   a.tunnels,
 		},
 		Instances:  domains,
 		N3Addr:     addr,

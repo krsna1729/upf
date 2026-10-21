@@ -19,9 +19,8 @@ func validArgs() graphArgs {
 		n3NextHop:  2,
 		pdrTableUL: "pdr_ul", pdrTableDL: "pdr_dl",
 		pdrFieldsUL: "src,dst,proto,sport,dport,qfi", pdrFieldsDL: "src,dst,proto,sport,dport",
-		selectFieldsDL: "dst_ip",
 		teidTable: "teid",
-		metersUL: "mt_ul", metersDL: "mt_dl",
+		metersUL:  "mt_ul", metersDL: "mt_dl",
 		// One encap module, both directions: the deployed daemon writes an
 		// uplink forward's tunnel record there too.
 		tunnels: "enc", tunnelsUL: "enc",
@@ -137,22 +136,6 @@ func TestGraphConfigRefusesBadInput(t *testing.T) {
 		{"a port mac that is not hex", func(a *graphArgs) { a.n3MAC = "zz:00:00:00:00:01" }, "-n3-mac"},
 		{"a peer mac of the wrong length", func(a *graphArgs) { a.peerMAC = "02:00:00:00:00:00:02" }, "-peer-mac"},
 		{"a peer mac that is not a mac", func(a *graphArgs) { a.peerMAC = "enc" }, "-peer-mac"},
-		// The selector and the matcher are one path, and its key is the
-		// session's: a field of one PDR cannot be in it.
-		{"a selector with no matcher", func(a *graphArgs) { a.selectDL = "sel_dl" }, "-pdr-match-dl"},
-		{"a matcher with no selector", func(a *graphArgs) { a.pdrMatchDL = "pdr_match_dl" }, "-select-dl"},
-		{"a selector keyed by a PDR's port", func(a *graphArgs) {
-			a.pdrMatchDL, a.selectDL = "pdr_match_dl", "sel_dl"
-			a.selectFieldsDL = "dport"
-		}, "a field of one PDR"},
-		{"a selector keyed by a field the graph has no name for", func(a *graphArgs) {
-			a.pdrMatchDL, a.selectDL = "pdr_match_dl", "sel_dl"
-			a.selectFieldsDL = "udp"
-		}, "-select-fields-dl"},
-		{"two homes for the downlink", func(a *graphArgs) {
-			a.pdrMatchDL, a.selectDL = "pdr_match_dl", "sel_dl"
-			a.firewallDL = "fw_dl"
-		}, "one rule home"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -200,14 +183,18 @@ func TestParseMAC(t *testing.T) {
 	}
 }
 
-// TestAtsssNeedsTheMatcher: the wildcard table has no field for a MAR id, so a
-// deployment that names an AtsssSteer module without the downlink PdrMatch is
-// refused at startup rather than accepting a session it cannot steer.
-func TestAtsssNeedsTheMatcher(t *testing.T) {
+// TestAtsssNeedsNothingElse: the downlink table's result carries the MAR
+// steering policy id in addition to the action record, so naming an AtsssSteer
+// module is all a deployment adds.
+func TestAtsssStandsOnItsOwnResultSlot(t *testing.T) {
 	args := validArgs()
 	args.atsss = "atsss_dl"
-	if _, err := graphConfig(args); err == nil {
-		t.Fatal("graphConfig accepted -atsss without -pdr-match-dl")
+	cfg, err := graphConfig(args)
+	if err != nil {
+		t.Fatalf("graphConfig refused -atsss: %v", err)
+	}
+	if cfg.Atsss != "atsss_dl" {
+		t.Errorf("the config carries Atsss %q, want the module the flag names", cfg.Atsss)
 	}
 }
 
@@ -248,9 +235,9 @@ func TestGraphConfigTunnelTransports(t *testing.T) {
 
 func TestGraphConfigRejectsInvalidN9Flags(t *testing.T) {
 	for _, tc := range []struct {
-		name string
+		name   string
 		change func(*graphArgs)
-		want string
+		want   string
 	}{
 		{"IPv6 N9", func(a *graphArgs) { a.n9 = "2001:db8::9" }, "-n9-addr"},
 		{"unspecified N9", func(a *graphArgs) { a.n9 = "0.0.0.0" }, "-n9-addr"},

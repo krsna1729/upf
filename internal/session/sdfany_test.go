@@ -138,7 +138,6 @@ func TestSeveralSDFFiltersAreSeveralRulesOfTheSessionsList(t *testing.T) {
 		cfg      Config
 		resource string
 	}{
-		{"pdrmatch", pdrMatchConfig("pdr_match_ul"), "pdr_match_ul/rules"},
 		{"firewall", firewallConfig("fw_ul", ""), "fw_ul/rules"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,16 +146,7 @@ func TestSeveralSDFFiltersAreSeveralRulesOfTheSessionsList(t *testing.T) {
 			if got := cause(t, c.Establish(uplinkPDI(0x7b04, []string{udp53, tcp443}, nil))); got != ie.CauseRequestAccepted {
 				t.Fatalf("cause %d", got)
 			}
-			var list []map[string]any
-			if tc.name == "firewall" {
-				list = firewallPolicy(t, rec.last(), tc.resource)
-			} else {
-				for _, ch := range rec.last() {
-					if ch.Resource == tc.resource {
-						list = pdrMatchRules(t, ch)
-					}
-				}
-			}
+			list := firewallPolicy(t, rec.last(), tc.resource)
 			ports := map[uint32]bool{}
 			for _, r := range list {
 				p, _ := r["dst_port_low"].(uint32)

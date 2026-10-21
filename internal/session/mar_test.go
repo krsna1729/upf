@@ -75,11 +75,6 @@ func marEstablishmentTEID(cpSEID uint64, ueIP string, teid uint32) *message.Sess
 func marConfig() Config {
 	cfg := testConfig()
 	cfg.Atsss = "atsss"
-	cfg.Down.PdrMatch = "pdr_match_dl"
-	// The downlink matcher is keyed by the selector's session id: an N6 packet
-	// carries no tunnel to key it by.
-	cfg.Down.Selector = "sel_dl"
-	cfg.Down.SelectorFields = []Field{DstIP, RouteDomain}
 	return cfg
 }
 
@@ -141,14 +136,9 @@ func TestMARProgramsPolicyAndSteeringRule(t *testing.T) {
 		t.Error("the tunnelled access has no encap record")
 	}
 
-	rules := changeWithResource(t, lastChanges(t, rec), "pdr_match_dl/rules")
-	rulesValue := rules.Value["rules"].([]map[string]any)
-	if len(rulesValue) != 1 {
-		t.Fatalf("downlink matcher has %d rules, want one", len(rulesValue))
-	}
-	if rulesValue[0]["steering_policy_id"] != policyID {
-		t.Errorf("matcher rule steering id is %v, want the policy id %d",
-			rulesValue[0]["steering_policy_id"], policyID)
+	dl := ruleIn(t, lastChanges(t, rec), "pdr_dl")
+	if got := dl.steeringID(); got != policyID {
+		t.Errorf("downlink rule steering id is %d, want the policy id %d", got, policyID)
 	}
 }
 
@@ -186,7 +176,6 @@ func TestUpdateMARMovesThePreferredAccess(t *testing.T) {
 func TestMARPDRWithoutASteeringModuleIsRefused(t *testing.T) {
 	cfg := marConfig()
 	cfg.Atsss = ""
-	cfg.Down.PdrMatch = ""
 	c := New(cfg, &recorder{}, quietLogger())
 	resp := c.Establish(marEstablishment(0x7003, "10.45.0.9"))
 	if got := answerCause(resp); got != ie.CauseRuleCreationModificationFailure {

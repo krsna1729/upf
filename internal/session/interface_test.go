@@ -110,38 +110,6 @@ func TestASubscriberSideSourceInterfaceValueIsMatchedTowardTheSubscriber(t *test
 	}
 }
 
-// TestASubscriberSideValueIsKeyedByItsAddressInTheKeyedMatcher: the same value
-// under the custom profile, where the downlink is a map keyed by the session
-// the selector names -- and the selector names it by its UE address, so a PDI
-// whose Source Interface is not Core still has to be keyed by it.
-func TestASubscriberSideValueIsKeyedByItsAddressInTheKeyedMatcher(t *testing.T) {
-	rec := &recorder{}
-	cfg := selectorConfig(DstIP)
-	c := New(cfg, rec, quietLogger())
-	resp := c.Establish(subscriberSideEstablishment(0x7302, "10.45.0.9", 0x52, ie.SrcInterface5GVNInternal))
-	if got := cause(t, resp); got != ie.CauseRequestAccepted {
-		t.Fatalf("the establishment answered cause %d", got)
-	}
-	seid := upFSEID(t, resp.(*message.SessionEstablishmentResponse))
-	// The selector's rule names the session by the UE address, and the
-	// matcher's map is keyed by the session id it writes.
-	mine := changesFor(rec.last(), "sel_dl/rules")
-	if len(mine) != 1 {
-		t.Fatalf("the transaction carries %d selector rules, want the session's one address", len(mine))
-	}
-	key := selectorKeyOfChange(t, mine[0])
-	if len(key) != 1 || len(key[0]) != 4 || key[0][3] != 9 {
-		t.Errorf("the selector's key is %v, want the PDI's UE address 10.45.0.9", key)
-	}
-	if got := selectorActionID(t, mine[0]); got != uint32(seid) {
-		t.Errorf("the selector's result is %d, want the session id %d", got, seid)
-	}
-	entry := oneMapChange(t, rec.last(), "pdr_match_dl/rules", uint32(seid))
-	if rules := pdrMatchRules(t, entry); len(rules) != 1 {
-		t.Errorf("the session's downlink entry holds %d rules, want its one subscriber-side PDR's", len(rules))
-	}
-}
-
 // TestEverySourceInterfaceValueIsServedOrRefused is the whole table: the four
 // values this UP serves compile, and the rest -- the CP function's own path and
 // the Spare values -- are refused with the cause that says the rule cannot be

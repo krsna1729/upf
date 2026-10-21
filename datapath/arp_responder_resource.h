@@ -35,7 +35,7 @@ struct Entry {
 // Vif's interfaces and Rewrite's templates -- a *running* daemon refuses an
 // entry, so a subscriber address provisioned at session time could never be
 // answered. This is the same table as an open-addressed slot table whose slots
-// are atomic (the idiom pdr_match_resource.h uses): a worker reads a published
+// are atomic: a worker reads a published
 // pointer with one acquire load, a transaction claims a slot and installs its
 // value under the engine's lock, and the value a reader may still hold is
 // retired, not freed, when it is replaced.
@@ -114,7 +114,7 @@ class EntriesResource final : public bess::dataplane::Resource {
       // would put both addresses in one slot and lose one of them (and retire
       // one entry more than the transaction declared room for, which the
       // engine treats as a fatal footprint violation). Re-claiming by key is
-      // what pdr_match_resource.h's own op does, and it repairs exactly this:
+      // what the slot-table op does, and it repairs exactly this:
       // a key the table no longer holds gets a fresh slot, and its value is
       // published where the key is. Both phases run under the engine's lock, so
       // nothing else moves in between.
@@ -175,8 +175,8 @@ class EntriesResource final : public bess::dataplane::Resource {
 
 inline EntriesResource::~EntriesResource() {
   // Frees the entries the slots still hold: module teardown, after the workers
-  // have stopped reading them (the destructor pdr_match_resource.h carries, and
-  // the fork's own SlotTable). A table destroyed with live entries is expected
+  // have stopped reading them (as the fork's own SlotTable destructor does). A
+  // table destroyed with live entries is expected
   // -- ReleaseForTeardown is the path that tolerates them -- so what a
   // retirement would have freed is freed here.
   for (const Slot &slot : slots_) {

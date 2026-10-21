@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# The deployed graph (deploy/upf.yaml, or deploy/custom-pdrmatch.yaml with the
-# keyed matcher) with this environment's wiring:
+# The deployed graph (deploy/upf.yaml) with this environment's wiring:
 #
 #   * its two PMD ports become af_packet vdevs over the veths ci/interop/net.sh
 #     makes;
@@ -68,13 +67,14 @@ new, n = re.subn(r'src_ip: "[0-9.]+"', f'src_ip: "{n3_ip}"', new, count=1)
 assert n == 1, 'no GtpuEncap src_ip'
 
 # The N6 next hop's MACs: this rig's pair in place of the file's (or of an
-# absent pair, as deploy/custom-pdrmatch.yaml's hop has it).
+# The N6 next hop's MACs: this rig's pair in place of the file's (or of an
+# absent pair, whose gateway then answers or not as the rig decides).
 new, n = re.subn(r'^      value: \{egress_gate: 0(?:, dst_mac: "[^"]*", src_mac: "[^"]*")?\}$',
                  f'      value: {{egress_gate: 0, dst_mac: "{mac(dn_mac)}", src_mac: "{mac(n6_mac)}"}}',
                  new, count=1, flags=re.M)
 assert n == 1, 'no rt/next_hops hop 1'
 
-# The N6 interface, where the graph has one (0 in the keyed graph).
+# The N6 interface, where the graph has one.
 new, n = re.subn(r'^        - \{id: 1, vlan: 0, mac_addr: "[^"]*", ip_addr: "[^"]*", route_domain: [0-9]+, gate: 1\}$',
                  f'        - {{id: 1, vlan: 0, mac_addr: "{n6_mac}", ip_addr: "{dn_gw}", route_domain: 1, gate: 1}}',
                  new, count=1, flags=re.M)

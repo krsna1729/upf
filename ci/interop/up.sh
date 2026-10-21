@@ -94,10 +94,7 @@ else
     # Real ports: the veths, the graph wired to them, and bessd as root (an
     # AF_PACKET socket needs it; the packets and the N4 side stay the same).
     "$(dirname "${BASH_SOURCE[0]}")/net.sh" up
-    case "${PROFILE:-generic}" in
-      custom) DEPLOYED=$ROOT/deploy/custom-pdrmatch.yaml ;;
-      *)      DEPLOYED=$ROOT/deploy/upf.yaml ;;
-    esac
+    DEPLOYED=$ROOT/deploy/upf.yaml
     python3 "$(dirname "${BASH_SOURCE[0]}")/graph.py" "$DEPLOYED" "$STATE/graph.yaml" "$IF_N3" "$IF_N6" \
       "$N3_IP" "$N6_MAC" "$DN_MAC" "$DN_GW" "$STATE/end-marker.sock" || die "building the dataplane graph failed"
     GRAPH=$STATE/graph.yaml
@@ -148,7 +145,6 @@ else
   # With real packets the downlink's outer Ethernet header is the N3 port's MAC
   # to the gNB container's (the one next hop upfd knows); both are fixed.
   [ -n "$DATAPLANE" ] && UPFD_ARGS+=(-n3-mac "$N3_MAC" -peer-mac "$GNB_MAC")
-  [ -n "${PROFILE:-}" ] && UPFD_ARGS+=(-profile "$PROFILE")
   detach upfd "$BIN/upfd" "${UPFD_ARGS[@]}"
   wait_log "$LOGS/upfd.log" "n4 listening" 10 || { cat "$LOGS/upfd.log" >&2; die "upfd did not start"; }
   log "upfd up: N4 $N4_UPFD, node-id $UPF_IP, bess 127.0.0.1:$BESS_PORT"

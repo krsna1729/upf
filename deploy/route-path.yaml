@@ -213,6 +213,7 @@ modules:
         - {attr_name: action_id, value_offset: 0, num_bytes: 4}
         - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_dl/meters, reference_key: BE32, reference_count: 2}
         - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: steering_policy_id, value_offset: 16, num_bytes: 4}
   - name: mt_dl
     mclass: Meter
     arg: {capacity: 65536, levels: 2}

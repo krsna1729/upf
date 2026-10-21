@@ -1602,11 +1602,6 @@ func (c *Compiler) resolve(s *Session) error {
 					"%w: PDR %d names MAR %d, and this deployment has no AtsssSteer module (-atsss)",
 					errNotExpressible, p.id, p.marID)
 			}
-			if c.cfg.Down.PdrMatch == "" {
-				return fmt.Errorf(
-					"%w: PDR %d names MAR %d, and the downlink uses no PdrMatch module to write the policy id",
-					errNotExpressible, p.id, p.marID)
-			}
 			m := s.MARs[p.marID]
 			if m == nil {
 				return fmt.Errorf("%w: PDR %d names MAR %d, which the session does not hold",
@@ -1688,7 +1683,7 @@ func (c *Compiler) resolve(s *Session) error {
 				if entry.hasRate && entry.mbUL != 0 {
 					// The direction's own rate: a QER that caps nothing
 					// uplink (an MBR of zero there) leaves the PDR unmetered
-					// rather than writing a meter no profile can hold. The
+					// rather than writing a meter that caps nothing. The
 					// session's shared QER wins when the PDR names it; a PDR
 					// that names only its own flow's QER keeps that QER's
 					// meter, which is the enforcement it would have had
@@ -2330,43 +2325,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// docs/design.md).
 			continue
 		}
-		if dir.PdrMatch != "" {
-			// The rule is one of *this session's* map value, keyed by the
-			// session itself: the key is the session's, and no other session
-			// can hold it while this one does (the claim below), so it is kept
-			// alive by the PDRs that name its F-TEID rather than by a rule key.
-			continue
-		}
 		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
 			for _, key := range keys {
 				live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
-			}
-		}
-	}
-	// The opt-in map keys the session still holds, as the transaction will write
-	// them: one per session -- the uplink's F-TEID, the downlink's session id.
-	// A removal or a replaced form whose key is in this set is not erased --
-	// the write follows, and the engine rejects both operations on one key.
-	livePdrMatch := map[string]bool{}
-	for _, p := range s.PDRs {
-		dir := c.direction(p.srcIfc)
-		if dir.PdrMatch == "" {
-			continue
-		}
-		if key, err := pdrMatchSessionKey(dir, s, p); err == nil {
-			livePdrMatch[pdrMatchClaim(dir, key)] = true
-		}
-	}
-	// The selector keys the session still holds: one per (route domain, UE
-	// address) its downlink PDRs name. A replaced form whose key is in this set
-	// is not erased -- the rule is the same rule, written again.
-	liveSelector := map[string]bool{}
-	if c.cfg.Down.Selector != "" {
-		for _, p := range s.PDRs {
-			if k, ok := selectorKeyOf(p); ok {
-				if claim, err := selectorClaim(c.cfg.Down, k); err == nil {
-					liveSelector[claim] = true
-				}
 			}
 		}
 	}
@@ -2483,7 +2444,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// A firewall-path PDR's rule is not a key of this transaction's: the
 		// policy is rewritten whole from the live model at the end of this
 		// function, and a PDR that is gone is simply not in it.
-		if dir.Firewall == "" && dir.PdrMatch == "" {
+		if dir.Firewall == "" {
 			keys, err := p.ruleKeys(dir.PDRFields)
 			if err != nil {
 				return nil, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
@@ -2492,23 +2453,6 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
 					erase(bess.Change{Resource: rulesRes(dir), Key: key})
 				}
-			}
-		}
-		if dir.PdrMatch != "" {
-			// The session's key goes only when the session's new form holds no
-			// PDR on this key: the key is the session's rules, so a form that
-			// kept none of them has nothing left to match, and one that kept
-			// some is rewritten by the write below.
-			if key, err := pdrMatchSessionKey(dir, s, p); err == nil && !livePdrMatch[pdrMatchClaim(dir, key)] {
-				erase(bess.Change{Resource: pdrMatchRes(dir), Key: map[string]any{"session": key}})
-			}
-		}
-		if k, ok := selectorKeyOf(p); ok && !liveSelector[claimOf(c.cfg.Down, k)] {
-			// The session's downlink no longer names this address: the rule
-			// goes. Its result is metadata, not a resource reference, so no
-			// record follows it.
-			if key, err := selectorRuleKey(c.cfg.Down, k); err == nil {
-				erase(bess.Change{Resource: selectorRes(c.cfg.Down), Key: key})
 			}
 		}
 		if e, ok := c.arpEntryOf(p); ok && !liveARP[e.claim()] {
@@ -2566,7 +2510,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		dir := c.direction(old.srcIfc)
 		// As above: on the firewall path the old form is not a key to erase,
 		// it is a rule the policy this compile writes no longer holds.
-		if dir.Firewall == "" && dir.PdrMatch == "" {
+		if dir.Firewall == "" {
 			keys, err := old.ruleKeys(dir.PDRFields)
 			if err != nil {
 				return nil, nil, fmt.Errorf("PDR %d: %w", old.id, err)
@@ -2575,20 +2519,6 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
 					erase(bess.Change{Resource: rulesRes(dir), Key: key})
 				}
-			}
-		}
-		if dir.PdrMatch != "" {
-			// A replaced form that moved to another key: the map key it held
-			// is not the one the new form writes, so it goes (the write below
-			// names the new one).
-			if key, err := pdrMatchSessionKey(dir, s, old); err == nil && !livePdrMatch[pdrMatchClaim(dir, key)] {
-				erase(bess.Change{Resource: pdrMatchRes(dir), Key: map[string]any{"session": key}})
-			}
-		}
-		if k, ok := selectorKeyOf(old); ok && !liveSelector[claimOf(c.cfg.Down, k)] {
-			// A replaced form whose UE address moved: its selector rule goes.
-			if key, err := selectorRuleKey(c.cfg.Down, k); err == nil {
-				erase(bess.Change{Resource: selectorRes(c.cfg.Down), Key: key})
 			}
 		}
 		if e, ok := c.arpEntryOf(old); ok && !liveARP[e.claim()] {
@@ -2652,7 +2582,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// rules, so two sessions matching the same packets produce two rules
 		// rather than one shared one.
 		var keys []map[string]any
-		if dir.Firewall == "" && dir.PdrMatch == "" {
+		if dir.Firewall == "" {
 			var err error
 			if keys, err = p.ruleKeys(dir.PDRFields); err != nil {
 				return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
@@ -2694,40 +2624,11 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			}
 			c.rules[rkey] = s.LocalSEID
 		}
-		if dir.PdrMatch != "" {
-			// One key per session, so the claim is on the session's key rather
-			// than on a rule: two sessions that would write one session's
-			// rules are refused here, exactly as two sessions that would write
-			// one WildcardMatch rule are -- a shared key would have one
-			// session's rules erased by the other's deletion. The claim is a
-			// rule key in every other respect: the same table, the same
-			// release. The key is the F-TEID the decap writes on the uplink,
-			// and the session id the selector writes on the downlink -- which
-			// no other session can hold, because the SEIDs are the compiler's
-			// own.
-			key, err := pdrMatchSessionKey(dir, s, p)
-			if err != nil {
-				return nil, nil, err
-			}
-			claim := pdrMatchClaim(dir, key)
-			if owner, taken := c.rules[claim]; taken && owner != s.LocalSEID {
-				return nil, nil, fmt.Errorf(
-					"%w: the session's rules are session %d's (key %#x)", errNotExpressible, owner, key)
-			}
-			if _, held := c.rules[claim]; !held {
-				claimed = append(claimed, claim)
-				if !s.holdsRuleKey(claim) {
-					s.ruleKeys = append(s.ruleKeys, claim)
-				}
-			}
-			c.rules[claim] = s.LocalSEID
-		}
-		if (dir.Firewall != "" || dir.PdrMatch != "") && p.buffer {
+		if dir.Firewall != "" && p.buffer {
 			// A buffering PDR's packets are held by the store the rule
-			// delivers them to, and neither a firewall nor a pdr_match rule
-			// has a buffering gate. Serving the session would leave the SMF
-			// believing its downlink is held while nothing holds it, so the
-			// rule is refused instead.
+			// delivers them to, and a firewall rule has no buffering gate.
+			// Serving the session would leave the SMF believing its downlink
+			// is held while nothing holds it, so the rule is refused instead.
 			return nil, nil, fmt.Errorf(
 				"%w: a BUFF PDR is delivered on the buffering branch's gate, and this module has only the input gate",
 				errNotExpressible)
@@ -2766,8 +2667,8 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				}
 				action = p.actionID
 			}
-			if dir.Firewall == "" && dir.PdrMatch == "" {
-				result := make([]byte, resultSize)
+			if dir.Firewall == "" {
+				result := make([]byte, p.resultSize())
 				if action != 0 {
 					result = pdrResult(p)
 				}
@@ -2845,7 +2746,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			})
 		}
 
-		if dir.Firewall == "" && dir.PdrMatch == "" {
+		if dir.Firewall == "" {
 			// One rule per (SDF filter, QFI) the PDI names -- TS 29.244 7.5.2.2
 			// NOTE 4: several of either match any -- all with this PDR's
 			// Precedence and its one action.
@@ -2873,8 +2774,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 
 	}
 	// The MAR policies and the tunnel records their accesses name, before the
-	// matcher's rules that name them: a rule's steer id is read by AtsssSteer,
-	// whose policy must be live by the time the rule selects a packet.
+	// DL rules whose result carries the policy id: a rule's steering id is
+	// read by AtsssSteer, whose policy must be live by the time the rule
+	// selects a packet.
 	marWrites, err := c.marChanges(s)
 	if err != nil {
 		return nil, nil, err
@@ -2891,40 +2793,6 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		return nil, nil, err
 	}
 	changes = append(changes, policies...)
-	// The selector's rules and the record they reference, before the matcher's
-	// map that the record's id is the key of: a session's downlink packets are
-	// named by the selector, and the matcher holds what they are then matched
-	// against. One rule per (route domain, UE address) the session's downlink
-	// PDRs name, claimed like any other rule key -- two sessions whose PDRs
-	// name one address would each select the other's packets.
-	var selected []selectorKey
-	if c.cfg.Down.Selector != "" {
-		if selected, err = selectorKeys(s); err != nil {
-			return nil, nil, err
-		}
-	}
-	for _, k := range selected {
-		claim, err := selectorClaim(c.cfg.Down, k)
-		if err != nil {
-			return nil, nil, err
-		}
-		if owner, taken := c.rules[claim]; taken && owner != s.LocalSEID {
-			return nil, nil, fmt.Errorf(
-				"%w: the downlink address %s is session %d's", errNotExpressible, k, owner)
-		}
-		if _, held := c.rules[claim]; !held {
-			claimed = append(claimed, claim)
-			if !s.holdsRuleKey(claim) {
-				s.ruleKeys = append(s.ruleKeys, claim)
-			}
-		}
-		c.rules[claim] = s.LocalSEID
-	}
-	selectorWrites, err := c.selectorChanges(s)
-	if err != nil {
-		return nil, nil, err
-	}
-	changes = append(changes, selectorWrites...)
 	// The subscriber's ARP entries, claimed the same way: one per address the
 	// session's subscriber-side PDRs name, on the interface that declares a
 	// responder. An address another session answers for is refused here rather
@@ -2946,16 +2814,6 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		c.rules[claim] = s.LocalSEID
 		changes = append(changes, e.change())
 	}
-	// The per-session matcher's map last: one key per session, each that
-	// session's own rules. It follows the action records the loop above wrote,
-	// because a rule names one -- and it is the only change the opt-in path
-	// makes for a PDR's match, there being no WildcardMatch key to write. A
-	// no-op for a deployment that configured no such module.
-	matched, err := c.pdrMatchChanges(s)
-	if err != nil {
-		return nil, nil, err
-	}
-	changes = append(changes, matched...)
 	committed = true
 	return changes, created, nil
 }
@@ -3396,7 +3254,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 // none, by the UE's own ("assigned" included).
 //
 // What the rule cannot carry is what a packet's 5-tuple does not have: the
-// PDI's QFI (the PdrMatch path's rule can, and takes it), the resolved route
+// PDI's QFI, the resolved route
 // domain and the tunnel. Those stay fields of the WildcardMatch path's key;
 // docs/claims.md records what that means for a firewall deployment.
 //
@@ -5339,194 +5197,4 @@ func createdFTEID(teid uint32, addr netip.Addr) *ie.IE {
 		fields.SetIPv4Flag()
 	}
 	return ie.NewFTEID(fields.Flags, teid, ip, nil, 0)
-}
-
-// -- the per-session matcher ---------------------------------------------------
-
-// pdrMatchRule is one PDR as a rule of its session's list: the fields of the
-// plugin's PdrMatchRule (datapath/upf_datapath.proto), whose shape is BESS's
-// FirewallArg.Rule with the QFI added. The match fields and the ActionId are
-// the firewall path's own derivation (firewallRule), because the two opt-in
-// paths carry the same fields and must select the same packets and resolve the
-// same action.
-//
-// A PDI's QFI (TS 29.244 8.2.89) is the rule's own: the module matches it
-// against the QoS flow the decap read out of the PDU Session Container, so two
-// PDRs of one tunnel that differ only by QFI are two rules of one session's
-// list, each chosen by its flow -- where the firewall path, whose table is the
-// 5-tuple, refuses a PDI that names one rather than match more widely than the
-// filter.
-func pdrMatchRule(p *pdr) (map[string]any, error) {
-	rule, err := firewallRule(p)
-	if err != nil {
-		return nil, err
-	}
-	// The firewall's rule carries a raw result record; the PdrMatch rule
-	// carries typed fields instead, and the module writes them itself.
-	delete(rule, "result")
-	if p.hasQFI {
-		rule["qfi"] = uint32(p.qfi)
-	}
-	if !p.drop && !p.buffer {
-		// The result the matcher writes directly, as a WildcardMatch rule's
-		// result record does: the PDR's action id (for the counter and the
-		// encap), its two meter levels and its Router next hop. A drop never
-		// reaches a downstream module, so it carries none.
-		own, shared := meterSlots(p)
-		rule["meter_ids"] = []uint32{own, shared}
-		rule["next_hop_id"] = p.nextHop
-	}
-	if p.hasMAR && !p.drop && !p.buffer {
-		// The policy ID the PDR matcher writes into the steering attribute;
-		// AtsssSteer reads it and selects the access. A rule that drops never
-		// reaches the steering module, and the matcher refuses a drop rule
-		// that carries a policy id, so a closed gate or exhausted quota
-		// publishes none.
-		rule["steering_policy_id"] = p.policyID
-	}
-	return rule, nil
-}
-
-// pdrMatchClaim is the compiler's own name for one key of a direction's opt-in
-// map: the resource and the key, as the claim table spells a rule key. Two
-// sessions that would write one session's rules are refused by it, exactly as
-// two sessions that would write one WildcardMatch rule are.
-func pdrMatchClaim(d Direction, teid uint32) string {
-	return pdrMatchRes(d) + "\x00" + strconv.FormatUint(uint64(teid), 10)
-}
-
-// pdrMatchKey is the key a direction's map holds one session's rules under: the
-// F-TEID of the PDR (the uplink, where the tunnel names the session), or the
-// session id the selector writes (the downlink, where the UE address does). A
-// direction with a selector keys by the session, so the PDR's own F-TEID -- of
-// which a downlink PDR has none -- is not consulted.
-func pdrMatchSessionKey(d Direction, s *Session, p *pdr) (uint32, error) {
-	if d.Selector != "" {
-		return selectorID(s)
-	}
-	if p.teid == 0 {
-		return 0, fmt.Errorf(
-			"%w: PDR %d names no F-TEID, and the PdrMatch path keys a session by it",
-			errNotExpressible, p.id)
-	}
-	return p.teid, nil
-}
-
-// pdrMatchEntry is one of a session's rules with the order it takes in its
-// list: the order is the SMF's own -- the lower Precedence wins and the module
-// applies the first rule that matches -- so the list is sorted by Precedence
-// ascending, as a firewall policy is, rather than by the classifier's inverted
-// priority. Ties on a Precedence are ordered by PDR id, so the same model
-// always yields the same list (and two rules that match one packet are then
-// decided the same way twice).
-type pdrMatchEntry struct {
-	precedence uint32
-	pdr        uint16
-	rule       map[string]any
-}
-
-// pdrMatchChanges is the opt-in map writes of one session: for each direction
-// whose module is configured, one key per session -- per F-TEID, which is what
-// names a session on N3 -- whose value is that session's rules for the
-// direction, in the session's precedence order.
-//
-// One key per session is the whole point of the module: the transaction engine
-// applies map operations per key, so this is one upsert of O(this session's
-// rules) where the shared WildcardMatch table is one upsert per rule of a table
-// holding every session's (docs/design.md, "the keyed write"). It is a no-op
-// for a deployment that configured no such module, which is every deployment
-// today, and that is the first thing it says: the default deployment's
-// transaction is byte for byte the one it was.
-func (c *Compiler) pdrMatchChanges(s *Session) ([]bess.Change, error) {
-	if c.cfg.Up.PdrMatch == "" && c.cfg.Down.PdrMatch == "" {
-		return nil, nil
-	}
-	changes := make([]bess.Change, 0, 2)
-	// The two directions, each with the side whose PDRs it serves. A Direction
-	// cannot be compared (its field list is a slice), so the loop carries the
-	// side itself -- downSide's answer, which is also what each PDR holds --
-	// rather than comparing what direction() returned.
-	for _, side := range []struct {
-		dir  Direction
-		down bool // the side toward the subscriber (downSide)
-	}{{c.cfg.Up, false}, {c.cfg.Down, true}} {
-		dir := side.dir
-		if dir.PdrMatch == "" {
-			continue
-		}
-		// The uplink's key is the session's F-TEID: it is what the decap
-		// writes as the module's own key attribute, and what names a session
-		// on N3. The downlink has no such key -- an N6 packet carries no
-		// tunnel -- so the key is the session id the selector writes into that
-		// same attribute after naming the session by its UE address
-		// (selector.go): one key per session either way, and the packet path
-		// reads one attribute.
-		//
-		// The lists, one per key, in the order the keys are first seen: the
-		// transaction is the same whatever the order, and an operator's log
-		// reads the same twice.
-		var downKey uint32
-		if side.down {
-			var err error
-			if downKey, err = selectorID(s); err != nil {
-				return nil, err
-			}
-		}
-		rules := map[uint32][]pdrMatchEntry{}
-		order := make([]uint32, 0, 1)
-		for _, p := range pdrsInOrder(s) {
-			// A PDR of the other side, or of a direction this module is not
-			// configured for: not this change's. The side is the PDR's own
-			// (down), so a PDI whose Source Interface names the service LAN or
-			// the 5G VN's internal interface is keyed like any other
-			// subscriber-side PDR.
-			if p.down != side.down {
-				continue
-			}
-			key := downKey
-			if !side.down {
-				if p.teid == 0 {
-					return nil, fmt.Errorf(
-						"%w: PDR %d names no F-TEID, and the PdrMatch path keys a session by it",
-						errNotExpressible, p.id)
-				}
-				key = p.teid
-			}
-			if p.buffer {
-				return nil, fmt.Errorf(
-					"%w: PDR %d buffers, which is the buffering branch's gate and not this module's",
-					errNotExpressible, p.id)
-			}
-			if _, seen := rules[key]; !seen {
-				order = append(order, key)
-			}
-			for _, v := range p.variants() {
-				rule, err := pdrMatchRule(v)
-				if err != nil {
-					return nil, fmt.Errorf("PDR %d: %w", p.id, err)
-				}
-				rules[key] = append(rules[key], pdrMatchEntry{
-					precedence: p.precedence, pdr: p.id, rule: rule})
-			}
-		}
-		for _, key := range order {
-			list := rules[key]
-			slices.SortStableFunc(list, func(a, b pdrMatchEntry) int {
-				if d := cmp.Compare(a.precedence, b.precedence); d != 0 {
-					return d
-				}
-				return cmp.Compare(a.pdr, b.pdr)
-			})
-			value := make([]map[string]any, 0, len(list))
-			for _, e := range list {
-				value = append(value, e.rule)
-			}
-			changes = append(changes, bess.Change{
-				Resource: pdrMatchRes(dir),
-				Key:      map[string]any{"session": key},
-				Value:    map[string]any{"rules": value},
-			})
-		}
-	}
-	return changes, nil
 }
