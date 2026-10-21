@@ -31,7 +31,7 @@
 // copy nothing but their tail, allocate nothing, and read no session state.
 class GtpuResponder final : public Module {
  public:
-  static const gate_idx_t kNumOGates = 1;
+  static const gate_idx_t kNumOGates = MAX_GATES;
 
   // No resource table: an echo belongs to the path, not to a session.
   static const ResourceTables resource_tables;
@@ -69,6 +69,7 @@ class GtpuResponder final : public Module {
 
   uint16_t port_ = 0;  // the UDP port the messages must arrive on
   uint32_t stamp_ = 0; // seconds from 1900 to this entity's start (8.7)
+  int reply_gate_attr_ = -1;  // optional ingress BE32 output gate
   std::unique_ptr<ErrorSlot[]> errors_;
   std::atomic<uint64_t> untracked_{0};
 };

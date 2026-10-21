@@ -31,10 +31,8 @@
 //
 // A packet whose action id is 0, has no tunnel record, or has no headroom is
 // dropped: a packet that cannot be tunnelled must not leave unencapsulated.
-// The outer IPv4 source address and the UDP ports are the graph's -- arguments
-// of the module, not session state -- while the TEID, the gNB's address, the
-// two Ethernet addresses, the QFI and the Transport Level Marking are the
-// session's.
+// The graph provides a default source address and UDP ports. Each tunnel
+// selects its transport output and may override that source address.
 //
 // The outer IPv4 header's ToS/Traffic Class is the inner packet's own unless
 // the session's record names a Transport Level Marking (TS 29.244 8.2.12), in
@@ -50,7 +48,7 @@
 // field existed.
 class GtpuEncap final : public Module {
  public:
-  static const gate_idx_t kNumOGates = 1;
+  static const gate_idx_t kNumOGates = MAX_GATES;
 
   using ActionId = bess::dataplane::ActionId;
 
@@ -58,6 +56,8 @@ class GtpuEncap final : public Module {
   struct Tunnel {
     uint32_t teid;    // network order
     uint32_t gnb_ip;  // network order
+    uint32_t src_ip;  // selected source, resolved when the record is decoded
+    gate_idx_t gate;
     bess::utils::Ethernet::Address ether_src;
     bess::utils::Ethernet::Address ether_dst;
     uint8_t qfi;      // 0: write no PDU Session Container

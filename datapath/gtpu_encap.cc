@@ -76,6 +76,9 @@ std::expected<bess::utils::Ethernet::Address, std::string> ParseEther(
 }  // namespace
 
 CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
+  if (arg.tunnel_attr() == "action_id") {
+    return CommandFailure(EINVAL, "the tunnel attribute must not be 'action_id'");
+  }
   if (arg.src_ip().empty()) {
     return CommandFailure(EINVAL, "the 'src_ip' field is required");
   }
@@ -119,9 +122,22 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
             }
             return dataplane::EncodeKey(ActionId(key.action_id()));
           },
-          [](const upf::pb::TunnelEntry &value)
+          [this](const upf::pb::TunnelEntry &value)
               -> std::expected<std::any, std::string> {
             Tunnel tunnel{};
+            if (value.gate() >= MAX_GATES) {
+              return std::unexpected("invalid tunnel 'gate' field");
+            }
+            tunnel.gate = static_cast<gate_idx_t>(value.gate());
+            tunnel.src_ip = src_ip_;
+            if (!value.src_ip().empty()) {
+              be32_t src;
+              if (!bess::utils::ParseIpv4Address(value.src_ip(), &src) ||
+                  src.value() == 0) {
+                return std::unexpected("invalid tunnel 'src_ip' field");
+              }
+              tunnel.src_ip = src.value();
+            }
             if (value.teid() == 0) {
               return std::unexpected("the 'teid' field is required");
             }
@@ -177,6 +193,8 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
                   sizeof(tunnel->ether_dst.bytes)));
               value.set_qfi(tunnel->qfi);
               value.set_marking(tunnel->marking);
+              value.set_gate(tunnel->gate);
+              value.set_src_ip(IpToString(tunnel->src_ip));
               visit(key, value);
             }
           }));
@@ -202,9 +220,6 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
   // that is not steered carries 0 there, and falls back to action_id below --
   // that is the mixed graph's path, not a different module.
   if (!arg.tunnel_attr().empty()) {
-    if (arg.tunnel_attr() == "action_id") {
-      return CommandFailure(EINVAL, "the tunnel attribute must not be 'action_id'");
-    }
     has_tunnel_ = true;
     tunnel_attr_ = AddMetadataAttr(arg.tunnel_attr(), sizeof(bess::utils::be32_t),
                                    AccessMode::kRead);
@@ -324,7 +339,7 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     eth->dst_addr = tunnel->ether_dst;
     eth->ether_type = be16_t(bess::utils::Ethernet::Type::kIpv4);
 
-    bess::tunnel::WriteIpv4(outer + bess::tunnel::kEthernetBytes, be32_t(src_ip_),
+    bess::tunnel::WriteIpv4(outer + bess::tunnel::kEthernetBytes, be32_t(tunnel->src_ip),
                             be32_t(tunnel->gnb_ip), bess::utils::Ipv4::Proto::kUdp,
                             static_cast<uint16_t>(bess::tunnel::kUdpBytes +
                                                   bess::tunnel::kGtpuBaseBytes +
@@ -369,7 +384,7 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       container[3] = 0;
     }
 
-    ogates[i] = 0;
+    ogates[i] = tunnel->gate;
   }
 
   // One call for the batch: when every packet leaves by the same gate -- the

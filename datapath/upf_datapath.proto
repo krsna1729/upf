@@ -70,6 +70,8 @@ message GtpuResponderArg {
   // like any other message the module does not answer -- which is what a
   // deployment whose controller does not report them wants.
   bool track_errors = 3;
+  // Read a BE32 gate from ingress metadata; empty always replies on gate 0.
+  string reply_gate_attr = 4;
 }
 
 // GtpuResponderCommandGetErrorsArg selects the TEIDs to read.
@@ -316,6 +318,10 @@ message TunnelEntry {
   // encap copies the inner TOS as it always did. A record that predates the
   // field reads as 0 and loads with the copy behaviour.
   uint32 marking = 6;
+  // The output gate on the encap module.
+  uint32 gate = 9;
+  // The outer IPv4 source address, empty uses the module's default.
+  string src_ip = 10;
 }
 
 // -- the per-session matcher ------------------------------------------------
