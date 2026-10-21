@@ -30,10 +30,14 @@ import (
 type selectorKey struct {
 	domain uint32
 	addr   netip.Addr
+	teid   uint32
 }
 
 // String is the key as the compiler spells it in its claim table.
 func (k selectorKey) String() string {
+	if k.teid != 0 {
+		return fmt.Sprintf("%d/%s/%d", k.domain, k.addr, k.teid)
+	}
 	return fmt.Sprintf("%d/%s", k.domain, k.addr)
 }
 
@@ -51,7 +55,7 @@ func selectorKeyOf(p *pdr) (selectorKey, bool) {
 	if !p.down || !p.ueIP.IsValid() || !p.ueIP.Unmap().Is4() {
 		return selectorKey{}, false
 	}
-	return selectorKey{domain: p.domain, addr: p.ueIP.Unmap()}, true
+	return selectorKey{domain: p.domain, addr: p.ueIP.Unmap(), teid: p.teid}, true
 }
 
 // selectorKeys are the keys a session's downlink PDRs name, in the PDRs' order
@@ -99,6 +103,8 @@ func selectorRuleKey(d Direction, k selectorKey) (map[string]any, error) {
 			copy(value, k.addr.AsSlice())
 		case RouteDomain:
 			binary.BigEndian.PutUint32(value, k.domain)
+		case UpfTEID:
+			binary.BigEndian.PutUint32(value, k.teid)
 		default:
 			return nil, fmt.Errorf(
 				"%w: the downlink selector's key is the session's, and the %s is a field of one PDR",

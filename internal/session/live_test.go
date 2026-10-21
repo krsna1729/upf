@@ -20,7 +20,6 @@ import (
 func liveConfig() Config {
 	cfg := testConfig()
 	cfg.TEIDTable = "teid"
-	cfg.TEIDGate = 0
 	cfg.Up = Direction{
 		PDRTable:  "pdr_ul",
 		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, QFI},

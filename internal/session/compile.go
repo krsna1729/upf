@@ -656,7 +656,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	// Update PDR) asked for none, and was answered with one.
 	asked := map[uint16]bool{}
 	for _, p := range pdrs {
-		if p.hasFTEID && p.srcIfc == ie.SrcInterfaceAccess && p.teid == 0 {
+		if p.hasFTEID && p.teid == 0 {
 			asked[p.id] = true
 		}
 	}
@@ -684,9 +684,9 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	// markers go out after the transaction lands -- TS 29.281 7.3.2.2: "after
 	// sending the last G-PDU that needs to be sent on a GTP-U tunnel" -- and
 	// before this request is answered.
-	var leaving []far
-	if c.cfg.EndMarker != "" && sndem(modificationFlags(req)) {
-		leaving = s.leavingTunnels(fars)
+	var leaving []tunnelEndMarker
+	if c.endMarkersConfigured() && sndem(modificationFlags(req)) {
+		leaving = c.leavingTunnels(s, fars)
 	}
 
 	// TS 29.244 8.2.31: DROBU asks this UPF to discard every packet the
@@ -763,8 +763,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	// tell that peer a stream it is carrying has ended.
 	if !c.restoring {
 		for _, tunnel := range leaving {
-			frame := endMarkerFrame(tunnel.teid, tunnel.peer, c.cfg.N3Addr, c.cfg.N3MAC, c.cfg.PeerMAC)
-			if err := c.sendEndMarker(frame); err != nil {
+			if err := c.sendTunnelEndMarker(tunnel); err != nil {
 				c.stats.markerFailures.Add(1)
 				c.log.Warn("session: an end marker was not sent", "seid", seid, "teid", tunnel.teid,
 					"error", err)
@@ -1203,7 +1202,9 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// selects this PDR keeps its action id, so a worker switching
 			// between old and new state never sees a dangling reference.
 			pdr.actionID = old.actionID
-			pdr.teid = old.teid
+			if !p.hasFTEID || old.down == pdr.down {
+				pdr.teid = old.teid
+			}
 			pdr.meterID = old.meterID
 			// A PDR that keeps buffering keeps its episode: the SMF is owed one
 			// Downlink Data Report per episode ("the first buffered DL packet"),
@@ -1213,7 +1214,13 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// the release its instruction owes would be missed.
 			pdr.ddnSent, pdr.buffer = old.ddnSent, old.buffer
 		}
-		if p.hasFTEID && p.srcIfc == ie.SrcInterfaceAccess {
+		if p.hasFTEID {
+			if p.srcIfc != ie.SrcInterfaceAccess && p.srcIfc != ie.SrcInterfaceCore {
+				return fmt.Errorf("%w: F-TEID is supported only for Access or Core source", errNotExpressible)
+			}
+			if !c.fteidAddr(pdr).Is4() {
+				return fmt.Errorf("%w: PDR %d has no local IPv4 tunnel address (configure -n9-addr or -fteid-address)", errNotExpressible, p.id)
+			}
 			if p.teid != 0 {
 				// An F-TEID the SMF pinned is ours to use and ours to keep out
 				// of the allocator's way: another session handed the same
@@ -1267,6 +1274,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				}
 				pdr.teid = id
 			}
+			c.byTEID[pdr.teid] = s
 		}
 		// The session's UE address is named by a PDI whose address is on the
 		// UE's side of the packet (ueAddr); an Access PDI's destination is
@@ -1281,6 +1289,16 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			s.stale = append(s.stale, old)
 		}
 		s.PDRs[p.id] = pdr
+	}
+	tunnelDirections := map[uint32]bool{}
+	for _, p := range s.PDRs {
+		if p.teid == 0 {
+			continue
+		}
+		if down, exists := tunnelDirections[p.teid]; exists && down != p.down {
+			return fmt.Errorf("%w: F-TEID %#x has conflicting ingress directions", errNotExpressible, p.teid)
+		}
+		tunnelDirections[p.teid] = p.down
 	}
 	// A removed MAR that a PDR still names is refused: the PDR's only egress
 	// would be gone, and the packet path would drop it with no cause the SMF
@@ -1878,6 +1896,13 @@ func (c *Compiler) egressHop(far *far, ifc routing.Interface, dir Direction) (ui
 	}
 	switch far.destIfc {
 	case ie.DstInterfaceAccess:
+		egress, err := c.forwardEgress(far, ifc)
+		if err != nil {
+			return 0, err
+		}
+		if hop, ok := egress.Hop(routing.Egress{DestIfc: ie.DstInterfaceAccess, Tunnel: far.hasOuter}); ok {
+			return hop, nil
+		}
 		// The access side: whichever direction the PDR is on, the forward
 		// leaves through the encap, and a deployment that names no
 		// -access-next-hop takes the downlink direction's own hop, which is the
@@ -2013,6 +2038,9 @@ func (c *Compiler) destinationHop(far *far, ifc routing.Interface) (uint32, erro
 		return c.destinationRefusal(far)
 
 	case ie.DstInterfaceAccess, ie.DstInterfaceCore, ie.DstInterfaceSGiLANN6LAN, ie.DstInterface5GVNInternal:
+		if far.hasOuter && len(c.cfg.Transports) != 0 {
+			return 0, fmt.Errorf("%w: per-next-hop tunnel transports require policy routing, not destination routing", errNotExpressible)
+		}
 		// Every expressible forward names hop 0: Access is the deployment's own
 		// exit (the encap, or the indirect tunnel) and destination mode reaches
 		// it by a route to its hop, so the action names none. The instance
@@ -2597,6 +2625,23 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	}
 
 	for _, p := range pdrsInOrder(s) {
+		// Admission remains live even while a PDR drops or buffers. It is
+		// ingress ownership, not a forwarding action.
+		if p.teid != 0 {
+			if !writtenTEIDs[p.teid] {
+				writtenTEIDs[p.teid] = true
+				gate := uint64(0)
+				if p.down {
+					gate = 1
+				}
+				changes = append(changes, bess.Change{
+					Resource: c.teidRes(), Key: teidRuleKey(p.teid),
+					Value: map[string]any{"gate": gate},
+				})
+			}
+			created = append(created, ie.NewCreatedPDR(
+				ie.NewPDRID(p.id), createdFTEID(p.teid, c.fteidAddr(p))))
+		}
 		dir := c.direction(p.srcIfc)
 		// The PDR's match: the direction's WildcardMatch key, or -- where the
 		// deployment opts into the firewall path -- a rule of the direction's
@@ -2768,11 +2813,11 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// by: the record is keyed by the same action id the rule carries.
 		for _, resource := range p.tunnels {
 			far := s.FARs[p.farID]
+			transport := c.tunnelTransport(p.nextHop)
 			value := map[string]any{
-				"teid":      far.teid,
-				"gnb_ip":    far.peer.String(),
-				"ether_src": c.cfg.N3MAC[:],
-				"ether_dst": c.cfg.PeerMAC[:],
+				"teid": far.teid, "gnb_ip": far.peer.String(),
+				"ether_src": transport.MAC[:], "ether_dst": transport.PeerMAC[:],
+				"gate": transport.Gate, "src_ip": transport.Addr.String(),
 			}
 			if p.encapQFI != 0 {
 				// The QER's QFI (8.2.89): the QoS flow the encap writes into
@@ -2826,25 +2871,6 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			}
 		}
 
-		// An uplink PDR's F-TEID is what makes the TEID ours: a rule of the
-		// table in front of the decap, which delivers matching G-PDUs to it.
-		// A TEID no rule names is dropped there (the table's default gate),
-		// so the decap itself needs no session state.
-		if p.teid != 0 {
-			if !writtenTEIDs[p.teid] {
-				writtenTEIDs[p.teid] = true
-				changes = append(changes, bess.Change{
-					Resource: c.teidRes(),
-					Key:      teidRuleKey(p.teid),
-					Value: map[string]any{
-						"gate": uint64(c.cfg.TEIDGate),
-					},
-				})
-			}
-			created = append(created, ie.NewCreatedPDR(
-				ie.NewPDRID(p.id),
-				createdFTEID(p.teid, c.cfg.N3Addr)))
-		}
 	}
 	// The MAR policies and the tunnel records their accesses name, before the
 	// matcher's rules that name them: a rule's steer id is read by AtsssSteer,
@@ -2984,11 +3010,11 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 				return nil, fmt.Errorf("MAR %d's %s access names FAR %d, which the session does not hold",
 					m.id, []string{"3GPP", "non-3GPP"}[which], access.farID)
 			}
+			transport := c.tunnelTransport(m.nextHops[which])
 			value := map[string]any{
-				"teid":      far.teid,
-				"gnb_ip":    far.peer.String(),
-				"ether_src": c.cfg.N3MAC[:],
-				"ether_dst": c.cfg.PeerMAC[:],
+				"teid": far.teid, "gnb_ip": far.peer.String(),
+				"ether_src": transport.MAC[:], "ether_dst": transport.PeerMAC[:],
+				"gate": transport.Gate, "src_ip": transport.Addr.String(),
 			}
 			if far.hasMarking {
 				value["marking"] = uint32(far.marking)
@@ -3344,11 +3370,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 		return match{value: b, mask: ones(4)}, true, nil
 	case UpfTEID:
 		if p.teid == 0 {
-			// The table declares the tunnel as part of the key and the PDI
-			// names none: a rule keyed on TEID 0 would be claimed by every
-			// session that has no tunnel of its own.
-			return match{}, false, fmt.Errorf("%w: the PDI names no F-TEID, so the rule has no tunnel to select by",
-				errNotExpressible)
+			return match{}, false, fmt.Errorf("%w: the PDI names no F-TEID, so the rule has no tunnel to select by", errNotExpressible)
 		}
 		b := make([]byte, 4)
 		binary.BigEndian.PutUint32(b, p.teid)
@@ -3679,7 +3701,7 @@ func (s *Session) createdPDRsFor(cfg Config, asked map[uint16]bool) []*ie.IE {
 		if p.teid != 0 && asked[p.id] {
 			out = append(out, ie.NewCreatedPDR(
 				ie.NewPDRID(p.id),
-				createdFTEID(p.teid, cfg.N3Addr)))
+				createdFTEID(p.teid, (&Compiler{cfg: cfg}).fteidAddr(p))))
 		}
 	}
 	return out
@@ -3692,7 +3714,7 @@ func (s *Session) createdPDRs(cfg Config) []*ie.IE {
 		if p.teid != 0 {
 			out = append(out, ie.NewCreatedPDR(
 				ie.NewPDRID(p.id),
-				createdFTEID(p.teid, cfg.N3Addr)))
+				createdFTEID(p.teid, (&Compiler{cfg: cfg}).fteidAddr(p))))
 		}
 	}
 	return out

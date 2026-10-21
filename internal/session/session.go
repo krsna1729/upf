@@ -311,15 +311,9 @@ type Direction struct {
 // Config is the deployed graph's shape and the constants a session's resources
 // point at.
 type Config struct {
-	// TEIDTable is the ExactMatch module whose rules are the F-TEID match
-	// ("teid"): one rule per session, holding the TEID at the offset the
-	// module's own argument gives it (Eth 14 + IPv4 20 + UDP 8 + the GTP-U
-	// header's flags, type and length 4). The decap behind it decapsulates
-	// only what reaches it; the graph sets the offset, so this compiler needs
-	// the table's name alone (deploy/smoke-gtpu.yaml, docs/design.md).
+	// TEIDTable is the shared UpfIngress admission resource's module name.
+	// ExactMatch TEID keys select gate 0 for uplink and gate 1 for downlink.
 	TEIDTable string
-	// TEIDGate is the gate a TEID rule delivers on: the decap's output gate.
-	TEIDGate uint32
 
 	// GTPUErrors is the GTP-U responder module whose error table the report
 	// loop reads ("echo0": the responder behind the TEID table's default gate,
@@ -373,6 +367,14 @@ type Config struct {
 	N3Addr netip.Addr
 	// The Ethernet addresses of the N3 hop (the graph's port and its peer).
 	N3MAC, PeerMAC [6]byte
+
+	// N9Addr is the local address advertised for Core-source tunnel PDIs.
+	N9Addr netip.Addr
+	// Transports selects the tunnel's physical egress by resolved FAR next hop.
+	// An absent entry retains the simple N3 transport.
+	Transports map[uint32]TunnelTransport
+	// FTEIDAddrs overrides the local ingress address by PDI network instance.
+	FTEIDAddrs map[string]netip.Addr
 
 	// EndMarker is the graph's unix_port socket path: where an End Marker
 	// packet is written when a modification's SNDEM flag moves a tunnel out
@@ -473,10 +475,8 @@ type Compiler struct {
 	store StoreCommands
 	log   *slog.Logger
 
-	// endMarkerConn is this run's connection to the graph's end-marker port,
-	// opened on the first marker and dropped when a write fails (the daemon
-	// behind it restarted, or the graph has no such port). Guarded by mu.
-	endMarkerConn *net.UnixConn
+	// Marker connections are shared by transport socket path, guarded by mu.
+	endMarkerConns map[string]*net.UnixConn
 
 	// journal is the checkpoint this run writes (journal.go), when there is
 	// one. It is set once, before the PFCP socket opens, and never changes: no
@@ -884,7 +884,7 @@ type pdr struct {
 	// forwards toward the data network (resolve).
 	nextHop uint32
 
-	teid     uint32 // uplink: the TEID we advertised (0 when not ours)
+	teid     uint32 // local ingress TEID, in either direction (0 for plain N6)
 	actionID uint32 // the action record this PDR's rule names
 	meterID  uint32 // the meter record a QER resolved to, in this chain's Meter
 	// ownMeterID and sharedMeterID are that choice's halves: the PDR's own

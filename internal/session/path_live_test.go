@@ -107,8 +107,8 @@ func pathEstablishmentWith(cpSEID uint64, ueIP, sdf string,
 // session exists (nothing selects those packets: the TEID table drops the G-PDU
 // and the downlink table has no rule), non-zero after:
 //
-//   - the uplink's counter is the router's output: the TEID rule matched, the
-//     decap stripped the tunnel, the PDR rule matched the UE's packet, its
+//   - the uplink's counter is the router's output: ingress admitted and
+//     decapsulated the tunnel, the PDR rule matched the UE's packet, its
 //     action selected the next hop, the meter passed it and the router found
 //     the N6 route.
 //   - the downlink's is the encap's output: the PDR rule matched the data

@@ -19,8 +19,8 @@ import (
 
 // TestLiveErrorIndicationBecomesAnERIRReport is finding 15 with nothing faked.
 // The lane's graph carries the same error arm as the smoke graph -- a Source
-// injecting the peer's GTP-U Error Indication, the rule table's default gate
-// delivering it to a responder whose track_errors is on -- and this test drives
+// injecting the peer's GTP-U Error Indication, ingress gate 2 delivering it to
+// a responder whose track_errors is on -- and this test drives
 // the control plane against that daemon: the tick's live reading of the
 // module's error table (get_errors, the same command bessctl answers), and the
 // Error Indication Report that comes out of it for the session whose downlink
@@ -45,8 +45,8 @@ func TestLiveErrorIndicationBecomesAnERIRReport(t *testing.T) {
 	}
 
 	cfg := liveConfig()
-	// The responder behind the TEID table's default gate, as the graph wires
-	// it: the module whose error table the tick reads.
+	// The responder behind ingress gate 2, as the graph wires it:
+	// the module whose error table the tick reads.
 	cfg.GTPUErrors = "echo_err"
 	c := New(cfg, client, slog.New(slog.NewTextHandler(os.Stderr,
 		&slog.HandlerOptions{Level: slog.LevelWarn})))

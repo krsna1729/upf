@@ -384,12 +384,8 @@ const (
 
 func testConfig() Config {
 	return Config{
-		// Both tables match the inner IPv4 packet, as deploy/session-live.yaml
-		// declares them: one table per direction, because a rule names an
-		// ActionId and a table declares one actions resource. The uplink table
-		// carries the decap's `qfi` attribute last (8.2.89), the downlink none:
-		// the QFI of a downlink packet is the encap's to write, not a field to
-		// match on.
+		// Both tables match the inner IPv4 packet and ingress tunnel metadata.
+		// The uplink also matches QFI; downlink QFI is written by the encap.
 		Up: Direction{
 			PDRTable:  "pdr_ul",
 			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, QFI},
@@ -416,7 +412,6 @@ func testConfig() Config {
 		// The F-TEID match, as deploy/smoke-gtpu.yaml wires it: the rule table
 		// in front of the decap, one rule per TEID.
 		TEIDTable: "teid",
-		TEIDGate:  0,
 		N3Addr:    netip.MustParseAddr("192.0.2.1"),
 		N3MAC:     [6]byte{2, 0, 0, 0, 0, 1},
 		PeerMAC:   [6]byte{2, 0, 0, 0, 0, 2},
@@ -2199,8 +2194,8 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 	if !ok {
 		t.Fatalf("no TEID rule for %#x among %d changes", fteid.TEID, len(changes))
 	}
-	if got := rule.Value["gate"]; got != uint64(testConfig().TEIDGate) {
-		t.Errorf("the TEID rule delivers on gate %v, want the decap's", got)
+	if got := rule.Value["gate"]; got != uint64(0) {
+		t.Errorf("the TEID rule delivers on gate %v, want 0 (UL)", got)
 	}
 	fields, _ := rule.Key["fields"].([]map[string]any)
 	if len(fields) != 1 {
