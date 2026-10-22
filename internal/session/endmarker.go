@@ -36,39 +36,61 @@ const (
 	gtpuPort      = 2152
 )
 
-// endMarkerFrame is one End Marker: the Ethernet minimum, an outer
-// Eth/IPv4/UDP/GTP-U header with an empty payload, the header's lengths and
-// checksum filled in. The TEID is the OLD F-TEID and the destination the OLD
-// peer, while the source is this UPF's old transport address -- 5.3.2's rule
-// for the markers the CP function would otherwise construct.
-func endMarkerFrame(teid uint32, peer netip.Addr, src netip.Addr, srcMAC, dstMAC [6]byte) []byte {
-	frame := make([]byte, 60) // the Ethernet minimum: a 42-byte message is padded to it
-	copy(frame[0:6], dstMAC[:])
-	copy(frame[6:12], srcMAC[:])
-	binary.BigEndian.PutUint16(frame[12:14], 0x0800)
-
-	ip := frame[14:34]
-	ip[0] = 0x45 // version 4, 5 words of header
-	binary.BigEndian.PutUint16(ip[2:4], 20+8+8)
-	ip[6], ip[7] = 0x40, 0x00 // DF: an end marker is never fragmented
-	ip[8] = 64                // TTL
-	ip[9] = 17                // UDP
-	src4, dst4 := src.As4(), peer.As4()
-	copy(ip[12:16], src4[:])
-	copy(ip[16:20], dst4[:])
-	binary.BigEndian.PutUint16(ip[10:12], ipv4Checksum(ip))
-
-	udp := frame[34:42]
+// endMarkerFrame builds an untagged Ethernet End Marker with zero MAC
+// addresses. The routed transport Router selects the neighbor and rewrites
+// L2; the outer IP family follows the old tunnel's source and peer.
+func endMarkerFrame(teid uint32, peer, src netip.Addr) ([]byte, error) {
+	if !peer.IsValid() || !src.IsValid() || peer.Is4In6() || src.Is4In6() ||
+		peer.Is4() != src.Is4() {
+		return nil, fmt.Errorf("end-marker source and peer must use the same IPv4 or IPv6 family: %s, %s",
+			src, peer)
+	}
+	const (
+		ethernetLength = 14
+		udpLength      = 8
+		gtpuLength     = 8
+	)
+	ipLength := 40
+	etherType := uint16(0x86dd)
+	if src.Is4() {
+		ipLength = 20
+		etherType = 0x0800
+	}
+	packetLength := ethernetLength + ipLength + udpLength + gtpuLength
+	frameLength := max(packetLength, 60)
+	frame := make([]byte, frameLength)
+	binary.BigEndian.PutUint16(frame[12:14], etherType)
+	ip := frame[ethernetLength : ethernetLength+ipLength]
+	if src.Is4() {
+		ip[0] = 0x45
+		binary.BigEndian.PutUint16(ip[2:4], uint16(ipLength+udpLength+gtpuLength))
+		binary.BigEndian.PutUint16(ip[6:8], 0x4000)
+		ip[8], ip[9] = 64, 17
+		src4, dst4 := src.As4(), peer.As4()
+		copy(ip[12:16], src4[:])
+		copy(ip[16:20], dst4[:])
+		binary.BigEndian.PutUint16(ip[10:12], ipv4Checksum(ip))
+	} else {
+		ip[0] = 0x60
+		binary.BigEndian.PutUint16(ip[4:6], udpLength+gtpuLength)
+		ip[6], ip[7] = 17, 64
+		src6, dst6 := src.As16(), peer.As16()
+		copy(ip[8:24], src6[:])
+		copy(ip[24:40], dst6[:])
+	}
+	udpOffset := ethernetLength + ipLength
+	udp := frame[udpOffset : udpOffset+udpLength]
 	binary.BigEndian.PutUint16(udp[0:2], gtpuPort)
 	binary.BigEndian.PutUint16(udp[2:4], gtpuPort)
-	binary.BigEndian.PutUint16(udp[4:6], 8+8)
-	// The UDP checksum stays 0: legal over IPv4, and what the encap writes too.
-
-	gtp := frame[42:50]
-	gtp[0] = 0x30 // version 1, PT 1, S/E/PN clear (5.1: an End Marker carries no optional field)
-	gtp[1] = endMarkerType
+	binary.BigEndian.PutUint16(udp[4:6], udpLength+gtpuLength)
+	gtp := frame[udpOffset+udpLength : udpOffset+udpLength+gtpuLength]
+	gtp[0], gtp[1] = 0x30, endMarkerType
 	binary.BigEndian.PutUint32(gtp[4:8], teid)
-	return frame
+	if src.Is6() {
+		datagram := frame[udpOffset : udpOffset+udpLength+gtpuLength]
+		binary.BigEndian.PutUint16(udp[6:8], ipv6UDPChecksum(src, peer, datagram))
+	}
+	return frame, nil
 }
 
 // ipv4Checksum is the header's checksum over a 20-byte IPv4 header whose
@@ -84,6 +106,38 @@ func ipv4Checksum(header []byte) uint16 {
 	return ^uint16(sum)
 }
 
+// ipv6UDPChecksum computes the mandatory IPv6 UDP checksum over the IPv6
+// pseudo-header and the complete UDP datagram.
+func ipv6UDPChecksum(src, dst netip.Addr, udp []byte) uint16 {
+	src6, dst6 := src.As16(), dst.As16()
+	var sum uint32
+	sum = checksumWords(sum, src6[:])
+	sum = checksumWords(sum, dst6[:])
+	var pseudo [8]byte
+	binary.BigEndian.PutUint32(pseudo[:4], uint32(len(udp)))
+	pseudo[7] = 17
+	sum = checksumWords(sum, pseudo[:])
+	sum = checksumWords(sum, udp)
+	for sum>>16 != 0 {
+		sum = sum&0xffff + sum>>16
+	}
+	checksum := ^uint16(sum)
+	if checksum == 0 {
+		return 0xffff
+	}
+	return checksum
+}
+
+func checksumWords(sum uint32, bytes []byte) uint32 {
+	for i := 0; i+1 < len(bytes); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(bytes[i : i+2]))
+	}
+	if len(bytes)%2 != 0 {
+		sum += uint32(bytes[len(bytes)-1]) << 8
+	}
+	return sum
+}
+
 // dialEndMarker opens the graph's unix_port (SOCK_SEQPACKET, so one write is
 // one packet) for this run's markers.
 func dialEndMarker(path string) (*net.UnixConn, error) {
@@ -93,11 +147,6 @@ func dialEndMarker(path string) (*net.UnixConn, error) {
 		return nil, fmt.Errorf("connecting to the end-marker port %s: %w", path, err)
 	}
 	return conn, nil
-}
-
-// sendEndMarker uses the default N3 transport's marker port.
-func (c *Compiler) sendEndMarker(frame []byte) error {
-	return c.sendEndMarkerAt(c.cfg.EndMarker, frame)
 }
 
 // sendEndMarkerAt writes one frame to the selected graph unix_port. A failure
@@ -199,25 +248,29 @@ func smReqFlagsDepth(ies []*ie.IE, depth int, has func(*ie.IE) bool) bool {
 	return false
 }
 
-// tunnelEndMarker retains the old transport as well as the old F-TEID: a
-// modification may change both the FAR's egress and its referring PDRs.
+// tunnelEndMarker retains the old routed endpoint as well as the old F-TEID:
+// a modification may change the FAR's egress or remote tunnel.
 type tunnelEndMarker struct {
 	far
-	transport TunnelTransport
+	localAddress         netip.Addr
+	transportRouteDomain uint32
 }
 
 func (c *Compiler) sendTunnelEndMarker(tunnel tunnelEndMarker) error {
-	transport := tunnel.transport
-	if !transport.Addr.Is4() || !tunnel.peer.Is4() {
-		return fmt.Errorf("end-marker transport requires IPv4 source and peer addresses: %s, %s", transport.Addr, tunnel.peer)
+	if tunnel.transportRouteDomain == 0 {
+		return fmt.Errorf("the old tunnel has no transport route domain")
 	}
-	frame := endMarkerFrame(tunnel.teid, tunnel.peer, transport.Addr, transport.MAC, transport.PeerMAC)
-	return c.sendEndMarkerAt(transport.EndMarker, frame)
+	frame, err := endMarkerFrame(tunnel.teid, tunnel.peer, tunnel.localAddress)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("%s.%d", c.cfg.EndMarker, tunnel.transportRouteDomain)
+	return c.sendEndMarkerAt(path, frame)
 }
 
 // leavingTunnels snapshots the tunnels a modification moves away from before
 // merge changes their FARs, PDRs or MARs. A shared FAR can have more than one
-// resolved egress; each distinct old transport receives its own marker.
+// resolved routed endpoint; each distinct old endpoint receives a marker.
 func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 	var out []tunnelEndMarker
 	for _, f := range fars {
@@ -239,60 +292,47 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 			updated.instance = f.instance
 		}
 		start := len(out)
-		add := func(hop uint32, ifc routing.Interface, dir Direction) {
-			transport := c.tunnelTransport(hop)
+		add := func(local netip.Addr, domain uint32, ifc routing.Interface) {
+			if !local.IsValid() || domain == 0 {
+				return
+			}
 			if !tunnelChanged {
-				nextHop, err := c.egressHop(&updated, ifc, dir)
-				if err != nil || c.tunnelTransport(nextHop) == transport {
+				endpoint, nextLocal, err := c.tunnelEndpoint(&updated, ifc)
+				if err == nil && nextLocal == local && endpoint.TransportRouteDomain == domain {
 					return
 				}
 			}
 			for _, marker := range out[start:] {
-				if marker.transport == transport {
+				if marker.localAddress == local && marker.transportRouteDomain == domain {
 					return
 				}
 			}
-			out = append(out, tunnelEndMarker{far: *old, transport: transport})
+			out = append(out, tunnelEndMarker{
+				far: *old, localAddress: local, transportRouteDomain: domain,
+			})
 		}
-		referenced := false
 		for _, p := range pdrsInOrder(s) {
-			if p.hasMAR || p.farID != old.id {
+			if p.hasMAR || p.farID != old.id || !p.tunnelLocalAddress.IsValid() {
 				continue
 			}
-			referenced = true
-			var ifc routing.Interface
-			if !tunnelChanged {
-				var err error
-				ifc, err = c.interfaceFor(p)
-				if err != nil {
-					continue
-				}
+			ifc, err := c.interfaceFor(p)
+			if err == nil {
+				add(p.tunnelLocalAddress, p.transportRouteDomain, ifc)
 			}
-			add(p.nextHop, ifc, c.direction(p.srcIfc))
 		}
 		for _, m := range s.MARs {
+			ifc, err := c.marInterface(s, m.id)
+			if err != nil {
+				continue
+			}
 			for which, access := range m.accesses {
-				if !access.hasFarID || access.farID != old.id || m.tunnelIDs[which] == 0 {
+				if !access.hasFarID || access.farID != old.id ||
+					m.tunnelIDs[which] == 0 || !m.tunnelLocalAddresses[which].IsValid() {
 					continue
 				}
-				referenced = true
-				var ifc routing.Interface
-				if !tunnelChanged {
-					var err error
-					ifc, err = c.marInterface(s, m.id)
-					if err != nil {
-						continue
-					}
-				}
-				add(m.nextHops[which], ifc, c.cfg.Down)
+				add(m.tunnelLocalAddresses[which], m.transportRouteDomains[which], ifc)
 			}
-		}
-		if !referenced && tunnelChanged {
-			// An unreferenced FAR has no resolved next hop or old
-			// packet stream; preserve the default transport behavior.
-			add(0, routing.Interface{}, c.cfg.Down)
 		}
 	}
 	return out
 }
-

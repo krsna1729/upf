@@ -5,7 +5,6 @@ package session
 import (
 	"context"
 	"log/slog"
-	"net/netip"
 	"os"
 	"testing"
 
@@ -19,14 +18,14 @@ import (
 // exactly as a deployment spells them.
 func liveConfig() Config {
 	cfg := testConfig()
-	cfg.TEIDTable = "teid"
+	cfg.GTPUDecap = "decap0"
 	cfg.Up = Direction{
 		PDRTable: "pdr_ul",
-		// The tunnel the packet arrived on joins the key (`upf_teid`, the
+		// The tunnel the packet arrived on joins the key (`fteid_context`, the
 		// decap's own attribute): the graph's table reads it, and a second
 		// session whose UE address and flows coincide with the first's cannot
 		// take the first's rules.
-		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI},
+		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, FTEIDContext, QFI},
 		Meters:    "mt_ul",
 		Counters:  "cnt_ul",
 		NextHop:   1,
@@ -36,12 +35,13 @@ func liveConfig() Config {
 		Tunnels: "enc",
 	}
 	cfg.Down = Direction{
-		PDRTable:  "pdr_dl",
-		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
-		Meters:    "mt_dl",
-		Counters:  "cnt_dl",
-		NextHop:   2,
-		Tunnels:   "enc",
+		PDRTable: "pdr_dl",
+		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain,
+			FTEIDContext, QFI},
+		Meters:   "mt_dl",
+		Counters: "cnt_dl",
+		NextHop:  2,
+		Tunnels:  "enc",
 	}
 	// UPF_ROUTE_MODE=destination is the routed lab (deploy/route-path.yaml):
 	// the Router's own FIB decides each packet's egress, so the compiler names
@@ -49,20 +49,16 @@ func liveConfig() Config {
 	if os.Getenv("UPF_ROUTE_MODE") == "destination" {
 		cfg.RouteMode = RouteByDestination
 	}
-	// UPF_FIREWALL=1 is the firewall path on both directions
-	// (deploy/firewall-path.yaml): the stock firewall module holds
-	// each direction's PDRs as one ordered policy, behind the same ActionTables.
+	// UPF_FIREWALL=1 selects the opt-in firewall path
+	// (`deploy/firewall-path.yaml`): it holds each direction's PDRs as one
+	// ordered policy rather than using the WildcardMatch result path.
 	if os.Getenv("UPF_FIREWALL") == "1" {
 		cfg.Up.PDRTable, cfg.Up.PDRFields, cfg.Up.Firewall = "", nil, "fw_ul"
 		cfg.Down.PDRTable, cfg.Down.PDRFields, cfg.Down.Firewall = "", nil, "fw_dl"
 	}
-	cfg.N3Addr = netip.MustParseAddr("192.0.2.1")
-	cfg.N3MAC = [6]byte{2, 0, 0, 0, 0, 1}
-	cfg.PeerMAC = [6]byte{2, 0, 0, 0, 0, 2}
-	// MaxActions, MaxMeters and MaxTEIDs keep their defaults: the lab graphs
-	// declare those capacities (65536) on their Meter, ActionTable and
-	// GtpuEncap modules, and the compiler's id spaces must equal them -- a
-	// session whose meter id is beyond the capacity is refused as invalid.
+	// MaxActions, MaxMeters and MaxTEIDs keep their defaults. The live graphs
+	// set matching capacities on Meter, UrrCount and GtpuEncap; compiler ID
+	// spaces must fit those resource limits or the session is refused.
 	return cfg
 }
 
@@ -233,9 +229,8 @@ func TestLiveStartupSweepErasesStaleSessions(t *testing.T) {
 // TestLiveSessionSharesOneFTEIDPerCHOOSEID programs a session whose two uplink
 // PDIs carry one CHOOSE ID (TS 29.244 8.2.3) into a real daemon. The unit test
 // beside it checks what the compiler builds; this one checks that the daemon
-// takes it -- two PDIs on one TEID rule is one (resource, key) written once,
-// which is what the engine's transaction rules allow -- and that the answer the
-// SMF would read names one TEID for both.
+// accepts one composite admission entry for their shared F-TEID and that the
+// Created PDRs report the same chosen TEID.
 func TestLiveSessionSharesOneFTEIDPerCHOOSEID(t *testing.T) {
 	target := os.Getenv("UPF_BESS_TARGET")
 	if target == "" {

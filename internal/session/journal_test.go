@@ -57,7 +57,7 @@ func TestTheCheckpointReplaysSessions(t *testing.T) {
 	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.7", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
 			ie.NewFARID(2))))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)

@@ -240,7 +240,7 @@ func TestPrintConfigRoundTrips(t *testing.T) {
 func TestEnvNamesFollowTheFlags(t *testing.T) {
 	for _, c := range []struct{ flag, env string }{
 		{"n4", "UPFD_N4"},
-		{"n3-addr", "UPFD_N3_ADDR"},
+		{"fteid-address", "UPFD_FTEID_ADDRESS"},
 		{"print-config", "UPFD_PRINT_CONFIG"},
 		{"buffer-gate", "UPFD_BUFFER_GATE"},
 	} {
@@ -278,37 +278,28 @@ func TestALayeredFlagCountsAsNamed(t *testing.T) {
 	}
 }
 
-func TestTunnelFlagLayersAndRoundTrip(t *testing.T) {
-	const first = "next-hop=3,gate=1,addr=192.0.2.9,mac=02:00:00:00:00:09,peer-mac=02:00:00:00:00:0a"
-	const second = "next-hop=4,gate=0,addr=192.0.2.10,mac=02:00:00:00:00:0b,peer-mac=02:00:00:00:00:0c"
-	const overrides = "instance=foo,addr=192.0.2.9;instance=bar,addr=192.0.2.10"
+func TestFTEIDAddressFlagLayersAndRoundTrip(t *testing.T) {
+	const first = "endpoint=7,reference=n3,transport-domain=1,source=access,instance=foo,ipv4=192.0.2.9"
+	const second = "endpoint=8,reference=n9,transport-domain=2,source=core,instance=bar,ipv4=192.0.2.10"
+	const mappings = first + ";" + second
 	for _, source := range []string{"file", "environment", "command line"} {
 		t.Run(source, func(t *testing.T) {
 			fs := layeredFlags()
-			var transports, addresses entryList
-			fs.Var(&transports, "tunnel-transport", "transport mappings")
-			fs.Var(&addresses, "fteid-address", "F-TEID addresses")
-			fs.String("n9-addr", "", "local N9 address")
-			fileValue := first + ";" + second
-			path := writeConfig(t, `{"n9-addr":"192.0.2.9","tunnel-transport":"`+fileValue+`","fteid-address":"`+overrides+`"}`)
-			t.Setenv("UPFD_TUNNEL_TRANSPORT", "")
+			var addresses entryList
+			fs.Var(&addresses, "fteid-address", "F-TEID endpoint mappings")
+			path := writeConfig(t, `{"fteid-address":"`+mappings+`"}`)
 			t.Setenv("UPFD_FTEID_ADDRESS", "")
-			t.Setenv("UPFD_N9_ADDR", "")
 			t.Setenv("UPFD_CONFIG", path)
+			want := mappings
 			var args []string
 			switch source {
 			case "environment":
-				t.Setenv("UPFD_TUNNEL_TRANSPORT", second+";"+first)
-				t.Setenv("UPFD_FTEID_ADDRESS", overrides)
-				t.Setenv("UPFD_N9_ADDR", "192.0.2.19")
-				fileValue = second + ";" + first
+				t.Setenv("UPFD_FTEID_ADDRESS", second+";"+first)
+				want = second + ";" + first
 			case "command line":
-				// Lower layers must not append mappings to CLI values.
-				t.Setenv("UPFD_TUNNEL_TRANSPORT", first)
-				args = []string{"-tunnel-transport", second, "-tunnel-transport", first,
-					"-fteid-address", "instance=foo,addr=192.0.2.9",
-					"-fteid-address", "instance=bar,addr=192.0.2.10"}
-				fileValue = second + ";" + first
+				t.Setenv("UPFD_FTEID_ADDRESS", first)
+				args = []string{"-fteid-address", second, "-fteid-address", first}
+				want = second + ";" + first
 			}
 			if err := fs.Parse(args); err != nil {
 				t.Fatal(err)
@@ -316,21 +307,20 @@ func TestTunnelFlagLayersAndRoundTrip(t *testing.T) {
 			if _, err := applyLayers(fs); err != nil {
 				t.Fatal(err)
 			}
-			if len(transports) != 2 || transports.String() != fileValue || addresses.String() != overrides {
-				t.Fatalf("layers merged or lost mappings: transports %v, addresses %v", transports, addresses)
+			if addresses.String() != want {
+				t.Fatalf("layers produced %q, want %q", addresses.String(), want)
 			}
-			if _, err := parseTransports(transports); err != nil {
+			endpoints, err := parseFTEIDAddresses(addresses, true)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := parseFTEIDAddresses(addresses); err != nil {
-				t.Fatal(err)
+			firstID, secondID := uint32(7), uint32(8)
+			if source != "file" {
+				firstID, secondID = 8, 7
 			}
-			wantN9 := "192.0.2.9"
-			if source == "environment" {
-				wantN9 = "192.0.2.19"
-			}
-			if got := fs.Lookup("n9-addr").Value.String(); got != wantN9 {
-				t.Fatalf("N9 address %q, want %q", got, wantN9)
+			if len(endpoints) != 2 || endpoints[0].ID != firstID ||
+				endpoints[1].ID != secondID {
+				t.Fatalf("endpoint order is %+v, want IDs %d then %d", endpoints, firstID, secondID)
 			}
 			printed, err := effectiveConfig(fs)
 			if err != nil {
@@ -341,8 +331,9 @@ func TestTunnelFlagLayersAndRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 			var restored entryList
-			if err := restored.Set(values["tunnel-transport"]); err != nil || restored.String() != transports.String() {
-				t.Fatalf("print-config did not round-trip transports: %v, %v", restored, err)
+			if err := restored.Set(values["fteid-address"]); err != nil ||
+				restored.String() != addresses.String() {
+				t.Fatalf("print-config did not round-trip F-TEID mappings: %v, %v", restored, err)
 			}
 		})
 	}

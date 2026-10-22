@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -29,20 +30,11 @@ func (v *entryList) Set(value string) error {
 	return nil
 }
 
-func parseLocalIPv4(value string) (netip.Addr, error) {
-	addr, err := netip.ParseAddr(value)
-	if err != nil || !addr.Is4() || addr.IsUnspecified() || addr.IsMulticast() ||
-		addr == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
-		return netip.Addr{}, fmt.Errorf("%q is not a local unicast IPv4 address", value)
-	}
-	return addr, nil
-}
-
-func parseTransports(entries entryList) (map[uint32]session.TunnelTransport, error) {
-	transports := make(map[uint32]session.TunnelTransport, len(entries))
+func parseFTEIDAddresses(entries entryList, multiInstance bool) ([]session.FTEIDEndpoint, error) {
+	endpoints := make([]session.FTEIDEndpoint, 0, len(entries))
+	ids := make(map[uint32]bool, len(entries))
 	for _, entry := range entries {
-		var transport session.TunnelTransport
-		var hop uint32
+		var ep session.FTEIDEndpoint
 		seen := map[string]bool{}
 		for _, field := range strings.Split(entry, ",") {
 			key, value, ok := strings.Cut(strings.TrimSpace(field), "=")
@@ -52,89 +44,100 @@ func parseTransports(entries entryList) (map[uint32]session.TunnelTransport, err
 			seen[key] = true
 			var err error
 			switch key {
-			case "next-hop":
-				var n uint64
-				n, err = strconv.ParseUint(value, 10, 32)
-				hop = uint32(n)
-			case "gate":
-				transport.Gate, err = strconv.ParseUint(value, 10, 64)
-				if err == nil && transport.Gate >= 8192 {
-					err = fmt.Errorf("gate must be below 8192")
+			case "endpoint":
+				var id uint64
+				id, err = strconv.ParseUint(value, 10, 32)
+				if err == nil && id == 0 {
+					err = fmt.Errorf("must be nonzero")
 				}
-			case "addr":
-				transport.Addr, err = parseLocalIPv4(value)
-			case "mac":
-				transport.MAC, err = parseMAC(value)
-			case "peer-mac":
-				transport.PeerMAC, err = parseMAC(value)
-			case "end-marker":
-				transport.EndMarker = value
+				ep.ID = uint32(id)
+			case "reference":
+				if value != "n3" && value != "n9" {
+					err = fmt.Errorf("must be n3 or n9")
+				}
+				ep.ReferencePoint = value
+			case "transport-domain":
+				var domain uint64
+				domain, err = strconv.ParseUint(value, 10, 32)
+				if err == nil && domain == 0 {
+					err = fmt.Errorf("must be nonzero")
+				}
+				ep.TransportRouteDomain = uint32(domain)
+			case "source":
+				switch value {
+				case "access":
+					ep.SourceInterface = ie.SrcInterfaceAccess
+				case "core":
+					ep.SourceInterface = ie.SrcInterfaceCore
+				default:
+					err = fmt.Errorf("must be access or core")
+				}
+			case "instance":
+				if value == "" {
+					err = fmt.Errorf("must not be empty")
+				}
+				ep.Instance = value
+			case "ipv4", "ipv6":
+				var addr netip.Addr
+				addr, err = netip.ParseAddr(value)
+				if err == nil && (addr.Zone() != "" || addr.IsUnspecified() || addr.IsMulticast() ||
+					addr.IsLinkLocalUnicast() || addr.IsLoopback() ||
+					addr == netip.AddrFrom4([4]byte{255, 255, 255, 255}) ||
+					(key == "ipv4" && !addr.Is4()) ||
+					(key == "ipv6" && (!addr.Is6() || addr.Is4In6()))) {
+					err = fmt.Errorf("%q is not a usable local IPv%s unicast address",
+						value, map[bool]string{true: "4", false: "6"}[key == "ipv4"])
+				}
+				if err == nil {
+					if key == "ipv4" {
+						ep.IPv4 = addr
+					} else {
+						ep.IPv6 = addr
+					}
+				}
 			default:
-				return nil, fmt.Errorf("%q: unknown transport field %q", entry, key)
+				return nil, fmt.Errorf("%q: unknown F-TEID field %q", entry, key)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("%q: %s: %w", entry, key, err)
 			}
 		}
-		for _, key := range []string{"next-hop", "gate", "addr", "mac", "peer-mac"} {
-			if !seen[key] {
-				return nil, fmt.Errorf("%q: transport needs %s=", entry, key)
-			}
+		if !seen["endpoint"] || !seen["reference"] || !seen["transport-domain"] ||
+			!seen["source"] || (!ep.IPv4.IsValid() && !ep.IPv6.IsValid()) ||
+			(multiInstance && (!seen["instance"] || ep.Instance == "")) ||
+			(!multiInstance && seen["instance"]) {
+			return nil, fmt.Errorf(
+				"%q: endpoint, reference, transport-domain, source and at least one address are required; instance is required only with -instances",
+				entry)
 		}
-		if _, exists := transports[hop]; exists {
-			return nil, fmt.Errorf("duplicate transport next-hop %d", hop)
+		if (ep.ReferencePoint == "n3" && ep.SourceInterface != ie.SrcInterfaceAccess) ||
+			(ep.ReferencePoint == "n9" && ep.SourceInterface != ie.SrcInterfaceCore) {
+			return nil, fmt.Errorf("%q: n3 requires source=access and n9 requires source=core", entry)
 		}
-		transports[hop] = transport
+		if ids[ep.ID] {
+			return nil, fmt.Errorf("duplicate F-TEID endpoint ID %d", ep.ID)
+		}
+		ids[ep.ID] = true
+		endpoints = append(endpoints, ep)
 	}
-	return transports, nil
-}
-
-func parseFTEIDAddresses(entries entryList) (map[string]netip.Addr, error) {
-	addresses := make(map[string]netip.Addr, len(entries))
-	for _, entry := range entries {
-		var instance string
-		var addr netip.Addr
-		seen := map[string]bool{}
-		for _, field := range strings.Split(entry, ",") {
-			key, value, ok := strings.Cut(strings.TrimSpace(field), "=")
-			if !ok || seen[key] {
-				return nil, fmt.Errorf("%q: expected distinct key=value fields", entry)
-			}
-			seen[key] = true
-			switch key {
-			case "instance":
-				instance = value
-			case "addr":
-				var err error
-				addr, err = parseLocalIPv4(value)
-				if err != nil {
-					return nil, fmt.Errorf("%q: addr: %w", entry, err)
-				}
-			default:
-				return nil, fmt.Errorf("%q: unknown F-TEID address field %q", entry, key)
-			}
-		}
-		if instance == "" || !addr.IsValid() {
-			return nil, fmt.Errorf("%q: F-TEID address needs instance= and addr=", entry)
-		}
-		if _, exists := addresses[instance]; exists {
-			return nil, fmt.Errorf("duplicate F-TEID address instance %q", instance)
-		}
-		addresses[instance] = addr
-	}
-	return addresses, nil
+	return endpoints, nil
 }
 
 func hasEndMarker(cfg session.Config) bool {
-	if cfg.EndMarker != "" {
-		return true
+	return cfg.EndMarker != ""
+}
+
+func parseMAC(value string) ([6]byte, error) {
+	var out [6]byte
+	hw, err := net.ParseMAC(value)
+	if err != nil {
+		return out, err
 	}
-	for _, transport := range cfg.Transports {
-		if transport.EndMarker != "" {
-			return true
-		}
+	if len(hw) != len(out) {
+		return out, fmt.Errorf("%q is not a 6-byte address", value)
 	}
-	return false
+	copy(out[:], hw)
+	return out, nil
 }
 
 // parsePDRFields reads a -pdr-fields-* flag: the PDR table's key, in the order
@@ -145,7 +148,7 @@ func parsePDRFields(spec string) ([]session.Field, error) {
 	names := map[string]session.Field{}
 	for _, f := range []session.Field{
 		session.SrcIP, session.DstIP, session.Proto, session.SrcPort,
-		session.DstPort, session.RouteDomain, session.UpfTEID, session.QFI,
+		session.DstPort, session.RouteDomain, session.FTEIDContext, session.QFI,
 	} {
 		names[f.FlagName()] = f
 	}
@@ -157,7 +160,7 @@ func parsePDRFields(spec string) ([]session.Field, error) {
 		}
 		f, ok := names[name]
 		if !ok {
-			return nil, fmt.Errorf("field %q is not one of src, dst, proto, sport, dport, domain, teid, qfi", name)
+			return nil, fmt.Errorf("field %q is not one of src, dst, proto, sport, dport, domain, fteid, qfi", name)
 		}
 		fields = append(fields, f)
 	}

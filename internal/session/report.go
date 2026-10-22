@@ -539,7 +539,7 @@ func (c *Compiler) countedModule(p *pdr) (string, bool) {
 	if len(p.urrIDs) == 0 || p.actionID == 0 || p.drop {
 		return "", false
 	}
-	dir := c.direction(p.srcIfc)
+	dir := c.direction(p)
 	return dir.Counters, dir.Counters != ""
 }
 
@@ -779,12 +779,12 @@ func (c *Compiler) countsOf(s *Session, uid uint32, counts map[string]map[uint32
 		if p.actionID == 0 || p.drop || !slices.Contains(p.urrIDs, uid) {
 			continue
 		}
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		if dir.Counters == "" {
 			continue
 		}
 		cell := counts[dir.Counters][p.actionID]
-		if p.srcIfc == ie.SrcInterfaceAccess {
+		if !p.downlink() {
 			up = up.add(cell.Usage)
 		} else {
 			down = down.add(cell.Usage)

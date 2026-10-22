@@ -630,13 +630,10 @@ type ErrorCount struct {
 }
 
 // ErrorCounts reads a GTP-U responder's error table through its own get_errors
-// action (datapath/upf_datapath.proto): the Error Indications the peer sent
-// this UPF, one count per TEID they named. Naming no TEID reads every entry
-// the table holds. It is the counterpart of RuleCounts and a reading of its
-// own: the table belongs to the responder behind the TEID table's default
-// gate, and a graph may have that module without a URR counter (or the other
-// way), so a session layer that measured usage but read errors out of the
-// counter module would read the wrong module's answer.
+// action (datapath/upf_datapath.proto): peer Error Indications, one count per
+// TEID. Naming no TEID reads every entry the table holds. It is independent of
+// usage counters: a graph may enable the gate-2 responder without a URR
+// counter, and the session layer must read the responder's own answer.
 func (c *Client) ErrorCounts(ctx context.Context, module string, teids ...uint32) ([]ErrorCount, error) {
 	arg, err := c.Message("upf.pb.GtpuResponderCommandGetErrorsArg",
 		map[string]any{"teids": teids})

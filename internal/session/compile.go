@@ -3,12 +3,11 @@
 // The PFCP side of the session layer: reading a session message into the
 // model below, resolving it into dataplane resources, and answering.
 //
-// The rule shapes are the ones deploy/upf.yaml declares: a WildcardMatch table
-// whose rule value is {priority, gate, action_id} (BESS D-141), an ActionTable
-// whose action names a meter and a next hop, a Meter per policed direction, the
-// plugin's per-session tunnel record for the downlink, and its per-TEID session
-// entry for the uplink. A direction may instead opt into BESS's firewall table
-// (docs/design.md, "The firewall path"): one ordered policy in a
+// The graph's rule shapes come from `deploy/upf.yaml`: `WildcardMatch` rules
+// carry `{priority, gate, result}`; `result_fields` write the ActionId, meter
+// IDs and next hop into metadata. One `Meter` handles each direction; session
+// changes also write tunnel records and endpoint-scoped F-TEID admission keys.
+// A direction may instead opt into BESS's firewall table: one ordered
 // "<module>/rules" singleton, whose rules carry prefix, protocol and port
 // *ranges* for both address families and a drop-or-pass verdict.
 
@@ -211,11 +210,10 @@ type pdrReq struct {
 	precedence uint32
 	srcIfc     uint8
 	ueIP       netip.Addr
-	// ueIPDst is 8.2.62's bit 3 (S/D) as this PDI carries it: set, the UE IP
-	// address IE names the packet's *destination*. Clear is the source -- and
-	// what every other request here sends, whose side therefore stays the
-	// direction's own (an Access packet's UE is its source, a Core one's its
-	// destination), which is also what an SMF that omits the bit means.
+	hasUEIP    bool
+	// ueIPDst is the PDI's 8.2.62 S/D bit: 1 names a destination IP address,
+	// 0 names a source IP address. It is distinct from PDR direction; Access
+	// traffic remains uplink even if this IE names a destination address.
 	ueIPDst bool
 	sdfs    []*sdfFilter // the PDI's SDF filters, any of which matches
 	// hasFarID says the FAR ID IE was there; the FAR it names is mandatory in
@@ -246,14 +244,12 @@ type pdrReq struct {
 
 	// An uplink PDR's PDI names an F-TEID: the TEID the SMF expects us to
 	// use (0: ours to choose) and, for the address, usually 0.
-	hasFTEID bool
-	teid     uint32
-	// hasCHID is the F-TEID's CHOOSE ID flag (TS 29.244 8.2.3) with the CH
-	// flag that makes it meaningful: PDIs that carry the same value are one
-	// tunnel endpoint, and the session allocates one F-TEID for all of them.
-	// Zero is a legal CHOOSE ID, so the flag and the value are two fields.
-	hasCHID bool
-	chid    uint8
+	hasFTEID, hasChoose  bool
+	teid                 uint32
+	fteidIPv4, fteidIPv6 netip.Addr
+	wantIPv4, wantIPv6   bool
+	hasCHID              bool
+	chid                 uint8
 }
 
 // marReq is one Create MAR or Update MAR (TS 29.244 7.5.2.8): the access
@@ -549,7 +545,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		URRs:      map[uint32]*urr{},
 		BARs:      map[uint8]*bar{},
 		MARs:      map[uint16]*mar{},
-		chids:     map[uint8]uint32{},
+		chids:     map[uint8]chosenFTEID{},
 	}
 	if err := c.merge(s, pdrs, fars, bars, qers, urrs, mars, removals{}); err != nil {
 		c.log.Warn("session: cannot carry the establishment request",
@@ -594,11 +590,6 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 
 	c.mu.Lock()
 	c.sessions[local] = s
-	for _, p := range pdrsInOrder(s) {
-		if p.teid != 0 {
-			c.byTEID[p.teid] = s
-		}
-	}
 	c.mu.Unlock()
 	c.stats.established.Add(1)
 	c.checkpoint(kindEstablish, local, req)
@@ -723,18 +714,19 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 
 	changes, _, err := c.compile(s)
 	if err != nil {
+		c.mu.Lock()
+		c.rollback(s, before)
+		c.mu.Unlock()
 		c.log.Warn("session: cannot compile the modification request", "seid", seid, "error", err)
-		// What this compile allocated is not released: the session is live and
-		// its records name those ids, so freeing them would let the pool hand
-		// them to a session whose record the live one still selects. The ids of
-		// objects a modification removed are held for the same reason -- safe,
-		// not implemented: those objects' records stay in the dataplane too,
-		// and a naive release would free ids that a live record still names. A
-		// provenance-tracked release is the fix (docs/design.md).
 		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
 	created := s.createdPDRsFor(c.cfg, asked)
 	if err := c.ap.Apply(context.Background(), changes...); err != nil {
+		if definiteRefusal(err) {
+			c.mu.Lock()
+			c.rollback(s, before)
+			c.mu.Unlock()
+		}
 		c.log.Warn("session: the dataplane refused the modification", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, causeOf(err), nil)
 	}
@@ -793,11 +785,6 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	}
 
 	c.mu.Lock()
-	for _, p := range pdrsInOrder(s) {
-		if p.teid != 0 {
-			c.byTEID[p.teid] = s
-		}
-	}
 	c.mu.Unlock()
 
 	c.log.Info("session: modified", "seid", seid, "pdrs", len(s.PDRs), "changes", len(changes))
@@ -1192,18 +1179,33 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		s.forgetRemoval(p.id)
 		pdr := &pdr{
 			id: p.id, precedence: p.precedence, srcIfc: p.srcIfc,
-			down: downSide(p.srcIfc),
-			ueIP: p.ueIP, ueIPDst: p.ueIPDst, sdfs: p.sdfs, farID: p.farID,
+			ueIP: p.ueIP, hasUEIP: p.hasUEIP, ueIPDst: p.ueIPDst,
+			sdfs: p.sdfs, farID: p.farID,
 			hasMAR: p.hasMAR, marID: p.marID, qerIDs: p.qerIDs, urrIDs: p.urrIDs,
 			instance: p.instance, qfis: p.qfis,
+			hasFTEID: p.hasFTEID, hasChoose: p.hasChoose, hasCHID: p.hasCHID, chid: p.chid,
+			fteidIPv4: p.fteidIPv4, fteidIPv6: p.fteidIPv6,
+			wantIPv4: p.wantIPv4, wantIPv6: p.wantIPv6,
+		}
+		var err error
+		pdr.down, err = pdrDownlink(pdr.srcIfc, pdr.hasUEIP, pdr.ueIPDst, pdr.sdfs)
+		if err != nil {
+			return fmt.Errorf("PDR %d: %w", p.id, err)
 		}
 		if old != nil {
 			// An update keeps the dataplane identity: the rule that already
 			// selects this PDR keeps its action id, so a worker switching
 			// between old and new state never sees a dangling reference.
 			pdr.actionID = old.actionID
+			pdr.writtenTunnels = old.writtenTunnels
 			if !p.hasFTEID || old.down == pdr.down {
 				pdr.teid = old.teid
+				pdr.hasFTEID = old.hasFTEID
+				pdr.endpointID, pdr.endpointFamily = old.endpointID, old.endpointFamily
+				pdr.endpointIPv4, pdr.endpointIPv6 = old.endpointIPv4, old.endpointIPv6
+				pdr.endpointFamilies = slices.Clone(old.endpointFamilies)
+				pdr.wantIPv4, pdr.wantIPv6 = old.wantIPv4, old.wantIPv6
+				pdr.hasChoose, pdr.hasCHID, pdr.chid = old.hasChoose, old.hasCHID, old.chid
 			}
 			pdr.meterID = old.meterID
 			// A PDR that keeps buffering keeps its episode: the SMF is owed one
@@ -1215,66 +1217,75 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			pdr.ddnSent, pdr.buffer = old.ddnSent, old.buffer
 		}
 		if p.hasFTEID {
-			if p.srcIfc != ie.SrcInterfaceAccess && p.srcIfc != ie.SrcInterfaceCore {
-				return fmt.Errorf("%w: F-TEID is supported only for Access or Core source", errNotExpressible)
-			}
-			if !c.fteidAddr(pdr).Is4() {
-				return fmt.Errorf("%w: PDR %d has no local IPv4 tunnel address (configure -n9-addr or -fteid-address)", errNotExpressible, p.id)
-			}
-			if p.teid != 0 {
-				// An F-TEID the SMF pinned is ours to use and ours to keep out
-				// of the allocator's way: another session handed the same
-				// value would share the TEID rule, and its uplink packets
-				// would land in whichever session wrote the rule last.
-				//
-				if other := c.byTEID[p.teid]; other != nil && other != s {
-					return fmt.Errorf(
-						"%w: the pinned F-TEID %#x is session %d's",
-						errNoResources, p.teid, other.LocalSEID)
+			families := requestedFTEIDFamilies(pdr)
+			var endpoint FTEIDEndpoint
+			if p.hasCHID && p.teid == 0 {
+				if chosen, ok := s.chids[p.chid]; ok {
+					if chosen.SourceInterface != pdr.srcIfc || chosen.Instance != pdr.instance ||
+						!slices.Equal(chosen.Families, families) {
+						return fmt.Errorf("%w: CHOOSE ID %d was reused with a different endpoint or family set", errNotExpressible, p.chid)
+					}
+					for _, candidate := range c.cfg.FTEIDEndpoints {
+						if candidate.ID == chosen.EndpointID {
+							endpoint = candidate
+							break
+						}
+					}
+					if endpoint.ID == 0 {
+						return fmt.Errorf("%w: CHOOSE ID %d references an unavailable endpoint", errNotExpressible, p.chid)
+					}
+				} else {
+					endpoint, err = c.fteidEndpoint(pdr)
 				}
+			} else {
+				endpoint, err = c.fteidEndpoint(pdr)
+			}
+			if err != nil {
+				return fmt.Errorf("PDR %d: %w", p.id, err)
+			}
+			for _, family := range families {
+				if (family == 4 && !endpoint.IPv4.IsValid()) || (family == 6 && !endpoint.IPv6.IsValid()) {
+					return fmt.Errorf("%w: CHOOSE ID %d endpoint lacks requested family %d", errNotExpressible, p.chid, family)
+				}
+			}
+			if (pdr.fteidIPv4.IsValid() && endpoint.IPv4 != pdr.fteidIPv4) ||
+				(pdr.fteidIPv6.IsValid() && endpoint.IPv6 != pdr.fteidIPv6) {
+				return fmt.Errorf("%w: CHOOSE ID %d was reused with a different endpoint address", errNotExpressible, p.chid)
+			}
+			pdr.endpointID = endpoint.ID
+			pdr.endpointIPv4, pdr.endpointIPv6 = endpoint.IPv4, endpoint.IPv6
+			pdr.endpointFamilies = slices.Clone(families)
+			pdr.wantIPv4, pdr.wantIPv6 = slices.Contains(families, 4), slices.Contains(families, 6)
+			pdr.endpointFamily = families[0]
+			if p.teid != 0 {
 				pdr.teid = p.teid
 				c.teids.reserve(p.teid)
-				// The mapping goes in here, under merge's lock, not after the
-				// Apply: that is what makes the check above atomic. Two
-				// concurrent establishments that pin one value would otherwise
-				// both pass (the mapping is written later), and the second
-				// Apply would overwrite the first's TEID rule. It also means a
-				// session's *own* two uplink PDRs that share a pinned value
-				// see their own mapping and are accepted. releaseSession rolls
-				// it back when the session is refused, and Establish's write
-				// after the Apply is the no-op it always was.
-				c.byTEID[p.teid] = s
-			} else if p.hasCHID {
-				// The SMF grouped this PDI with the session's others that carry
-				// the same CHOOSE ID (TS 29.244 8.2.3): they are one tunnel
-				// endpoint, so the session allocates one F-TEID for the group
-				// and hands it to each of them, in this request or in a later
-				// one. A pin is not overridden by the group: the pin branch
-				// above is the SMF naming the TEID itself, and the two cannot
-				// agree on one value by accident.
-				teid, ok := s.chids[p.chid]
-				if !ok {
-					id, err := c.teids.alloc()
+			} else if p.hasChoose {
+				if p.hasCHID {
+					chosen, ok := s.chids[p.chid]
+					if !ok {
+						teid, err := c.teids.alloc()
+						if err != nil {
+							return fmt.Errorf("%w: %v", errNoResources, err)
+						}
+						chosen = chosenFTEID{
+							TEID: teid, EndpointID: endpoint.ID,
+							Families: slices.Clone(families), SourceInterface: pdr.srcIfc,
+							Instance: pdr.instance,
+						}
+						s.chids[p.chid] = chosen
+					}
+					pdr.teid = chosen.TEID
+				} else {
+					teid, err := c.teids.alloc()
 					if err != nil {
 						return fmt.Errorf("%w: %v", errNoResources, err)
 					}
-					teid = id
-					s.chids[p.chid] = id
+					pdr.teid = teid
 				}
-				pdr.teid = teid
-			} else if pdr.teid == 0 {
-				// The SMF left the F-TEID to us (TEID 0): allocate one and
-				// report it in the Created PDR. Failing to is not something to
-				// shrug at -- a session with TEID 0 has no rule to be selected
-				// by, so the uplink would blackhole while the SMF was told the
-				// establishment succeeded.
-				id, err := c.teids.alloc()
-				if err != nil {
-					return fmt.Errorf("%w: %v", errNoResources, err)
-				}
-				pdr.teid = id
+			} else {
+				return fmt.Errorf("%w: an F-TEID with TEID zero must carry CHOOSE", errNotExpressible)
 			}
-			c.byTEID[pdr.teid] = s
 		}
 		// The session's UE address is named by a PDI whose address is on the
 		// UE's side of the packet (ueAddr); an Access PDI's destination is
@@ -1289,16 +1300,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			s.stale = append(s.stale, old)
 		}
 		s.PDRs[p.id] = pdr
-	}
-	tunnelDirections := map[uint32]bool{}
-	for _, p := range s.PDRs {
-		if p.teid == 0 {
-			continue
+		if pdr.teid != 0 {
+			if err := c.claimFTEID(s, pdr); err != nil {
+				return err
+			}
 		}
-		if down, exists := tunnelDirections[p.teid]; exists && down != p.down {
-			return fmt.Errorf("%w: F-TEID %#x has conflicting ingress directions", errNotExpressible, p.teid)
-		}
-		tunnelDirections[p.teid] = p.down
 	}
 	// A removed MAR that a PDR still names is refused: the PDR's only egress
 	// would be gone, and the packet path would drop it with no cause the SMF
@@ -1368,6 +1374,23 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	if err := resolveSDFIDs(s); err != nil {
 		return err
 	}
+	for _, p := range s.PDRs {
+		down, err := pdrDownlink(p.srcIfc, p.hasUEIP, p.ueIPDst, p.sdfs)
+		if err != nil {
+			return fmt.Errorf("PDR %d: %w", p.id, err)
+		}
+		p.down = down
+	}
+	tunnelDirections := map[uint32]bool{}
+	for _, p := range s.PDRs {
+		if p.teid == 0 {
+			continue
+		}
+		if down, exists := tunnelDirections[p.teid]; exists && down != p.down {
+			return fmt.Errorf("%w: F-TEID %#x has conflicting ingress directions", errNotExpressible, p.teid)
+		}
+		tunnelDirections[p.teid] = p.down
+	}
 	// What the request's objects mean for each PDR (resolve): a modification
 	// that leaves the model unfaithful to itself is refused before the compile
 	// that would write it.
@@ -1375,6 +1398,42 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		return err
 	}
 	return nil
+}
+
+// pdrDownlink resolves packet direction from the PDI's UE-address side when it
+// is explicit, or from an SDF "assigned" side when the PDI omits that IE.
+// Source Interface is only the ordinary fallback; Access is always uplink.
+func pdrDownlink(srcIfc uint8, hasUEIP, ueIPDst bool, sdfs []*sdfFilter) (bool, error) {
+	if srcIfc == ie.SrcInterfaceAccess {
+		return false, nil
+	}
+	if hasUEIP {
+		return ueIPDst, nil
+	}
+
+	hasDirection, down := false, false
+	for _, sdf := range sdfs {
+		if sdf == nil || sdf.bare {
+			continue
+		}
+		if sdf.srcAssigned && sdf.dstAssigned {
+			return false, fmt.Errorf("%w: an SDF filter marks the UE as both source and destination",
+				errNotExpressible)
+		}
+		if !sdf.srcAssigned && !sdf.dstAssigned {
+			continue
+		}
+		candidate := sdf.dstAssigned
+		if hasDirection && down != candidate {
+			return false, fmt.Errorf("%w: PDI SDF filters imply conflicting packet directions",
+				errNotExpressible)
+		}
+		hasDirection, down = true, candidate
+	}
+	if hasDirection {
+		return down, nil
+	}
+	return true, nil
 }
 
 // resolveMAR derives one MAR's two accesses into the packet path's numbers: the
@@ -1427,6 +1486,8 @@ func (c *Compiler) resolveMAR(s *Session, m *mar) error {
 	}
 	for which := 0; which < 2; which++ {
 		access := &m.accesses[which]
+		m.tunnelLocalAddresses[which] = netip.Addr{}
+		m.transportRouteDomains[which] = 0
 		if !access.hasFarID || access.priority == ie.PriorityNoStandby {
 			s.retireTunnel(m.tunnelIDs[which])
 			m.nextHops[which] = 0
@@ -1466,6 +1527,13 @@ func (c *Compiler) resolveMAR(s *Session, m *mar) error {
 				}
 				m.tunnelIDs[which] = id
 			}
+			endpoint, local, err := c.tunnelEndpoint(far, ifc)
+			if err != nil {
+				return fmt.Errorf("MAR %d's %s access: %w", m.id,
+					[]string{"3GPP", "non-3GPP"}[which], err)
+			}
+			m.tunnelLocalAddresses[which] = local
+			m.transportRouteDomains[which] = endpoint.TransportRouteDomain
 		} else {
 			s.retireTunnel(m.tunnelIDs[which])
 			m.tunnelIDs[which] = 0
@@ -1580,7 +1648,7 @@ func (c *Compiler) resolve(s *Session) error {
 	}
 	for _, p := range pdrsInOrder(s) {
 		far := s.FARs[p.farID]
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		ifc, err := c.interfaceFor(p)
 		if err != nil {
 			return err
@@ -1629,7 +1697,7 @@ func (c *Compiler) resolve(s *Session) error {
 			// (5.2.4.1), and only the downlink chain has the branch. A BUFF-only FAR
 			// on an uplink PDR -- which no SMF should send -- keeps the drop it had,
 			// rather than gating to a branch that is not in its chain.
-			p.buffer = c.cfg.Buffering != nil && far != nil && p.srcIfc != ie.SrcInterfaceAccess &&
+			p.buffer = c.cfg.Buffering != nil && far != nil && p.downlink() &&
 				far.apply&applyForw == 0 && far.apply&applyBuff != 0
 			// The report is the SMF's to ask for: NOCP is set with BUFF (8.2.26),
 			// and without it the held packets are reported to nobody.
@@ -1658,6 +1726,8 @@ func (c *Compiler) resolve(s *Session) error {
 		}
 		p.meterID = 0
 		p.tunnels = nil
+		p.tunnelLocalAddress = netip.Addr{}
+		p.transportRouteDomain = 0
 		p.encapQFI = 0
 		p.hasEncapQFI = false
 		var sharedUL, ownUL, sharedDL, ownDL uint32
@@ -1672,7 +1742,7 @@ func (c *Compiler) resolve(s *Session) error {
 				return fmt.Errorf("%w: PDR %d's QER %d is not in the session",
 					errNotExpressible, p.id, qid)
 			}
-			if p.srcIfc == ie.SrcInterfaceAccess {
+			if !p.downlink() {
 				if entry.gateUL == ie.GateStatusClosed {
 					// A closed gate is an instruction to stop, not to hold: it
 					// outranks the FAR's BUFF for this PDR. Every QER the PDR
@@ -1725,11 +1795,11 @@ func (c *Compiler) resolve(s *Session) error {
 		// The meter this PDR is policed by: the session's shared QER when the
 		// PDR names it, else the last rate-bearing QER of its own (which is
 		// what a PDR that names only a flow QER had before). The two are kept
-		// apart as well, for a chain with two levels: the action names the
-		// flow's first, so the Meter stops a red packet before the session's
-		// bucket is charged.
+		// apart as well, for a two-level Meter: the PDR result writes the flow
+		// meter ID first, so a red flow bucket does not charge the shared session
+		// bucket.
 		switch {
-		case downSide(p.srcIfc):
+		case p.downlink():
 			p.ownMeterID, p.sharedMeterID = ownDL, sharedDL
 			if sharedDL != 0 {
 				p.meterID = sharedDL
@@ -1744,7 +1814,7 @@ func (c *Compiler) resolve(s *Session) error {
 				p.meterID = ownUL
 			}
 		}
-		if !p.hasMAR && far != nil && far.hasOuter {
+		if !p.hasMAR && far != nil && far.hasOuter && far.apply&applyForw != 0 && !p.drop {
 			if dir.Tunnels == "" {
 				// The FAR adds an outer header, so the forward's packets must
 				// leave in a tunnel -- indirect data forwarding (Destination
@@ -1756,13 +1826,19 @@ func (c *Compiler) resolve(s *Session) error {
 				// drops them (datapath/gtpu_encap.cc) -- a silent blackhole the
 				// SMF never hears about. Cause 73 names the flag instead.
 				flagName := "-tunnels-ul"
-				if downSide(p.srcIfc) {
+				if p.downlink() {
 					flagName = "-tunnels"
 				}
 				return fmt.Errorf(
 					"%w: PDR %d's FAR adds an outer header, and this deployment's tunnel module for this direction is unset (%s)",
 					errNotExpressible, p.id, flagName)
 			}
+			endpoint, local, err := c.tunnelEndpoint(far, ifc)
+			if err != nil {
+				return fmt.Errorf("PDR %d's outer GTP-U tunnel: %w", p.id, err)
+			}
+			p.tunnelLocalAddress = local
+			p.transportRouteDomain = endpoint.TransportRouteDomain
 			p.tunnels = []string{tunnelsRes(dir)}
 		}
 		for _, uid := range p.urrIDs {
@@ -2033,9 +2109,6 @@ func (c *Compiler) destinationHop(far *far, ifc routing.Interface) (uint32, erro
 		return c.destinationRefusal(far)
 
 	case ie.DstInterfaceAccess, ie.DstInterfaceCore, ie.DstInterfaceSGiLANN6LAN, ie.DstInterface5GVNInternal:
-		if far.hasOuter && len(c.cfg.Transports) != 0 {
-			return 0, fmt.Errorf("%w: per-next-hop tunnel transports require policy routing, not destination routing", errNotExpressible)
-		}
 		// Every expressible forward names hop 0: Access is the deployment's own
 		// exit (the encap, or the indirect tunnel) and destination mode reaches
 		// it by a route to its hop, so the action names none. The instance
@@ -2147,16 +2220,68 @@ func urrLinkedByAnotherURR(s *Session, id uint32) bool {
 	return false
 }
 
-// teidNamed reports whether a PDR the session still has names this F-TEID. The
-// TEID rule is the session's, not the PDR's: several uplink PDRs may share one
-// F-TEID, so removing or replacing one of them does not remove the rule.
-func teidNamed(s *Session, teid uint32) bool {
+func chosenNamed(s *Session, chosen chosenFTEID) bool {
 	for _, p := range s.PDRs {
-		if p.teid == teid {
+		if p.hasCHID && p.teid == chosen.TEID && p.endpointID == chosen.EndpointID &&
+			p.srcIfc == chosen.SourceInterface && p.instance == chosen.Instance &&
+			slices.Equal(p.endpointFamilies, chosen.Families) {
 			return true
 		}
 	}
 	return false
+}
+
+// fteidKeyNamed reports whether any live PDR in the session still references an
+// exact family/address/endpoint/TEID admission key.
+func fteidKeyNamed(s *Session, key map[string]any) bool {
+	identity := fmt.Sprint(key)
+	for _, p := range s.PDRs {
+		if p.teid == 0 {
+			continue
+		}
+		for _, owned := range fteidKeysOf(p) {
+			if fmt.Sprint(owned) == identity {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
+	keys := fteidKeysOf(p)
+	identities := make([]string, len(keys))
+	for i, key := range keys {
+		identities[i] = fmt.Sprint(key)
+		if owner, ok := c.byFTEID[identities[i]]; ok &&
+			(owner.session != s || owner.down != p.down) {
+			return fmt.Errorf("%w: F-TEID endpoint key is already owned", errNoResources)
+		}
+	}
+	ctxKey := fteidContextKey{session: s, down: p.down, endpoint: p.endpointID, teid: p.teid}
+	ctx := c.fteidContexts[ctxKey]
+	if ctx == nil {
+		id, err := c.contexts.alloc()
+		if err != nil {
+			return fmt.Errorf("%w: F-TEID context: %v", errNoResources, err)
+		}
+		ctx = &fteidContext{id: id}
+		c.fteidContexts[ctxKey] = ctx
+	}
+	for _, key := range identities {
+		if _, exists := c.byFTEID[key]; exists {
+			continue
+		}
+		c.byFTEID[key] = fteidOwner{session: s, down: p.down}
+		ctx.keys++
+		if c.fteidTEIDKeys[p.teid] == nil {
+			c.fteidTEIDKeys[p.teid] = map[string]bool{}
+		}
+		c.fteidTEIDKeys[p.teid][key] = true
+	}
+	p.fteidContext = ctx.id
+	c.teids.reserve(p.teid)
+	return nil
 }
 
 // writeCounter writes the counting module's entry for a PDR a URR measures: the
@@ -2172,6 +2297,46 @@ func writeCounter(p *pdr, dir Direction) []bess.Change {
 		Key:      map[string]any{"action_id": p.actionID},
 		Value:    map[string]any{},
 	}}
+}
+func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
+	if p.teid == 0 {
+		return
+	}
+	removed := false
+	for _, key := range fteidKeysOf(p) {
+		identity := fmt.Sprint(key)
+		if !force && fteidKeyNamed(s, key) {
+			continue
+		}
+		owner, ok := c.byFTEID[identity]
+		if !ok || owner.session != s {
+			continue
+		}
+		delete(c.byFTEID, identity)
+		delete(c.fteidTEIDKeys[p.teid], identity)
+		removed = true
+		ctxKey := fteidContextKey{session: s, down: owner.down, endpoint: p.endpointID, teid: p.teid}
+		if ctx := c.fteidContexts[ctxKey]; ctx != nil {
+			if ctx.keys--; ctx.keys <= 0 {
+				delete(c.fteidContexts, ctxKey)
+				c.contexts.release(ctx.id)
+			}
+		}
+	}
+	if removed && len(c.fteidTEIDKeys[p.teid]) == 0 {
+		delete(c.fteidTEIDKeys, p.teid)
+		if !sessionHasCHIDTEID(s, p.teid) {
+			c.teids.release(p.teid)
+		}
+	}
+}
+func sessionHasCHIDTEID(s *Session, teid uint32) bool {
+	for _, chosen := range s.chids {
+		if chosen.TEID == teid {
+			return true
+		}
+	}
+	return false
 }
 
 // bufferCountersRes is the BUFF branch's counting module's counter resource.
@@ -2295,11 +2460,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	changes := make([]bess.Change, 0, 4*len(s.PDRs)+len(s.QERs))
 	created := make([]*ie.IE, 0, len(s.PDRs))
 
-	// A TEID rule is the session's, not the PDR's: two uplink PDRs that share an
-	// F-TEID name it twice, and the engine rejects a second operation on one
-	// (resource, key) in a transaction. It is written once, with the first PDR's
-	// precedence (pdrsInOrder is an order, so that is the lowest).
-	writtenTEIDs := map[uint32]bool{}
+	// Admission is keyed by the complete endpoint/family/local-address/TEID
+	// tuple. PDRs in one session that share that F-TEID write one resource row;
+	// direction is its only value.
+	writtenFTEIDs := map[string]bool{}
 	// Two PDRs whose filters compile to one rule key are one rule the dataplane
 	// cannot tell apart -- precedence is part of the rule's value, not its key,
 	// so differing precedence does not separate them. Writing both would be
@@ -2317,7 +2481,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// The rule keys the session still holds, as the transaction will write them.
 	live := map[string]bool{}
 	for _, p := range s.PDRs {
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		if dir.Firewall != "" {
 			// The rule is a rule of the direction's firewall policy, which
 			// this compile writes whole at the end and which is keyed by
@@ -2347,7 +2511,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// engine rejects both operations on one key.
 	liveCounters := map[string]bool{}
 	for _, p := range s.PDRs {
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		// A dropped rule keeps its entry: the entry's existence follows the
 		// PDR (a URR still measures it, and the id is still its own), not the
 		// rule's effect. Excluding the dropped ones here is what made a second
@@ -2369,7 +2533,8 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	//   - a rule key another PDR compiles to is not erased (the write follows);
 	//   - a QER's meter is erased only when the QER went with the PDR, because
 	//     compile writes a meter for every QER the session still holds;
-	//   - the TEID rule only when no PDR of the session still shares the F-TEID;
+	//   - an F-TEID admission entry only when no PDR of the session still uses
+	//     its full key;
 	//   - the claim on an erased rule key goes in settle, not here: this is a
 	//     transaction that may still be refused, and a claim dropped while it is
 	//     being built would let another session write over the rule this one's
@@ -2389,7 +2554,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// that no URR measures any more: the module would go on counting a rule
 	// nobody reports, and the rule's id is about to be free.
 	counterErase := func(p *pdr) {
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		if dir.Counters == "" || len(p.urrIDs) == 0 || p.actionID == 0 {
 			return
 		}
@@ -2440,7 +2605,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			Key: map[string]any{"id": p.actionID}})
 	}
 	for _, p := range s.removed {
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		// A firewall-path PDR's rule is not a key of this transaction's: the
 		// policy is rewritten whole from the live model at the end of this
 		// function, and a PDR that is gone is simply not in it.
@@ -2464,13 +2629,20 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		for _, t := range p.tunnels {
 			erase(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
 		}
-		if p.teid != 0 && !teidNamed(s, p.teid) {
-			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
+		for _, t := range p.writtenTunnels {
+			erase(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
+		}
+		if p.teid != 0 {
+			for _, key := range fteidKeysOf(p) {
+				if !fteidKeyNamed(s, key) {
+					erase(bess.Change{Resource: c.teidRes(), Key: key})
+				}
+			}
 		}
 		// A removed PDR's meters go only when no QER of the session still holds
-		// them. With two levels the action names both; the chosen one may be
-		// the own one (a PDR naming no shared QER), so a repeat is skipped
-		// rather than erased twice.
+		// them. The PDR result carries both meter IDs; the chosen one may be the
+		// own one (a PDR naming no shared QER), so a repeat is skipped rather than
+		// erased twice.
 		prev := uint32(0)
 		for _, id := range []uint32{p.meterID, p.ownMeterID} {
 			if id != 0 && id != prev && !qerHoldsMeter(s, id) {
@@ -2507,7 +2679,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 	}
 	for _, old := range s.stale {
-		dir := c.direction(old.srcIfc)
+		dir := c.direction(old)
 		// As above: on the firewall path the old form is not a key to erase,
 		// it is a rule the policy this compile writes no longer holds.
 		if dir.Firewall == "" {
@@ -2526,8 +2698,12 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// answered for goes, the same guard as the removed form above.
 			erase(e.erasure())
 		}
-		if old.teid != 0 && !teidNamed(s, old.teid) {
-			erase(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(old.teid)})
+		if old.teid != 0 {
+			for _, key := range fteidKeysOf(old) {
+				if !fteidKeyNamed(s, key) {
+					erase(bess.Change{Resource: c.teidRes(), Key: key})
+				}
+			}
 		}
 		counterErase(old)
 		bufferCounterErase(old)
@@ -2558,21 +2734,28 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// Admission remains live even while a PDR drops or buffers. It is
 		// ingress ownership, not a forwarding action.
 		if p.teid != 0 {
-			if !writtenTEIDs[p.teid] {
-				writtenTEIDs[p.teid] = true
-				gate := uint64(0)
-				if p.down {
-					gate = 1
+			direction := uint32(0)
+			if p.down {
+				direction = 1
+			}
+			for _, key := range fteidKeysOf(p) {
+				keyID := fmt.Sprint(key)
+				if writtenFTEIDs[keyID] {
+					continue
 				}
+				writtenFTEIDs[keyID] = true
 				changes = append(changes, bess.Change{
-					Resource: c.teidRes(), Key: teidRuleKey(p.teid),
-					Value: map[string]any{"gate": gate},
+					Resource: c.teidRes(), Key: key,
+					Value: map[string]any{"direction": direction, "context_id": p.fteidContext},
 				})
 			}
 			created = append(created, ie.NewCreatedPDR(
-				ie.NewPDRID(p.id), createdFTEID(p.teid, c.fteidAddr(p))))
+				ie.NewPDRID(p.id), c.createdFTEID(p)))
 		}
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
+		if p.teid != 0 && dir.Firewall != "" {
+			return nil, nil, fmt.Errorf("%w: firewall classifier cannot match endpoint-scoped F-TEID metadata", errNotExpressible)
+		}
 		// The PDR's match: the direction's WildcardMatch key, or -- where the
 		// deployment opts into the firewall path -- a rule of the direction's
 		// firewall policy, which is written whole at the end of this function
@@ -2710,23 +2893,29 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// is what keeps a session without a URR off the counting module's cost.
 		changes = append(changes, writeCounter(p, dir)...)
 
-		// A downlink PDR's FAR names the tunnel this session's packets leave
-		// by: the record is keyed by the same action id the rule carries.
+		// An outer GTP-U tunnel is routed by the post-encap Router. The
+		// record carries only the local/peer IP endpoints and the transport
+		// route domain; the Router resolves the neighbor and rewrites Ethernet.
+		// A record the action held under its previous FAR and no longer needs
+		// goes, or a later rebind to an encap path would find it stale.
+		for _, resource := range p.writtenTunnels {
+			if !slices.Contains(p.tunnels, resource) {
+				erase(bess.Change{Resource: resource, Key: map[string]any{"action_id": p.actionID}})
+			}
+		}
+		p.writtenTunnels = p.tunnels
 		for _, resource := range p.tunnels {
 			far := s.FARs[p.farID]
-			transport := c.tunnelTransport(p.nextHop)
 			value := map[string]any{
-				"teid": far.teid, "gnb_ip": far.peer.String(),
-				"ether_src": transport.MAC[:], "ether_dst": transport.PeerMAC[:],
-				"gate": transport.Gate, "src_ip": transport.Addr.String(),
+				"teid":                   far.teid,
+				"local_address":          p.tunnelLocalAddress.AsSlice(),
+				"peer_address":           far.peer.AsSlice(),
+				"transport_route_domain": p.transportRouteDomain,
 			}
-			if p.encapQFI != 0 {
-				// The QER's QFI (8.2.89): the QoS flow the encap writes into
-				// the PDU Session Container of every packet it tunnels, which
-				// is the flow the gNB schedules the packet on. Written only
-				// where the SMF's QER named one -- 0 is not a QFI, so a record
-				// without the field says the session has no flow of its own.
+			if p.hasEncapQFI {
+				// QFI 0 is valid; qfi_present distinguishes it from no QFI.
 				value["qfi"] = uint32(p.encapQFI)
+				value["qfi_present"] = true
 			}
 			if far.hasMarking {
 				// The FAR's Transport Level Marking (8.2.12): the ToS/Traffic
@@ -2868,11 +3057,11 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 				return nil, fmt.Errorf("MAR %d's %s access names FAR %d, which the session does not hold",
 					m.id, []string{"3GPP", "non-3GPP"}[which], access.farID)
 			}
-			transport := c.tunnelTransport(m.nextHops[which])
 			value := map[string]any{
-				"teid": far.teid, "gnb_ip": far.peer.String(),
-				"ether_src": transport.MAC[:], "ether_dst": transport.PeerMAC[:],
-				"gate": transport.Gate, "src_ip": transport.Addr.String(),
+				"teid":                   far.teid,
+				"local_address":          m.tunnelLocalAddresses[which].AsSlice(),
+				"peer_address":           far.peer.AsSlice(),
+				"transport_route_domain": m.transportRouteDomains[which],
 			}
 			if far.hasMarking {
 				value["marking"] = uint32(far.marking)
@@ -2917,11 +3106,8 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 // *higher* priority ("If a packet matches multiple rules, the rule with higher
 // priority will be applied", module_msg.proto:347). The Precedence is therefore
 // inverted into the classifier's space, and it is inverted here, in one place,
-// because every rule the deployment programs carries the value: a session's PDR
-// rules and the TEID rule in front of the decap alike. Precedence 0, the
-// highest there is, takes the classifier's largest priority, and distinct
-// Precedences stay distinct priorities -- in the opposite direction, which is
-// the SMF's.
+// The two PDR tables use this value; F-TEID admission entries are not classifier
+// rules and carry no precedence.
 func rulePriority(precedence uint32) int64 {
 	return math.MaxUint32 - int64(precedence)
 }
@@ -3026,19 +3212,24 @@ func ones(n int) []byte {
 	return b
 }
 
-// ueAddr reports whether this PDR's UE IP address IE names the session's UE
-// address rather than another node's. 8.2.62's bit 3 says which side of the
-// packet the address appears on, and the UE is on the access side of an uplink
-// packet (its source) and on the core side of a downlink one (its
-// destination). An Access PDR whose bit says destination -- the CP function's
-// address for DHCP or RADIUS, 5.2.1's own example -- carries some other node
-// there: it is a rule key, not what the session's UE address is, so it neither
-// becomes the session's address nor is asked of the interface's pool.
+// ueAddr reports whether this PDI address names the subscriber's address.
+// The Access-side destination form can instead name another node (e.g. a CP
+// function); all other explicit UE IP addresses, and an inherited address,
+// identify the subscriber.
 func (p *pdr) ueAddr() bool {
 	if !p.ueIP.IsValid() {
 		return false
 	}
-	return p.srcIfc != ie.SrcInterfaceAccess || !p.ueIPDst
+	return p.srcIfc != ie.SrcInterfaceAccess || !p.hasUEIP || !p.ueIPDst
+}
+
+// ueIPIsDestination is the packet side constrained by the PDI's UE address.
+// An inherited address follows the resolved packet direction.
+func (p *pdr) ueIPIsDestination() bool {
+	if p.hasUEIP {
+		return p.ueIPDst
+	}
+	return p.downlink()
 }
 
 // host is a field constrained to one IPv4 address: the UE's, where a PDI names
@@ -3127,10 +3318,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 			return host(p.ueIP)
 		}
 		if sd != nil && sd.srcAssigned {
-			// "from assigned": the UE is the flow's source. On the uplink that
-			// is the fallback above; on the downlink it must be said here,
-			// because the SDF carries no address of its own for this side.
-			if p.ueIPDst {
+			if p.ueIPIsDestination() {
 				return match{}, false, fmt.Errorf(
 					"%w: the PDI's UE IP address %s is the destination and the SDF filter makes it the source",
 					errNotExpressible, p.ueIP)
@@ -3140,6 +3328,9 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 		if sd != nil && sd.srcOK {
 			m, err := pref(sd.src)
 			return m, err == nil, err
+		}
+		if !p.ueIPIsDestination() {
+			return host(p.ueIP)
 		}
 		return match{}, false, nil
 	case DstIP:
@@ -3171,11 +3362,22 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 			}
 			return match{}, false, nil
 		}
+		if sd != nil && sd.dstAssigned {
+			if !p.ueIPIsDestination() {
+				return match{}, false, fmt.Errorf(
+					"%w: the PDI's UE IP address %s is the source and the SDF filter makes it the destination",
+					errNotExpressible, p.ueIP)
+			}
+			return host(p.ueIP)
+		}
 		if sd != nil && sd.dstOK {
 			m, err := pref(sd.dst)
 			return m, err == nil, err
 		}
-		return host(p.ueIP)
+		if p.ueIPIsDestination() {
+			return host(p.ueIP)
+		}
+		return match{}, false, nil
 	case Proto:
 		if sd != nil && sd.protoOK {
 			return match{value: []byte{sd.proto}, mask: ones(1)}, true, nil
@@ -3218,20 +3420,24 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 		}
 		return match{}, false, nil
 	case RouteDomain:
-		// The interface the PDI's network instance resolved to (resolve): the
-		// domain the deployment's interface writes into the packet that arrives
-		// on it, so a rule placed in one instance never selects another's
-		// packets -- which is what lets two instances serve the same subscriber
-		// prefix.
+		// A tunneled packet has no inner route-domain tag before its PDR is
+		// selected; the PDI's Network Instance is written as the result below.
+		// Plain-interface ingress receives its route domain from the attachment
+		// and uses it to keep overlapping instances apart.
+		if p.hasFTEID {
+			return match{}, false, nil
+		}
 		b := make([]byte, 4)
 		binary.BigEndian.PutUint32(b, p.domain)
 		return match{value: b, mask: ones(4)}, true, nil
-	case UpfTEID:
+	case FTEIDContext:
+		// The decap's exact admission (endpoint, family, local address, TEID)
+		// already ran; its entry's context id is the whole tunnel identity.
 		if p.teid == 0 {
-			return match{}, false, fmt.Errorf("%w: the PDI names no F-TEID, so the rule has no tunnel to select by", errNotExpressible)
+			return match{}, false, nil
 		}
 		b := make([]byte, 4)
-		binary.BigEndian.PutUint32(b, p.teid)
+		binary.BigEndian.PutUint32(b, p.fteidContext)
 		return match{value: b, mask: ones(4)}, true, nil
 	default:
 		return match{}, false, nil
@@ -3265,15 +3471,16 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 // rule does. Each PDR has its own id, so the policy, one resource for every
 // session, holds one id per rule. A rule that drops names none (the module
 // refuses a drop with one).
-// firewallResult is the firewall rule's result record: the same two meter
-// levels and next hop a WildcardMatch result carries. The firewall module
-// writes the action id through its own action_attr; this record is the rest.
+// firewallResult is the firewall rule's result record: the two meter levels,
+// next hop and resolved inner route domain. The firewall module writes the
+// action id through its own action_attr; this record is the rest.
 func firewallResult(p *pdr) []byte {
-	b := make([]byte, 12)
+	b := make([]byte, 16)
 	own, shared := meterSlots(p)
 	binary.BigEndian.PutUint32(b[0:], own)
 	binary.BigEndian.PutUint32(b[4:], shared)
 	binary.BigEndian.PutUint32(b[8:], p.nextHop)
+	binary.BigEndian.PutUint32(b[12:], p.domain)
 	return b
 }
 
@@ -3319,12 +3526,10 @@ func firewallRule(p *pdr) (map[string]any, error) {
 			dst = sd.dst
 		}
 	} else {
+		ueIPDst := p.ueIPIsDestination()
 		switch {
 		case sd != nil && sd.srcAssigned:
-			// "from assigned": the UE is the flow's source, which an SDF
-			// filter can only say with that word -- it carries no address of
-			// its own for that side.
-			if p.ueIPDst {
+			if ueIPDst {
 				return nil, fmt.Errorf(
 					"%w: the PDI's UE IP address %s is the destination and the SDF filter makes it the source",
 					errNotExpressible, p.ueIP)
@@ -3335,10 +3540,26 @@ func firewallRule(p *pdr) (map[string]any, error) {
 			}
 		case sd != nil && sd.srcOK:
 			src = sd.src
+		case !ueIPDst:
+			var err error
+			if src, err = firewallHost(p.ueIP); err != nil {
+				return nil, err
+			}
 		}
-		if sd != nil && sd.dstOK {
+		switch {
+		case sd != nil && sd.dstAssigned:
+			if !ueIPDst {
+				return nil, fmt.Errorf(
+					"%w: the PDI's UE IP address %s is the source and the SDF filter makes it the destination",
+					errNotExpressible, p.ueIP)
+			}
+			var err error
+			if dst, err = firewallHost(p.ueIP); err != nil {
+				return nil, err
+			}
+		case sd != nil && sd.dstOK:
 			dst = sd.dst
-		} else {
+		case ueIPDst:
 			var err error
 			if dst, err = firewallHost(p.ueIP); err != nil {
 				return nil, err
@@ -3459,7 +3680,7 @@ func (c *Compiler) firewallPolicies(extra, except *Session) (map[string][]map[st
 	}
 	add := func(s *Session) error {
 		for _, p := range pdrsInOrder(s) {
-			dir := c.direction(p.srcIfc)
+			dir := c.direction(p)
 			if dir.Firewall == "" {
 				continue
 			}
@@ -3554,12 +3775,11 @@ func (c *Compiler) firewallChanges(extra, except *Session) ([]bess.Change, error
 // createdPDRsFor is the Created PDRs of a Modification Response: the tunnel of
 // each PDR whose PDI asked the UP function to choose it in this request.
 func (s *Session) createdPDRsFor(cfg Config, asked map[uint16]bool) []*ie.IE {
+	c := &Compiler{cfg: cfg}
 	var out []*ie.IE
 	for _, p := range pdrsInOrder(s) {
 		if p.teid != 0 && asked[p.id] {
-			out = append(out, ie.NewCreatedPDR(
-				ie.NewPDRID(p.id),
-				createdFTEID(p.teid, (&Compiler{cfg: cfg}).fteidAddr(p))))
+			out = append(out, ie.NewCreatedPDR(ie.NewPDRID(p.id), c.createdFTEID(p)))
 		}
 	}
 	return out
@@ -3567,12 +3787,11 @@ func (s *Session) createdPDRsFor(cfg Config, asked map[uint16]bool) []*ie.IE {
 
 // createdPDRs is what the response re-states on a retransmission.
 func (s *Session) createdPDRs(cfg Config) []*ie.IE {
+	c := &Compiler{cfg: cfg}
 	out := make([]*ie.IE, 0, len(s.PDRs))
 	for _, p := range pdrsInOrder(s) {
 		if p.teid != 0 {
-			out = append(out, ie.NewCreatedPDR(
-				ie.NewPDRID(p.id),
-				createdFTEID(p.teid, (&Compiler{cfg: cfg}).fteidAddr(p))))
+			out = append(out, ie.NewCreatedPDR(ie.NewPDRID(p.id), c.createdFTEID(p)))
 		}
 	}
 	return out
@@ -4141,30 +4360,25 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			}
 			p.hasFTEID = true
 			p.teid = fields.TEID
-			// CHOOSE ID (8.2.3): with the CH flag the PDI asks us to allocate,
-			// and PDIs that carry the same CHOOSE ID are one tunnel endpoint.
-			// Without CH the IE carries a TEID the SMF pinned, so there is no
-			// allocation for a group to share, and the field's own rule ("this
-			// bit may only be set to 1 if the CH bit is set to 1") has it that
-			// such a request is malformed: reading a value the library does not
-			// parse there would be guessing at an octet the spec puts after the
-			// addresses. It is ignored, and the pin is used as it always was.
-			if fields.HasCh() && fields.HasChID() {
+			p.wantIPv4, p.wantIPv6 = fields.HasIPv4(), fields.HasIPv6()
+			if fields.HasIPv4() && len(fields.IPv4Address) == net.IPv4len {
+				v := fields.IPv4Address.To4()
+				if v != nil && !net.IP(v).IsUnspecified() {
+					p.fteidIPv4 = netip.AddrFrom4([4]byte(v))
+				}
+			}
+			if fields.HasIPv6() && len(fields.IPv6Address) == net.IPv6len {
+				v := fields.IPv6Address.To16()
+				if v != nil && !net.IP(v).IsUnspecified() && !netip.AddrFrom16([16]byte(v)).Is4In6() {
+					p.fteidIPv6 = netip.AddrFrom16([16]byte(v))
+				}
+			}
+			// CH requests allocation. If CHID is present, every PDR carrying
+			// that identifier shares this endpoint and its family set.
+			p.hasChoose = fields.HasCh()
+			if p.hasChoose && fields.HasChID() {
 				p.hasCHID = true
 				p.chid = fields.ChooseID
-			}
-			if fields.HasCh() && fields.HasIPv6() && !fields.HasIPv4() {
-				// V6 with no V4 flag is a request for an IPv6 F-TEID (8.2.3:
-				// the UP function "shall assign an F-TEID with an IP4 or an
-				// IPv6 address if the V4 or V6 bit is set respectively"), and
-				// the address this UP advertises on N3 is IPv4: answering with
-				// one would hand the SMF a family it did not ask for. IPv6 is
-				// an explicit refusal everywhere else too (a PDI naming an IPv6
-				// address or prefix is cause 73, docs/claims.md). V4|V6
-				// names both families -- either will do -- and a CH bit with no
-				// family at all names none (a shape 8.2.3 does not allow and no
-				// SMF sends), so those are answered with the IPv4 F-TEID.
-				return fmt.Errorf("%w: the F-TEID IE asks for an IPv6 address, and this UP's N3 address is IPv4", errNotExpressible)
 			}
 		case ie.UEIPAddress:
 			fields, err := c.UEIPAddress()
@@ -4174,6 +4388,7 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			// 8.2.62's bit 3 names the side the address appears on; it is only
 			// read here, in the PDI (the spec says to set it 0 elsewhere).
 			p.ueIPDst = c.HasSD()
+			p.hasUEIP = true
 			if c.HasCHV4() || c.HasCHV6() {
 				// CHV4/CHV6 (TS 29.244 8.2.62): the SMF asks the UP function to
 				// choose an address of that family -- the UEIP feature, which
@@ -4714,13 +4929,9 @@ func parseQER(i *ie.IE) (qerReq, error) {
 			// The QER's QFI (TS 29.244 8.2.89): the QoS flow this QER
 			// polices, and the one a downlink packet's PDU Session Container
 			// must name. resolve carries it into the tunnel record the PDR's
-			// FAR writes. QFI 0 is in the spec's range and is what OMEC's
-			// pfcpsim sends by default; the encap writes no container for a
-			// tunnel whose QFI is 0, so the QER marks nothing -- the same
-			// downlink packet a QER with no QFI IE gets.
-			if v, err := c.QFI(); err == nil && v == 0 {
-				continue
-			}
+			// FAR writes. QFI 0 is in the spec's range (TS 38.415 5.5.3.3):
+			// the record's qfi_present keeps it distinct from a QER with no
+			// QFI IE, so the encap writes a container carrying 0.
 			qfi, err := qfiIE(c, "the QER's")
 			if err != nil {
 				return qerReq{}, err
@@ -5187,14 +5398,47 @@ func definiteRefusal(err error) bool {
 // carries (an F-TEID's IPv4 flag is bit 1; the zero flags of a field built by
 // hand would drop the address).
 func createdFTEID(teid uint32, addr netip.Addr) *ie.IE {
-	ip := net.IP(nil)
+	var ipv4, ipv6 net.IP
 	if addr.Is4() {
-		b := addr.As4()
-		ip = b[:]
+		v := addr.As4()
+		ipv4 = v[:]
+	} else if addr.Is6() {
+		v := addr.As16()
+		ipv6 = v[:]
 	}
-	fields := ie.NewFTEIDFields(0, teid, ip, nil, 0)
-	if ip != nil {
+	fields := ie.NewFTEIDFields(0, teid, ipv4, ipv6, 0)
+	if ipv4 != nil {
 		fields.SetIPv4Flag()
 	}
-	return ie.NewFTEID(fields.Flags, teid, ip, nil, 0)
+	if ipv6 != nil {
+		fields.SetIPv6Flag()
+	}
+	return ie.NewFTEID(fields.Flags, teid, ipv4, ipv6, 0)
+}
+func (c *Compiler) createdFTEID(p *pdr) *ie.IE {
+	var ipv4, ipv6 net.IP
+	for _, endpoint := range c.cfg.FTEIDEndpoints {
+		if endpoint.ID != p.endpointID {
+			continue
+		}
+		if p.wantIPv4 && endpoint.IPv4.Is4() {
+			v := endpoint.IPv4.As4()
+			ipv4 = v[:]
+		}
+		if p.wantIPv6 && endpoint.IPv6.Is6() {
+			v := endpoint.IPv6.As16()
+			ipv6 = v[:]
+		}
+	}
+	if ipv4 == nil && ipv6 == nil {
+		return createdFTEID(p.teid, c.fteidAddr(p))
+	}
+	fields := ie.NewFTEIDFields(0, p.teid, ipv4, ipv6, 0)
+	if ipv4 != nil {
+		fields.SetIPv4Flag()
+	}
+	if ipv6 != nil {
+		fields.SetIPv6Flag()
+	}
+	return ie.NewFTEID(fields.Flags, p.teid, ipv4, ipv6, 0)
 }

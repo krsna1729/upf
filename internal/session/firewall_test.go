@@ -11,7 +11,6 @@ package session
 import (
 	"context"
 	"encoding/binary"
-	"net"
 	"testing"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -57,7 +56,7 @@ func firewallEstablishment(cpSEID uint64, ueIP string, precedence uint32, sdf st
 		ie.NewFSEID(cpSEID, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(precedence),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter(sdf, "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -234,11 +233,14 @@ func TestAForwardingFirewallRuleCarriesItsResult(t *testing.T) {
 		t.Fatalf("a forwarding rule carries action_id %v, want a non-zero id", policy[0]["action_id"])
 	}
 	result, ok := policy[0]["result"].([]byte)
-	if !ok || len(result) != 12 {
-		t.Fatalf("the forwarding rule carries result %v, want two meter levels and a next hop", policy[0]["result"])
+	if !ok || len(result) != 16 {
+		t.Fatalf("the forwarding rule carries result %v, want two meter levels, a next hop and a route domain", policy[0]["result"])
 	}
-	if hop := binary.BigEndian.Uint32(result[8:]); hop != 2 {
+	if hop := binary.BigEndian.Uint32(result[8:12]); hop != 2 {
 		t.Errorf("the rule's result takes next hop %d, want the access side's (2)", hop)
+	}
+	if domain := binary.BigEndian.Uint32(result[12:]); domain != 0 {
+		t.Errorf("the rule's result writes route domain %d, want the default instance's (0)", domain)
 	}
 
 	rec = &recorder{}
@@ -382,7 +384,7 @@ func TestAModificationWritesItsRulesOnce(t *testing.T) {
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(3),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.30", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.30", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 1000-2000", "", "", "", 0)),
 			ie.NewFARID(1)),
 	)
@@ -462,22 +464,21 @@ func TestTheSweepReplacesAStaleFirewallPolicy(t *testing.T) {
 // names a destination constrains dst_ip alone.
 func TestAFirewallRulesUESideFollowsThePDIsSD(t *testing.T) {
 	rec := &recorder{}
-	c := New(firewallConfig("fw_ul", ""), rec, quietLogger())
+	c := New(firewallConfig("", "fw_dl"), rec, quietLogger())
 	req := message.NewSessionEstablishmentRequest(0, 0, 0x5f11, 1, 0,
 		ie.NewFSEID(0x5f11, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
-			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, 0x5f115f11, net.ParseIP("192.0.2.1"), nil, 0),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				// V4 | S/D: the address is the packet's destination.
 				ie.NewUEIPAddress(0x06, "192.0.2.9", "", 0, 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
-			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
 	)
 	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a destination-flagged PDI on the firewall path answered cause %d, want accepted", got)
 	}
-	policy := firewallPolicy(t, rec.last(), "fw_ul/rules")
+	policy := firewallPolicy(t, rec.last(), "fw_dl/rules")
 	if len(policy) != 1 {
 		t.Fatalf("the policy holds %d rules, want 1", len(policy))
 	}
@@ -512,5 +513,17 @@ func TestAFirewallRuleRefusesTheSDContradiction(t *testing.T) {
 	}
 	if len(rec.txns) != 0 {
 		t.Error("a refused session wrote to the dataplane")
+	}
+}
+func TestFirewallRejectsPDRsWhoseTunnelIdentityItCannotMatch(t *testing.T) {
+	rec := &recorder{}
+	cfg := firewallConfig("fw_ul", "")
+	c := New(cfg, rec, quietLogger())
+	resp := c.Establish(establishmentWithFTEID(0x5f20, "10.45.0.6", 0x11223344))
+	if got := cause(t, resp); got == ie.CauseRequestAccepted {
+		t.Fatal("firewall accepted an FTEID PDR although it cannot key endpoint metadata")
+	}
+	if len(rec.txns) != 0 {
+		t.Fatal("unsupported firewall/FTEID PDR reached Apply")
 	}
 }

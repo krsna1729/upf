@@ -52,7 +52,7 @@ func TestStatsCountWhatTheSMFAsked(t *testing.T) {
 		ie.NewFSEID(2, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 1000-2000", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),

@@ -80,7 +80,7 @@ func pathEstablishmentWith(cpSEID uint64, ueIP, sdf string,
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter(sdf, "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -104,8 +104,8 @@ func pathEstablishmentWith(cpSEID uint64, ueIP, sdf string,
 // over the control plane makes deploy/session-path.yaml carry packets in both
 // directions. The graph's two Sources run from the moment it is applied, so the
 // counters where each chain leaves the UPF are the evidence -- zero before the
-// session exists (nothing selects those packets: the TEID table drops the G-PDU
-// and the downlink table has no rule), non-zero after:
+// session exists (F-TEID admission misses go to gate 2, outside the PDR chains),
+// non-zero after:
 //
 //   - the uplink's counter is the router's output: ingress admitted and
 //     decapsulated the tunnel, the PDR rule matched the UE's packet, its
@@ -192,11 +192,11 @@ func carriesPackets(t *testing.T, req *message.SessionEstablishmentRequest, cont
 // TestLiveSessionSharedRecords is the shape a real SMF sends when it programs
 // several uplink filters onto one tunnel: two uplink PDRs sharing one F-TEID and
 // one QER, then a Modify that removes one of them. Both halves are where the
-// engine's transaction rules bite -- one TEID rule named twice by the
-// establishment, an erase of a key the same transaction writes by the removal --
-// and the recorder the unit tests use takes anything, so this is the only place
-// the daemon's verdict is heard (core/dataplane/transaction_engine.cc rejects a
-// second operation on one (resource, key) in a transaction).
+// the engine's transaction rules bite -- two PDRs share one F-TEID admission
+// entry, and removing one must not erase a key the same transaction retains.
+// The recorder used by unit tests accepts anything, so this live daemon check
+// verifies the transaction engine rejects duplicate operations on one
+// (resource, key) (`core/dataplane/transaction_engine.cc`).
 func TestLiveSessionSharedRecords(t *testing.T) {
 	target := os.Getenv("UPF_BESS_TARGET")
 	if target == "" {
@@ -230,26 +230,24 @@ func TestLiveSessionSharedRecords(t *testing.T) {
 	}()
 	t.Logf("established SEID %d with two uplink PDRs on one F-TEID", upFSEID(t, resp))
 
-	// PDR 1 is the one the shared TEID rule was written from (the first PDR, in
-	// precedence order), and PDR 2 survives to rewrite it: that is the case
-	// where a removal's erase list and a write can name one key in one
-	// transaction. Then PDR 2 goes too, which is the case where the session has
-	// no user of the TEID left and the rule is erased.
+	// The shared admission entry must survive removing PDR 1 while PDR 2 still
+	// names the same F-TEID. Removing PDR 2 then leaves no user of the key, so
+	// the entry is erased.
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewRemovePDR(ie.NewPDRID(1)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
-		t.Fatalf("the daemon refused the removal of the TEID's PDR with cause %d", got)
+		t.Fatalf("the daemon refused the removal of the F-TEID's PDR with cause %d", got)
 	}
-	t.Logf("removed PDR 1; PDR 2 rewrote the shared TEID rule in the same transaction")
+	t.Logf("removed PDR 1; PDR 2 retained the shared admission entry")
 
 	mod = message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 3, 0,
 		ie.NewRemovePDR(ie.NewPDRID(2)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
-		t.Fatalf("the daemon refused the second removal with cause %d", got)
+		t.Fatalf("the daemon refused removal of the last F-TEID PDR with cause %d", got)
 	}
-	t.Logf("removed PDR 2; the session holds no user of the TEID rule now")
+	t.Logf("removed PDR 2; the session released the admission entry")
 }
 
 // gatePackets is the packets a module's output gate has counted, from the
@@ -333,7 +331,7 @@ func pathUrrEstablishment(cpSEID uint64, ueIP string, urr *ie.IE) *message.Sessi
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -756,10 +754,10 @@ func TestLiveTwoInstancesRouteIndependently(t *testing.T) {
 	cfg := liveConfig()
 	cfg.Instances = instances
 	// deploy/session-instances.yaml's uplink table classifies by the tunnel the
-	// packet arrived on (`upf_teid`, the decap's own metadata attribute): that
+	// packet arrived on (`fteid_context`, the decap's own metadata attribute): that
 	// is what tells two instances' sessions with one UE address apart, and the
 	// field list here mirrors the manifest's the way every other list does.
-	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI}
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, FTEIDContext, QFI}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := New(cfg, client, log)

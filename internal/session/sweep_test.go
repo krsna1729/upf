@@ -112,14 +112,14 @@ func (f *sweepFake) Contents(_ context.Context, names ...string) (map[string][]b
 	return out, nil
 }
 
-// TestSweepNamesTheGraphsResources pins the names a sweep touches: the
-// deployment's own spelling, "<module>/<table>", never a bare module name --
-// a sweep that reads "pdr_ul" finds no such resource and erases nothing.
+// TestSweepNamesTheGraphsResources pins the exact names a startup sweep reads:
+// the deployment's `<module>/<table>` paths, including `decap0/fteids`, never
+// a bare module name.
 func TestSweepNamesTheGraphsResources(t *testing.T) {
 	cfg := liveConfig()
 	c := New(cfg, &sweepFake{}, quietLogger())
 	want := map[string]bool{
-		"teid/rules": true, "pdr_ul/rules": true, "pdr_dl/rules": true,
+		"decap0/fteids": true, "pdr_ul/rules": true, "pdr_dl/rules": true,
 		"mt_ul/meters": true, "mt_dl/meters": true,
 		"cnt_ul/counters": true, "cnt_dl/counters": true, "enc/tunnels": true,
 	}

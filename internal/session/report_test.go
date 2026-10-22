@@ -5,7 +5,6 @@ package session
 import (
 	"context"
 	"fmt"
-	"net"
 	"reflect"
 	"slices"
 	"testing"
@@ -49,9 +48,9 @@ func TestATickReadsEachCounterModuleOnce(t *testing.T) {
 	seids := make([]uint64, 0, sessions)
 	for i := range sessions {
 		cp := uint64(0x5010 + i)
-		// Each session its own F-TEID and UE address: the table in front of the
-		// decap holds one rule per TEID, so two sessions of one compiler cannot
-		// share one.
+		// Each session has its own complete F-TEID admission key and UE address.
+		// The key includes endpoint, family, local address and TEID; different
+		// sessions cannot claim the same full key.
 		fteid, ue := uint32(0x2000+i), fmt.Sprintf("10.45.%d.%d", i/250, i%250+1)
 		resp := bulk.Establish(urrSession(cp, fteid, ue, urrID, quotaURR(urrID, 100))).(*message.SessionEstablishmentResponse)
 		if got := cause(t, resp); got != ie.CauseRequestAccepted {
@@ -123,17 +122,15 @@ func TestATickReadsEachCounterModuleOnce(t *testing.T) {
 	}
 }
 
-// urrSession is urrEstablishment with the session's own F-TEID and UE address:
-// the tick's scenario is many sessions at once, and two sessions of one
-// compiler cannot share a TEID -- the table in front of the decap holds one
-// rule per TEID. The URR, its PDR and its FAR are exactly what that helper
-// builds.
+// urrSession is urrEstablishment with the session's own complete F-TEID key
+// and UE address. The report-tick scenario covers many sessions; each key is
+// exact, and the helper also builds the URR, PDR and FAR.
 func urrSession(cpSEID uint64, fteid uint32, ueIP string, urrID uint32, urr *ie.IE) *message.SessionEstablishmentRequest {
 	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
 		ie.NewFSEID(cpSEID, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0)),
 			ie.NewFARID(1), ie.NewURRID(urrID)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),

@@ -13,7 +13,7 @@ package session
 
 import (
 	"errors"
-	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,7 +37,7 @@ func subscriberSideEstablishment(cpSEID uint64, ueIP string, fteid uint32, srcIf
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),
@@ -52,7 +52,7 @@ func subscriberSideEstablishment(cpSEID uint64, ueIP string, fteid uint32, srcIf
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(srcIfc),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -207,8 +207,13 @@ func egressConfig(t *testing.T) Config {
 	}
 	cfg := testConfig()
 	cfg.Instances = d
+	cfg.FTEIDEndpoints = append(cfg.FTEIDEndpoints, FTEIDEndpoint{
+		ID: 2, ReferencePoint: "n9", TransportRouteDomain: 2,
+		SourceInterface: ie.SrcInterfaceCore, Instance: "internet",
+		IPv4: netip.MustParseAddr("192.0.2.9"),
+	})
 	cfg.AccessNextHop = 2
-	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI}
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, FTEIDContext, QFI}
 	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain}
 	return cfg
 }
@@ -237,7 +242,7 @@ func egressEstablishment(cpSEID uint64, ueIP string, fteid uint32, instance stri
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewNetworkInstance(instance),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),
@@ -249,7 +254,7 @@ func egressEstablishment(cpSEID uint64, ueIP string, fteid uint32, instance stri
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewNetworkInstance(instance),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -310,6 +315,80 @@ func TestAForwardTowardTheAccessSideEncapsulatesWhicheverDirection(t *testing.T)
 	}
 }
 
+func TestTemporaryAccessForwardFARRetainsSessionAfterCleanup(t *testing.T) {
+	cfg := egressConfig(t)
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	const seid = 0x7420
+	resp := c.Establish(egressEstablishment(seid, "10.45.0.20", 0x70, "internet",
+		farTo(ie.DstInterfaceCore),
+		farTo(ie.DstInterfaceAccess, tunnelTo(0x22334460, "10.20.30.2"))))
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the steady session answered cause %d", got)
+	}
+	resource := cfg.Up.Tunnels + "/tunnels"
+	base := rec.last()
+	uplink := ruleIn(t, base, cfg.Up.PDRTable)
+	downlink := ruleIn(t, base, cfg.Down.PDRTable)
+	if _, ok := find0(base, resource, "action_id", uplink.actionID()); ok {
+		t.Fatal("the steady uplink FAR unexpectedly has an outer-header tunnel")
+	}
+	if got := find(t, base, resource, "action_id", downlink.actionID()).Value["teid"]; got != uint32(0x22334460) {
+		t.Fatalf("the steady downlink tunnel has TEID %v, want 0x22334460", got)
+	}
+
+	upSEID := upFSEID(t, resp.(*message.SessionEstablishmentResponse))
+	mod := message.NewSessionModificationRequest(0, 0, upSEID, 2, 0,
+		ie.NewFSEID(seid, nil, nil),
+		ie.NewCreateFAR(
+			ie.NewFARID(9),
+			ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceAccess),
+				ie.NewOuterHeaderCreation(0x0100, 0x55aa55aa, "10.20.30.9", "", 0, 0, 0),
+			),
+		),
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewFARID(9)),
+	)
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("installing the temporary forwarding FAR answered cause %d", got)
+	}
+	temporary := rec.last()
+	temporaryUplink := ruleIn(t, temporary, cfg.Up.PDRTable)
+	if temporaryUplink.actionID() != uplink.actionID() {
+		t.Fatal("rebinding the PDR changed its action ID")
+	}
+	if got := nextHop(t, temporary, uplink.actionID()); got != cfg.AccessNextHop {
+		t.Fatalf("the temporary forward takes next hop %d, want access hop %d", got, cfg.AccessNextHop)
+	}
+	if got := find(t, temporary, resource, "action_id", uplink.actionID()).Value["teid"]; got != uint32(0x55aa55aa) {
+		t.Fatalf("the temporary uplink tunnel has TEID %v, want 0x55aa55aa", got)
+	}
+
+	cleanup := message.NewSessionModificationRequest(0, 0, upSEID, 3, 0,
+		ie.NewFSEID(seid, nil, nil),
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewFARID(1)),
+		ie.NewRemoveFAR(ie.NewFARID(9)),
+	)
+	if got := cause(t, c.Modify(cleanup)); got != ie.CauseRequestAccepted {
+		t.Fatalf("restoring the steady FAR and removing the temporary FAR answered cause %d", got)
+	}
+	restored := rec.last()
+	restoredUplink := ruleIn(t, restored, cfg.Up.PDRTable)
+	if restoredUplink.actionID() != uplink.actionID() {
+		t.Fatal("cleanup changed the active uplink PDR's action ID")
+	}
+	if got := nextHop(t, restored, uplink.actionID()); got != cfg.Up.NextHop {
+		t.Fatalf("the restored forward takes next hop %d, want steady hop %d", got, cfg.Up.NextHop)
+	}
+	if erased, ok := find0(restored, resource, "action_id", uplink.actionID()); !ok || erased.Value != nil {
+		t.Fatal("cleanup did not erase the temporary uplink tunnel record")
+	}
+	if changed, ok := find0(restored, resource, "action_id", downlink.actionID()); ok && changed.Value == nil {
+		t.Fatal("cleanup erased the unrelated downlink tunnel record")
+	}
+}
+
 // TestATunnelOutOfAnInstanceTakesTheTunnelEgress: Destination Interface Core
 // with an Outer Header Creation is a tunnel out of the instance -- N9, or the
 // tunnel of an indirect forward -- and it leaves by the egress the deployment
@@ -347,11 +426,11 @@ func TestATunnelOutOfAnInstanceTakesTheTunnelEgress(t *testing.T) {
 }
 
 // TestDestinationRoutingNamesNoNextHop: in destination mode the Router decides
-// the egress from the packet's own address and the deployment's routes, so the
-// FAR's egress is not resolved here -- every supported Destination Interface
-// names hop 0 (the action table's "no next hop"). The tunnel record is still
-// written: the FIB chooses the encap's gate, and the encap reads the session's
-// tunnel from the action id.
+// the egress from the packet's destination and graph routes. The compiler does
+// not resolve the FAR to a next-hop ID.
+// The PDR result's `next_hop_id` is 0, but the tunnel record is still written.
+// The FIB chooses the encap gate, and `GtpuEncap` reads the tunnel by the PDR
+// result's ActionId.
 func TestDestinationRoutingNamesNoNextHop(t *testing.T) {
 	cfg := egressConfig(t)
 	cfg.RouteMode = RouteByDestination

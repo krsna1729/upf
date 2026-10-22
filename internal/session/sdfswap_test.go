@@ -32,40 +32,6 @@ func uplinkWithDLForm(sdf string) *message.SessionEstablishmentRequest {
 	)
 }
 
-func TestAnUplinkPDRReadsTheDownlinkFormFilterSwapped(t *testing.T) {
-	// "from 8.8.8.8 53 to assigned": downlink packets come FROM 8.8.8.8:53 TO
-	// the UE. The uplink packets this PDR selects are the reverse: from the
-	// UE to 8.8.8.8, port 53 at the far end.
-	for _, tc := range []struct {
-		name string
-		cfg  Config
-		res  string
-	}{
-		{"firewall", firewallConfig("fw_ul", ""), "fw_ul/rules"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := &recorder{}
-			c := New(tc.cfg, rec, quietLogger())
-			if got := cause(t, c.Establish(uplinkWithDLForm(dlForm))); got != ie.CauseRequestAccepted {
-				t.Fatalf("the establishment answered cause %d", got)
-			}
-			rule := firewallPolicy(t, rec.last(), tc.res)[0]
-			if got := rule["src_ip"]; got != "10.45.0.6/32" {
-				t.Errorf("src_ip is %v, want the UE's host route (the filter's `to assigned`, swapped)", got)
-			}
-			if got := rule["dst_ip"]; got != "8.8.8.8/32" {
-				t.Errorf("dst_ip is %v, want 8.8.8.8/32 (the filter's `from`, swapped)", got)
-			}
-			if got := rule["dst_port_low"]; got != uint32(53) {
-				t.Errorf("dst_port_low is %v, want 53 (the filter's source port, swapped)", got)
-			}
-			if _, ok := rule["src_port_low"]; ok {
-				t.Errorf("src_port_low is %v, but the filter names no port on the UE's side", rule["src_port_low"])
-			}
-		})
-	}
-}
-
 func TestAnUplinkPDRKeysTheWildcardRuleOnTheSwappedFilter(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())

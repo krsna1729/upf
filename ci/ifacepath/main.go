@@ -20,9 +20,10 @@
 //	down      S6 (a PDR whose PDI names the service LAN's interface and whose
 //	          FAR names Core): the data
 //	          network's frame leaves by the instance's plain hop
-//	forward   S1's FAR moves to the access side, and its uplink frame now leaves
-//	          through the encap (indirect data forwarding, 8.2.2 NOTE 2): the
-//	          access side's hop, not the direction's
+//	forward   Create a temporary FAR for S1; its uplink frame leaves through
+//	          the target-RAN tunnel, then a bounded local timer starts
+//	forward_cleanup  After that timer, restore FAR 1 and remove the temporary
+//	          FAR; the same stream returns to N6 (N4/data-plane fixture only)
 //	vn        S4 (an uplink PDR whose FAR names 5G VN Internal) re-injects its
 //	          packet into the subscriber-side table, where S5 (a PDR whose PDI
 //	          names 5G VN Internal) takes it and tunnels it to that UE's gNB
@@ -92,6 +93,7 @@ const (
 	pool = "10.44.0.0/14"
 
 	n3Addr = "192.0.2.1"
+	n9Addr = "192.0.2.9"
 	n6Addr = "192.0.2.2"
 )
 
@@ -143,9 +145,10 @@ const (
 	dlTEID7 = 0x55667787
 	dlTEID8 = 0x55667788
 
-	// The tunnel S1's FAR is moved to (the `forward` arm): the far end of an
-	// indirect forward.
-	forwardTEID = 0x55aa55aa
+	// S1's temporary Mode 6 forwarding FAR, target-RAN tunnel, and SMF timer.
+	forwardFARID         = 9
+	forwardTEID          = 0x55aa55aa
+	mode6ForwardingTimer = 4 * time.Second
 
 	// The UE addresses, one per session. "assigned" in a filter is the PDR's
 	// own address, so each session's rules are its own.
@@ -255,10 +258,17 @@ func run(target, handshake string) error {
 	if err := pass(handshake, "down"); err != nil {
 		return err
 	}
-	if err := forwardArm(ctx, client, c, seid1); err != nil {
+	var forwardExpiry time.Time
+	if err := forwardArm(ctx, client, c, seid1, &forwardExpiry); err != nil {
 		return err
 	}
 	if err := pass(handshake, "forward"); err != nil {
+		return err
+	}
+	if err := forwardCleanupArm(ctx, client, c, seid1, forwardExpiry); err != nil {
+		return err
+	}
+	if err := pass(handshake, "forward_cleanup"); err != nil {
 		return err
 	}
 	if err := fiveGVN(ctx, client, c); err != nil {
@@ -511,39 +521,39 @@ func down(ctx context.Context, client *bess.Client, c *session.Compiler) error {
 	return nil
 }
 
-// forward moves S1's FAR to the access side with an outer header -- the
-// indirect-forwarding shape (TS 29.244 8.2.2 NOTE 2), where an *uplink* PDR's
-// forward leaves back toward another access node -- and starts S1's stream
-// again: the frame must leave through the encap (the access side's hop, gate
-// 1), not by the uplink direction's own hop (gate 0, which the control of this
-// arm holds still).
-func forwardArm(ctx context.Context, client *bess.Client, c *session.Compiler, seid uint64) error {
+// forwardArm models the temporary N3 forwarding leg of Mode 6. It creates a
+// separate FAR, rebinds only S1's uplink PDR, and starts the SMF timer when the
+// accepted N4 modification installs that leg.
+func forwardArm(ctx context.Context, client *bess.Client, c *session.Compiler, seid uint64, expiry *time.Time) error {
 	before, err := snapshot(ctx, client)
 	if err != nil {
 		return err
 	}
 	mod := message.NewSessionModificationRequest(0, 0, seid, 1, 0,
 		ie.NewFSEID(seid, nil, nil),
-		ie.NewUpdateFAR(
-			ie.NewFARID(1),
+		ie.NewCreateFAR(
+			ie.NewFARID(forwardFARID),
 			ie.NewApplyAction(applyForw),
-			ie.NewUpdateForwardingParameters(
+			ie.NewForwardingParameters(
 				ie.NewDestinationInterface(ie.DstInterfaceAccess),
 				ie.NewOuterHeaderCreation(0x0100, forwardTEID, gnbAddr, "", 0, 0, 0),
 			),
-		))
+		),
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewFARID(forwardFARID)),
+	)
 	resp, ok := c.Modify(mod).(*message.SessionModificationResponse)
 	if !ok {
-		return errors.New("the modification answered no session-level response")
+		return errors.New("creating the temporary forwarding FAR answered no session-level response")
 	}
 	if got := cause(resp.Cause); got != ie.CauseRequestAccepted {
-		return fmt.Errorf("moving the FAR to the access side was refused with cause %d", got)
+		return fmt.Errorf("creating the temporary forwarding FAR was refused with cause %d", got)
 	}
+	*expiry = time.Now().Add(mode6ForwardingTimer)
 	if err := inject(ctx, client, "src_up"); err != nil {
 		return err
 	}
 	if _, err := waitFor(ctx, client, router, accessGate, value(before, exit{module: router, gate: accessGate})); err != nil {
-		return fmt.Errorf("the uplink forward toward the access side never reached it: %w", err)
+		return fmt.Errorf("the temporary uplink forward toward the access side never reached it: %w", err)
 	}
 	if err := stopAll(ctx, client); err != nil {
 		return err
@@ -554,9 +564,63 @@ func forwardArm(ctx context.Context, client *bess.Client, c *session.Compiler, s
 		return err
 	}
 	if grew := value(after, exit{module: router, gate: n6Gate}) - value(before, exit{module: router, gate: n6Gate}); grew != 0 {
-		return fmt.Errorf("the access side's forward carried %v packets by the data network's exit, and it must leave through the encap", grew)
+		return fmt.Errorf("the temporary access forward carried %v packets by the data network's exit", grew)
 	}
-	fmt.Println("ifacepath: forward: an uplink forward toward the access side left through the encap")
+	fmt.Printf("ifacepath: forward: temporary FAR %d tunneled the uplink to the target RAN; timer %s started\n",
+		forwardFARID, mode6ForwardingTimer)
+	return nil
+}
+
+// forwardCleanupArm waits for the timer started by forwardArm, then models the
+// SMF's N4 cleanup: restore S1's steady FAR, remove the temporary FAR, and prove
+// the live session forwards the same uplink stream through N6 again.
+func forwardCleanupArm(ctx context.Context, client *bess.Client, c *session.Compiler, seid uint64, expiry time.Time) error {
+	if expiry.IsZero() {
+		return errors.New("the temporary forwarding timer was not started")
+	}
+	if remaining := time.Until(expiry); remaining > 0 {
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	before, err := snapshot(ctx, client)
+	if err != nil {
+		return err
+	}
+	mod := message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+		ie.NewFSEID(seid, nil, nil),
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewFARID(1)),
+		ie.NewRemoveFAR(ie.NewFARID(forwardFARID)),
+	)
+	resp, ok := c.Modify(mod).(*message.SessionModificationResponse)
+	if !ok {
+		return errors.New("restoring the steady FAR answered no session-level response")
+	}
+	if got := cause(resp.Cause); got != ie.CauseRequestAccepted {
+		return fmt.Errorf("restoring the steady FAR and removing temporary FAR %d was refused with cause %d", forwardFARID, got)
+	}
+	if err := inject(ctx, client, "src_up"); err != nil {
+		return err
+	}
+	if _, err := waitFor(ctx, client, router, n6Gate, value(before, exit{module: router, gate: n6Gate})); err != nil {
+		return fmt.Errorf("the uplink stream did not resume through N6 after timer cleanup: %w", err)
+	}
+	if err := stopAll(ctx, client); err != nil {
+		return err
+	}
+	after, err := snapshot(ctx, client)
+	if err != nil {
+		return err
+	}
+	if grew := value(after, exit{module: router, gate: accessGate}) - value(before, exit{module: router, gate: accessGate}); grew != 0 {
+		return fmt.Errorf("the removed temporary FAR still sent %v packets toward the access side", grew)
+	}
+	fmt.Printf("ifacepath: forward_cleanup: timer expired; S1 returned to FAR 1 and temporary FAR %d was removed\n",
+		forwardFARID)
 	return nil
 }
 
@@ -838,7 +902,7 @@ func (cs sessionCase) message() *message.SessionEstablishmentRequest {
 			ie.NewPDI(
 				ie.NewSourceInterface(cs.down.srcIfc),
 				ie.NewNetworkInstance(cs.instance),
-				ie.NewUEIPAddress(0x02, cs.down.ue, "", 0, 0),
+				ie.NewUEIPAddress(0x06, cs.down.ue, "", 0, 0),
 				ie.NewSDFFilter(cs.down.sdf, "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -870,7 +934,7 @@ func (cs sessionCase) message() *message.SessionEstablishmentRequest {
 				ie.NewPDI(
 					ie.NewSourceInterface(cs.down2.srcIfc),
 					ie.NewNetworkInstance(cs.instance),
-					ie.NewUEIPAddress(0x02, cs.down2.ue, "", 0, 0),
+					ie.NewUEIPAddress(0x06, cs.down2.ue, "", 0, 0),
 					ie.NewSDFFilter(cs.down2.sdf, "", "", "", 0),
 				),
 				ie.NewFARID(3),
@@ -1140,10 +1204,10 @@ func config() session.Config {
 		panic(err) // the deployment above is this program's own constant
 	}
 	return session.Config{
-		TEIDTable: "teid",
+		GTPUDecap: "decap0",
 		Up: session.Direction{
 			PDRTable:  upModule,
-			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto, session.SrcPort, session.DstPort, session.QFI},
+			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto, session.SrcPort, session.DstPort, session.FTEIDContext, session.QFI},
 			Meters:    "mt_ul",
 			Counters:  "cnt_ul",
 			NextHop:   hopN6,
@@ -1154,7 +1218,7 @@ func config() session.Config {
 		},
 		Down: session.Direction{
 			PDRTable:  downModule,
-			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto, session.SrcPort, session.DstPort},
+			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto, session.SrcPort, session.DstPort, session.RouteDomain, session.FTEIDContext, session.QFI},
 			Meters:    "mt_dl",
 			Counters:  "cnt_dl",
 			NextHop:   hopAccess,
@@ -1164,8 +1228,16 @@ func config() session.Config {
 		// The access side's own hop, whichever direction the PDR is on (the
 		// lane's graph names it -access-next-hop 2).
 		AccessNextHop: hopAccess,
-		N3Addr:        netip.MustParseAddr(n3Addr),
-		N3MAC:         [6]byte{2, 0, 0, 0, 0, 1},
-		PeerMAC:       [6]byte{2, 0, 0, 0, 0, 2},
+		FTEIDEndpoints: []session.FTEIDEndpoint{{
+			ID: 1, ReferencePoint: "n3", TransportRouteDomain: 1,
+			SourceInterface: ie.SrcInterfaceAccess, IPv4: netip.MustParseAddr(n3Addr),
+		}, {
+			// The local end of a tunnel out of the instance (S2, S8's N9
+			// branch): a Core-side FAR with Outer Header Creation needs an n9
+			// endpoint of the forwarding instance to source it from.
+			ID: 2, ReferencePoint: "n9", TransportRouteDomain: 1,
+			SourceInterface: ie.SrcInterfaceCore, Instance: internet,
+			IPv4: netip.MustParseAddr(n9Addr),
+		}},
 	}
 }

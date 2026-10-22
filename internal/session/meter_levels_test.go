@@ -2,7 +2,6 @@
 package session
 
 import (
-	"net"
 	"strings"
 	"testing"
 
@@ -19,13 +18,13 @@ func twoLevelEstablishment(cpSEID uint64, ueIP string, fteid uint32) *message.Se
 		ie.NewFSEID(cpSEID, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any 1000 to any", "", "", "", 0)),
 			ie.NewFARID(1), ie.NewQERID(1), ie.NewQERID(9)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any 2000 to any", "", "", "", 0)),
 			ie.NewFARID(1), ie.NewQERID(2), ie.NewQERID(9)),
@@ -40,12 +39,10 @@ func twoLevelEstablishment(cpSEID uint64, ueIP string, fteid uint32) *message.Se
 	)
 }
 
-// TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions: every rule's result
-// names the PDR's own rate-bearing QER first and the session's shared one
-// after it, so the Meter stops a red packet at the flow's bucket before the
-// session's is charged. The second slot is one id across both PDRs (the shared
-// QER) and the first differs (each PDR's flow), which is the order the design
-// asks for seen from the rules alone.
+// TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions: each PDR result lists
+// its selected flow QER first, then the session's shared QER. A red first level
+// does not charge the session bucket. Both PDRs share the second meter ID; each
+// carries its own first ID. This is the order the session compiler emits.
 func TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions(t *testing.T) {
 	cfg := testConfig()
 	rec := &recorder{}

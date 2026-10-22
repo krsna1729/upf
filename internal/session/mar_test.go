@@ -2,7 +2,6 @@
 package session
 
 import (
-	"net"
 	"testing"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -27,7 +26,7 @@ func marEstablishmentTEID(cpSEID uint64, ueIP string, teid uint32) *message.Sess
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, teid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(teid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),
@@ -37,7 +36,7 @@ func marEstablishmentTEID(cpSEID uint64, ueIP string, teid uint32) *message.Sess
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
 			),
 			ie.NewMARID(7),

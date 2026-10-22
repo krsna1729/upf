@@ -55,12 +55,13 @@ func ulRules(changes []bess.Change) (written, erased []rule) {
 	return
 }
 
-// seen is the set of (destination port, qfi) pairs the rules constrain.
+// seen is the set of (destination port, qfi) pairs the rules constrain. QFI is
+// the last uplink field in testConfig, after the endpoint-scoped F-TEID fields.
 func seen(rs []rule) map[[2]int]int {
 	out := map[[2]int]int{}
 	for _, r := range rs {
 		port := int(r.value(4)[0])<<8 | int(r.value(4)[1])
-		out[[2]int{port, int(r.value(5)[0])}]++
+		out[[2]int{port, int(r.value(6)[0])}]++
 	}
 	return out
 }
@@ -132,30 +133,31 @@ func TestFiltersAndQFIsMultiplyAndModificationErasesWhatItDrops(t *testing.T) {
 	}
 }
 
-func TestSeveralSDFFiltersAreSeveralRulesOfTheSessionsList(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		cfg      Config
-		resource string
-	}{
-		{"firewall", firewallConfig("fw_ul", ""), "fw_ul/rules"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := &recorder{}
-			c := New(tc.cfg, rec, quietLogger())
-			if got := cause(t, c.Establish(uplinkPDI(0x7b04, []string{udp53, tcp443}, nil))); got != ie.CauseRequestAccepted {
-				t.Fatalf("cause %d", got)
-			}
-			list := firewallPolicy(t, rec.last(), tc.resource)
-			ports := map[uint32]bool{}
-			for _, r := range list {
-				p, _ := r["dst_port_low"].(uint32)
-				ports[p] = true
-			}
-			if len(list) != 2 || !ports[53] || !ports[443] {
-				t.Errorf("the list is %v, want a rule for port 53 and one for 443", list)
-			}
-		})
+func TestSeveralSDFFiltersAreSeveralFirewallRules(t *testing.T) {
+	rec := &recorder{}
+	c := New(firewallConfig("", "fw_dl"), rec, quietLogger())
+	req := message.NewSessionEstablishmentRequest(0, 0, 0x7b04, 1, 0,
+		ie.NewFSEID(0x7b04, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(100),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
+				ie.NewSDFFilter(udp53, "", "", "", 0),
+				ie.NewSDFFilter(tcp443, "", "", "", 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
+	)
+	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+		t.Fatalf("cause %d", got)
+	}
+	list := firewallPolicy(t, rec.last(), "fw_dl/rules")
+	ports := map[uint32]bool{}
+	for _, r := range list {
+		p, _ := r["src_port_low"].(uint32)
+		ports[p] = true
+	}
+	if len(list) != 2 || !ports[53] || !ports[443] {
+		t.Errorf("the list is %v, want a rule for source port 53 and one for 443", list)
 	}
 }
 

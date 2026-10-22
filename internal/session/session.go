@@ -6,13 +6,13 @@
 //
 // The compiler resolves a PDR's relations once, at programming time:
 //
-//	PDR     -> one rule in the graph's PDR table, whose {gate, action_id} the
-//	           packet path returns in one lookup
-//	FAR     -> a next hop (forwarding) or a drop; the downlink one also a
-//	           tunnel record, keyed by the same ActionId
-//	QER     -> a meter record per direction, referenced by the action
-//	F-TEID  -> a rule in the graph's TEID table, so only TEIDs this UPF
-//	           advertised are accepted
+//	PDR     -> one graph rule; one lookup writes its ActionId, meter IDs, and
+//	           next-hop/domain result fields into packet metadata
+//	FAR     -> a next hop (forwarding) or a drop; a downlink forward also has
+//	           a tunnel record keyed by the same ActionId
+//	QER     -> a meter record per QER, named by meter IDs in the PDR result
+//	F-TEID  -> one admission key per configured local address family:
+//	           endpoint ID, address family/address and TEID
 //
 // State here is a cache of what the SMF asked for, not a source of truth --
 // and only for as long as the process lives, unless the run was given a
@@ -35,7 +35,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 
 	"github.com/krsna1729/upf/internal/bess"
@@ -110,21 +109,13 @@ const (
 	// overlapping prefixes apart -- the same filter in two instances is two
 	// rules, because their domains differ (internal/routing).
 	RouteDomain
-	// UpfTEID is the decap's own metadata attribute: the tunnel a decapsulated
-	// packet arrived on. A graph declares it in the uplink table when two
-	// sessions may serve one UE address -- two network instances -- because the
-	// tunnel, not the address, is what tells those packets apart then.
-	UpfTEID
-	// QFI is the QoS Flow Identifier (TS 29.244 8.2.89) of the packet: the
-	// decap writes the six bits a decapsulated uplink packet carries in its
-	// PDU Session Container to the packet's `qfi` attribute, and the uplink
-	// table declares the field last. It is what tells two uplink PDRs of one
-	// session apart when nothing else does -- a QoS flow's rule beside the
-	// session's general one -- so the PDI's QFI is the rule's last key field: a
-	// PDI that names one is selected by it, and one that names none masks it
-	// out and still matches. A deployment whose uplink table declares no such
-	// field ignores a PDI's QFI, and two PDRs it alone told apart then compile
-	// to one rule key and are refused rather than half-programmed (compile).
+	// FTEIDContext is the metadata attribute GtpuDecap writes from the exact
+	// F-TEID admission entry a G-PDU matched (`fteid_context`): a compiler
+	// allocated id standing for one session's (endpoint, TEID) in one
+	// direction. The admission lookup already compared endpoint, family, local
+	// address and TEID, so the PDR key needs only this 4-byte id; a TEID
+	// repeated on another endpoint or by another session has a different one.
+	FTEIDContext
 	QFI
 )
 
@@ -137,16 +128,14 @@ func (f Field) width() int {
 		return 1
 	case SrcPort, DstPort:
 		return 2
-	case RouteDomain, UpfTEID:
-		// Both are four-byte metadata attributes, as the graph declares them.
+	case RouteDomain, FTEIDContext:
 		return 4
 	default:
 		return 0
 	}
 }
 
-// String is the field's name as the graph's manifest spells the offset: a cause
-// and a log line that name the field are what an SMF's operator works from.
+// String is the field's name as the graph's manifest spells the offset.
 func (f Field) String() string {
 	switch f {
 	case SrcIP:
@@ -161,8 +150,8 @@ func (f Field) String() string {
 		return "destination port"
 	case RouteDomain:
 		return "route domain"
-	case UpfTEID:
-		return "tunnel endpoint"
+	case FTEIDContext:
+		return "F-TEID context"
 	case QFI:
 		return "QFI"
 	default:
@@ -170,8 +159,7 @@ func (f Field) String() string {
 	}
 }
 
-// FlagName is the field as the module flags spell it (-pdr-fields-ul and
-// friends), which is the inverse of the parser in cmd/upfd: one name per field.
+// FlagName is the field as module flags spell it.
 func (f Field) FlagName() string {
 	switch f {
 	case SrcIP:
@@ -186,14 +174,17 @@ func (f Field) FlagName() string {
 		return "dport"
 	case RouteDomain:
 		return "domain"
-	case UpfTEID:
-		return "teid"
+	case FTEIDContext:
+		return "fteid"
 	case QFI:
 		return "qfi"
 	default:
 		return "field" + strconv.Itoa(int(f))
 	}
 }
+
+// Direction is one half of the deployed graph: where a PDR of this direction
+// sends its matches, and what a forward means there.
 
 // Direction is one half of the deployed graph: where a PDR of this direction
 // sends its matches, and what a forward means there.
@@ -231,10 +222,10 @@ func ParseRouteMode(s string) (RouteMode, error) {
 // N6, the downlink's feeds the GtpuEncap that leaves toward N3. The PDR table
 // is shared; the rule's own gate picks the chain (docs/design.md).
 type Direction struct {
-	// PDRTable is the WildcardMatch module holding this direction's PDR rules
-	// ("pdr_ul", "pdr_dl"). One table per direction, because the rule names an
-	// ActionId and a table declares one actions resource: the classifier's
-	// reference check (D-141) is then exact for every rule.
+	// PDRTable is the `WildcardMatch` module holding this direction's rules
+	// (`pdr_ul` or `pdr_dl`). Its `result_fields` define the PDR result; a hit
+	// writes ActionId, meter IDs, next hop and route domain directly to metadata.
+	// The output chain is direction-specific.
 	PDRTable string
 	// PDRFields is that table's key, in the graph's order.
 	PDRFields []Field
@@ -275,16 +266,36 @@ type Direction struct {
 	Counters string
 }
 
+// FTEIDEndpoint is a configured local GTP-U endpoint. Slice order is the
+// deterministic CHOOSE preference order.
+type FTEIDEndpoint struct {
+	ID                   uint32
+	ReferencePoint       string
+	TransportRouteDomain uint32
+	SourceInterface      uint8
+	Instance             string
+	IPv4                 netip.Addr
+	IPv6                 netip.Addr
+}
+
+// FTEIDKey is the exact GTP-U admission identity.
+type FTEIDKey struct {
+	EndpointID    uint32
+	AddressFamily uint32
+	LocalAddress  []byte
+	TEID          uint32
+}
+
+// Direction: where a PDR of this direction sends its matches, and what a
+// forward means there.
 // Config is the deployed graph's shape and the constants a session's resources
 // point at.
 type Config struct {
-	// TEIDTable is the shared UpfIngress admission resource's module name.
-	// ExactMatch TEID keys select gate 0 for uplink and gate 1 for downlink.
-	TEIDTable string
+	// GTPUDecap is the GtpuDecap module owning the /fteids resource.
+	GTPUDecap string
 
 	// GTPUErrors is the GTP-U responder module whose error table the report
-	// loop reads ("echo0": the responder behind the TEID table's default gate,
-	// which is where an Error Indication the peer sends this UPF arrives).
+	// loop reads; it is reached from GtpuDecap's unknown/control gate.
 	// Empty means the graph's responder does not track them and the SMF is
 	// told of no tunnel loss; a session whose FAR sends with a TEID the peer
 	// reported is reported as an Error Indication Report (TS 29.244 5.10).
@@ -329,24 +340,13 @@ type Config struct {
 	NodeID string
 	N4Addr netip.Addr
 
-	// N3Addr is the UPF's N3 IPv4 address: the F-TEID we advertise, and the
-	// outer source of a downlink packet.
-	N3Addr netip.Addr
-	// The Ethernet addresses of the N3 hop (the graph's port and its peer).
-	N3MAC, PeerMAC [6]byte
+	// FTEIDEndpoints are ordered; that order resolves CHOOSE requests and
+	// selects the configured local endpoint for each routed GTP-U reference
+	// point. TransportRouteDomain is independent of the inner route_domain.
+	FTEIDEndpoints []FTEIDEndpoint
 
-	// N9Addr is the local address advertised for Core-source tunnel PDIs.
-	N9Addr netip.Addr
-	// Transports selects the tunnel's physical egress by resolved FAR next hop.
-	// An absent entry retains the simple N3 transport.
-	Transports map[uint32]TunnelTransport
-	// FTEIDAddrs overrides the local ingress address by PDI network instance.
-	FTEIDAddrs map[string]netip.Addr
-
-	// EndMarker is the graph's unix_port socket path: where an End Marker
-	// packet is written when a modification's SNDEM flag moves a tunnel out
-	// from under a session (TS 29.244 5.3.2). Empty means this UPF constructs
-	// none, and the association response advertises no EMPU for it.
+	// EndMarker is the base graph unix_port path. A marker uses the old
+	// tunnel's transport route domain as a suffix: <path>.<domain>.
 	EndMarker string
 
 	// Buffering is the graph's buffering branch (TS 29.244 7.5.2.6, 5.2.4):
@@ -371,27 +371,16 @@ type Config struct {
 	IDReuseDelay time.Duration
 }
 
-// downSide reports whether a Source Interface value (TS 29.244 8.2.2) names
-// the side toward the subscriber: Access is the uplink side (8.2.2 NOTE 1: it
-// "corresponds to the access side"), and Core, the service LAN's interface and
-// the 5G VN's internal interface are the side a packet toward the subscriber is
-// matched on.
-//
-// The value names a side and not a direction: for indirect data forwarding both
-// the Source Interface and the Destination Interface are Access (8.2.2 NOTE 2),
-// and what makes that an uplink forward is the Destination Interface, which the
-// FAR's egress decision reads. The value this function is given is one the
-// parser accepted, so it is one of the four (parsePDI).
-func downSide(srcIfc uint8) bool { return srcIfc != ie.SrcInterfaceAccess }
+// downlink is whether this PDR's packets travel toward the UE. Source
+// Interface identifies the logical ingress side; it does not select a
+// direction for every procedure. merge derives this from the PDI's UE-address
+// side when present, then from an "assigned" SDF side, with the ordinary
+// Source Interface behavior as the fallback.
+func (p *pdr) downlink() bool { return p.down }
 
-// downlink is whether the PDR's packets come from the core to the subscriber:
-// the non-Access side. A downlink rule carries the one result field more.
-func (p *pdr) downlink() bool { return downSide(p.srcIfc) }
-
-// direction of a PDR: the uplink chain for a packet the UE sends, the downlink
-// chain for one it receives.
-func (c *Compiler) direction(srcIfc uint8) Direction {
-	if downSide(srcIfc) {
+// direction is the PDR's packet direction, not its Source Interface.
+func (c *Compiler) direction(p *pdr) Direction {
+	if p.downlink() {
 		return c.cfg.Down
 	}
 	return c.cfg.Up
@@ -413,10 +402,13 @@ func (c Config) withDefaults() Config {
 		// ids to hand out.
 		c.IDReuseDelay = time.Second
 	}
-	for _, d := range []*Direction{&c.Up, &c.Down} {
-		if len(d.PDRFields) == 0 {
-			d.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort}
-		}
+	if len(c.Up.PDRFields) == 0 {
+		c.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort,
+			FTEIDContext, QFI}
+	}
+	if len(c.Down.PDRFields) == 0 {
+		c.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort,
+			RouteDomain, FTEIDContext, QFI}
 	}
 	return c
 }
@@ -457,14 +449,24 @@ type Compiler struct {
 	journal   *Journal
 	restoring bool
 
-	mu       sync.Mutex
-	sessions map[uint64]*Session // by local SEID
-	byTEID   map[uint32]*Session // by the N3 TEID we advertised
-	nextSEID uint64
-	actions  *idPool
-	policies *idPool
-	meters   *idPool
-	teids    *idPool
+	mu            sync.Mutex
+	sessions      map[uint64]*Session
+	nextSEID      uint64
+	byFTEID       map[string]fteidOwner
+	fteidTEIDKeys map[uint32]map[string]bool
+	actions       *idPool
+	policies      *idPool
+	meters        *idPool
+	teids         *idPool
+	// fteidContexts is the admission context each (session, direction,
+	// endpoint, TEID) holds while one of its exact F-TEID keys is claimed: the
+	// id GtpuDecap writes as `fteid_context` and the PDR key matches. Like the
+	// TEID it replaced in that key, a context is reusable once released: its
+	// admission entries leave in the same transaction as its rules. A pinned
+	// TEID outside MaxTEIDs still takes a context, so the pool is not bounded
+	// by it: the decap's max_fteids is what bounds live contexts.
+	fteidContexts map[fteidContextKey]*fteidContext
+	contexts      *idPool
 	// MAR policy and tunnel records are allocated from the same pools as
 	// action records: a tunnel key shares the GtpuEncap table with an ordinary
 	// PDR's action key, and a policy key must be unique across sessions. The
@@ -483,6 +485,23 @@ type Compiler struct {
 	stats counters
 }
 
+type fteidOwner struct {
+	session *Session
+	down    bool
+}
+
+type fteidContextKey struct {
+	session  *Session
+	down     bool
+	endpoint uint32
+	teid     uint32
+}
+
+type fteidContext struct {
+	id   uint32
+	keys int // claimed exact admission keys that write this id
+}
+
 // New returns a compiler writing through ap.
 func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	if log == nil {
@@ -490,17 +509,20 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	}
 	cfg = cfg.withDefaults()
 	c := &Compiler{
-		cfg:      cfg,
-		ap:       ap,
-		log:      log,
-		sessions: map[uint64]*Session{},
-		byTEID:   map[uint32]*Session{},
-		rules:    map[string]uint64{},
-		nextSEID: 1,
-		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
-		policies: newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
-		meters:   newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
-		teids:    newIDPool(cfg.MaxTEIDs, 0),
+		cfg:           cfg,
+		ap:            ap,
+		log:           log,
+		sessions:      map[uint64]*Session{},
+		rules:         map[string]uint64{},
+		byFTEID:       map[string]fteidOwner{},
+		fteidTEIDKeys: map[uint32]map[string]bool{},
+		fteidContexts: map[fteidContextKey]*fteidContext{},
+		nextSEID:      1,
+		actions:       newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		policies:      newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		meters:        newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
+		teids:         newIDPool(cfg.MaxTEIDs, 0),
+		contexts:      newIDPool(1<<31, 0),
 	}
 	if reader, ok := ap.(CounterReader); ok {
 		c.counters = reader
@@ -527,6 +549,14 @@ func (c *Compiler) findByCP(cpSEID uint64) *Session {
 	return nil
 }
 
+type chosenFTEID struct {
+	TEID            uint32
+	EndpointID      uint32
+	Families        []uint8
+	SourceInterface uint8
+	Instance        string
+}
+
 // Session is what the SMF asked for, as compiled.
 type Session struct {
 	LocalSEID uint64
@@ -551,13 +581,10 @@ type Session struct {
 	// are what AtsssSteer applies.
 	MARs map[uint16]*mar
 
-	// chids is the F-TEID the session allocated per CHOOSE ID (TS 29.244
-	// 8.2.3): PDIs whose F-TEID IE carries the same CHOOSE ID are one tunnel
-	// endpoint, and the F-TEID is handed to each of them rather than allocated
-	// once per PDI. An entry lives while some PDR of the session names the TEID
-	// it holds (settle drops the rest), so the map never carries a value the
-	// pool has taken back -- which would put two sessions on one TEID rule.
-	chids map[uint8]uint32
+	// chids stores the allocated endpoint, complete address-family set and TEID
+	// per CHOOSE ID (TS 29.244 8.2.3). All PDIs sharing an ID reuse precisely
+	// that selection, which remains reserved for a retry until no PDR names it.
+	chids map[uint8]chosenFTEID
 
 	// erirSent is the count of each TEID this session's SMF has already been
 	// told about: the responder's error counts only grow (bess.ErrorCounts),
@@ -727,27 +754,8 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 			c.actions.release(id)
 		}
 	}
-	held := map[uint32]bool{}
-	for _, teid := range s.chids {
-		held[teid] = true
-	}
-	for _, p := range pdrsInOrder(s) {
-		held[p.teid] = true
-	}
-	for _, p := range s.removed {
-		held[p.teid] = true
-	}
-	for _, p := range s.stale {
-		held[p.teid] = true
-	}
 	for _, p := range failedPDRs {
-		if p.teid != 0 && !held[p.teid] {
-			held[p.teid] = true
-			if c.byTEID[p.teid] == s {
-				delete(c.byTEID, p.teid)
-			}
-			c.teids.release(p.teid)
-		}
+		c.releaseFTEIDClaim(s, p, false)
 	}
 	meters := map[uint32]bool{}
 	for _, q := range qersInOrder(s) {
@@ -810,6 +818,9 @@ type pdr struct {
 	// (the subscriber ARP answer).
 	down bool
 	ueIP netip.Addr
+	// hasUEIP records that this PDI carried the UE IP Address IE; an address
+	// inherited from another PDR must not be mistaken for an explicit S/D bit.
+	hasUEIP bool
 	// ueIPDst is 8.2.62's bit 3 as the PDI carried it: set, the address is the
 	// packet's destination (ueAddr says what that means for the session).
 	ueIPDst bool
@@ -844,9 +855,8 @@ type pdr struct {
 	hasQFI bool
 	qfi    uint8
 	// encapQFI is the QFI of the QER this PDR's downlink record carries
-	// (resolve), or 0 when no QER of the PDR named one: the QoS flow the encap
-	// writes into the PDU Session Container the gNB reads. 0 is not a QFI
-	// (8.2.89), so it is also the "none" the record is written without.
+	// (resolve). hasEncapQFI distinguishes an absent QFI from valid QFI 0
+	// (TS 38.415 5.5.3.3).
 	encapQFI    uint8
 	hasEncapQFI bool
 
@@ -855,17 +865,31 @@ type pdr struct {
 	// forwards toward the data network (resolve).
 	nextHop uint32
 
-	teid     uint32 // local ingress TEID, in either direction (0 for plain N6)
-	actionID uint32 // the action record this PDR's rule names
-	meterID  uint32 // the meter record a QER resolved to, in this chain's Meter
+	hasFTEID, hasChoose, hasCHID bool
+	chid                         uint8
+	fteidIPv4, fteidIPv6         netip.Addr
+	wantIPv4, wantIPv6           bool
+	teid                         uint32 // local ingress TEID, in either direction (0 for plain N6)
+	endpointID                   uint32
+	endpointFamily               uint8
+	fteidContext                 uint32 // the admission context the decap writes for this PDR's F-TEID
+	endpointIPv4, endpointIPv6   netip.Addr
+	endpointFamilies             []uint8
+	tunnelLocalAddress           netip.Addr
+	transportRouteDomain         uint32
+	actionID                     uint32 // the ActionId carried in this PDR rule's result
+	meterID                      uint32 // the meter record a QER resolved to, in this chain's Meter
 	// ownMeterID and sharedMeterID are that choice's halves: the PDR's own
 	// last rate-bearing QER, and the session's shared QER (0 when the PDR
-	// names none). A direction with MeterLevels 2 writes both into the action
-	// in that order.
+	// names none). The PDR result writes the own meter ID first and the shared
+	// session meter ID second, as the direction's `Meter(levels: 2)` consumes them.
 	ownMeterID    uint32
 	sharedMeterID uint32
 	tunnels       []string // per-session tunnel records to write (downlink)
-	drop          bool     // the FAR drops, or the QER's gate is closed this way
+	// writtenTunnels are the tunnel resources this PDR's action holds in the
+	// dataplane: a rebind to a FAR without Outer Header Creation erases them.
+	writtenTunnels []string
+	drop           bool // the FAR drops, or the QER's gate is closed this way
 	// buffer says the FAR asks for the packets to be held (Apply Action BUFF
 	// without FORW) and the deployment has a store: the rule delivers on the
 	// buffering branch instead, and the flow's key is the ActionId the rule
@@ -949,7 +973,9 @@ type mar struct {
 	policyID uint32
 	// tunnelIDs are the GtpuEncap records the two accesses name, allocated
 	// when an access adds an outer header and kept for the session's life.
-	tunnelIDs [2]uint32
+	tunnelIDs             [2]uint32
+	tunnelLocalAddresses  [2]netip.Addr
+	transportRouteDomains [2]uint32
 }
 
 // marAccess is one access of a MAR: the FAR it forwards through (TS 29.244
@@ -1381,7 +1407,7 @@ func (p *idPool) reserve(id uint32) {
 // legal pin and an illegal allocation) only ends its reservation: the range is
 // what the deployment's peer expects to see in a TEID. A zero grace means an id
 // may be reused as soon as the walk is over (for a resource with no retire
-// period: the TEID table's rules are keyed, not slotted).
+// period: F-TEID admission entries are exact-index keys, not slots).
 func (p *idPool) release(id uint32) {
 	if id == 0 {
 		return
@@ -1398,28 +1424,34 @@ func (p *idPool) release(id uint32) {
 func rulesRes(d Direction) string    { return d.PDRTable + "/rules" }
 func firewallRes(d Direction) string { return d.Firewall + "/rules" }
 
-func (c *Compiler) teidRes() string { return c.cfg.TEIDTable + "/rules" }
+func (c *Compiler) teidRes() string { return c.cfg.GTPUDecap + "/fteids" }
 func metersRes(d Direction) string  { return d.Meters + "/meters" }
+func fteidKey(endpointID, family uint32, address []byte, teid uint32) map[string]any {
+	return map[string]any{
+		"endpoint_id": endpointID, "address_family": family,
+		"local_address": slices.Clone(address), "teid": teid,
+	}
+}
 
 // The classifier's result record, as every deployed graph declares it:
 // action_id (4), meter_id for the meter stack (8: the PDR's own QER, then the
-// session's, big-endian), next_hop_id (4), and -- on the downlink -- the
-// steering policy id (4, 0 without a MAR). BESS writes the record straight
+// session's, big-endian), next_hop_id (4), route_domain (4), and -- on the
+// downlink -- steering_policy_id (4, 0 without a MAR). BESS writes the record
 // into metadata (`result_fields`); no action table is in the chain.
 const (
-	resultActionID   = 0
-	resultMeterID    = 4
-	resultNextHopID  = 12
-	resultSize       = 16
-	resultSteeringID = 16
+	resultActionID    = 0
+	resultMeterID     = 4
+	resultNextHopID   = 12
+	resultRouteDomain = 16
+	resultSize        = 20
+	resultSteeringID  = 20
 )
 
 // pdrResult is one PDR rule's result record. The meter stack has two levels in
 // every deployment: the second is 0 when the PDR names no shared QER, which
-// the Meter skips. On the downlink a PDR the session's MAR steers carries its
-// MAR's policy id in the record's last field -- the AtsssSteer module reads it
-// and selects the access, and a rule without a MAR (or a drop) publishes zero,
-// which the module passes on its plain gate.
+// the Meter skips. The selected PDI Network Instance is written to
+// route_domain after the classifier; on a downlink MAR PDR, AtsssSteer reads
+// the final policy id and selects the access.
 func pdrResult(p *pdr) []byte {
 	b := make([]byte, p.resultSize())
 	binary.BigEndian.PutUint32(b[resultActionID:], p.actionID)
@@ -1427,10 +1459,8 @@ func pdrResult(p *pdr) []byte {
 	binary.BigEndian.PutUint32(b[resultMeterID:], own)
 	binary.BigEndian.PutUint32(b[resultMeterID+4:], shared)
 	binary.BigEndian.PutUint32(b[resultNextHopID:], p.nextHop)
+	binary.BigEndian.PutUint32(b[resultRouteDomain:], p.domain)
 	if p.downlink() {
-		// The MAR steering policy id, 0 without a MAR (or on a rule whose
-		// action drops or buffers: the module's policy is read only on a
-		// packet the chain forwards).
 		steering := uint32(0)
 		if p.hasMAR && !p.drop && !p.buffer {
 			steering = p.policyID
@@ -1440,8 +1470,8 @@ func pdrResult(p *pdr) []byte {
 	return b
 }
 
-// resultSize is the result record's width, in bytes: the action record's 16,
-// and the downlink's one steering field more.
+// resultSize is the base record width (action, meters, next hop and domain),
+// plus the downlink's optional steering-policy id.
 func (p *pdr) resultSize() int {
 	if p.downlink() {
 		return resultSize + 4
@@ -1463,13 +1493,24 @@ func meterSlots(p *pdr) (uint32, uint32) {
 func tunnelsRes(d Direction) string  { return d.Tunnels + "/tunnels" }
 func countersRes(d Direction) string { return d.Counters + "/counters" }
 
-// teidRuleKey is the key of a session's TEID rule: the four bytes of the TEID.
-// ExactMatch takes the field value directly without masks.
-func teidRuleKey(teid uint32) map[string]any {
-	value := []byte{byte(teid >> 24), byte(teid >> 16), byte(teid >> 8), byte(teid)}
-	return map[string]any{
-		"fields": []map[string]any{{"value_bin": value}},
+func fteidKeysOf(p *pdr) []map[string]any {
+	families := p.endpointFamilies
+	if len(families) == 0 {
+		families = []uint8{p.endpointFamily}
 	}
+	keys := make([]map[string]any, 0, len(families))
+	for _, family := range families {
+		var address []byte
+		if family == 6 {
+			v := p.endpointIPv6.As16()
+			address = v[:]
+		} else {
+			v := p.endpointIPv4.As4()
+			address = v[:]
+		}
+		keys = append(keys, fteidKey(p.endpointID, uint32(family), address, p.teid))
+	}
+	return keys
 }
 
 // remove takes a session's state out of the dataplane and frees its ids. The
@@ -1503,7 +1544,7 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	all = append(all, s.removed...)
 	all = append(all, s.stale...)
 	for _, p := range all {
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		if dir.Firewall != "" {
 			// The rule lives in the direction's firewall policy, which this
 			// deletion rewrites below (a policy holds the rules of every live
@@ -1535,12 +1576,14 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		}
 	}
 	for _, p := range all {
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		for _, t := range p.tunnels {
 			add(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
 		}
 		if p.teid != 0 {
-			add(bess.Change{Resource: c.teidRes(), Key: teidRuleKey(p.teid)})
+			for _, key := range fteidKeysOf(p) {
+				add(bess.Change{Resource: c.teidRes(), Key: key})
+			}
 		}
 		if dir.Counters != "" && len(p.urrIDs) > 0 && p.actionID != 0 {
 			add(bess.Change{Resource: countersRes(dir), Key: map[string]any{"action_id": p.actionID}})
@@ -1643,18 +1686,17 @@ func (c *Compiler) settle(s *Session) {
 	defer c.mu.Unlock()
 	gones := append(append([]*pdr(nil), s.removed...), s.stale...)
 	for _, p := range gones {
-		if p.teid == 0 || c.byTEID[p.teid] != s || teidNamed(s, p.teid) {
-			continue
-		}
-		delete(c.byTEID, p.teid)
-		c.teids.release(p.teid)
+		c.releaseFTEIDClaim(s, p, false)
 	}
-	// A CHID's F-TEID is the session's while a PDR names it: an entry left
-	// holding a released TEID would hand that value to a later PDR with the same
-	// CHOOSE ID, and two sessions would come to share one TEID rule.
-	for chid, teid := range s.chids {
-		if !teidNamed(s, teid) {
+	// A CHID's F-TEID remains owned while a PDR names it. Keeping a released
+	// CHID would hand a recycled TEID to a later PDR and let sessions claim the
+	// same complete admission key.
+	for chid, chosen := range s.chids {
+		if !chosenNamed(s, chosen) {
 			delete(s.chids, chid)
+			if len(c.fteidTEIDKeys[chosen.TEID]) == 0 {
+				c.teids.release(chosen.TEID)
+			}
 		}
 	}
 	// The rule keys this transaction erased are given up now that it has landed.
@@ -1666,7 +1708,7 @@ func (c *Compiler) settle(s *Session) {
 	// skips the erase for those), and it stays claimed.
 	live := map[string]bool{}
 	for _, p := range s.PDRs {
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		if dir.Firewall != "" {
 			// A firewall-path PDR holds no rule key: its rule is a rule of the
 			// direction's policy, which no session claims (compile).
@@ -1686,7 +1728,7 @@ func (c *Compiler) settle(s *Session) {
 		}
 	}
 	for _, p := range gones {
-		dir := c.direction(p.srcIfc)
+		dir := c.direction(p)
 		if dir.Firewall != "" {
 			continue
 		}
@@ -1764,7 +1806,6 @@ func (c *Compiler) releaseSession(s *Session) {
 	// uplink PDRs sharing a pinned F-TEID would otherwise release it twice --
 	// the second release finds the reservation gone and queues an SMF's value
 	// for allocation.
-	teids := map[uint32]bool{}
 	actions := map[uint32]bool{}
 	policies := map[uint32]bool{}
 	meters := map[uint32]bool{}
@@ -1775,24 +1816,18 @@ func (c *Compiler) releaseSession(s *Session) {
 	all = append(all, s.removed...)
 	all = append(all, s.stale...)
 	for _, p := range all {
-		if p.teid != 0 && !teids[p.teid] {
-			teids[p.teid] = true
-			// Only if this session is what the mapping names. The mapping goes
-			// in during merge, under merge's lock, so nothing else can hold
-			// this value while this session has it: the guard is what the
-			// rollback property rests on (a refused session clears its own
-			// mapping and nobody else's), and it is defensive, not reachable
-			// today.
-			if c.byTEID[p.teid] == s {
-				delete(c.byTEID, p.teid)
-			}
-			c.teids.release(p.teid)
-		}
+		c.releaseFTEIDClaim(s, p, true)
 		if p.actionID != 0 && !actions[p.actionID] {
 			actions[p.actionID] = true
 			c.actions.release(p.actionID)
 		}
 	}
+	for _, chosen := range s.chids {
+		if len(c.fteidTEIDKeys[chosen.TEID]) == 0 {
+			c.teids.release(chosen.TEID)
+		}
+	}
+	clear(s.chids)
 	// The meters are the QERs': one per policed direction, allocated with the
 	// QER and not with the PDRs that happen to name it. A QER a modification
 	// removed is one of them: the removal took it out of the model, so this is

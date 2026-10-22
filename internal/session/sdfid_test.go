@@ -28,7 +28,7 @@ func bidirectional(cp uint64, downlinkFilter, uplinkFilter *ie.IE) *message.Sess
 			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				downlinkFilter),
 			ie.NewFARID(2)),
 		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
@@ -140,7 +140,7 @@ func TestADefinitionChangeRewritesTheReferencingPDRsRule(t *testing.T) {
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 5, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any 54 to assigned", "", "", "", 7)),
 			ie.NewFARID(2)),
 	)

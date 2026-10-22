@@ -4,6 +4,7 @@ package session
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net"
 	"net/netip"
 	"path/filepath"
@@ -12,18 +13,21 @@ import (
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
+
+	"github.com/krsna1729/upf/internal/routing"
 )
 
-// The frame, byte for byte: the OLD tunnel's TEID (0x99887766) and peer
-// (10.20.30.2), this UPF's N3 address (10.20.30.1) as the source, the graph's
-// two Ethernet addresses (the peer's first), GTP-U type 254 with a zero length
-// and no optional field (TS 29.281 5.1, 7.3.2), and padding to the Ethernet
-// minimum.
+// The IPv4 frame is byte-for-byte: the old TEID and peer, a zero Ethernet
+// header for routed neighbor rewrite, a valid outer IP/UDP header, GTP-U type
+// 254 with no optional fields, and Ethernet-minimum padding.
 func TestTheEndMarkerFrameIsWhatThePeerReads(t *testing.T) {
-	got := endMarkerFrame(0x99887766, netip.MustParseAddr("10.20.30.2"),
-		netip.MustParseAddr("10.20.30.1"), [6]byte{2, 0, 0, 0, 0, 1}, [6]byte{2, 0, 0, 0, 0, 2})
+	got, err := endMarkerFrame(0x99887766, netip.MustParseAddr("10.20.30.2"),
+		netip.MustParseAddr("10.20.30.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []byte{
-		0x02, 0x00, 0x00, 0x00, 0x00, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x00,
 		0x45, 0x00, 0x00, 0x24, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0xea, 0x9e,
 		0x0a, 0x14, 0x1e, 0x01, 0x0a, 0x14, 0x1e, 0x02,
 		0x08, 0x68, 0x08, 0x68, 0x00, 0x10, 0x00, 0x00,
@@ -35,6 +39,43 @@ func TestTheEndMarkerFrameIsWhatThePeerReads(t *testing.T) {
 	}
 	if len(got) != 60 {
 		t.Errorf("the frame is %d bytes, want the Ethernet minimum 60", len(got))
+	}
+}
+
+func TestIPv6EndMarkerHasMandatoryUDPChecksum(t *testing.T) {
+	src := netip.MustParseAddr("2001:db8:1::1")
+	peer := netip.MustParseAddr("2001:db8:1::2")
+	frame, err := endMarkerFrame(0x11223344, peer, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frame) != 70 || !bytes.Equal(frame[:12], make([]byte, 12)) ||
+		binary.BigEndian.Uint16(frame[12:14]) != 0x86dd {
+		t.Fatalf("IPv6 Ethernet frame has length/type/MAC %d/%04x/%x",
+			len(frame), binary.BigEndian.Uint16(frame[12:14]), frame[:12])
+	}
+	ip := frame[14:54]
+	if ip[0]>>4 != 6 || binary.BigEndian.Uint16(ip[4:6]) != 16 ||
+		ip[6] != 17 || ip[7] != 64 ||
+		!bytes.Equal(ip[8:24], src.AsSlice()) || !bytes.Equal(ip[24:40], peer.AsSlice()) {
+		t.Fatalf("unexpected IPv6 outer header: %x", ip)
+	}
+	udp := frame[54:70]
+	if binary.BigEndian.Uint16(udp[0:2]) != gtpuPort ||
+		binary.BigEndian.Uint16(udp[2:4]) != gtpuPort ||
+		binary.BigEndian.Uint16(udp[4:6]) != 16 ||
+		binary.BigEndian.Uint16(udp[6:8]) == 0 {
+		t.Fatalf("unexpected IPv6 UDP header: %x", udp[:8])
+	}
+	checksum := binary.BigEndian.Uint16(udp[6:8])
+	datagram := bytes.Clone(udp)
+	clear(datagram[6:8])
+	if want := ipv6UDPChecksum(src, peer, datagram); checksum != want {
+		t.Errorf("UDP checksum is %#04x, want %#04x", checksum, want)
+	}
+	if udp[8] != 0x30 || udp[9] != endMarkerType ||
+		binary.BigEndian.Uint32(udp[12:16]) != 0x11223344 {
+		t.Errorf("unexpected GTP-U End Marker: %x", udp[8:])
 	}
 }
 
@@ -98,7 +139,7 @@ func endMarkerListener(t *testing.T, path string) <-chan []byte {
 // one End Marker naming the tunnel the session is leaving -- not the new one.
 func TestAModificationWithSNDEMSendsTheOldTunnelsMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "end-marker.sock")
-	frames := endMarkerListener(t, path)
+	frames := endMarkerListener(t, path+".1")
 
 	cfg := testConfig()
 	cfg.EndMarker = path
@@ -124,8 +165,11 @@ func TestAModificationWithSNDEMSendsTheOldTunnelsMarker(t *testing.T) {
 
 	select {
 	case frame := <-frames:
-		want := endMarkerFrame(0x11223344, netip.MustParseAddr("10.20.30.2"), cfg.N3Addr,
-			cfg.N3MAC, cfg.PeerMAC)
+		want, err := endMarkerFrame(0x11223344, netip.MustParseAddr("10.20.30.2"),
+			cfg.FTEIDEndpoints[0].IPv4)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !bytes.Equal(frame, want) {
 			t.Errorf("the end marker is\n% x\nwant the OLD tunnel's\n% x", frame, want)
 		}
@@ -162,7 +206,7 @@ func TestAModificationWithSNDEMSendsTheOldTunnelsMarker(t *testing.T) {
 // exists would tell that peer a stream it is carrying has ended.
 func TestARestoredJournalSendsNoEndMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "end-marker.sock")
-	frames := endMarkerListener(t, path)
+	frames := endMarkerListener(t, path+".1")
 	j, _ := checkpointJournal(t, filepath.Join(t.TempDir(), "checkpoint"))
 
 	cfg := testConfig()
@@ -230,73 +274,114 @@ func TestAnEndMarkerThatCannotBeSentDoesNotFailTheModification(t *testing.T) {
 	}
 }
 
-func TestTunnelTransportUsesTheResolvedHop(t *testing.T) {
-	cfg := testConfig()
-	cfg.EndMarker = "/tmp/n3-marker.sock"
-	n9 := TunnelTransport{
-		Gate: 1, Addr: netip.MustParseAddr("10.90.0.1"),
-		MAC: [6]byte{2, 9, 0, 0, 0, 1}, PeerMAC: [6]byte{2, 9, 0, 0, 0, 2},
-		EndMarker: "/tmp/n9-marker.sock",
-	}
-	cfg.Transports = map[uint32]TunnelTransport{3: n9, 4: {}}
-	c := New(cfg, &recorder{}, quietLogger())
-	fallback := TunnelTransport{
-		Addr: cfg.N3Addr, MAC: cfg.N3MAC, PeerMAC: cfg.PeerMAC, EndMarker: cfg.EndMarker,
-	}
-	for _, tc := range []struct {
-		hop  uint32
-		want TunnelTransport
-	}{
-		{0, fallback},
-		{2, fallback},
-		{3, n9},
-		{4, TunnelTransport{}},
-	} {
-		if got := c.tunnelTransport(tc.hop); got != tc.want {
-			t.Errorf("hop %d selects %+v, want %+v", tc.hop, got, tc.want)
-		}
-	}
-}
-
-func TestFTEIDAddressFollowsLocalIngressAndInstanceOverride(t *testing.T) {
+func TestTunnelEndpointUsesReferencePointFamilyAndInstance(t *testing.T) {
 	cfg := egressConfig(t)
-	cfg.N9Addr = netip.MustParseAddr("10.90.0.1")
-	override := netip.MustParseAddr("10.91.0.1")
+	cfg.FTEIDEndpoints = []FTEIDEndpoint{
+		{ID: 1, ReferencePoint: "n3", TransportRouteDomain: 1,
+			SourceInterface: ie.SrcInterfaceAccess, Instance: "internet",
+			IPv4: netip.MustParseAddr("10.90.0.1"), IPv6: netip.MustParseAddr("2001:db8:3::1")},
+		{ID: 2, ReferencePoint: "n3", TransportRouteDomain: 3,
+			SourceInterface: ie.SrcInterfaceAccess,
+			IPv4:            netip.MustParseAddr("10.93.0.1")},
+		{ID: 3, ReferencePoint: "n9", TransportRouteDomain: 2,
+			SourceInterface: ie.SrcInterfaceCore, Instance: "internet",
+			IPv4: netip.MustParseAddr("10.91.0.1"), IPv6: netip.MustParseAddr("2001:db8:9::1")},
+	}
+	c := New(cfg, &recorder{}, quietLogger())
+	internet, _ := cfg.Instances.Lookup("internet")
+	vn, _ := cfg.Instances.Lookup("vn")
 	for _, tc := range []struct {
-		name     string
-		src      uint8
-		instance string
-		addrs    map[string]netip.Addr
-		want     netip.Addr
+		name       string
+		far        *far
+		ifc        routing.Interface
+		endpointID uint32
+		local      netip.Addr
+		domain     uint32
 	}{
-		{"Access defaults to N3", ie.SrcInterfaceAccess, "internet", nil, cfg.N3Addr},
-		{"Core defaults to N9", ie.SrcInterfaceCore, "internet", nil, cfg.N9Addr},
-		{"Access can advertise N9", ie.SrcInterfaceAccess, "internet", map[string]netip.Addr{"internet": override}, override},
-		{"Core instance overrides N9", ie.SrcInterfaceCore, "internet", map[string]netip.Addr{"internet": override}, override},
-		{"unnamed PDI uses default instance", ie.SrcInterfaceAccess, "", map[string]netip.Addr{"internet": override}, override},
-		{"other instance does not override", ie.SrcInterfaceAccess, "vn", map[string]netip.Addr{"internet": override}, cfg.N3Addr},
+		{"N3 IPv4 scoped endpoint", &far{destIfc: ie.DstInterfaceAccess, peer: netip.MustParseAddr("10.20.30.2")},
+			internet, 1, netip.MustParseAddr("10.90.0.1"), 1},
+		{"N9 IPv6 scoped endpoint", &far{destIfc: ie.DstInterfaceCore, peer: netip.MustParseAddr("2001:db8:9::2")},
+			internet, 3, netip.MustParseAddr("2001:db8:9::1"), 2},
+		{"unscoped endpoint fallback", &far{destIfc: ie.DstInterfaceAccess, peer: netip.MustParseAddr("10.20.30.2")},
+			vn, 2, netip.MustParseAddr("10.93.0.1"), 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			local := cfg
-			local.FTEIDAddrs = tc.addrs
-			c := New(local, &recorder{}, quietLogger())
-			if got := c.fteidAddr(&pdr{srcIfc: tc.src, instance: tc.instance}); got != tc.want {
-				t.Errorf("advertised address is %s, want %s", got, tc.want)
+			endpoint, local, err := c.tunnelEndpoint(tc.far, tc.ifc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if endpoint.ID != tc.endpointID || local != tc.local ||
+				endpoint.TransportRouteDomain != tc.domain {
+				t.Errorf("selected endpoint %+v with local %s, want endpoint %d, local %s, domain %d",
+					endpoint, local, tc.endpointID, tc.local, tc.domain)
 			}
 		})
 	}
-	cfg.N9Addr = netip.Addr{}
+	missing := &far{destIfc: ie.DstInterfaceCore, instance: "vn",
+		peer: netip.MustParseAddr("2001:db8:9::2")}
+	if _, _, err := c.tunnelEndpoint(missing, vn); err == nil {
+		t.Fatal("a scoped N9 IPv6 endpoint was selected for a different instance")
+	}
+}
+func TestFTEIDEndpointSelectionUsesSourceAndInstance(t *testing.T) {
+	cfg := egressConfig(t)
+	cfg.FTEIDEndpoints = []FTEIDEndpoint{
+		{ID: 7, ReferencePoint: "n3", SourceInterface: ie.SrcInterfaceAccess, Instance: "internet", IPv4: netip.MustParseAddr("10.90.0.1")},
+		{ID: 9, ReferencePoint: "n3", SourceInterface: ie.SrcInterfaceAccess, Instance: "internet", IPv4: netip.MustParseAddr("10.92.0.1"), IPv6: netip.MustParseAddr("2001:4860::9")},
+		{ID: 8, ReferencePoint: "n9", SourceInterface: ie.SrcInterfaceCore, Instance: "internet", IPv4: netip.MustParseAddr("10.91.0.1")},
+	}
 	c := New(cfg, &recorder{}, quietLogger())
-	if got := c.fteidAddr(&pdr{srcIfc: ie.SrcInterfaceCore}); got.IsValid() {
-		t.Errorf("Core with no N9 address silently advertised %s", got)
+	core, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceCore, instance: "internet", wantIPv4: true})
+	if err != nil || core.ID != 8 {
+		t.Fatalf("Core PDI selected endpoint %+v, error %v", core, err)
+	}
+	first, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, instance: "internet", wantIPv4: true})
+	if err != nil || first.ID != 7 {
+		t.Fatalf("IPv4 CHOOSE selected endpoint %+v, error %v", first, err)
+	}
+	for _, p := range []*pdr{
+		{srcIfc: ie.SrcInterfaceAccess, instance: "internet", wantIPv6: true},
+		{srcIfc: ie.SrcInterfaceAccess, instance: "internet", wantIPv4: true, wantIPv6: true},
+	} {
+		ep, err := c.fteidEndpoint(p)
+		if err != nil || ep.ID != 9 {
+			t.Fatalf("family-exact CHOOSE selected endpoint %+v, error %v", ep, err)
+		}
+	}
+	pinned := &pdr{srcIfc: ie.SrcInterfaceAccess, instance: "internet", teid: 0x77,
+		wantIPv4: true, fteidIPv4: netip.MustParseAddr("10.92.0.1")}
+	if ep, err := c.fteidEndpoint(pinned); err != nil || ep.ID != 9 {
+		t.Fatalf("pinned F-TEID selected endpoint %+v, error %v", ep, err)
+	}
+	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess,
+		instance: "internet", teid: 0x79, wantIPv4: true,
+		fteidIPv4: netip.MustParseAddr("198.51.100.77")}); err == nil {
+		t.Fatal("pinned address absent from endpoint configuration was accepted")
+	}
+	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, instance: "internet", teid: 0x78, wantIPv4: true}); err == nil {
+		t.Fatal("addressless pinned F-TEID was accepted despite multiple matching endpoints")
+	}
+	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, instance: "vn", wantIPv4: true}); err == nil {
+		t.Fatal("an unmatched instance selected an endpoint")
+	}
+	onlyV4 := cfg
+	onlyV4.FTEIDEndpoints = []FTEIDEndpoint{
+		cfg.FTEIDEndpoints[0],
+		{ID: 10, ReferencePoint: "n3", SourceInterface: ie.SrcInterfaceAccess,
+			Instance: "internet", IPv4: netip.MustParseAddr("10.93.0.1")},
+	}
+	if _, err := New(onlyV4, &recorder{}, quietLogger()).fteidEndpoint(
+		&pdr{srcIfc: ie.SrcInterfaceAccess, instance: "internet", wantIPv4: true, wantIPv6: true}); err == nil {
+		t.Fatal("no-partial-fallback family request selected an IPv4-only endpoint")
 	}
 }
 
 func TestEndMarkerSocketsAreSelectedAndReusedIndependently(t *testing.T) {
 	cfg := testConfig()
-	cfg.EndMarker = filepath.Join(t.TempDir(), "n3.sock")
-	n9Path := filepath.Join(t.TempDir(), "n9.sock")
-	n3Frames := endMarkerListener(t, cfg.EndMarker)
+	base := filepath.Join(t.TempDir(), "end-marker.sock")
+	cfg.EndMarker = base
+	n3Path, n9Path := base+".1", base+".2"
+	n3Frames := endMarkerListener(t, n3Path)
 	n9Frames := endMarkerListener(t, n9Path)
 	c := New(cfg, &recorder{}, quietLogger())
 	t.Cleanup(func() {
@@ -309,19 +394,13 @@ func TestEndMarkerSocketsAreSelectedAndReusedIndependently(t *testing.T) {
 		frames <-chan []byte
 		value  byte
 	}{
-		{cfg.EndMarker, n3Frames, 1},
+		{n3Path, n3Frames, 1},
 		{n9Path, n9Frames, 2},
-		{cfg.EndMarker, n3Frames, 3},
+		{n3Path, n3Frames, 3},
 		{n9Path, n9Frames, 4},
 	} {
 		frame := []byte{tc.value}
-		var err error
-		if tc.path == cfg.EndMarker {
-			err = c.sendEndMarker(frame)
-		} else {
-			err = c.sendEndMarkerAt(tc.path, frame)
-		}
-		if err != nil {
+		if err := c.sendEndMarkerAt(tc.path, frame); err != nil {
 			t.Fatalf("sending to %s: %v", tc.path, err)
 		}
 		select {
@@ -338,29 +417,26 @@ func TestEndMarkerSocketsAreSelectedAndReusedIndependently(t *testing.T) {
 	}
 }
 
-func TestSNDEMUsesTheOldTransportForAccessAndCoreTunnels(t *testing.T) {
+func TestSNDEMUsesTheOldRoutedEndpointForAccessAndCoreTunnels(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		oldDest    uint8
-		oldHop     uint32
 		newDest    uint8
 		sameTunnel bool
 	}{
-		{"Access N9 to Core default", ie.DstInterfaceAccess, 2, ie.DstInterfaceCore, false},
-		{"Core N9 to Access default", ie.DstInterfaceCore, 3, ie.DstInterfaceAccess, false},
-		{"Access transport-only move", ie.DstInterfaceAccess, 2, ie.DstInterfaceCore, true},
-		{"Core transport-only move", ie.DstInterfaceCore, 3, ie.DstInterfaceAccess, true},
+		{"Access to Core with a new tunnel", ie.DstInterfaceAccess, ie.DstInterfaceCore, false},
+		{"Core to Access with a new tunnel", ie.DstInterfaceCore, ie.DstInterfaceAccess, false},
+		{"Access to Core transport move", ie.DstInterfaceAccess, ie.DstInterfaceCore, true},
+		{"Core to Access transport move", ie.DstInterfaceCore, ie.DstInterfaceAccess, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := egressConfig(t)
-			cfg.EndMarker = "" // Only N9 has a marker socket.
-			n9 := TunnelTransport{
-				Gate: 1, Addr: netip.MustParseAddr("10.90.0.1"),
-				MAC: [6]byte{2, 9, 0, 0, 0, 1}, PeerMAC: [6]byte{2, 9, 0, 0, 0, 2},
-				EndMarker: filepath.Join(t.TempDir(), "n9.sock"),
-			}
-			cfg.Transports = map[uint32]TunnelTransport{tc.oldHop: n9}
-			frames := endMarkerListener(t, n9.EndMarker)
+			base := filepath.Join(t.TempDir(), "end-marker.sock")
+			cfg.EndMarker = base
+			n3Local := cfg.FTEIDEndpoints[0].IPv4
+			n9Local := cfg.FTEIDEndpoints[1].IPv4
+			n3Frames := endMarkerListener(t, base+".1")
+			n9Frames := endMarkerListener(t, base+".2")
 			rec := &recorder{}
 			c := New(cfg, rec, quietLogger())
 			t.Cleanup(func() {
@@ -374,15 +450,21 @@ func TestSNDEMUsesTheOldTransportForAccessAndCoreTunnels(t *testing.T) {
 			if got := cause(t, resp); got != ie.CauseRequestAccepted {
 				t.Fatalf("establishment answered cause %d", got)
 			}
+			oldLocal, oldDomain, oldFrames := n3Local, uint32(1), n3Frames
+			newLocal, newDomain := n9Local, uint32(2)
+			if tc.oldDest == ie.DstInterfaceCore {
+				oldLocal, oldDomain, oldFrames = n9Local, 2, n9Frames
+			}
+			if tc.newDest == ie.DstInterfaceAccess {
+				newLocal, newDomain = n3Local, 1
+			}
 			dl := ruleIn(t, rec.last(), cfg.Down.PDRTable)
 			tunnel := find(t, rec.last(), tunnelsRes(cfg.Down), "action_id", dl.actionID())
-			if tunnel.Value["gate"] != n9.Gate || tunnel.Value["src_ip"] != n9.Addr.String() {
-				t.Errorf("N9 tunnel gate/source is %v/%v, want %d/%s", tunnel.Value["gate"], tunnel.Value["src_ip"], n9.Gate, n9.Addr)
-			}
-			if !bytes.Equal(tunnel.Value["ether_src"].([]byte), n9.MAC[:]) ||
-				!bytes.Equal(tunnel.Value["ether_dst"].([]byte), n9.PeerMAC[:]) {
-				t.Errorf("N9 tunnel Ethernet headers are %v/%v, want %v/%v",
-					tunnel.Value["ether_src"], tunnel.Value["ether_dst"], n9.MAC, n9.PeerMAC)
+			if !bytes.Equal(tunnel.Value["local_address"].([]byte), oldLocal.AsSlice()) ||
+				tunnel.Value["transport_route_domain"] != oldDomain {
+				t.Fatalf("old tunnel endpoint is %v/domain %v, want %s/domain %d",
+					tunnel.Value["local_address"], tunnel.Value["transport_route_domain"],
+					oldLocal, oldDomain)
 			}
 			forwarding := []*ie.IE{ie.NewDestinationInterface(tc.newDest)}
 			if !tc.sameTunnel {
@@ -397,22 +479,23 @@ func TestSNDEMUsesTheOldTransportForAccessAndCoreTunnels(t *testing.T) {
 			}
 			dl = ruleIn(t, rec.last(), cfg.Down.PDRTable)
 			tunnel = find(t, rec.last(), tunnelsRes(cfg.Down), "action_id", dl.actionID())
-			if tunnel.Value["gate"] != uint64(0) || tunnel.Value["src_ip"] != cfg.N3Addr.String() {
-				t.Errorf("unmapped new hop did not fall back to N3: %v", tunnel.Value)
+			if !bytes.Equal(tunnel.Value["local_address"].([]byte), newLocal.AsSlice()) ||
+				tunnel.Value["transport_route_domain"] != newDomain {
+				t.Errorf("new tunnel endpoint is %v/domain %v, want %s/domain %d",
+					tunnel.Value["local_address"], tunnel.Value["transport_route_domain"],
+					newLocal, newDomain)
 			}
-			if !bytes.Equal(tunnel.Value["ether_src"].([]byte), cfg.N3MAC[:]) ||
-				!bytes.Equal(tunnel.Value["ether_dst"].([]byte), cfg.PeerMAC[:]) {
-				t.Errorf("fallback tunnel Ethernet headers are %v/%v, want %v/%v",
-					tunnel.Value["ether_src"], tunnel.Value["ether_dst"], cfg.N3MAC, cfg.PeerMAC)
+			frame, err := endMarkerFrame(0x11223344, netip.MustParseAddr("10.20.30.2"), oldLocal)
+			if err != nil {
+				t.Fatal(err)
 			}
 			select {
-			case got := <-frames:
-				want := endMarkerFrame(0x11223344, netip.MustParseAddr("10.20.30.2"), n9.Addr, n9.MAC, n9.PeerMAC)
-				if !bytes.Equal(got, want) {
-					t.Errorf("marker is\n% x\nwant old transport and tunnel\n% x", got, want)
+			case got := <-oldFrames:
+				if !bytes.Equal(got, frame) {
+					t.Errorf("marker is\n% x\nwant old routed tunnel\n% x", got, frame)
 				}
 			case <-time.After(2 * time.Second):
-				t.Fatal("old N9 transport received no marker")
+				t.Fatal("the old transport route domain received no marker")
 			}
 			if stats := c.Stats(); stats.Markers != 1 || stats.MarkerFailures != 0 {
 				t.Errorf("markers sent %d, failed %d, want 1 and 0", stats.Markers, stats.MarkerFailures)
@@ -421,44 +504,49 @@ func TestSNDEMUsesTheOldTransportForAccessAndCoreTunnels(t *testing.T) {
 	}
 }
 
-func TestLeavingTunnelsCapturesSharedPDRAndMARTransports(t *testing.T) {
-	cfg := testConfig()
-	n9 := TunnelTransport{Gate: 1, Addr: netip.MustParseAddr("10.90.0.1")}
-	cfg.Transports = map[uint32]TunnelTransport{3: n9}
-	c := New(cfg, &recorder{}, quietLogger())
+func TestLeavingTunnelsCapturesSharedPDRAndMARRoutedEndpoints(t *testing.T) {
+	c := New(testConfig(), &recorder{}, quietLogger())
+	localN3 := netip.MustParseAddr("192.0.2.1")
+	localN9 := netip.MustParseAddr("192.0.2.9")
 	old := &far{id: 2, hasOuter: true, teid: 0x11223344, peer: netip.MustParseAddr("10.20.30.2")}
 	s := &Session{
 		FARs: map[uint32]*far{2: old},
 		PDRs: map[uint16]*pdr{
-			1: {id: 1, farID: 2, nextHop: 2},
-			2: {id: 2, farID: 2, nextHop: 2},
+			1: {id: 1, farID: 2, tunnelLocalAddress: localN3, transportRouteDomain: 1},
+			2: {id: 2, farID: 2, tunnelLocalAddress: localN3, transportRouteDomain: 1},
 		},
 		MARs: map[uint16]*mar{
 			1: {
-				accesses: [2]marAccess{{hasFarID: true, farID: 2}},
-				nextHops: [2]uint32{3}, tunnelIDs: [2]uint32{7},
+				accesses:              [2]marAccess{{hasFarID: true, farID: 2}},
+				tunnelIDs:             [2]uint32{7},
+				tunnelLocalAddresses:  [2]netip.Addr{localN9},
+				transportRouteDomains: [2]uint32{2},
 			},
 		},
 	}
 	markers := c.leavingTunnels(s, []farReq{{id: 2, hasOuter: true, teid: 0xaabbccdd, peer: old.peer}})
 	if len(markers) != 2 {
-		t.Fatalf("captured %d markers, want two distinct transports, not duplicate PDR markers", len(markers))
+		t.Fatalf("captured %d markers, want one per distinct routed endpoint", len(markers))
 	}
 	old.teid = 0xaabbccdd
-	s.PDRs[1].nextHop = 3
-	s.MARs[1].nextHops[0] = 2
 	if markers[0].teid != 0x11223344 || markers[1].teid != 0x11223344 {
 		t.Error("old TEID changed with the live FAR")
 	}
-	if markers[0].transport != c.tunnelTransport(2) || markers[1].transport != n9 {
-		t.Errorf("old transports changed with live references: %+v", markers)
+	if markers[0].localAddress != localN3 || markers[0].transportRouteDomain != 1 ||
+		markers[1].localAddress != localN9 || markers[1].transportRouteDomain != 2 {
+		t.Errorf("old routed endpoints changed with live references: %+v", markers)
 	}
 }
 
-func TestLeavingTunnelsDoesNotEndAnUnchangedTransport(t *testing.T) {
+func TestLeavingTunnelsDoesNotEndAnUnchangedRoutedEndpoint(t *testing.T) {
 	cfg := egressConfig(t)
-	n9 := TunnelTransport{Gate: 1, Addr: netip.MustParseAddr("10.90.0.1")}
-	cfg.Transports = map[uint32]TunnelTransport{3: n9}
+	local := netip.MustParseAddr("10.90.0.1")
+	cfg.FTEIDEndpoints = []FTEIDEndpoint{
+		{ID: 1, ReferencePoint: "n3", TransportRouteDomain: 2,
+			SourceInterface: ie.SrcInterfaceAccess, Instance: "internet", IPv4: local},
+		{ID: 2, ReferencePoint: "n9", TransportRouteDomain: 2,
+			SourceInterface: ie.SrcInterfaceCore, Instance: "internet", IPv4: local},
+	}
 	c := New(cfg, &recorder{}, quietLogger())
 	old := &far{
 		id: 2, apply: applyForw, destIfc: ie.DstInterfaceCore, instance: "internet",
@@ -467,7 +555,8 @@ func TestLeavingTunnelsDoesNotEndAnUnchangedTransport(t *testing.T) {
 	s := &Session{
 		FARs: map[uint32]*far{2: old},
 		PDRs: map[uint16]*pdr{
-			1: {id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, instance: "internet", nextHop: 3},
+			1: {id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, instance: "internet",
+				tunnelLocalAddress: local, transportRouteDomain: 2},
 		},
 	}
 	for _, update := range []farReq{
@@ -475,17 +564,10 @@ func TestLeavingTunnelsDoesNotEndAnUnchangedTransport(t *testing.T) {
 		{id: 2, hasDestIfc: true, destIfc: ie.DstInterfaceCore},
 		{id: 2, hasInstance: true, instance: "internet"},
 		{id: 2, hasOuter: true, teid: old.teid, peer: old.peer},
+		{id: 2, hasDestIfc: true, destIfc: ie.DstInterfaceAccess},
 	} {
 		if got := c.leavingTunnels(s, []farReq{update}); len(got) != 0 {
-			t.Errorf("unchanged update %+v produced markers %+v", update, got)
+			t.Errorf("an unchanged routed endpoint produced markers for update %+v: %+v", update, got)
 		}
-	}
-	move := farReq{id: 2, hasDestIfc: true, destIfc: ie.DstInterfaceAccess}
-	if got := c.leavingTunnels(s, []farReq{move}); len(got) != 1 || got[0].transport != n9 {
-		t.Fatalf("transport-only move did not capture old N9 transport: %+v", got)
-	}
-	cfg.Transports[2] = n9
-	if got := c.leavingTunnels(s, []farReq{move}); len(got) != 0 {
-		t.Errorf("different hop on identical transport produced markers %+v", got)
 	}
 }

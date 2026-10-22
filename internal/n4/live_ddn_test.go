@@ -39,7 +39,7 @@ func bufferedReportEstablishment(seq uint32, cpSEID uint64) *message.SessionEsta
 			ie.NewFARID(1)),
 		ie.NewCreatePDR(ie.NewPDRID(ddnPDRID), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.2", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
 			ie.NewFARID(2)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(forw),

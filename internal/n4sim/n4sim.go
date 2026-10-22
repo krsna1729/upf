@@ -96,7 +96,7 @@ func Establish(seq uint32, s Session) *message.SessionEstablishmentRequest {
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, s.UEIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, s.UEIP, "", 0, 0),
 				ie.NewSDFFilter(s.sdf(), "", "", "", 0),
 			),
 			ie.NewFARID(2),

@@ -35,6 +35,11 @@ func TestULCLOneSessionBranchesByDestination(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Instances = domains
+	cfg.FTEIDEndpoints = append(cfg.FTEIDEndpoints, FTEIDEndpoint{
+		ID: 2, ReferencePoint: "n9", TransportRouteDomain: 2,
+		SourceInterface: ie.SrcInterfaceCore, Instance: "internet",
+		IPv4: netip.MustParseAddr("192.0.2.9"),
+	})
 	rec := &recorder{}
 	c := New(cfg, rec, quietLogger())
 
@@ -73,7 +78,7 @@ func TestULCLOneSessionBranchesByDestination(t *testing.T) {
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewNetworkInstance("internet"),
-				ie.NewUEIPAddress(0x02, "10.45.0.8", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.8", "", 0, 0),
 				ie.NewSDFFilter("permit out ip from any to assigned", "", "", "", 0),
 			),
 			ie.NewFARID(3),

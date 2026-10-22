@@ -9,6 +9,7 @@ import (
 
 	"github.com/krsna1729/upf/internal/routing"
 	"github.com/krsna1729/upf/internal/session"
+	"github.com/wmnsk/go-pfcp/ie"
 )
 
 // TestParseInstancesReadsTheEgresses: each *-next-hop key is one egress of the
@@ -181,12 +182,12 @@ func TestParseInstancesRefuses(t *testing.T) {
 // than silently dropped -- a dropped field is a rule keyed on less than the
 // table matches.
 func TestParsePDRFieldsNamesTheGraphsKey(t *testing.T) {
-	got, err := parsePDRFields("src, dst, proto, sport, dport, teid")
+	got, err := parsePDRFields("src, dst, proto, sport, dport, fteid, qfi")
 	if err != nil {
-		t.Fatalf("the graph's six fields were refused: %v", err)
+		t.Fatalf("the graph's seven fields were refused: %v", err)
 	}
 	want := []session.Field{session.SrcIP, session.DstIP, session.Proto,
-		session.SrcPort, session.DstPort, session.UpfTEID}
+		session.SrcPort, session.DstPort, session.FTEIDContext, session.QFI}
 	if len(got) != len(want) {
 		t.Fatalf("the flag parsed %d fields, want %d", len(got), len(want))
 	}
@@ -194,6 +195,11 @@ func TestParsePDRFieldsNamesTheGraphsKey(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("field %d is %v, want %v", i, got[i], want[i])
 		}
+	}
+	// The admission context replaced the per-endpoint key fields; a profile
+	// still naming them must not quietly key less than it says.
+	if _, err := parsePDRFields("teid,endpoint"); err == nil {
+		t.Error("the removed endpoint key fields were accepted")
 	}
 	if _, err := parsePDRFields("src,domain,tunnel"); err == nil {
 		t.Error("a field name the graph has no such field for was accepted")
@@ -205,81 +211,54 @@ func TestParsePDRFieldsNamesTheGraphsKey(t *testing.T) {
 	}
 }
 
-func TestParseTunnelTransports(t *testing.T) {
-	const transport = "next-hop=3,gate=1,addr=192.0.2.9,mac=02:00:00:00:00:09,peer-mac=02:00:00:00:00:0a"
-	transports, err := parseTransports(entryList{transport})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := transports[3]; got.Gate != 1 || got.Addr != netip.MustParseAddr("192.0.2.9") ||
-		got.MAC != [6]byte{2, 0, 0, 0, 0, 9} || got.PeerMAC != [6]byte{2, 0, 0, 0, 0, 10} || got.EndMarker != "" {
-		t.Fatalf("unexpected transport: %+v", got)
-	}
-	for _, key := range []string{"next-hop=3", "gate=1", "addr=192.0.2.9", "mac=02:00:00:00:00:09", "peer-mac=02:00:00:00:00:0a"} {
-		t.Run("missing "+key, func(t *testing.T) {
-			var fields []string
-			for _, field := range strings.Split(transport, ",") {
-				if field != key {
-					fields = append(fields, field)
-				}
-			}
-			if _, err := parseTransports(entryList{strings.Join(fields, ",")}); err == nil {
-				t.Fatal("missing explicit transport field accepted")
-			}
-		})
-	}
-	for _, tc := range []struct{ old, replacement string }{
-		{"next-hop=3", "next-hop=4294967296"},
-		{"gate=1", "gate=8192"},
-		{"gate=1", "gate=-1"},
-		{"addr=192.0.2.9", "addr=2001:db8::9"},
-		{"addr=192.0.2.9", "addr=0.0.0.0"},
-		{"addr=192.0.2.9", "addr=224.0.0.1"},
-		{"addr=192.0.2.9", "addr=255.255.255.255"},
-		{"mac=02:00:00:00:00:09", "mac=invalid"},
-		{"peer-mac=02:00:00:00:00:0a", "peer-mac=02:00:00:00:00:00:00:0a"},
-	} {
-		t.Run(tc.replacement, func(t *testing.T) {
-			if _, err := parseTransports(entryList{strings.Replace(transport, tc.old, tc.replacement, 1)}); err == nil {
-				t.Fatal("invalid transport accepted")
-			}
-		})
-	}
-	for _, entries := range []entryList{
-		{transport, transport},
-		{transport + ",gate=2"},
-		{transport + ",unknown=value"},
-		{transport + ",invalid"},
-	} {
-		if _, err := parseTransports(entries); err == nil {
-			t.Fatalf("invalid mapping accepted: %v", entries)
-		}
-	}
-	if _, err := parseTransports(entryList{strings.Replace(transport, "gate=1", "gate=8191", 1)}); err != nil {
-		t.Fatalf("last valid gate rejected: %v", err)
-	}
-}
-
 func TestParseFTEIDAddresses(t *testing.T) {
-	addresses, err := parseFTEIDAddresses(entryList{"instance=foo,addr=192.0.2.9", "instance=bar,addr=192.0.2.10"})
-	if err != nil || len(addresses) != 2 || addresses["foo"] != netip.MustParseAddr("192.0.2.9") ||
-		addresses["bar"] != netip.MustParseAddr("192.0.2.10") {
-		t.Fatalf("address overrides: %v, error %v", addresses, err)
+	entries := entryList{
+		"endpoint=7,reference=n3,transport-domain=1,source=access,instance=foo,ipv4=192.0.2.9,ipv6=2001:db8::9",
+		"endpoint=8,reference=n9,transport-domain=2,source=core,instance=bar,ipv4=192.0.2.10",
 	}
-	for _, entries := range []entryList{
-		{"instance=foo"},
-		{"addr=192.0.2.9"},
-		{"instance=,addr=192.0.2.9"},
-		{"instance=foo,addr=::1"},
-		{"instance=foo,addr=0.0.0.0"},
-		{"instance=foo,addr=192.0.2.9,addr=192.0.2.10"},
-		{"instance=foo,addr=192.0.2.9", "instance=foo,addr=192.0.2.10"},
-		{"instance=foo,addr=192.0.2.9,unknown=value"},
-		{"instance=foo,addr=192.0.2.9,invalid"},
+	endpoints, err := parseFTEIDAddresses(entries, true)
+	if err != nil || len(endpoints) != 2 || endpoints[0].ID != 7 ||
+		endpoints[0].ReferencePoint != "n3" || endpoints[0].TransportRouteDomain != 1 ||
+		endpoints[0].SourceInterface != ie.SrcInterfaceAccess ||
+		endpoints[0].IPv4 != netip.MustParseAddr("192.0.2.9") ||
+		endpoints[0].IPv6 != netip.MustParseAddr("2001:db8::9") ||
+		endpoints[1].ID != 8 || endpoints[1].ReferencePoint != "n9" ||
+		endpoints[1].TransportRouteDomain != 2 ||
+		endpoints[1].SourceInterface != ie.SrcInterfaceCore {
+		t.Fatalf("F-TEID endpoints: %+v, error %v", endpoints, err)
+	}
+	for _, bad := range []string{
+		"reference=n3,transport-domain=1,source=access,ipv4=192.0.2.9",
+		"endpoint=0,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.9",
+		"endpoint=7,reference=n3,transport-domain=0,source=access,ipv4=192.0.2.9",
+		"endpoint=4294967296,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.9",
+		"endpoint=7,reference=n3,transport-domain=1,source=core,ipv4=192.0.2.9",
+		"endpoint=7,reference=n19,transport-domain=1,source=access,ipv4=192.0.2.9",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv4=::1",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv6=::ffff:192.0.2.1",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv4=0.0.0.0",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv4=169.254.1.1",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv6=2001:db8::1%eth0",
 	} {
-		if _, err := parseFTEIDAddresses(entries); err == nil {
-			t.Fatalf("invalid override accepted: %v", entries)
+		if _, err := parseFTEIDAddresses(entryList{bad}, false); err == nil {
+			t.Errorf("invalid F-TEID endpoint accepted: %s", bad)
 		}
+	}
+	if _, err := parseFTEIDAddresses(entryList{
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.9",
+	}, true); err == nil {
+		t.Error("multi-instance endpoint without instance was accepted")
+	}
+	if _, err := parseFTEIDAddresses(entryList{
+		"endpoint=7,reference=n3,transport-domain=1,source=access,instance=foo,ipv4=192.0.2.9",
+		"endpoint=7,reference=n9,transport-domain=2,source=core,instance=bar,ipv4=192.0.2.10",
+	}, true); err == nil {
+		t.Error("duplicate endpoint ID was accepted")
+	}
+	if got, err := parseFTEIDAddresses(entryList{
+		"endpoint=9,reference=n3,transport-domain=3,source=access,ipv6=fd00::1",
+	}, false); err != nil || got[0].IPv6 != netip.MustParseAddr("fd00::1") {
+		t.Errorf("valid ULA endpoint rejected: %+v, %v", got, err)
 	}
 }
 
