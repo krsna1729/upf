@@ -239,10 +239,11 @@ PDNType IPv4
 ```
 
 What is **not** there: no SDF Filter (no PCC rules), no F-TEID CHOOSE (the SMF
-allocates the TEID itself, `0x00000002`, and takes the N3 address from its
-`interfaces.endpoints`, here `upfd`'s own `-n3-addr`), no Outer Header Creation in
-the downlink FAR (the gNB is not known yet: it is plain `FORW` to Access, not
-`BUFF`/`NOCP`, until the Modification), no BAR, no Traffic Endpoint.
+allocates TEID `0x00000002` and takes the N3 address from
+`interfaces.endpoints`; `ci/interop/up.sh` supplies that address through
+`-fteid-address endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3_IP`),
+no Outer Header Creation in the downlink FAR (the gNB is not known yet: it is
+plain `FORW` to Access until the Modification), no BAR, no Traffic Endpoint.
 
 With `URR_PERIOD=0 URR_THRESHOLD=0` the SMF creates no default URRs
 (`[WARN][SMF][PduSess] No Create URR`): the request is 332 bytes, the same minus
@@ -470,8 +471,8 @@ bessd, upfd on the host                bessd's N6 port upfi-n6  <--veth-->  eth0
 | piece | who makes it | why |
 |---|---|---|
 | the two veths, the data network's namespace, the bridge port | `ci/interop/net.sh` (fixed names, MACs, addresses; removed by `down.sh`) | the gNB's GTP-U must reach a port bessd owns, and the UPF's N3 address must be answered by nobody's kernel |
-| the graph | `ci/interop/graph.py`, from `deploy/upf.yaml` (or `deploy/custom-pdrmatch.yaml` with `PROFILE=custom`) | the deployed graph with this rig's ports, addresses and MACs |
-| the gNB's fixed address and MAC, and a permanent neighbour for the N3 address | `ci/interop/ue.sh` | `upfd -peer-mac` is one next hop: the downlink's outer Ethernet header names the gNB |
+| the graph | `ci/interop/graph.py`, rendered from `deploy/upf.yaml` | runtime port names, endpoint addresses, route domains and resolver interfaces; there is no custom PDR graph |
+| the gNB's fixed address and MAC, and a permanent neighbor for the N3 address | `ci/interop/ue.sh` | the gNB needs a static entry because no host kernel owns the UPF's N3 address; `rt_transport` learns the gNB's next-hop MAC by ARP and writes the outer Ethernet pair |
 | the UE's route to the data network, then the echo | `ci/interop/ue.sh traffic` | UERANSIM installs the session's prefix on the tunnel and nothing else, so without it the echo leaves by the container's default route |
 | `-urr-interval 1s` | `ci/interop/up.sh` | without it no URR is ever read: no periodic or threshold report reaches the SMF, and even the termination reports are zero (the first reading of a URR is its baseline) |
 

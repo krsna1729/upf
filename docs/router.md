@@ -1,52 +1,82 @@
-# The fork's Router, and this UPF's gaps
+# Router behavior in the UPF graph
 
-The Router is BESS's (`core/modules/router.cc`, library `core/route/router.h`).
-It is the only place this repository forwards an IP packet: the classifier's
-rule result writes a next-hop id (hop mode), or the packet's own destination is
-looked up in its route domain (destination mode). This document records what
-the Router does today, what the graph binds, and which routing work this UPF
-does not do.
+BESS `Router` (`core/modules/router.cc`, `core/route/`) has two modes and dual-stack
+destination routing. `deploy/upf.yaml` uses two Router instances because inner
+session forwarding and outer GTP-U routing use different keys.
 
-## What the module does
+## The two Router instances
 
-| Area | Behaviour |
-|---|---|
-| Packet path | `Router::ProcessBatch` reads `next_hop_id` metadata and forwards to the next hop's egress gate (hop mode, `ROUTE_MODE_NEXT_HOP_ID`, the default). In `ROUTE_MODE_DESTINATION` it reads the packet's IPv4 destination and the `route_domain` metadata the ingress `Vif` wrote, and looks the prefix up in that domain's LPM table. |
-| Routes | Per-domain IPv4 LPM (`LpmRouteTable`). A route's value is a next-hop id or an ECMP group id, never both. A missing domain in an upsert creates it (`CreateDomainLocked`); domain 0 always exists. |
-| Next hops | `NextHop` is an egress interface id, a neighbour state, and the destination/source MACs. `RewriteL2` writes the MACs; the module also decrements the IPv4 hop count and drops TTL 1. A hop with no egress (`kInvalidInterfaceId`) is a blackhole: the frame ends there. |
-| ECMP | `NextHopGroup` holds 1..64 members; a flow picks one by a hash the module is configured with (`flow_hash`: whole flow by default, or address pair only). Membership is immutable; changing it publishes a new group. |
-| Neighbour state | `kResolved`, `kIncomplete`, `kUnreachable`. The packet path forwards only a resolved hop. Hop mode drops an unresolved one; destination mode drops it or punts to `punt_unresolved_gate`. |
-| Misses | In destination mode a FIB miss drops or goes to `punt_miss_gate`. Both are counted. A frame that is not IPv4, is malformed, or is a non-initial fragment is dropped and counted rather than guessed at. Hop mode forwards what the metadata names and drops the rest. |
-| Resources | `next_hops` (`RouterNextHopIdKey`/`RouterNextHopValue`), `groups` (`RouterGroupIdKey`/`RouterGroupValue`), `routes` (`RouterRouteKey`/`RouterRouteValue`). Reads are canonical: defaults omitted, a resolved neighbour absent, a zero MAC absent. |
-| Update modes | `SetRoute`/`RemoveRoute` are in-place and atomic per call, not per sequence. `ReplaceRouteSetAtomic` builds and validates a whole domain off to the side and publishes it with one store; a failure leaves the old set visible. A route may name only a published next hop; a next hop cannot be removed while a route names it. |
-| Bounds | `max_routes`, `max_tbl8s`, `max_next_hops`, `max_domains`, `max_groups`; domains 0..`max_domains-1`, route values 24-bit. `upfd -max-domains` is checked against the same bound (`internal/routing.MaxDomains`). |
-| Gates | An output gate per next-hop egress interface. The module's drop gate is where an unresolved hop, a miss without a punt gate, and a malformed header go. |
+| module | mode | lookup | graph role |
+|---|---|---|---|
+| `rt` | `ROUTE_MODE_NEXT_HOP_ID` (default) | `next_hop_id` from the PDR result | Inner session forwarding. Hop 1 reaches N6, hops 2/3 reach `GtpuEncap`, and hop 5 is the optional service-LAN re-injection path. |
+| `rt_transport` | `ROUTE_MODE_DESTINATION` | IPv4/IPv6 destination in `transport_route_domain` | Routes encapsulated packets, GTP-U responses and End Markers to N3/N9. The graph configures an IPv4 and IPv6 default route in each transport domain. |
 
-What the graph binds:
+The inner Router resolves the N6 next hop and writes its Ethernet addresses.
+The post-encap Router selects the N3 or N9 transport interface by destination
+and domain, then resolves that interface's neighbor. Both instances use the
+same Router implementation, but each has its own resources, resolver and
+metadata context.
 
-- `deploy/upf.yaml`: hop mode. `rt/next_hops` holds the deployment's five
-  static hops (the data network's and the access side's with their L2 pairs, a
-  tunnel out of an instance, the service LAN's, the 5G VN re-injection); gate 2
-  is the uplink tunnel to the encap, gate 4 the 5G VN re-injection into
-  `pdr_dl`, gate 1 the downlink encap. `max_domains` is 1.
-- `deploy/route-path.yaml`: destination mode. The graph declares the routes and
-  next hops; `upfd` runs with `-route-mode=destination`, so a forward's result
-  names hop 0 and the Router decides from the packet's destination and domain.
-  `ci/route-path.sh` proves both directions.
+`rt_transport` sets `domain_attr: transport_route_domain`; the default is
+`route_domain`. `GtpuEncap` writes the tunnel's transport domain. N3/N9 input
+tags and End Marker inputs set the domain before their frames reach
+`rt_transport`. The N3/N9 logical endpoints can share a physical port.
 
-## Gaps in this UPF
+## Routes and next hops
 
-These are controller/deployment gaps, not Router features the fork lacks. Each
-row names the seam that would close it.
+The Router's resources are `<router>/routes`, `<router>/next_hops`, and
+`<router>/groups`. A route key includes a route domain and either an IPv4 or
+IPv6 prefix. Its value names a next hop or a group. In destination mode, the
+most-specific route in the packet's domain wins. In next-hop mode, the
+`next_hop_id` metadata selects the forwarding adjacency directly.
 
-| Gap | What happens today | Where it would be closed |
-|---|---|---|
-| No route programming from the controller | `rt/routes` is static graph configuration (`deploy/route-path.yaml`). `upfd` writes sessions, meter states, tunnels and next hops, never a route or a group. A routed N6/N9 transport cannot follow the SMF's prefixes without an operator editing the graph. | A controller resource editor for `RouterRouteKey`/`RouterRouteValue` (and groups), ideally one `ReplaceRouteSetAtomic` per domain per transaction; `upfd`'s interface configs (`-instances` pools) are the natural input. |
-| No connected or local routes | Nothing derives a prefix from an interface. The `Vif` knows `ip_addr` and `route_domain`; the Router knows neither, and a subscriber prefix is not in any route table. | Derive connected routes from each interface's pool/address and install local addresses as blackhole or local hops, through the same `ReplaceRouteSetAtomic` seam. |
-| No neighbour resolver | Every next hop's MAC is static, written in the graph. There is no ARP/ND module that moves a hop between `kIncomplete` and `kResolved`; `punt_unresolved_gate` can only send the frame somewhere else. | A resolver module on the egress branch that watches ARP/ND replies (or a controller resolver fed by the N6 ARP traffic) and calls the `next_hops` resource with the learned MAC and state. |
-| Destination mode cannot express a FAR's different instance | The Router routes in the domain the packet carries. A FAR that names another network instance would need the packet's domain rewritten between the classifier and the Router; no module does that, so the compiler refuses the FAR (`destinationHop`). | A domain-write stage between the table and the Router, or a policy-hop form for the cross-instance case. |
-| No IPv6 FIB | The route tables are IPv4 (`Ipv4Prefix`, 32-bit address). IPv6 PDRs are expressible; a routed IPv6 transport is not. | A second LPM family in `LpmRouteTable`, or a separate v6 Router instance keyed by the same domain. |
-| No ICMP for a dropped forward | TTL expiry and a blackhole are silent; the Router counts them (`ttl_expired_frames`, `blackholed_frames` in destination mode) and does not answer. | An ICMP module on the Router's drop path, if the deployment wants the peer to learn why. |
+`deploy/upf.yaml` owns the inner next-hop gates and the outer transport FIB.
+`rt_transport/routes` contains `0.0.0.0/0` and `::/0` in domains 1 and 2;
+their next-hop bindings select the configured N3/N9 interface and peer. The
+session compiler writes PDR results and tunnel records, not FIB routes. Route
+policy remains deployment configuration; `upfd` does not install routes from
+PFCP Network Instance names.
 
-`docs/claims.json` carries the conformance rows; this page is the operational
-inventory those rows refer to.
+The configured `neighbor_bindings` seed incomplete next hops and assign their
+IDs to the resolver. Routes can name those IDs, but a static
+`<router>/next_hops` record must not overwrite a resolver-owned ID. The other
+inner next hops in `deploy/upf.yaml` are static gate mappings.
+
+## ARP and Neighbor Discovery
+
+Both Router instances have `resolver_interfaces` and `neighbor_bindings`.
+`Vif.vif_id_attr` writes `neighbor_interface_id`; Router uses that interface ID
+to associate incoming ARP or IPv6 Neighbor Discovery frames with the correct
+resolver interface. This metadata is separate from `route_domain`,
+`transport_route_domain`, endpoint IDs and queue IDs.
+
+Router sends received neighbor frames from workers to a bounded control-side
+ring. Its maintenance path validates ARP replies and IPv6 Neighbor
+Advertisements, updates the neighbor state, and publishes a complete next-hop
+record. A Router task emits ARP requests or Neighbor Solicitations. Retries,
+aging and failure are bounded by the configured resolver timers and
+`max_neighbors`.
+
+Unresolved or unreachable neighbors fail closed in this graph; no punt gate is
+configured. A valid reply or advertisement updates the next-hop adjacency
+without changing the route that names it. `docs/neighbor-resolution.md` in the
+BESS tree documents identity checks, timers and publication semantics.
+
+## Packet handling and limits
+
+- Destination mode routes IPv4 and IPv6. It decrements IPv4 TTL and repairs the
+  checksum, or decrements the IPv6 hop limit. A missing route, invalid header,
+  unresolved neighbor, expired TTL/hop limit or blackhole hop is dropped and
+  counted. The Router does not generate ICMP errors.
+- Next-hop mode uses `next_hop_id`, rewrites L2, and decrements IPv4 TTL. It
+  forwards non-IPv4 frames without a hop-count change. The deployed inner PDR
+  fields are IPv4; outer transport routing supports IPv4 and IPv6.
+- Route resources are static graph configuration in this deployment. The UPF
+  has no routing protocol, RIB or PFCP-driven route update path.
+- `UpfArpResponder` answers IPv4 ARP for the N6 interface and active UE
+  addresses. `Vif` answers Neighbor Solicitations for its own interface
+  address; the graph does not provide proxy NDP for the UE pool.
+
+See `docs/datapath.md` for module and metadata ownership, `deploy/upf.yaml` for
+the production graph, and `deploy/route-path.yaml` with `ci/route-path.sh` for
+the destination-mode route proof.

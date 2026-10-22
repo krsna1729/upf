@@ -18,6 +18,8 @@ implemented, and a newer text is not evidence for this implementation.
 | TS 29.244 — Interface between the Control Plane and the User Plane Nodes | 16.9.1 | `29.244-v16.9.1.txt` | https://www.3gpp.org/ftp/Specs/archive/29_series/29.244/29244-g91.zip |
 | TS 29.281 — GPRS Tunnelling Protocol User Plane (GTPv1-U) | 16.2.0 | `29.281-v16.2.0.txt` | https://www.3gpp.org/ftp/Specs/archive/29_series/29.281/29281-g20.zip |
 | TS 38.415 — PDU Session User Plane Protocol | 16.6.0 | `38.415-v16.6.0.txt` | https://www.3gpp.org/ftp/Specs/archive/38_series/38.415/38415-g60.zip |
+| TS 23.501 — System architecture for the 5G System (5GS) | 16.9.0 | `23.501-v16.9.0.txt` | https://www.3gpp.org/ftp/Specs/archive/23_series/23.501/23501-g90.zip |
+| TS 23.502 — Procedures for the 5G System (5GS) | 16.9.0 | `23.502-v16.9.0.txt` | https://www.3gpp.org/ftp/Specs/archive/23_series/23.502/23502-g90.zip |
 
 The archive and excerpt hashes make the copies checkable:
 
@@ -26,6 +28,8 @@ The archive and excerpt hashes make the copies checkable:
 | TS 29.244 V16.9.1 | `88c0e4d30643bb49403214c09c749bd4c70da0ecbd32f6c9eb182b995da4dac7` | `7c94676f9eac29022a3436a5daeac8dd15478145715fa5f91640c69a890dec8e` |
 | TS 29.281 V16.2.0 | `1cd5d70ebbe60393c215cf259196e7ac18622bea540c8c12d80fefceb10fdece` | `83849f824e84a8c4aa513fdfd43e3b64d7f123b678b496eb60840d45179d0edc` |
 | TS 38.415 V16.6.0 | `0a54fa84efb85eb7c377160e4458cb8cf90f91cce57f5598fd5f06da4c7c9f6f` | `e81aac78132d777a6c3d58f8648a3012ea382917c361bd1789101be5780a3d84` |
+| TS 23.501 V16.9.0 | `c88a8dbc0d7cfb36b9c77140a5133649fcd02834c7b91a6943e5b58a7c086052` | `5c1cb69106a95154fa6d94ae7f6a21a12aec338389c865d90bac731cf7c2ae51` |
+| TS 23.502 V16.9.0 | `8a4ac102596e64fda6251c3af0b8a54cdbb61c35f4c48d852bf7413b9ea13e1e` | `c156df958d49e7d9050ec03ab933dcfbfe8a568675c57670695056ad94330412` |
 
 The `.txt` files are excerpts: the cited clause headings and body text, cut
 from the official 3GPP `.docx`/`.doc` archives converted to UTF-8 with

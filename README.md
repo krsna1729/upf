@@ -8,16 +8,13 @@ router. A rule's result writes the action id, the meter stack and the next hop
 straight into metadata; there is no action table in the chain.
 
 ```mermaid
-flowchart TD
-    SMF["SMF (Control Plane)"] <-->|"PFCP / N4 (UDP 8805)"| UPFD["upfd (Go Controller)"]
-    UPFD -->|"control_v2 over gRPC<br/>• Desired state: Pipeline<br/>• Per session: one transaction"| BESS["bessd (C++ Dataplane + Plugin)<br/>• Classifier &rarr; {gate, action_id, meter_ids, next_hop_id}<br/>• GTP-U decap / encap &amp; Echo Responder<br/>• Router (N3 / N6 / N9 domains)"]
-
-    subgraph TRAFFIC["User Plane Traffic Path"]
-        direction LR
-        N3["N3 (Access / gNB)"] <-->|"GTP-U"| BESS
-        BESS <-->|"Plain IPv4"| N6["N6 (Data Network)"]
-        BESS <-->|"GTP-U"| N9["N9 (Peer UPF)"]
-    end
+flowchart LR
+    SMF["SMF<br/>(Control Plane)"] <-->|"PFCP / N4<br/>(UDP 8805)"| UPFD["upfd<br/>(Go Controller)"]
+    UPFD -->|"control_v2<br/>(gRPC)"| BESS["bessd (C++ Dataplane + Plugin)<br/>• Classifier &rarr; {gate, action, meter, hop}<br/>• GTP-U decap / encap &amp; Echo<br/>• Router (N3 / N6 / N9 domains)"]
+    
+    BESS <-->|"N3: GTP-U"| RAN["(R)AN / gNB"]
+    BESS <-->|"N6: IPv4 / IPv6"| DN["Data Network"]
+    BESS <-->|"N9: GTP-U"| PEER["Peer UPF"]
 ```
 
 ## Pipeline
@@ -33,8 +30,9 @@ datapath, a `bess-dev` stage: this tree reads its own copy under `build/bess/`
 (untracked), vendored from a built checkout of the BESS fork
 (`github.com/krsna1729/bess`) with `ci/vendor-bess.sh`; the layout and the
 `BESS`/`STAGE`/`DPDK_LIB` overrides are in the header of `ci/bess-env.sh`.
-No NIC is needed for anything below. Only `ci/veth-port.sh` needs root — it
-creates a veth pair; every other lane runs unprivileged and starts its own
+No NIC is needed for the lanes below. `ci/veth-port.sh` and
+`ci/veth-layouts.sh` need root; they create isolated veth pairs and delete only
+the pairs they created. The other lanes run unprivileged and start their own
 daemon on free ports.
 
 ### The Go side — no BESS needed
@@ -53,9 +51,8 @@ layer, which is `-bess <addr>` against a running daemon.
 # one-time, if build/bess is absent: import the fork's built tree
 ci/vendor-bess.sh ~/Projects/bess
 
-PKG_CONFIG="pkg-config --define-prefix" \
-PKG_CONFIG_PATH=build/bess/stage/lib/pkgconfig \
-  meson setup datapath/build
+PKG_CONFIG_PATH=$PWD/build/bess/stage/lib/pkgconfig \
+  meson setup datapath/build datapath
 ninja -C datapath/build
 
 # first proof: bessd loads the plugin, a G-PDU is decapsulated, an outer
@@ -70,11 +67,23 @@ ci/smoke-gtpu.sh
 ./upfd -n4 0.0.0.0:8805 -node-id 10.0.0.1
 
 # against a daemon that has deploy/upf.yaml applied
-./upfd -bess 127.0.0.1:10514 -n4 0.0.0.0:8805 -node-id 10.0.0.1
+./upfd -bess 127.0.0.1:10514 -n4 0.0.0.0:8805 -node-id 10.0.0.1 \
+  -fteid-address 'endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.1' \
+  -fteid-address 'endpoint=2,reference=n9,transport-domain=2,source=core,ipv4=192.0.2.3' \
+  -gtpu-decap decap0
 ```
 
-The shortest way to see the whole thing — `bessd`, the graph, `upfd` and one
-session carrying packets both ways — is `ci/session-path.sh`.
+The sample maps endpoint 1 to N3 and endpoint 2 to N9. Each endpoint binds an
+ingress F-TEID identity and a transport route domain; N9 may be omitted when the
+deployment does not serve it. The graph's post-encap Router resolves the peer
+MAC from ARP/ND.
+
+`ci/session-path.sh` exercises a PFCP-programmed session on both synthetic
+packet chains and checks the End Marker. `ci/veth-port.sh` exercises a
+compiler-programmed session and routed egress on a real veth.
+`ci/veth-layouts.sh` exercises eight one-to-three-PMD attachment layouts with
+real N3/N9 G-PDUs, N6 traffic, endpoint-scoped admission and an unknown-TEID
+case.
 
 ## The inner loop
 
@@ -102,8 +111,9 @@ Run the lane that proves the path you touched:
 | `ci/session-report.sh` | URR reports — period, threshold, quota — over PFCP |
 | `ci/buffer-path.sh` | BAR buffering, DDN, and the duration's expiry |
 | `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names; a ULCL session's two uplink PDRs take the data network's hop and an N9 tunnel |
-| `ci/veth-port.sh` | one PMD port split into N3/N6/N9 on a veth, with route domains (needs root) |
-| `ci/pdrmatch-2dn.sh` | two network instances, one UE address, two exits; an N9 tunnel out of one instance is decapped and taken by the peer's session in the other |
+| `ci/veth-port.sh` | one PMD port split into N3/N6/N9; the post-encap Router resolves its outer next hop on the veth (needs root) |
+| `ci/veth-layouts.sh` | eight real-veth layouts: all five 1–3-PMD partitions, MAC/VLAN demux, direct per-port tags, same N3/N9 local IPv4+TEID, and unknown-TEID handling (needs root) |
+| `ci/session-instances.sh` | one subscriber address served by two network instances, each with its own F-TEID and exit |
 | `ci/atsss-steer.sh` | a MAR's two accesses, the health table, policy update and erase; every window byte-checked |
 | `ci/bench-n4.sh` | the N4 envelope: establish / modify / delete rates |
 
