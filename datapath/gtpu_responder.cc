@@ -19,6 +19,7 @@
 #include "utils/checksum.h"
 #include "utils/endian.h"
 #include "utils/ether.h"
+#include "gtpu_wire.h"
 #include "utils/ip.h"
 
 using bess::utils::be16_t;
@@ -223,10 +224,10 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     if (g[1] != kGtpdu && (g[0] & 0x05) != 0) [[unlikely]] {
       continue;
     }
-    // Two messages reach this module through the TEID table's default gate: an
-    // Echo Request (7.1, TEID 0) and a G-PDU whose TEID no session names
-    // (7.3.1). The second is answered with an Error Indication when its TEID is
-    // not 0 -- TEID 0 is the echo path, and no G-PDU carries it.
+    // GtpuDecap gate 2 receives Echo Requests (7.1), peer Error Indications
+    // and valid G-PDUs without an admitted endpoint-scoped F-TEID (7.3.1).
+    // The G-PDU is answered when its TEID is nonzero: TEID 0 is the echo path,
+    // and no G-PDU carries it.
     // Validate before inspecting Error Indication IEs, even without ingress.
     if (gtp + bess::tunnel::kGtpuBaseBytes + Get16(g + 2) >
             size_t{outer.l4_offset} + outer.l4_length ||
@@ -285,31 +286,52 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       sequence = Get16(g + 8);
     }
 
-    // The outer IPv4 header, rewritten in place: the two addresses swapped,
-    // the length cut to the reply's, the checksum recomputed. An IPv4 header
-    // with options is not one `CalculateIpv4NoOptChecksum` covers, so it is
-    // not one this module replies to.
-    auto *ip = reinterpret_cast<bess::utils::Ipv4 *>(pkt.head_data<uint8_t *>() +
-                                                     outer.l3_offset);
-    if (ip->version != 4 || ip->header_length != 5) [[unlikely]] {
+    // Rewrite IPv4 or IPv6 endpoints and lengths before appending the reply
+    // tail. IPv4 options are unsupported by the no-options checksum helper.
+    const size_t udp_length = bess::tunnel::kUdpBytes +
+                              bess::tunnel::kGtpuBaseBytes + tailLen;
+    if (outer.l3 == bess::conntrack::L3Kind::kIpv4) {
+      auto *ip = reinterpret_cast<bess::utils::Ipv4 *>(
+          pkt.head_data<uint8_t *>() + outer.l3_offset);
+      if (ip->version != 4 || ip->header_length != 5) [[unlikely]] {
+        continue;
+      }
+      std::swap(ip->src, ip->dst);
+      ip->length = be16_t(static_cast<uint16_t>(
+          bess::tunnel::kIpv4Bytes + udp_length));
+      ip->checksum = bess::utils::CalculateIpv4NoOptChecksum(*ip);
+    } else if (outer.l3 == bess::conntrack::L3Kind::kIpv6) {
+      if (outer.l4_offset < outer.l3_offset + 40) [[unlikely]] continue;
+      uint8_t *ip6 = pkt.head_data<uint8_t *>() + outer.l3_offset;
+      if ((ip6[0] >> 4) != 6) [[unlikely]] continue;
+      for (size_t octet = 0; octet < 16; ++octet)
+        std::swap(ip6[8 + octet], ip6[24 + octet]);
+      const size_t extension_length =
+          outer.l4_offset - (outer.l3_offset + 40);
+      const size_t payload_length = extension_length + udp_length;
+      if (payload_length > 65535) [[unlikely]] continue;
+      Put16(ip6 + 4, static_cast<uint16_t>(payload_length));
+    } else {
       continue;
     }
-    std::swap(ip->src, ip->dst);
-    ip->length = be16_t(static_cast<uint16_t>(bess::tunnel::kIpv4Bytes +
-                                              bess::tunnel::kUdpBytes +
-                                              bess::tunnel::kGtpuBaseBytes + tailLen));
-    ip->checksum = bess::utils::CalculateIpv4NoOptChecksum(*ip);
 
-    // The UDP header: the ports swapped -- so the reply leaves for the port
-    // the request came from -- the length cut, checksum 0 (legal over IPv4,
-    // and what the encap writes on the way out too).
+    // Swap the UDP ports, cut its length, and zero its checksum. IPv4 permits
+    // zero; IPv6's mandatory checksum is recomputed after the reply tail exists.
     uint8_t *udp = pkt.head_data<uint8_t *>() + outer.l4_offset;
     const uint16_t src_port = Get16(udp);
     Put16(udp, Get16(udp + 2));
     Put16(udp + 2, src_port);
-    Put16(udp + 4, static_cast<uint16_t>(bess::tunnel::kUdpBytes +
-                                         bess::tunnel::kGtpuBaseBytes + tailLen));
+    Put16(udp + 4, static_cast<uint16_t>(udp_length));
     Put16(udp + 6, 0);
+    auto finish_ipv6_checksum = [&] {
+      if (outer.l3 != bess::conntrack::L3Kind::kIpv6) return;
+      uint8_t *frame = pkt.head_data<uint8_t *>();
+      const uint8_t *ip6 = frame + outer.l3_offset;
+      uint8_t *reply_udp = frame + outer.l4_offset;
+      Put16(reply_udp + 6,
+            upf::datapath::Ipv6UdpChecksum(ip6 + 8, ip6 + 24, reply_udp,
+                                           udp_length));
+    };
 
     // The GTP-U header. An Echo Response carries the S-flag field and TEID 0
     // (7.1); an Error Indication carries S clear and TEID 0 too -- the peer
@@ -340,6 +362,7 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     if (!echo) {
       tail[0] = kTeidIe;
       Put32(tail + 1, unknownTeid);
+      finish_ipv6_checksum();
       ogates[i] = static_cast<gate_idx_t>(reply_gate);
       continue;
     }
@@ -358,6 +381,7 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     std::memset(tail + 13, 0, 4);  // the 32-bit fraction
 
     ogates[i] = static_cast<gate_idx_t>(reply_gate);
+    finish_ipv6_checksum();
   }
 
   EmitBatch(ctx, batch, ogates);
@@ -366,5 +390,5 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
 std::string GtpuResponder::GetDesc() const { return std::format("port {}", port_); }
 
 ADD_MODULE(GtpuResponder, "gtpu_responder",
-           "answers GTP-U Echo Requests (type 1) with the reply (type 2): the "
-           "graph routes TEID-0 messages here, and everything else is dropped")
+           "answers GTP-U Echo Requests and unknown G-PDUs on IPv4/IPv6; "
+           "tracks peer Error Indications when enabled; drops other messages")

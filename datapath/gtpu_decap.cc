@@ -2,10 +2,13 @@
 
 #include "gtpu_decap.h"
 
+#include <limits>
+#include <array>
 #include <algorithm>
 #include <cstdint>
 #include <format>
 #include <span>
+#include <cstring>
 #include <string>
 
 // Before every other BESS header: glog must win over protobuf's absl logging
@@ -14,71 +17,18 @@
 
 #include "commands.h"
 #include "framework/plugin.h"
+#include "dataplane/resource_registry.h"
+#include "framework/resource_codec.h"
 #include "pdu_session_qfi.h"
 #include "tunnel/tunnel.h"
 #include "utils/endian.h"
 #include "utils/ether.h"
+#include "gtpu_admission.h"
+namespace dataplane = bess::dataplane;
 
-// The class has no resource tables: a session's TEID is a rule of the
-// classifier in front of this module (the compiler writes one per session).
-const ResourceTables GtpuDecap::resource_tables = {};
-
-namespace {
-
-// The extension header type of a PDU Session Container (TS 29.281 table
-// 5.2.2.7-1): what the chain below is walked for.
-constexpr uint8_t kPduSessionContainer = 0x85;
-
-// The `qfi` attribute's contract (pdu_session_qfi.h): what this module writes
-// when the chain carried no PDU Session Container at all.
-using upf::kNoPduSessionQfi;
-
-// The QFI a G-PDU's next-extension-header chain carries, or kNoPduSessionQfi
-// when the chain holds no PDU Session Container (pdu_session_qfi.h: the
-// attribute's contract, and why the "no container" value cannot be 0). The
-// tunnel library walks and validates the
-// chain but reports only the first header's type, so the walk is repeated here
-// for the one byte the container carries: the QFI sits in the low six bits of
-// its second content octet (TS 38.415 5.5.2.1: PPP and RQI above it in the
-// downlink frame; 5.5.2.2: spare above it in the uplink one). `end` is where
-// the library found the T-PDU, which is where the chain ends.
-uint8_t PduSessionQfi(std::span<const uint8_t> frame, size_t gtpu, size_t end) noexcept {
-  // The optional tail -- sequence number, N-PDU number and the octet that
-  // names the first extension header -- is present only if a flag of octet 1
-  // is set (TS 29.281 5.1); without the E flag there is no chain to walk.
-  if ((frame[gtpu] & 0x04) == 0) {
-    return kNoPduSessionQfi;
-  }
-  const size_t limit = std::min(end, frame.size());
-  if (gtpu + bess::tunnel::kGtpuBaseBytes + 4 > limit) {
-    return kNoPduSessionQfi;
-  }
-  uint8_t next = frame[gtpu + bess::tunnel::kGtpuBaseBytes + 3];
-  size_t off = gtpu + bess::tunnel::kGtpuBaseBytes + 4;
-  for (size_t n = 0; next != 0; n++) {
-    // One extension header: a length octet in 4-octet units -- the count takes
-    // in that octet and the next-type octet that ends the header -- then the
-    // content, then the next header's type.
-    if (n > 16 || off + 4 > limit) {
-      return kNoPduSessionQfi;
-    }
-    const size_t len = size_t{frame[off]} * 4;
-    if (len == 0 || off + len > limit) {
-      return kNoPduSessionQfi;
-    }
-    if (next == kPduSessionContainer) {
-      // The length is in 4-octet units, so a non-zero one covers at least the
-      // two content octets this reads: the PDU type and then the QFI.
-      return static_cast<uint8_t>(frame[off + 2] & 0x3f);
-    }
-    next = frame[off + len - 1];
-    off += len;
-  }
-  // The chain ended without a PDU Session Container.
-  return kNoPduSessionQfi;
-}
-
-}  // namespace
+const ResourceTables GtpuDecap::resource_tables = {
+    ResourceTable::Map<upf::pb::FteidKey, upf::pb::FteidEntry>("fteids"),
+};
 
 CommandResponse GtpuDecap::Init(const upf::pb::GtpuDecapArg &arg) {
   if (arg.port() != 0) {
@@ -89,115 +39,204 @@ CommandResponse GtpuDecap::Init(const upf::pb::GtpuDecapArg &arg) {
   } else {
     port_ = bess::tunnel::kGtpuPort;
   }
+  constexpr size_t kDefaultMaxFteids = 65536;
+  max_fteids_ = arg.max_fteids() == 0 ? kDefaultMaxFteids
+                                      : arg.max_fteids();
+  if (max_fteids_ > std::numeric_limits<uint32_t>::max() / 2)
+    return CommandFailure(EINVAL, "max_fteids exceeds exact-index limits");
+  // SharedExactIndex sizes its underlying ConcurrentExactTable for the live
+  // limit plus QSBR deletion headroom; max_fteids_ is the admitted live cap.
+  fteid_table_ = bess::flow::SharedExactIndex::Create(
+      static_cast<uint32_t>(sizeof(upf::datapath::FteidId)), max_fteids_,
+      init_context().rcu(), -1);
+  if (fteid_table_ == nullptr)
+    return CommandFailure(ENOMEM, "cannot create the fteids exact index");
+  resource_ = std::make_unique<upf::datapath::FteidResource>(
+      name() + "/fteids", *fteid_table_, init_context().rcu(), max_fteids_);
 
-  using AccessMode = bess::metadata::Attribute::AccessMode;
-  teid_attr_ = AddMetadataAttr("upf_teid", sizeof(bess::utils::be32_t),
-                               AccessMode::kWrite);
-  if (teid_attr_ < 0) {
-    return CommandFailure(-teid_attr_, "add_metadata_attr() failed");
+  binding_ = init_context().codecs().Bind(
+      *resource_,
+      std::make_shared<bess::framework::TypedCodec<
+          upf::pb::FteidKey, upf::pb::FteidEntry>>(
+          [](const upf::pb::FteidKey &key)
+              -> std::expected<dataplane::ResourceKey, std::string> {
+            if (key.endpoint_id() == 0 || key.teid() == 0)
+              return std::unexpected("endpoint_id and teid must be nonzero");
+            const size_t bytes = key.address_family() == 4 ? 4 :
+                                 key.address_family() == 6 ? 16 : 0;
+            if (bytes == 0 || key.local_address().size() != bytes)
+              return std::unexpected("local_address length must match family 4 or 6");
+            upf::datapath::FteidId id{};
+            id[0] = static_cast<uint8_t>(key.endpoint_id() >> 24);
+            id[1] = static_cast<uint8_t>(key.endpoint_id() >> 16);
+            id[2] = static_cast<uint8_t>(key.endpoint_id() >> 8);
+            id[3] = static_cast<uint8_t>(key.endpoint_id());
+            id[4] = static_cast<uint8_t>(key.address_family());
+            std::memcpy(id.data() + (bytes == 4 ? 17 : 5),
+                        key.local_address().data(), bytes);
+            id[21] = static_cast<uint8_t>(key.teid() >> 24);
+            id[22] = static_cast<uint8_t>(key.teid() >> 16);
+            id[23] = static_cast<uint8_t>(key.teid() >> 8);
+            id[24] = static_cast<uint8_t>(key.teid());
+            return dataplane::EncodeKey(id);
+          },
+          [](const upf::pb::FteidEntry &value)
+              -> std::expected<std::any, std::string> {
+            if (value.direction() > 1)
+              return std::unexpected("direction must be 0 (UL) or 1 (DL)");
+            if (value.context_id() == 0)
+              return std::unexpected("context_id must be nonzero");
+            return std::any(upf::datapath::FteidRecord{
+                static_cast<uint8_t>(value.direction()), value.context_id()});
+          },
+          [this](const auto &visit) {
+            resource_->ForEach([&visit](const upf::datapath::FteidId &id,
+                                         const upf::datapath::FteidRecord &record) {
+              upf::pb::FteidKey key;
+              const uint32_t endpoint = uint32_t{id[0]} << 24 |
+                                        uint32_t{id[1]} << 16 |
+                                        uint32_t{id[2]} << 8 | id[3];
+              const uint32_t teid = uint32_t{id[21]} << 24 |
+                                    uint32_t{id[22]} << 16 |
+                                    uint32_t{id[23]} << 8 | id[24];
+              key.set_endpoint_id(endpoint);
+              key.set_address_family(id[4]);
+              key.set_teid(teid);
+              const size_t off = id[4] == 4 ? 17 : 5;
+              key.set_local_address(
+                  reinterpret_cast<const char *>(id.data() + off),
+                  id[4] == 4 ? 4 : 16);
+              upf::pb::FteidEntry value;
+              value.set_direction(record.direction);
+              value.set_context_id(record.context_id);
+              visit(key, value);
+            });
+          }));
+  if (auto registered = init_context().resources().Register(resource_.get());
+      !registered) {
+    binding_.Reset();
+    resource_.reset();
+    return CommandFailure(EEXIST, "%s", registered.error().c_str());
   }
-
-  // The QFI of the PDU Session Container, one byte: 0..63 (TS 38.415 5.5.3.3's
-  // six-bit field) or kNoPduSessionQfi when the G-PDU carried no container
-  // (pdu_session_qfi.h). Like the TEID above it is written,
-  // not read: the modules that consume it -- the uplink PDR table's match
-  // fields -- own the reader side of the attribute.
+  auto unwind_resource = [this] {
+    const std::string resource_name = resource_->name();
+    CHECK(init_context().resources().Unregister(resource_name));
+    binding_.Reset();
+    resource_.reset();
+  };
+  using AccessMode = bess::metadata::Attribute::AccessMode;
+  context_attr_ = AddMetadataAttr("fteid_context", sizeof(bess::utils::be32_t),
+                                  AccessMode::kWrite);
+  if (context_attr_ < 0) {
+    unwind_resource();
+    return CommandFailure(-context_attr_, "add_metadata_attr() failed");
+  }
   qfi_attr_ = AddMetadataAttr("qfi", sizeof(uint8_t), AccessMode::kWrite);
   if (qfi_attr_ < 0) {
+    unwind_resource();
     return CommandFailure(-qfi_attr_, "add_metadata_attr() failed");
+  }
+  endpoint_attr_ = AddMetadataAttr("endpoint_id", sizeof(bess::utils::be32_t),
+                                   AccessMode::kRead);
+  if (endpoint_attr_ < 0) {
+    unwind_resource();
+    return CommandFailure(-endpoint_attr_, "add_metadata_attr() failed");
   }
 
   return CommandSuccess();
 }
 
 void GtpuDecap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
-  // One offset load per batch: the layout does not change under a batch.
-  const auto teid_offset = attr_offset(teid_attr_);
+  const auto context_offset = attr_offset(context_attr_);
+  const auto endpoint_offset = attr_offset(endpoint_attr_);
   const auto qfi_offset = attr_offset(qfi_attr_);
-  gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
+  gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
+  upf::datapath::FteidId keys[bess::PacketBatch::kMaxBurst]{};
+  bess::conntrack::ParsedFlowPacket outer[bess::PacketBatch::kMaxBurst]{};
+  bess::tunnel::GtpuInfo info[bess::PacketBatch::kMaxBurst]{};
+  bool candidate[bess::PacketBatch::kMaxBurst]{};
+  uint64_t values[bess::PacketBatch::kMaxBurst]{};
 
-  for (size_t i = 0; i < cnt; i++) {
+  // Parse all frames first; the fixed-width exact table then admits the burst
+  // with one lock-free batch lookup.
+  for (size_t i = 0; i < cnt; ++i) {
     bess::PacketRef pkt = batch->packet(i);
     ogates[i] = DROP_GATE;
-
-    // The parse and the reframing read one segment: a chained packet is not
-    // something this module can reframe in place (it would need a copy, and
-    // the packet path here makes none).
-    if (not pkt.is_linear()) [[unlikely]] {
+    const uint32_t endpoint_id =
+        get_attr_with_offset<bess::utils::be32_t>(endpoint_offset, pkt).value();
+    if (endpoint_id == 0) continue;
+    const std::span<const uint8_t> frame(pkt.head_data<const uint8_t *>(),
+                                         pkt.head_len());
+    upf::datapath::ParsedGtpu parsed;
+    const auto kind = upf::datapath::ParseGtpuAdmission(
+        frame, pkt.total_len(), port_, endpoint_id, &parsed);
+    if (kind == upf::datapath::GtpuParseKind::kControl) {
+      ogates[i] = 2;
       continue;
     }
-
-    const std::span<const uint8_t> frame(pkt.head_data<const uint8_t *>(), pkt.head_len());
-    bess::conntrack::ParsedFlowPacket outer;
-    bess::tunnel::GtpuInfo info;
-    const auto status = bess::tunnel::DecapGtpu(frame, outer, info, port_, pkt.total_len());
-    if (status != bess::tunnel::DecapError::kOk) [[unlikely]] {
-      continue;
-    }
-
-    // The attribute is written for the modules downstream that read it. A
-    // write-only attribute no module reads is not allocated at all: the
-    // pipeline gives it kMetadataOffsetNoWrite ("attr not read downstream",
-    // core/metadata.cc:FillOffsetArrays), so writing it is a no-op -- correct,
-    // and a graph that wants the TEID in a packet's metadata must have a
-    // reader for it.
-    set_attr_with_offset<bess::utils::be32_t>(
-        teid_offset, pkt, bess::utils::be32_t(info.tunnel.id));
-
-    // The QFI of the PDU Session Container the chain carries, or
-    // kNoPduSessionQfi when it carries none. The write happens either way: a
-    // packet's metadata area is reused mbuf space that nothing clears between
-    // packets, so a G-PDU without a container would otherwise hand the
-    // previous packet's QFI to the table that matches on it -- the reason
-    // WildcardMatch writes its action id on a miss too
-    // (core/modules/wildcard_match.cc). The "no container" value sits above
-    // the QFI range, because 0 is a flow a real gNB sends
-    // (pdu_session_qfi.h).
-    const uint8_t qfi = PduSessionQfi(
-        frame, size_t{outer.l4_offset} + bess::tunnel::kUdpBytes,
-        info.tunnel.inner_offset);
-    set_attr_with_offset<uint8_t>(qfi_offset, pkt, qfi);
-
-    // The graph carries Ethernet frames: BESS's core modules (the router's
-    // lookup, the classifiers) read IPv4 behind an Ethernet header, so the
-    // packet the graph sees is the inner packet behind a header. The head
-    // moves to the inner packet and a header is written in front of it -- the
-    // outer frame's own addresses, the inner packet's type -- using the
-    // headroom the outer headers occupied: no byte of the payload is copied.
-    const auto *outer_eth = pkt.head_data<const bess::utils::Ethernet *>();
-    const bess::utils::Ethernet::Address src = outer_eth->src_addr;
-    const bess::utils::Ethernet::Address dst = outer_eth->dst_addr;
-
-    pkt.adj(static_cast<uint16_t>(info.tunnel.inner_offset));
-    // 4 or 6 in the first nibble of the payload: what a G-PDU can carry. Read
-    // before the new header is written in front of it.
-    const uint8_t version = *pkt.head_data<const uint8_t *>() >> 4;
-    if (version != 4 && version != 6) [[unlikely]] {
-      continue;
-    }
-
-    auto *eth = static_cast<bess::utils::Ethernet *>(
-        pkt.prepend(bess::tunnel::kEthernetBytes));
-    if (eth == nullptr) [[unlikely]] {
-      continue;  // no headroom for a frame header
-    }
-    eth->src_addr = src;
-    eth->dst_addr = dst;
-    eth->ether_type =
-        bess::utils::be16_t(version == 4 ? bess::utils::Ethernet::Type::kIpv4
-                                        : bess::utils::Ethernet::Type::kIpv6);
-    ogates[i] = 0;
+    outer[i] = parsed.outer;
+    info[i] = parsed.info;
+    keys[i] = parsed.key;
+    candidate[i] = true;
   }
 
-  // One call for the batch: when every packet leaves by the same gate -- the
-  // common case, and the only one here -- the batch leaves whole, and a
-  // dropped packet costs the drop and nothing else (core/module.h:EmitBatch).
+  const auto *key_bytes = reinterpret_cast<const std::byte *>(keys);
+  const uint64_t hits = cnt == 0 ? 0 : fteid_table_->LookupBatch(
+      key_bytes, sizeof(keys[0]), values, cnt);
+
+  for (size_t i = 0; i < cnt; ++i) {
+    if (!candidate[i]) continue;
+    const uint64_t bit = uint64_t{1} << i;
+    uint32_t context = 0;
+    const uint8_t gate = upf::datapath::FteidOutputGate(
+        (hits & bit) != 0, values[i], &context);
+    if (gate == 2) {
+      ogates[i] = gate;
+      continue;
+    }
+    bess::PacketRef pkt = batch->packet(i);
+    if (not pkt.is_linear()) continue;
+
+    const auto &gtpu = info[i];
+    const std::span<const uint8_t> frame(pkt.head_data<const uint8_t *>(),
+                                         pkt.head_len());
+    const uint8_t version = frame[gtpu.tunnel.inner_offset] >> 4;
+    if (version != 4 && version != 6) continue;
+
+    upf::datapath::ParsedGtpu parsed;
+    parsed.outer = outer[i];
+    parsed.info = gtpu;
+    const auto decap_metadata =
+        upf::datapath::BuildGtpuDecapMetadata(frame, parsed, context);
+
+    set_attr_with_offset<bess::utils::be32_t>(
+        context_offset, pkt, bess::utils::be32_t(decap_metadata.fteid_context));
+    set_attr_with_offset<uint8_t>(qfi_offset, pkt, decap_metadata.qfi);
+
+    const auto *outer_eth = pkt.head_data<const uint8_t *>();
+    pkt.adj(static_cast<uint16_t>(gtpu.tunnel.inner_offset));
+    auto *eth = static_cast<uint8_t *>(
+        pkt.prepend(bess::tunnel::kEthernetBytes));
+    if (eth == nullptr) continue;
+    upf::datapath::WriteDecapsulatedEthernetHeader(eth, outer_eth, version);
+    ogates[i] = gate;
+  }
   EmitBatch(ctx, batch, ogates);
 }
 
+void GtpuDecap::DeInit() {
+  if (resource_ == nullptr) return;
+  binding_.Reset();
+  const std::string resource_name = resource_->name();
+  auto unregistered = init_context().resources().Unregister(resource_name);
+  CHECK(unregistered) << unregistered.error();
+  resource_.reset();
+}
+
 std::string GtpuDecap::GetDesc() const {
-  return std::format("port {}", port_);
+  return std::format("{} F-TEIDs, UDP {}", resource_ == nullptr ? 0 : resource_->LiveCount(),
+                     port_);
 }
 
 // One plugin descriptor for the whole library (gtpu_encap.cc carries the other
@@ -205,7 +244,6 @@ std::string GtpuDecap::GetDesc() const {
 BESS_PLUGIN("upf_datapath", "0.2.0");
 
 ADD_MODULE(GtpuDecap, "gtpu_decap",
-           "decapsulates GTP-U (outer Eth/IP/UDP/GTP-U) to a frame holding the "
-           "inner IP packet, writing the TEID to `upf_teid` and the QFI of a "
-           "PDU Session Container to `qfi` (255 when none was carried); the "
-           "F-TEID match is the classifier in front of it")
+           "admits G-PDUs by endpoint/family/local-address/TEID; known UL and DL "
+           "frames leave gates 0 and 1, unknown G-PDUs and control frames leave "
+           "gate 2, and malformed packets drop")

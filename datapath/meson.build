@@ -54,3 +54,18 @@ upf_datapath = shared_module(
   install: true,
   install_dir: modules_dir,
 )
+
+# Focused parser, admission-key, F-TEID resource and outer-wire unit tests. The
+# test links bess-dev-static for the RcuDomain and SharedExactIndex the resource
+# wraps; the plugin never links those archives (bessd provides the symbols).
+gtest_dep = dependency('gtest', required: false)
+bess_static_dep = dependency('bess-dev-static', required: false)
+if gtest_dep.found() and bess_static_dep.found()
+  gtpu_datapath_test = executable(
+    'gtpu_datapath_test',
+    'gtpu_datapath_test.cc',
+    include_directories: include_directories('.'),
+    dependencies: [bess_static_dep, protobuf_dep, gtest_dep],
+  )
+  test('gtpu_datapath', gtpu_datapath_test)
+endif

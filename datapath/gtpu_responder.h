@@ -10,16 +10,13 @@
 #include "module.h"
 #include "upf_datapath.pb.h"
 
-// Answers the two GTP-U messages a UPF is handed on a TEID that names no
-// session, and drops everything else it is given (TS 29.281 7.2 and 7.3.1).
+// Handles GTP-U control and unadmitted G-PDU traffic sent to GtpuDecap gate 2
+// (TS 29.281 7.2 and 7.3.1).
 //
-// The graph hands it whatever the rule table in front of it routes to the
-// default gate. A G-PDU's TEID is a session's rule; two messages reach a UPF
-// outside one: an Echo Request, always on TEID 0, whose reply the peer's path
-// management needs -- a peer that gets none reads the N3 path as down, with no
-// packet loss to point at -- and a G-PDU whose TEID no session names, which
-// 7.3.1 answers with an Error Indication so the peer learns the tunnel is
-// gone instead of sending into it.
+// GtpuDecap sends Echo Requests, peer Error Indications and valid G-PDUs whose
+// endpoint-scoped F-TEID is not admitted. This module answers Echo Requests,
+// returns an Error Indication for an unadmitted G-PDU, and counts peer Error
+// Indications for Session Report generation. Other control types are dropped.
 //
 // Both replies are the request with its Ethernet, IPv4 and UDP addresses
 // swapped, the type replaced, and the lengths recomputed. An Echo Response
