@@ -97,7 +97,7 @@ bessd_apply "$GRAPH" || {
 
 (cd "$ROOT" && $GO build -o "$WORK/upfd" ./cmd/upfd)
 "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-  -n3-addr 192.0.2.1 -urr-interval "$TICK" \
+  -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.1" -gtpu-decap decap0 -urr-interval "$TICK" \
   -buffer-store buf -buffer-counter cnt_buf -buffer-gate 1 -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do

@@ -79,7 +79,7 @@ fi
 # The node a real SMF talks to, with the graph's shape (its flags' defaults are
 # deploy/upf.yaml's module names; the N3 address and both next hops match).
 "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-  -n3-addr "$N3" -log-level info >"$UPFD_LOG" 2>&1 &
+  -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do
   grep -q "n4 listening" "$UPFD_LOG" 2>/dev/null && break
@@ -134,7 +134,7 @@ if [ "$FAIL" = 0 ]; then
   wait "$UPFD_PID" 2>/dev/null || true
   : >"$UPFD_LOG"
   "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-    -n3-addr "$N3" -log-level info >>"$UPFD_LOG" 2>&1 &
+    -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info >>"$UPFD_LOG" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
     grep -q "n4 listening" "$UPFD_LOG" 2>/dev/null && break
@@ -181,7 +181,7 @@ if [ "$FAIL" = 0 ]; then
   kill "$UPFD_PID" 2>/dev/null || true
   wait "$UPFD_PID" 2>/dev/null || true
   "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-    -n3-addr "$N3" -log-level info -checkpoint "$CP" >>"$CP1" 2>&1 &
+    -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info -checkpoint "$CP" >>"$CP1" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
     grep -q "n4 listening" "$CP1" 2>/dev/null && break
@@ -208,7 +208,7 @@ if [ "$FAIL" = 0 ]; then
   kill "$UPFD_PID" 2>/dev/null || true
   wait "$UPFD_PID" 2>/dev/null || true
   "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-    -n3-addr "$N3" -log-level info -checkpoint "$CP" >>"$CP2" 2>&1 &
+    -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info -checkpoint "$CP" >>"$CP2" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
     grep -q "n4 listening" "$CP2" 2>/dev/null && break

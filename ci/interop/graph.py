@@ -1,45 +1,43 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# The deployed graph (deploy/upf.yaml) with this environment's wiring:
+# Render deploy/upf.yaml for the interop veths. The transport Router resolves
+# the gNB and data-network neighbors; the graph supplies each link's local
+# interface identity, not static tunnel MAC addresses.
 #
-#   * its two PMD ports become af_packet vdevs over the veths ci/interop/net.sh
-#     makes;
-#   * the encap's outer source is the N3 address, and the end-marker socket
-#     moves out of /tmp;
-#   * the addresses the graph writes into frames are this rig's. The N6 next
-#     hop (`rt/next_hops`, id 1) carries the deployment's own MAC pair in the
-#     file, and here it is the veths': the Router writes a resolved hop's
-#     addresses into the frame it forwards, so what the graph names is what the
-#     data network sees (BESS D-153). Where the graph has an N6 interface
-#     (deploy/upf.yaml: the Vif; the keyed graph has none), its MAC is this
-#     rig's too -- so a frame the data network sends is the interface's -- and
-#     its address is the gateway the rig's data network routes the pool
-#     through. ci/interop/net.sh sets that neighbour permanently, so the
-#     interface answers no ARP in this rig (the deployment's own frames are
-#     what the MAC substitution is for).
-#
-#   graph.py <deployed.yaml> <out.yaml> <if_n3> <if_n6> <n3_ip> <n6_mac> <dn_mac> <dn_gw> <marker_path>
+#   graph.py <deployed.yaml> <out.yaml> <if_n3> <if_n6> <n3_ip> <n3_mac>
+#            <gnb_ip> <n6_mac> <dn_ip> <dn_gw> <marker_path>
 import base64
 import re
+import socket
 import sys
 
-src, out, if_n3, if_n6, n3_ip, n6_mac, dn_mac, dn_gw, marker = sys.argv[1:10]
+if len(sys.argv) != 12:
+    sys.exit("graph.py: expected deployed graph, output, two interfaces, "
+             "N3 IP/MAC, gNB IP, N6 MAC, DN IP/gateway, and marker path")
 
-# The marker is a socket path, and bessd binds it as given: a relative path (or
-# a value that is not a path at all, which is what an argument list that slipped
-# one position produces) would have the daemon bind a socket named after that
-# value wherever it happens to run -- once a MAC address in the checkout's root.
-# Every path this script writes must be absolute.
+src, out, if_n3, if_n6, n3_ip, n3_mac, gnb_ip, n6_mac, dn_ip, dn_gw, marker = sys.argv[1:]
+
+# The daemon binds UnixSocketPort paths as given. Every path this script writes
+# must be absolute, or a misplaced argument would create a socket in its cwd.
 for name, value in (("marker", marker), ("out", out)):
     if not value.startswith("/"):
-        sys.exit(f"graph.py: {name} must be an absolute path, got {value!r} "
-                 f"(check the argument order: <if_n3> <if_n6> <n3_ip> <n6_mac> "
-                 f"<dn_mac> <dn_gw> <marker_path>)")
+        sys.exit(f"graph.py: {name} must be an absolute path, got {value!r}")
 
 
-def mac(s):
-    return base64.b64encode(bytes(int(x, 16) for x in s.split(':'))).decode()
+def mac(value):
+    return base64.b64encode(bytes(int(part, 16) for part in value.split(":"))).decode()
+
+
+def ipv4(value):
+    return base64.b64encode(socket.inet_aton(value)).decode()
+
+
+def replace_once(text, pattern, replacement, label, flags=re.MULTILINE):
+    updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+    if count != 1:
+        sys.exit(f"graph.py: could not replace {label}")
+    return updated
 
 
 text = open(src).read()
@@ -55,28 +53,61 @@ ports = f'''ports:
     arg: {{vdev: "net_af_packet1,iface={if_n6},qpairs=1"}}
     num_rx_queues: 1
     num_tx_queues: 1
-  - name: cp_marker
+  - name: cp_marker_n3
     driver: UnixSocketPort
-    arg: {{path: {marker}}}
+    arg: {{path: "{marker}.1"}}
+  - name: cp_marker_n9
+    driver: UnixSocketPort
+    arg: {{path: "{marker}.2"}}
 
 '''
-new, n = re.subn(r'^ports:\n.*?(?=^modules:)', lambda m: ports, text, count=1, flags=re.S | re.M)
-assert n == 1, 'no ports: block before modules:'
+new = replace_once(text, r"^ports:\n.*?(?=^modules:)", ports,
+                   "ports block", re.MULTILINE | re.DOTALL)
 
-new, n = re.subn(r'src_ip: "[0-9.]+"', f'src_ip: "{n3_ip}"', new, count=1)
-assert n == 1, 'no GtpuEncap src_ip'
+# The Vifs and resolver interfaces name the local address/MAC. Neighbor MACs
+# are learned by the Router from ARP, not injected into tunnel entries.
+new = replace_once(
+    new,
+    r'^        - \{id: 1, vlan: 0, mac_addr: "02:00:00:00:03:01", ip_addr: "192\.0\.2\.1", ipv6_addr: "[^"]*", route_domain: 0, gate: 1\}$',
+    f'        - {{id: 1, vlan: 0, mac_addr: "{n3_mac}", ip_addr: "{n3_ip}", ipv6_addr: "2001:db8:1::1", route_domain: 0, gate: 1}}',
+    "N3 Vif identity")
+new = replace_once(
+    new,
+    r'^        - \{id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192\.0\.2\.2", ipv6_addr: "[^"]*", route_domain: 0, gate: 1\}$',
+    f'        - {{id: 1, vlan: 0, mac_addr: "{n6_mac}", ip_addr: "{dn_gw}", ipv6_addr: "2001:db8:6::1", route_domain: 0, gate: 1}}',
+    "N6 Vif identity")
+new = replace_once(
+    new,
+    r'^        - \{id: 1, egress_gate: 0, mac: "[^"]*", ipv4: "[^"]*"\}$',
+    f'        - {{id: 1, egress_gate: 0, mac: "{mac(n6_mac)}", ipv4: "{dn_gw}"}}',
+    "N6 Router resolver interface")
+new = replace_once(
+    new,
+    r'^        - \{next_hop_id: 1, interface_id: 1, ipv4: "[^"]*"\}$',
+    f'        - {{next_hop_id: 1, interface_id: 1, ipv4: "{dn_ip}"}}',
+    "N6 Router neighbor binding")
+new = replace_once(
+    new,
+    r'^        - \{id: 1, egress_gate: 0, mac: "[^"]*", ipv4: "[^"]*", ipv6: "[^"]*"\}$',
+    f'        - {{id: 1, egress_gate: 0, mac: "{mac(n3_mac)}", ipv4: "{n3_ip}", ipv6: "2001:db8:1::1"}}',
+    "N3 transport resolver interface")
+new = replace_once(
+    new,
+    r'^        - \{next_hop_id: 1, interface_id: 1, ipv4: "192\.0\.2\.2"\}$',
+    f'        - {{next_hop_id: 1, interface_id: 1, ipv4: "{gnb_ip}"}}',
+    "N3 transport neighbor binding")
+new = replace_once(
+    new,
+    r'^  arp_n6/entries:\n    - key: \{ip: "[^"]*"\}\n      value: \{mac_addr: "[^"]*"\}$',
+    f'  arp_n6/entries:\n    - key: {{ip: "{dn_gw}"}}\n      value: {{mac_addr: "{n6_mac}"}}',
+    "N6 ARP identity")
 
-# The N6 next hop's MACs: this rig's pair in place of the file's (or of an
-# The N6 next hop's MACs: this rig's pair in place of the file's (or of an
-# absent pair, whose gateway then answers or not as the rig decides).
-new, n = re.subn(r'^      value: \{egress_gate: 0(?:, dst_mac: "[^"]*", src_mac: "[^"]*")?\}$',
-                 f'      value: {{egress_gate: 0, dst_mac: "{mac(dn_mac)}", src_mac: "{mac(n6_mac)}"}}',
-                 new, count=1, flags=re.M)
-assert n == 1, 'no rt/next_hops hop 1'
+# ARP requests emitted by the N3 resolver use the local N3 address as sender.
+# Route those requests to the N3 port; peer replies go to the Router.
+old_n3 = ipv4("192.0.2.1")
+new_n3 = ipv4(n3_ip)
+if old_n3 not in new:
+    sys.exit("graph.py: no N3 ARP sender rule")
+new = new.replace(f'value_bin: "{old_n3}"', f'value_bin: "{new_n3}"', 1)
 
-# The N6 interface, where the graph has one.
-new, n = re.subn(r'^        - \{id: 1, vlan: 0, mac_addr: "[^"]*", ip_addr: "[^"]*", route_domain: [0-9]+, gate: 1\}$',
-                 f'        - {{id: 1, vlan: 0, mac_addr: "{n6_mac}", ip_addr: "{dn_gw}", route_domain: 1, gate: 1}}',
-                 new, count=1, flags=re.M)
-
-open(out, 'w').write(new)
+open(out, "w").write(new)

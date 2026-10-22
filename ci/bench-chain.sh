@@ -36,14 +36,13 @@ LOG=$(mktemp /tmp/upf-bench-XXXXXX.log)
 PIDFILE=$(mktemp /tmp/upf-bench-XXXXXX.pid)
 MANIFEST=$(mktemp /tmp/upf-bench-XXXXXX.yaml)
 
-# The uplink packet: the 87-byte G-PDU deploy/smoke-gtpu.yaml uses
-# (TEID 0x11223344, inner 10.0.0.1 -> 8.8.8.8/UDP, "hello-upf").
-GPDU="AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4BChQeAghoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARILcKAAABCAgICATSADUAEQAAaGVsbG8tdXBm"
-# The inner packet alone, for the encap-side variants.
-INNER="RQAAJQABQABAESC3CgAAAQgICAgE0gA1ABEAAGhlbGxvLXVwZg=="
-# The four session attributes GtpuEncap reads (upf_teid 0x11223344, upf_gnb_ip
-# 10.20.30.2, the two MACs), as one SetMetadata argument.
-ATTRS='{attrs: [{name: upf_teid, size: 4, value_int: 287454020}, {name: upf_gnb_ip, size: 4, value_int: 169090562}, {name: ether_src, size: 6, value_bin: "AgAAAAAB"}, {name: ether_dst, size: 6, value_bin: "AgAAAAAC"}]}'
+# The admitted uplink G-PDU: TEID 0x11223345, no PDU Session Container, and
+# outer peer 10.20.30.2 -> local endpoint 10.20.30.1.
+GPDU="AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4CChQeAQhoCGgANQAAMP8AJREiM0VFAAAlAAFAAEARILcKAAABCAgICATSADUAEQAAaGVsbG8tdXBm"
+# A deterministic malformed Ethernet/IPv4 frame: no IPv4 header follows EtherType.
+MALFORMED="AgAAAAABAgAAAAACCAA="
+# The encap ActionId, as one SetMetadata argument.
+ATTRS='{attrs: [{name: action_id, size: 4, value_int: 1}]}'
 
 export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
@@ -87,17 +86,53 @@ write_manifest() { # write_manifest <variant>; a "b1" suffix means Source burst 
         printf '  - {upstream: %s_rw, downstream: %s_bp}\n' "$v" "$v"
         printf '  - {upstream: %s_bp, downstream: %s_sink}\n' "$v" "$v"
         ;;
-      decap) # the G-PDU rewriter + the plugin module
+      decap) # admitted G-PDU -> endpoint tag -> exact F-TEID admission
         printf '  - {name: %s_rw, mclass: Rewrite, arg: {templates: ["%s"]}}\n' "$v" "$GPDU"
-        printf '  - {name: %s_dec, mclass: GtpuDecap}\n  - {name: %s_sink, mclass: Sink}\n' "$v" "$v"
+        printf '  - {name: %s_tag, mclass: SetMetadata, arg: {attrs: [{name: endpoint_id, size: 4, value_int: 1}]}}\n' "$v"
+        printf '  - {name: %s_dec, mclass: GtpuDecap}\n' "$v"
+        printf '  - {name: %s_md, mclass: MetadataTest, arg: {read: {endpoint_id: 4, fteid_context: 4, qfi: 1}}}\n' "$v"
+        printf '  - {name: %s_sink, mclass: Sink}\n' "$v"
         printf 'connections:\n  - {upstream: %s, downstream: %s_rw}\n' "$s" "$v"
-        printf '  - {upstream: %s_rw, downstream: %s_dec}\n' "$v" "$v"
-        printf '  - {upstream: %s_dec, downstream: %s_sink}\n' "$v" "$v"
+        printf '  - {upstream: %s_rw, downstream: %s_tag}\n' "$v" "$v"
+        printf '  - {upstream: %s_tag, downstream: %s_dec}\n' "$v" "$v"
+        printf '  - {upstream: %s_dec, downstream: %s_md}\n' "$v" "$v"
+        printf '  - {upstream: %s_md, downstream: %s_sink}\n' "$v" "$v"
         ;;
-      decapnorewrite) # the Source's own bytes are the G-PDU; control: hop1
-        printf '  - {name: %s_dec, mclass: GtpuDecap}\n  - {name: %s_sink, mclass: Sink}\n' "$v" "$v"
-        printf 'connections:\n  - {upstream: %s, downstream: %s_dec}\n' "$s" "$v"
-        printf '  - {upstream: %s_dec, downstream: %s_sink}\n' "$v" "$v"
+      decapctl) # same chain with Bypass in the decap slot
+        printf '  - {name: %s_rw, mclass: Rewrite, arg: {templates: ["%s"]}}\n' "$v" "$GPDU"
+        printf '  - {name: %s_tag, mclass: SetMetadata, arg: {attrs: [{name: endpoint_id, size: 4, value_int: 1}]}}\n' "$v"
+        printf '  - {name: %s_bp, mclass: Bypass}\n' "$v"
+        printf '  - {name: %s_md, mclass: MetadataTest, arg: {read: {endpoint_id: 4, fteid_context: 4, qfi: 1}}}\n' "$v"
+        printf '  - {name: %s_sink, mclass: Sink}\n' "$v"
+        printf 'connections:\n  - {upstream: %s, downstream: %s_rw}\n' "$s" "$v"
+        printf '  - {upstream: %s_rw, downstream: %s_tag}\n' "$v" "$v"
+        printf '  - {upstream: %s_tag, downstream: %s_bp}\n' "$v" "$v"
+        printf '  - {upstream: %s_bp, downstream: %s_md}\n' "$v" "$v"
+        printf '  - {upstream: %s_md, downstream: %s_sink}\n' "$v" "$v"
+        ;;
+      decapmalformed) # deterministic short frame exercises fail-closed parsing
+        printf '  - {name: %s_rw, mclass: Rewrite, arg: {templates: ["%s"]}}\n' "$v" "$MALFORMED"
+        printf '  - {name: %s_tag, mclass: SetMetadata, arg: {attrs: [{name: endpoint_id, size: 4, value_int: 1}]}}\n' "$v"
+        printf '  - {name: %s_dec, mclass: GtpuDecap}\n' "$v"
+        printf '  - {name: %s_md, mclass: MetadataTest, arg: {read: {endpoint_id: 4, fteid_context: 4, qfi: 1}}}\n' "$v"
+        printf '  - {name: %s_sink, mclass: Sink}\n' "$v"
+        printf 'connections:\n  - {upstream: %s, downstream: %s_rw}\n' "$s" "$v"
+        printf '  - {upstream: %s_rw, downstream: %s_tag}\n' "$v" "$v"
+        printf '  - {upstream: %s_tag, downstream: %s_dec}\n' "$v" "$v"
+        printf '  - {upstream: %s_dec, downstream: %s_md}\n' "$v" "$v"
+        printf '  - {upstream: %s_md, downstream: %s_sink}\n' "$v" "$v"
+        ;;
+      decapmalformedctl) # same malformed chain with Bypass in the decap slot
+        printf '  - {name: %s_rw, mclass: Rewrite, arg: {templates: ["%s"]}}\n' "$v" "$MALFORMED"
+        printf '  - {name: %s_tag, mclass: SetMetadata, arg: {attrs: [{name: endpoint_id, size: 4, value_int: 1}]}}\n' "$v"
+        printf '  - {name: %s_bp, mclass: Bypass}\n' "$v"
+        printf '  - {name: %s_md, mclass: MetadataTest, arg: {read: {endpoint_id: 4, fteid_context: 4, qfi: 1}}}\n' "$v"
+        printf '  - {name: %s_sink, mclass: Sink}\n' "$v"
+        printf 'connections:\n  - {upstream: %s, downstream: %s_rw}\n' "$s" "$v"
+        printf '  - {upstream: %s_rw, downstream: %s_tag}\n' "$v" "$v"
+        printf '  - {upstream: %s_tag, downstream: %s_bp}\n' "$v" "$v"
+        printf '  - {upstream: %s_bp, downstream: %s_md}\n' "$v" "$v"
+        printf '  - {upstream: %s_md, downstream: %s_sink}\n' "$v" "$v"
         ;;
       em) # the classifier alone, default gate: all packets miss
         printf '  - {name: %s_rw, mclass: Rewrite, arg: {templates: ["%s"]}}\n' "$v" "$GPDU"
@@ -116,36 +151,52 @@ write_manifest() { # write_manifest <variant>; a "b1" suffix means Source burst 
       encapctl) # the control for encap: same chain, Bypass in the module's slot
         printf '  - {name: %s_rw, mclass: Rewrite, arg: {templates: ["%s"]}}\n' "$v" "$INNER"
         printf '  - {name: %s_sm, mclass: SetMetadata, arg: %s}\n' "$v" "$ATTRS"
-        printf '  - {name: %s_bp, mclass: Bypass}\n  - {name: %s_sink, mclass: Sink}\n' "$v" "$v"
+        printf '  - {name: %s_bp, mclass: Bypass}\n' "$v"
+        printf '  - {name: %s_md, mclass: MetadataTest, arg: {read: {action_id: 4, transport_route_domain: 4}}}\n' "$v"
+        printf '  - {name: %s_sink, mclass: Sink}\n' "$v"
         printf 'connections:\n  - {upstream: %s, downstream: %s_rw}\n' "$s" "$v"
         printf '  - {upstream: %s_rw, downstream: %s_sm}\n' "$v" "$v"
         printf '  - {upstream: %s_sm, downstream: %s_bp}\n' "$v" "$v"
-        printf '  - {upstream: %s_bp, downstream: %s_sink}\n' "$v" "$v"
+        printf '  - {upstream: %s_bp, downstream: %s_md}\n' "$v" "$v"
+        printf '  - {upstream: %s_md, downstream: %s_sink}\n' "$v" "$v"
         ;;
       encap)
         printf '  - {name: %s_rw, mclass: Rewrite, arg: {templates: ["%s"]}}\n' "$v" "$INNER"
         printf '  - {name: %s_sm, mclass: SetMetadata, arg: %s}\n' "$v" "$ATTRS"
-        printf '  - {name: %s_enc, mclass: GtpuEncap, arg: {src_ip: "10.20.30.1"}}\n' "$v"
+        printf '  - {name: %s_enc, mclass: GtpuEncap, arg: {max_tunnels: 65536}}\n' "$v"
+        printf '  - {name: %s_md, mclass: MetadataTest, arg: {read: {action_id: 4, transport_route_domain: 4}}}\n' "$v"
         printf '  - {name: %s_sink, mclass: Sink}\n' "$v"
         printf 'connections:\n  - {upstream: %s, downstream: %s_rw}\n' "$s" "$v"
         printf '  - {upstream: %s_rw, downstream: %s_sm}\n' "$v" "$v"
         printf '  - {upstream: %s_sm, downstream: %s_enc}\n' "$v" "$v"
-        printf '  - {upstream: %s_enc, downstream: %s_sink}\n' "$v" "$v"
+        printf '  - {upstream: %s_enc, downstream: %s_md}\n' "$v" "$v"
+        printf '  - {upstream: %s_md, downstream: %s_sink}\n' "$v" "$v"
         ;;
       *) echo "unknown variant $v" >&2; return 1 ;;
+    esac
+    case "$v" in
+      decap)
+        printf 'resources:\n  %s_dec/fteids:\n    - key: {endpoint_id: 1, address_family: 4, local_address: "ChQeAQ==", teid: 287454021}\n      value: {direction: 0, context_id: 1}\n' "$v"
+        ;;
+      encap)
+        printf 'resources:\n  %s_enc/tunnels:\n    - key: {action_id: 1}\n      value:\n        teid: 287454020\n        local_address: "ChQeAQ=="\n        peer_address: "ChQeAg=="\n        transport_route_domain: 1\n' "$v"
+        ;;
     esac
     printf 'workers:\n  - {wid: 0, core: %s}\n' "${CORES%%-*}"
   } > "$MANIFEST"
 }
 
-# The module whose output gate is counted: the one just before the Sink.
+# The gate whose count represents work completed: module output for admitted
+# packets, or Source output for malformed packets that the decap correctly drops.
 counter_module() { # counter_module <variant>
   case "${1%b1}" in
     sink) echo "${1}_src" ;;
     hop1) echo "${1}_bp" ;;
     hop4) echo "${1}_b3" ;;
     rewrite | rewritehop) echo "${1}_rw" ;;
-    decap | decapnorewrite) echo "${1}_dec" ;;
+    decap) echo "${1}_dec" ;;
+    decapctl) echo "${1}_bp" ;;
+    decapmalformed | decapmalformedctl) echo "${1}_src" ;;
     em) echo "${1}_em" ;;
     setmeta) echo "${1}_sm" ;;
     encapctl) echo "${1}_bp" ;;
@@ -196,7 +247,7 @@ for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 
 
 # Every variant follows the same path (pause, apply, resume, count); the order
 # below is only the order the numbers are printed in.
-VARIANTS=(sink hop1 hop4 rewrite rewritehop decap decapnorewrite setmeta encapctl encap em sinkb1 hop1b1)
+VARIANTS=(sink hop1 hop4 rewrite rewritehop decap decapctl decapmalformed decapmalformedctl setmeta encapctl encap em sinkb1 hop1b1)
 for v in "${VARIANTS[@]}"; do
   measure "$v"
 done
@@ -208,8 +259,9 @@ control_of() {
     hop1 | sinkb1 | hop1b1) echo sink ;;
     hop4) echo hop1 ;;
     rewritehop) echo rewrite ;;
-    decap | em) echo rewritehop ;;
-    decapnorewrite) echo hop1 ;;
+    decap) echo decapctl ;;
+    decapmalformed) echo decapmalformedctl ;;
+    em) echo rewritehop ;;
     encap) echo encapctl ;;
     *) echo "" ;;
   esac

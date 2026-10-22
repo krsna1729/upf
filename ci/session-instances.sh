@@ -73,9 +73,9 @@ check() { # check <description> <the dump's hex> <fixed string it must contain>
 }
 
 # Both tunnels are on the wire: the two sessions' F-TEIDs, in the G-PDUs the
-# graph's two sources send. The dump is upstream of the TEID table, so this says
-# what the sessions' uplink rules are keyed on, not where the packets go -- that
-# is the Go half's two gate counts above.
+# graph's two sources send. The dump precedes endpoint tagging and GtpuDecap,
+# so it records the input TEIDs; the Go half's separate gate counts above show
+# which session's admission and PDR path each stream uses.
 check "the internet stream's G-PDU carries its tunnel" "$TEID_HEX" "11 22 33 44"
 check "the ims stream's G-PDU carries its tunnel" "$TEID_HEX" "11 22 33 45"
 

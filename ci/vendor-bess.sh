@@ -48,6 +48,10 @@ STAGE_SRC=${STAGE_SRC:-$SRC/build/stage-fast/usr/local}
 FAST_SRC=${FAST_SRC:-$SRC/build/fast}
 DPDK_SRC=${DPDK_SRC:-$(ls -d "$SRC"/deps/dpdk-*/ | head -1)}
 DPDK_SRC=${DPDK_SRC%/}
+# A checkout may link deps/dpdk-* to a DPDK built elsewhere. Its binaries carry
+# the path DPDK was built at, the checkout's .pc files the path they were
+# configured with: both spellings are rewritten and both are checked for.
+DPDK_REAL=$(realpath "$DPDK_SRC")
 DEST=$ROOT/build/bess
 
 for p in "$STAGE_SRC/bin/bessd" "$DPDK_SRC/install/lib" "$FAST_SRC/core/bessd" "$SRC/sdk/go/go.mod"; do
@@ -63,14 +67,14 @@ cp -a "$DPDK_SRC/usertools" "$DEST/dpdk/usertools"
 cp -a "$FAST_SRC" "$DEST/fast"
 cp -a "$SRC/sdk/go" "$DEST/sdk/go"
 
-OLD=$DPDK_SRC
+OLD=$DPDK_REAL
 NEW=$DEST/dpdk
 # Where meson installs pkg-config files depends on the host's libdir: a plain
 # lib/pkgconfig here, lib/<triplet>/pkgconfig on Debian/Ubuntu. Rewrite every
 # one the install produced rather than assuming the first layout -- a missed
 # bess-dev.pc keeps naming the checkout, and the final check below catches it.
 while IFS= read -r -d '' f; do
-  sed -i "s|$OLD|$NEW|g" "$f"
+  sed -i -e "s|$DPDK_SRC|$NEW|g" -e "s|$OLD|$NEW|g" "$f"
 done < <(find "$DEST/stage" "$DEST/dpdk/install" -type f \
            \( -name '*.pc' -o -name rte_build_config.h \) -print0)
 
@@ -127,10 +131,12 @@ for path in sys.argv[3:]:
     print(f"vendor-bess: {path}: DPDK path patched at {n} place(s)")
 PY
 
-if grep -rIlF "$SRC" "$DEST/stage" "$DEST/dpdk" 2>/dev/null | grep .; then
-  echo "vendor-bess: the files above still name $SRC" >&2
-  exit 1
-fi
+for checkout in "$SRC" "$OLD"; do
+  if grep -rIlF "$checkout" "$DEST/stage" "$DEST/dpdk" 2>/dev/null | grep .; then
+    echo "vendor-bess: the files above still name $checkout" >&2
+    exit 1
+  fi
+done
 if grep -rlaF "$PMD_OLD" "$DEST/dpdk" 2>/dev/null | grep .; then
   echo "vendor-bess: the files above still name the checkout's PMD directory ($PMD_OLD)" >&2
   exit 1

@@ -22,6 +22,9 @@
 # uplink PDRs -- a general port-53 filter and a specific destination -- send
 # their frames out of two different exits (ULCL: the data network's hop and an
 # N9 tunnel) on the session's one TEID.
+# The `forward` and `forward_cleanup` windows exercise that temporary FAR
+# lifecycle with a local timer standing in for the SMF timer. They do not run
+# N2 signaling or the complete 5GC/NG-RAN handover procedure.
 #
 # Why windows rather than one run: every frame in this graph opens with the same
 # MACs, so each window injects exactly the streams its case is about and the
@@ -123,6 +126,7 @@ window egress
 window ulcl
 window down
 window forward
+window forward_cleanup
 window vn
 window refuse
 window arp
@@ -175,6 +179,8 @@ DN_N6=$(dump_hex dump_n6 "$WORK/down.log")
 DN_N3=$(dump_hex dump_n3 "$WORK/down.log")
 FW_N6=$(dump_hex dump_n6 "$WORK/forward.log")
 FW_N3=$(dump_hex dump_n3 "$WORK/forward.log")
+FC_N6=$(dump_hex dump_n6 "$WORK/forward_cleanup.log")
+FC_N3=$(dump_hex dump_n3 "$WORK/forward_cleanup.log")
 VN_N6=$(dump_hex dump_n6 "$WORK/vn.log")
 VN_N3=$(dump_hex dump_n3 "$WORK/vn.log")
 REF_N6=$(dump_hex dump_n6 "$WORK/refuse.log")
@@ -243,6 +249,16 @@ contains "forward: the indirect forward left through the encap" \
 contains "forward: it carries the session's own packet" \
       "$FW_N3" "0a 2d 00 02 08 08 08 08"
 empty "forward: it did not leave by the data network's exit" "$FW_N6"
+
+# --- Mode 6 temporary N3 forwarding FAR, then SMF-timer cleanup -------------
+# The driver starts a bounded timer on the accepted N4 update. This fixture
+# simulates its expiry and the SMF's cleanup update; it is not a full 5GC/NG-RAN
+# Mode 6 procedure.
+contains "forward_cleanup: the live session returned to the N6 egress" \
+      "$FC_N6" "0a 2d 00 02 08 08 08 08"
+contains "forward_cleanup: the restored N6 route carries its L2 pair" \
+      "$FC_N6" "02 00 00 00 06 02 02 00 00 00 06 01"
+empty "forward_cleanup: the temporary N3 tunnel is gone" "$FC_N3"
 
 # --- 5G VN Internal, both steps ---------------------------------------------
 # S4's uplink packet is re-injected into the subscriber-side table, where S5

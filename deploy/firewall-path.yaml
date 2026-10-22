@@ -7,7 +7,7 @@
 # compiles to -- carrying the PDR's ActionId -- are shown to select the action,
 # the meter, the counter and the tunnel, through a stock module.
 #
-# uplink    src_up -> rewrite_up -> teid -> decap0 -> fw_ul -> mt_ul -> cnt_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
+# uplink    src_up -> rewrite_up -> set_n3_endpoint -> decap0 -> fw_ul -> mt_ul -> cnt_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
 # downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> fw_dl -> mt_dl -> cnt_dl -> rt -> enc -> dump_d -> sink_n3
 #
 # A third, idle path is the control plane's own: the unix_port cp_marker (the
@@ -16,10 +16,8 @@
 # daemon's log. Nothing of a session's traffic passes through it.
 #
 # Nothing here is a session: the Go controller writes every rule, action,
-# meter, counter, tunnel and TEID rule, and `ci/session-path.sh` proves a session
-# programmed over the control plane carries packets both ways -- the uplink's
-# count needs the TEID rule, the decap and the PDR rule; the downlink's needs
-# the PDR rule, its action, its meter and the tunnel record the encap reads.
+# meter, counter, tunnel and endpoint-scoped F-TEID resource. The live session
+# test verifies known uplink/downlink packets enter their directional classifiers.
 #
 # The two Sources send continuously from the moment the graph is applied, so a
 # sink's counter is zero exactly when no session selects those packets: that is
@@ -41,10 +39,8 @@
 # modules are deploy/session-path.yaml's, unchanged: that file carries the
 # comments. This file's difference is the two tables.
 #
-# Metadata attributes are laid out in module registration order, so the module
-# that declares "upf_teid" is listed first and the reader that makes it real
-# (a write-only attribute no module reads gets no offset) follows it, as in
-# deploy/smoke-gtpu.yaml.
+# Metadata attributes are laid out in module registration order. MetadataTest
+# declares all GtpuDecap-written fields so they receive storage.
 
 ports:
   # The control plane's marker port: a unix socket (SOCK_SEQPACKET) that the
@@ -58,9 +54,8 @@ modules:
   # The peer's GTP-U Error Indication (TS 29.281 7.3.1): type 26, header TEID
   # 0, and the TEID IE naming the tunnel it cannot reach -- the one this
   # session's downlink FAR sends with (0x55667788, pathDownTEID in the live
-  # test). It takes the rule table's default gate, the responder behind it
-  # records the count (its track_errors argument), and the SMF hears about it
-  # as an Error Indication Report (TS 29.244 5.10).
+  # test). GtpuDecap routes unknown valid GPDU/control traffic on gate 2 here.
+  # The responder records received Error Indications and notifies the SMF
   - name: echo_err
     mclass: GtpuResponder
     arg: {track_errors: true}
@@ -78,7 +73,7 @@ modules:
   - name: mt_md
     mclass: MetadataTest
     arg:
-      read: {upf_teid: 4}
+      read: {endpoint_id: 4, fteid_context: 4, qfi: 1}
   - name: dump_u
     mclass: Dump
     arg: {interval: 1}
@@ -90,17 +85,13 @@ modules:
     arg:
       templates:
         - "AgAAAAACAgAAAAABCABFAABJAAFAAEARUIwKFB4CwAACAQhoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARIIkKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm"
-  - name: teid
-    mclass: ExactMatch
+  - name: set_n3_endpoint
+    mclass: SetMetadata
     arg:
-      fields:
-        # The G-PDU's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's
-        # flags, type and length (4). One rule per session; a TEID no rule
-        # names takes the default gate, whose responder answers a G-PDU for a
-        # tunnel this node does not have with an Error Indication (7.3.1) and
-        # records the Error Indications the peer sends (5.10).
-        - {offset: 46, num_bytes: 4}
-      default_gate: 1
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+        - {name: route_domain, size: 4, value_int: 0}
+        - {name: transport_route_domain, size: 4, value_int: 1}
   # The stock firewall in place of the WildcardMatch table: its policy is one
   # ordered rule list (the compiler writes every live session's rules of this
   # direction), a rule names its PDR's ActionId, and the rule result behind it
@@ -111,6 +102,7 @@ modules:
       result_fields:
         - {attr_name: meter_id, value_offset: 0, num_bytes: 8, reference: mt_ul/meters, reference_key: BE32, reference_count: 2}
         - {attr_name: next_hop_id, value_offset: 8, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 12, num_bytes: 4}
   - name: mt_ul
     mclass: Meter
     arg: {capacity: 65536, levels: 2}
@@ -143,7 +135,7 @@ modules:
     arg:
       default_gate: 0
       interfaces:
-        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 1, gate: 1}
+        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 0, gate: 1}
   - name: l2_sort
     mclass: ExactMatch
     arg:
@@ -162,6 +154,7 @@ modules:
       result_fields:
         - {attr_name: meter_id, value_offset: 0, num_bytes: 8, reference: mt_dl/meters, reference_key: BE32, reference_count: 2}
         - {attr_name: next_hop_id, value_offset: 8, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 12, num_bytes: 4}
   - name: mt_dl
     mclass: Meter
     arg: {capacity: 65536, levels: 2}
@@ -170,7 +163,10 @@ modules:
     arg: {capacity: 65536}
   - name: enc
     mclass: GtpuEncap
-    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
+    arg: {max_tunnels: 65536}
+  - name: mt_transport
+    mclass: MetadataTest
+    arg: {read: {transport_route_domain: 4}}
   - name: dump_d
     mclass: Dump
     arg: {interval: 1}
@@ -191,15 +187,15 @@ modules:
 
 connections:
   - {upstream: src_up, downstream: rewrite_up}
-  - {upstream: rewrite_up, downstream: teid}
-  - {upstream: teid, downstream: decap0}
-  - {upstream: teid, downstream: echo_err, ogate: 1}
+  - {upstream: rewrite_up, downstream: set_n3_endpoint}
+  - {upstream: set_n3_endpoint, downstream: decap0}
   - {upstream: src_err, downstream: rewrite_err}
-  - {upstream: rewrite_err, downstream: teid}
-  - {upstream: decap0, downstream: mt_md}
+  - {upstream: rewrite_err, downstream: set_n3_endpoint}
+  - {upstream: decap0, downstream: mt_md, ogate: 0}
+  - {upstream: decap0, downstream: fw_dl, ogate: 1}
+  - {upstream: decap0, downstream: echo_err, ogate: 2}
   - {upstream: mt_md, downstream: dump_u}
   - {upstream: dump_u, downstream: fw_ul}
-  - {upstream: fw_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
   # changes when that band should be marked or shed rather than passed.
@@ -221,7 +217,8 @@ connections:
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
   - {upstream: cnt_dl, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
-  - {upstream: enc, downstream: dump_d}
+  - {upstream: enc, downstream: mt_transport}
+  - {upstream: mt_transport, downstream: dump_d}
   - {upstream: dump_d, downstream: sink_n3}
 
   # The control plane's markers: the port's packets go straight to the dump,

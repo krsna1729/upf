@@ -96,7 +96,7 @@ else
     "$(dirname "${BASH_SOURCE[0]}")/net.sh" up
     DEPLOYED=$ROOT/deploy/upf.yaml
     python3 "$(dirname "${BASH_SOURCE[0]}")/graph.py" "$DEPLOYED" "$STATE/graph.yaml" "$IF_N3" "$IF_N6" \
-      "$N3_IP" "$N6_MAC" "$DN_MAC" "$DN_GW" "$STATE/end-marker.sock" || die "building the dataplane graph failed"
+      "$N3_IP" "$N3_MAC" "$GNB_IP" "$N6_MAC" "$DN_IP" "$DN_GW" "$STATE/end-marker.sock" || die "building the dataplane graph failed"
     GRAPH=$STATE/graph.yaml
     detach bessd sudo -n -E env "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
       "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$STATE/bessd-own.pid" -modules="$PLUG" -f
@@ -129,12 +129,11 @@ else
   fi
   : >"$LOGS/upfd.log"
   echo "${N4_UPFD##*:}" >"$STATE/n4_backend_port"
-  # The deployed graph's uplink key: the inner 5-tuple, the tunnel the packet
-  # arrived on, and its QFI (deploy/upf.yaml's pdr_ul). The flag must list the
-  # graph's fields in the graph's order; a mismatch writes rules the table
-  # cannot read.
-  UPFD_ARGS=(-n4 "$N4_UPFD" -node-id "$UPF_IP" -bess "127.0.0.1:$BESS_PORT" -n3-addr "$UPF_N3"
-    -pdr-fields-ul src,dst,proto,sport,dport,teid,qfi
+  # The deployed uplink key includes the 5-tuple, F-TEID endpoint identity and
+  # QFI. The default field order matches deploy/upf.yaml.
+  UPFD_ARGS=(-n4 "$N4_UPFD" -node-id "$UPF_IP" -bess "127.0.0.1:$BESS_PORT"
+    -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$UPF_N3"
+    -gtpu-decap decap0
     -log-level "${UPFD_LOG_LEVEL:-debug}")
   # The evaluation loop: without it no URR is ever read, so a real SMF's URRs
   # (the stock config's period 10 s and volume threshold 1000 bytes) are never
@@ -142,9 +141,8 @@ else
   # carry zero -- the first reading of a URR is its baseline, not its usage
   # (report.go). One second is well inside the SMF's own 10 s period.
   UPFD_ARGS+=(-urr-interval "${URR_INTERVAL:-1s}")
-  # With real packets the downlink's outer Ethernet header is the N3 port's MAC
-  # to the gNB container's (the one next hop upfd knows); both are fixed.
-  [ -n "$DATAPLANE" ] && UPFD_ARGS+=(-n3-mac "$N3_MAC" -peer-mac "$GNB_MAC")
+  # The base path selects the old tunnel's domain-specific marker socket.
+  [ -n "$DATAPLANE" ] && UPFD_ARGS+=(-end-marker "$STATE/end-marker.sock")
   detach upfd "$BIN/upfd" "${UPFD_ARGS[@]}"
   wait_log "$LOGS/upfd.log" "n4 listening" 10 || { cat "$LOGS/upfd.log" >&2; die "upfd did not start"; }
   log "upfd up: N4 $N4_UPFD, node-id $UPF_IP, bess 127.0.0.1:$BESS_PORT"

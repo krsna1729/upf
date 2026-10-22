@@ -6,38 +6,35 @@
 #
 #   bessd -m 512 --no-huge -- -f deploy/smoke-gtpu.yaml --modules=<plugin dir>
 #
-# Uplink: a Source's packets are rewritten into one G-PDU frame (TEID
-# 0x11223344, inner 10.0.0.1 -> 8.8.8.8/UDP), matched by the session's TEID
-# rule, decapsulated by the plugin, and Dump prints the frame and the upf_teid
-# the module wrote. The rule below is what makes that TEID one of ours: a
-# G-PDU whose TEID no rule names is dropped by the table's default gate
-# (ci/smoke-gtpu.sh checks that too).
+# Uplink: Sources rewrite frames into G-PDUs, tag endpoint 1, and let
+# GtpuDecap admit the complete (endpoint, outer family, local address, TEID)
+# identity. The decap writes TEID, endpoint, family, address and QFI metadata;
+# an unknown or control packet takes gate 2 to GtpuResponder.
 #
 # Downlink: an inner IP packet gets the session's ActionId (setattr) -- what a
 # PDR rule's {gate, action_id} would deliver -- and the plugin writes the outer
 # Eth/IPv4/UDP/GTP-U headers from the tunnel record that id names.
 #
-# Path management: the uplink chain's last packet is an Echo Request (type 1,
-# TEID 0). No session names TEID 0, so it takes the rule table's default gate,
-# which is the plugin's echo module: the reply is the request with its
-# addresses and ports swapped, its type set to 2 and its payload dropped.
+# Path management: an Echo Request (type 1, TEID 0) and the peer's Error
+# Indication are control messages. Decap sends both through gate 2; the
+# responder replies to echo and counts the peer's error.
 #
 # Everything dynamic is a resource, not a module argument: a session change is
 # one transaction over these tables, exactly as the Go controller writes it.
 
 modules:
-  # Metadata attributes are laid out in the order modules register them, and
-  # the Dump module's window shows the first 16 bytes of a packet's metadata.
-  # The decap declares "upf_teid" (the TEID it read) and is listed first, so
-  # that window is where the smoke's metadata check looks for it; every module
-  # after it may add its own.
+  # Endpoint id is ingress metadata and must be present before decapsulation.
+  # Every probe has its own tag, decap, responder and Dump: a Dump prints what
+  # it sees when its interval comes round, so two frames sharing one would race.
+  - name: tag_up
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+  # F-TEID admission is the decap's exact resource, keyed by endpoint,
+  # address family, local outer address and TEID.
   - name: decap0
-    # mclass is the module's class name (core/module.h:761 registers #_MOD),
-    # not the legacy ADD_MODULE string ("gtpu_decap").
     mclass: GtpuDecap
-  - name: dump_teid
-    mclass: Dump
-    arg: {interval: 1}
   - name: src_up
     mclass: Source
     arg: {pkt_size: 95, burst: 1}
@@ -56,42 +53,25 @@ modules:
         # grew by the eight bytes (IPv4 0x51, UDP 0x3d, GTP-U 0x2d) and the
         # IPv4 checksum with them; the inner packet is byte for byte what it
         # was, so the decap's own checks below still read it.
-        - "AgAAAAABAgAAAAACCABFAABRAAFAAEAR6nAKFB4BChQeAghoCGgAPQAANP8ALREiM0QAAACFARAFAEUAACUAAUAAQBEgtwoAAAEICAgIBNIANQARAABoZWxsby11cGY="
-  - name: teid
-    mclass: ExactMatch
-    arg:
-      fields:
-        # The outer frame's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U
-        # header's flags/type/length (4). One rule per session; no rule (or a
-        # TEID no rule names) is what the default gate takes.
-        - {offset: 46, num_bytes: 4}
-      # The default gate is the responder, not the drop: TEID 0 is the echo
-      # path (7.1) and a TEID no rule names is a G-PDU for a tunnel this node
-      # does not have, which 7.3.1 answers with an Error Indication. Both
-      # replies come from the same module class; they are two instances only so
-      # that each chain has its own Dump (a Dump prints what it sees when its
-      # interval comes round, so two frames sharing one would race).
-      default_gate: 1
+        - "AgAAAAABAgAAAAACCABFAABRAAFAAEAR6nAKFB4CChQeAQhoCGgAPQAANP8ALREiM0QAAACFARAFAEUAACUAAUAAQBEgtwoAAAEICAgIBNIANQARAABoZWxsbw11cGY="
   - name: mt_md
     mclass: MetadataTest
     arg:
-      # The reader that makes the decap's "upf_teid" attribute real: a
+      # The reader that makes the decap's "fteid_context" attribute real: a
       # write-only attribute no module reads gets no offset at all
       # (core/metadata.cc, FillOffsetArrays), so the writes the smoke checks
       # for would be no-ops. This module declares nothing of its own; it
       # passes packets through.
-      read: {upf_teid: 4, qfi: 1}
+      read: {endpoint_id: 4, fteid_context: 4, qfi: 1}
   - name: dump_up
     mclass: Dump
     arg: {interval: 1}
   - name: sink_up
     mclass: Sink
 
-  # A second uplink chain whose G-PDU carries TEID 0x55667788, which no rule
-  # names: the table's default gate takes it, the responder answers it with an
-  # Error Indication (7.3.1), and the frame's inner source address (10.0.0.2)
-  # must never appear in the log -- the payload goes nowhere. Same frame as the
-  # first, with the TEID and the inner address changed.
+  # A G-PDU with TEID 0x55667788 has no admission entry, so GtpuDecap sends it
+  # to gate 2 and the responder returns an Error Indication. Its inner source
+  # address (10.0.0.2) must never appear in the log.
   - name: src_drop
     mclass: Source
     arg: {pkt_size: 87, burst: 1}
@@ -99,7 +79,21 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4BChQeAghoCGgANQAAMP8AJVVmd4hFAAAlAAFAAEARJLoKAAACCAgEBBDhADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4CChQeAQhoCGgANQAAMP8AJVVmd4hFAAAlAAFAAEARJLoKAAACCAgEBBDhADUAEQAAaGVsbG8tdXBm"
+  - name: tag_drop
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+  - name: decap_drop
+    mclass: GtpuDecap
+  - name: resp_drop
+    mclass: GtpuResponder
+  - name: dump_drop
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_drop
+    mclass: Sink
 
   # A third uplink frame: the same G-PDU with **no** PDU Session Container --
   # the E flag clear (octet 1's 0x34 becomes 0x30), so no optional tail and no
@@ -109,10 +103,33 @@ modules:
   # container" value, because 0 is a real QFI (TS 38.415 5.5.3.3 ranges 0..63)
   # and a rule a PDI keys on QFI 0 must not select this packet.
   #
-  # Its TEID is its own (0x11223345, one above the first frame's), and so is
-  # the rest of its chain: the two uplink frames must not share a Dump, because
-  # a Dump prints what it sees when its interval comes round and the checks
-  # below name one frame's bytes each.
+  # TEID 0x11223345 is a second admitted uplink F-TEID, without a PDU Session
+  # Container, on its own decap and Dump.
+  #
+  # IPv6 unknown G-PDU: no IPv6 admission row, so it exercises the dual-stack
+  # gate-2 Error Indication path and its mandatory UDP checksum.
+  - name: src_drop6
+    mclass: Source
+    arg: {pkt_size: 90, burst: 1}
+  - name: rewrite_drop6
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAACht1gAAAAACQRQCABDbgAAQAAAAAAAAAAAAIgAQ24AAEAAAAAAAAAAAABCGgIaAAkUEgw/wAUVWZ3iUUAABQAAAAAAAAAAAAAAAAAAAAA"
+  - name: tag_drop6
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+  - name: decap_drop6
+    mclass: GtpuDecap
+  - name: resp_drop6
+    mclass: GtpuResponder
+  - name: dump_drop6
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_drop6
+    mclass: Sink
   - name: src_nocont
     mclass: Source
     arg: {pkt_size: 87, burst: 1}
@@ -120,12 +137,18 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4BChQeAghoCGgANQAAMP8AJREiM0VFAAAlAAFAAEARILcKAAABCAgICATSADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAABAgAAAAACCABFAABJAAFAAEAR6ngKFB4CChQeAQhoCGgANQAAMP8AJREiM0VFAAAlAAFAAEARILcKAAABCAgICATSADUAEQAAaGVsbG8tdXBm"
+  - name: tag_nocont
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
   - name: decap_nocont
     mclass: GtpuDecap
   - name: mt_nocont
     mclass: MetadataTest
-    arg: {read: {upf_teid: 4, qfi: 1}}
+    arg:
+      read: {endpoint_id: 4, fteid_context: 4, qfi: 1}
   - name: dump_nocont
     mclass: Dump
     arg: {interval: 1}
@@ -145,30 +168,47 @@ modules:
         # whose value is de ad be ef 00 00 00 00: the reply must not carry
         # that one back. 14 + 20 + 8 + 8 + 4 + 11 bytes.
         - "AgAAAAABAgAAAAACCABFAAAzAABAAEAR6o8KFB4CChQeAQhoCGgAHwAAMgEADwAAAAASNAAA5wAI3q2+7wAAAAA="
-  # TEID 0's rule (below) sends the echo arm to this responder; the table's
-  # default gate sends a G-PDU on an unnamed TEID to echo_err, so each reply
-  # has a Dump to itself.
+  - name: tag_echo
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+  - name: decap_echo
+    mclass: GtpuDecap
   - name: echo0
     mclass: GtpuResponder
-    arg: {track_errors: true}
-  - name: echo_err
-    mclass: GtpuResponder
-    arg: {track_errors: true}
-  - name: dump_err
-    mclass: Dump
-    arg: {interval: 1}
-  - name: sink_err
-    mclass: Sink
   - name: dump_echo
     mclass: Dump
     arg: {interval: 1}
   - name: sink_echo
     mclass: Sink
+  # IPv6 Echo Request exercises the response path and IPv6 UDP checksum.
+  - name: src_echo6
+    mclass: Source
+    arg: {pkt_size: 85, burst: 1}
+  - name: rewrite_echo6
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAACht1gAAAAAB8RQCABDbgAAQAAAAAAAAAAAAIgAQ24AAEAAAAAAAAAAAABCGgIaAAfwoYyAQAPAAAAABI0AADnAAjerb7vAAAAAA=="
+  - name: tag_echo6
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+  - name: decap_echo6
+    mclass: GtpuDecap
+  - name: resp_echo6
+    mclass: GtpuResponder
+  - name: dump_echo6
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_echo6
+    mclass: Sink
 
-  # The peer's Error Indication (TS 29.281 7.3.1): GTP-U type 26, header TEID
-  # 0, and the TEID IE naming the tunnel it could not reach (0x55667788). It
-  # takes the table's default gate, the responder records its count, and
-  # nothing is replied.
+  # The peer's Error Indication (TS 29.281 7.3.1) is control traffic, not an
+  # admitted G-PDU. Decap sends it to gate 2; the responder records it and sends
+  # no reply.
   - name: src_err
     mclass: Source
     arg: {pkt_size: 55, burst: 1}
@@ -177,6 +217,18 @@ modules:
     arg:
       templates:
         - "AgAAAAABAgAAAAACCABFAAApAAAAAEARKpoKFB4CChQeAQhoCGgAFQAAMBoABQAAAAAQVWZ3iA=="
+  - name: tag_err
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+  - name: decap_err
+    mclass: GtpuDecap
+  - name: resp_err
+    mclass: GtpuResponder
+    arg: {track_errors: true}
+  - name: sink_err
+    mclass: Sink
 
   - name: src_down
     mclass: Source
@@ -197,7 +249,10 @@ modules:
         - {name: "action_id", size: "4", value_int: "1"}
   - name: encap0
     mclass: GtpuEncap
-    arg: {src_ip: "10.20.30.1"}
+    arg: {max_tunnels: 65536}
+  - name: mt_domain
+    mclass: MetadataTest
+    arg: {read: {transport_route_domain: 4}}
   - name: dump_down
     mclass: Dump
     arg: {interval: 1}
@@ -223,7 +278,10 @@ modules:
         - {name: "action_id", size: "4", value_int: "2"}
   - name: encap_qfi
     mclass: GtpuEncap
-    arg: {src_ip: "10.20.30.1"}
+    arg: {max_tunnels: 65536}
+  - name: mt_domain_qfi
+    mclass: MetadataTest
+    arg: {read: {transport_route_domain: 4}}
   - name: dump_down_qfi
     mclass: Dump
     arg: {interval: 1}
@@ -251,7 +309,10 @@ modules:
         - {name: "action_id", size: "4", value_int: "3"}
   - name: encap_mark
     mclass: GtpuEncap
-    arg: {src_ip: "10.20.30.1"}
+    arg: {max_tunnels: 65536}
+  - name: mt_domain_mark
+    mclass: MetadataTest
+    arg: {read: {transport_route_domain: 4}}
   - name: dump_down_mark
     mclass: Dump
     arg: {interval: 1}
@@ -260,99 +321,105 @@ modules:
 
 connections:
   - {upstream: src_up, downstream: rewrite_up}
-  - {upstream: rewrite_up, downstream: teid}
-  - {upstream: src_drop, downstream: rewrite_drop}
-  - {upstream: rewrite_drop, downstream: teid}
-  - {upstream: src_nocont, downstream: rewrite_nocont}
-  - {upstream: rewrite_nocont, downstream: teid}
-  - {upstream: teid, downstream: decap_nocont, ogate: 2}
-  - {upstream: decap_nocont, downstream: mt_nocont}
-  - {upstream: mt_nocont, downstream: dump_nocont}
-  - {upstream: dump_nocont, downstream: sink_nocont}
-  - {upstream: teid, downstream: dump_teid}
-  - {upstream: dump_teid, downstream: decap0}
-  - {upstream: decap0, downstream: mt_md}
+  - {upstream: rewrite_up, downstream: tag_up}
+  - {upstream: tag_up, downstream: decap0}
+  - {upstream: decap0, downstream: mt_md, ogate: 0}
   - {upstream: mt_md, downstream: dump_up}
   - {upstream: dump_up, downstream: sink_up}
-
-  # Two responders: TEID 0's rule (ogate 3, the echo arm) and the table's
-  # default gate (ogate 1, the responder an unnamed TEID reaches).
-  - {upstream: teid, downstream: echo0, ogate: 3}
-  - {upstream: teid, downstream: echo_err, ogate: 1}
-  - {upstream: echo_err, downstream: dump_err}
-  - {upstream: dump_err, downstream: sink_err}
+  - {upstream: src_nocont, downstream: rewrite_nocont}
+  - {upstream: rewrite_nocont, downstream: tag_nocont}
+  - {upstream: tag_nocont, downstream: decap_nocont}
+  - {upstream: decap_nocont, downstream: mt_nocont, ogate: 0}
+  - {upstream: mt_nocont, downstream: dump_nocont}
+  - {upstream: dump_nocont, downstream: sink_nocont}
+  - {upstream: src_drop, downstream: rewrite_drop}
+  - {upstream: rewrite_drop, downstream: tag_drop}
+  - {upstream: tag_drop, downstream: decap_drop}
+  - {upstream: decap_drop, downstream: resp_drop, ogate: 2}
+  - {upstream: resp_drop, downstream: dump_drop}
+  - {upstream: dump_drop, downstream: sink_drop}
+  - {upstream: src_drop6, downstream: rewrite_drop6}
+  - {upstream: rewrite_drop6, downstream: tag_drop6}
+  - {upstream: tag_drop6, downstream: decap_drop6}
+  - {upstream: decap_drop6, downstream: resp_drop6, ogate: 2}
+  - {upstream: resp_drop6, downstream: dump_drop6}
+  - {upstream: dump_drop6, downstream: sink_drop6}
   - {upstream: src_echo, downstream: rewrite_echo}
-  - {upstream: rewrite_echo, downstream: teid}
-  - {upstream: src_err, downstream: rewrite_err}
-  - {upstream: rewrite_err, downstream: teid}
+  - {upstream: rewrite_echo, downstream: tag_echo}
+  - {upstream: tag_echo, downstream: decap_echo}
+  - {upstream: decap_echo, downstream: echo0, ogate: 2}
   - {upstream: echo0, downstream: dump_echo}
   - {upstream: dump_echo, downstream: sink_echo}
+  - {upstream: src_echo6, downstream: rewrite_echo6}
+  - {upstream: rewrite_echo6, downstream: tag_echo6}
+  - {upstream: tag_echo6, downstream: decap_echo6}
+  - {upstream: decap_echo6, downstream: resp_echo6, ogate: 2}
+  - {upstream: resp_echo6, downstream: dump_echo6}
+  - {upstream: dump_echo6, downstream: sink_echo6}
+  - {upstream: src_err, downstream: rewrite_err}
+  - {upstream: rewrite_err, downstream: tag_err}
+  - {upstream: tag_err, downstream: decap_err}
+  - {upstream: decap_err, downstream: resp_err, ogate: 2}
+  - {upstream: resp_err, downstream: sink_err}
 
   - {upstream: src_down, downstream: rewrite_down}
   - {upstream: rewrite_down, downstream: setattr_down}
   - {upstream: setattr_down, downstream: encap0}
-  - {upstream: encap0, downstream: dump_down}
-  - {upstream: dump_down, downstream: sink_down}
+  - {upstream: encap0, downstream: mt_domain}
+  - {upstream: mt_domain, downstream: dump_down}
   - {upstream: src_down_qfi, downstream: rewrite_down_qfi}
   - {upstream: rewrite_down_qfi, downstream: setattr_down_qfi}
   - {upstream: setattr_down_qfi, downstream: encap_qfi}
-  - {upstream: encap_qfi, downstream: dump_down_qfi}
-  - {upstream: dump_down_qfi, downstream: sink_down_qfi}
+  - {upstream: encap_qfi, downstream: mt_domain_qfi}
+  - {upstream: mt_domain_qfi, downstream: dump_down_qfi}
   - {upstream: src_down_mark, downstream: rewrite_down_mark}
   - {upstream: rewrite_down_mark, downstream: setattr_down_mark}
   - {upstream: setattr_down_mark, downstream: encap_mark}
-  - {upstream: encap_mark, downstream: dump_down_mark}
-  - {upstream: dump_down_mark, downstream: sink_down_mark}
+  - {upstream: encap_mark, downstream: mt_domain_mark}
+  - {upstream: mt_domain_mark, downstream: dump_down_mark}
 
 workers:
   - {wid: 0, core: 0}
 
 resources:
-  # The session's TEID, as the rule the compiler would write for it: the frame
-  # is decapsulated only because this rule matches it (0x11223344 = 287454020,
-  # the mask all ones). WildcardMatchRuleKey holds the values and the masks in
-  # two lists, one FieldData per field, and a bytes field is base64.
-  teid/rules:
-    - key: {fields: [{value_bin: "ESIzRA=="}]}
-      value: {gate: 0}
-    # TEID 0: the echo path (7.1). Its own gate and responder, so the reply
-    # has a Dump to itself.
-    - key: {fields: [{value_bin: "AAAAAA=="}]}
-      value: {gate: 3}
-    # The container-less frame's TEID (0x11223345), whose rule takes the
-    # table's second gate: its own decap, reader and Dump, so its metadata is
-    # printed whatever the first chain is doing.
-    - key: {fields: [{value_bin: "ESIzRQ=="}]}
-      value: {gate: 2}
-  # The session's downlink path: the gNB's F-TEID and outer address, and the
-  # two Ethernet addresses (base64: 02:00:00:00:00:01 and :02).
+  # Each admitting decap holds its own uplink F-TEID on endpoint 1 at
+  # 10.20.30.1. The complete key is endpoint, family, local address and TEID;
+  # the value's context_id is what the decap writes into fteid_context.
+  # decap0's 0x0C0FFEE1 (202374881) and decap_nocont's 0x0C0FFEE2 (202374882)
+  # are distinctive so the smoke can find them in the Dump output.
+  decap0/fteids:
+    - key: {endpoint_id: 1, address_family: 4, local_address: "ChQeAQ==", teid: 287454020}
+      value: {direction: 0, context_id: 202374881}
+  decap_nocont/fteids:
+    - key: {endpoint_id: 1, address_family: 4, local_address: "ChQeAQ==", teid: 287454021}
+      value: {direction: 0, context_id: 202374882}
+  # GtpuEncap leaves Ethernet source/destination unresolved. It writes the
+  # local source and peer destination for the post-encap Router.
   encap0/tunnels:
     - key: {action_id: 1}
       value:
         teid: 287454020
-        gnb_ip: "10.20.30.2"
-        ether_src: "AgAAAAAB"
-        ether_dst: "AgAAAAAC"
-  # The same session's flow with a QER that names QFI 5: the encap must write
-  # the PDU Session Container for it (0 = no container, the record above).
+        local_address: "ChQeAQ=="
+        peer_address: "ChQeAg=="
+        transport_route_domain: 1
+  # A QER that names QFI 5 adds the PDU Session Container.
   encap_qfi/tunnels:
     - key: {action_id: 2}
       value:
         teid: 287454020
-        gnb_ip: "10.20.30.2"
-        ether_src: "AgAAAAAB"
-        ether_dst: "AgAAAAAC"
+        local_address: "ChQeAQ=="
+        peer_address: "ChQeAg=="
+        transport_route_domain: 1
         qfi: 5
+        qfi_present: true
   # A session whose FAR carries a Transport Level Marking (TS 29.244 8.2.42):
-  # the outer IPv4 header's ToS/Traffic Class is the marking's DSCP (0xb8, EF)
-  # over the inner packet's ECN bits, the 0xfc mask naming the bits the inner
-  # header keeps. 47356 is 0xb8fc: the ToS octet in the high byte and the mask
-  # in the low one, as the IE's two octets encode them.
+  # the outer IPv4 ToS is the marking DSCP (0xb8, EF), with inner ECN bits
+  # preserved by the 0xfc mask. 47356 is 0xb8fc.
   encap_mark/tunnels:
     - key: {action_id: 3}
       value:
         teid: 287454020
-        gnb_ip: "10.20.30.2"
-        ether_src: "AgAAAAAB"
-        ether_dst: "AgAAAAAC"
+        local_address: "ChQeAQ=="
+        peer_address: "ChQeAg=="
+        transport_route_domain: 1
         marking: 47356
