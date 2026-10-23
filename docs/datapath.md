@@ -72,7 +72,7 @@ fixture does not wire.
 
 ```mermaid
 flowchart TB
-    upfd["upfd · End Marker builder"] -->|"one frame · SOCK_SEQPACKET"| ports["cp_marker_n3 / cp_marker_n9<br/>paths <base>.1 / <base>.2"]
+    upfd["upfd · End Marker builder"] -->|"one frame · SOCK_SEQPACKET"| ports["cp_marker_n3 / cp_marker_n9<br/>paths #lt;base#gt;.1 / #lt;base#gt;.2"]
     ports --> domain["SetMetadata<br/>transport_route_domain"]
     domain --> router["rt_transport · outer Router"]
     router --> n3out["N3/N9 egress"]
