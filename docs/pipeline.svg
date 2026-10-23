@@ -5,21 +5,23 @@
     </marker>
   </defs>
   <style>
+    svg { color: #1f2328; }
+    @media (prefers-color-scheme: dark) { svg { color: #e6edf3; } }
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; fill: currentColor; }
     .title { font-size: 15px; font-weight: 700; }
-    .sub { font-size: 11px; fill: var(--muted); }
+    .sub { font-size: 11px; fill: var(--muted, #6e7781); }
     .label { font-size: 12px; font-weight: 700; }
-    .desc { font-size: 9px; fill: var(--muted); }
-    .meta { font-size: 9px; fill: var(--accent); font-weight: 600; }
-    .pkt { font-size: 9px; fill: var(--warning); font-weight: 600; }
+    .desc { font-size: 9px; fill: var(--muted, #6e7781); }
+    .meta { font-size: 9px; fill: var(--accent, #0969da); font-weight: 600; }
+    .pkt { font-size: 9px; fill: var(--warning, #bc4c00); font-weight: 600; }
     .gate { font-size: 9px; font-weight: 700; }
-    .box { fill: none; stroke: var(--border); stroke-width: 1.5; rx: 5; }
-    .box-hot { fill: none; stroke: var(--accent); stroke-width: 2; rx: 5; }
+    .box { fill: none; stroke: var(--border, #8c959f); stroke-width: 1.5; rx: 5; }
+    .box-hot { fill: none; stroke: var(--accent, #0969da); stroke-width: 2; rx: 5; }
     .box-port { fill: none; stroke: currentColor; stroke-width: 1.75; rx: 5; }
-    .flow { fill: none; stroke: currentColor; stroke-opacity: 0.55; stroke-width: 1.5; marker-end: url(#arrow); }
-    .flow-meta { fill: none; stroke: var(--accent); stroke-width: 1.5; marker-end: url(#arrow); }
-    .flow-control { fill: none; stroke: var(--warning); stroke-width: 1.5; stroke-dasharray: 4 3; marker-end: url(#arrow); }
-    .divider { stroke: var(--border); stroke-width: 1; stroke-dasharray: 5 4; }
+    .flow { fill: none; stroke: var(--fg, #57606a); stroke-width: 1.5; marker-end: url(#arrow); }
+    .flow-meta { fill: none; stroke: var(--accent, #0969da); stroke-width: 1.5; marker-end: url(#arrow); }
+    .flow-control { fill: none; stroke: var(--warning, #bc4c00); stroke-width: 1.5; stroke-dasharray: 4 3; marker-end: url(#arrow); }
+    .divider { stroke: var(--border, #8c959f); stroke-width: 1; stroke-dasharray: 5 4; }
   </style>
 
   <text x="24" y="28" class="title">UPF PACKET PATH</text>
@@ -37,37 +39,37 @@
     <text x="245" y="107" text-anchor="middle" class="meta">endpoint_id</text>
     <text x="245" y="121" text-anchor="middle" class="meta">transport_route_domain</text>
 
-    <rect x="360" y="58" width="205" height="116" class="box-hot"/>
-    <text x="462" y="78" text-anchor="middle" class="label">GtpuDecap</text>
-    <text x="462" y="96" text-anchor="middle" class="meta">key: endpoint / family / local IP / TEID</text>
-    <text x="462" y="112" text-anchor="middle" class="desc">IPv4/IPv6 outer and inner packets</text>
-    <text x="462" y="128" text-anchor="middle" class="desc">writes TEID, endpoint fields and QFI</text>
-    <text x="462" y="147" text-anchor="middle" class="gate">0 UL  ·  1 DL  ·  2 unknown/control</text>
+    <rect x="350" y="58" width="215" height="116" class="box-hot"/>
+    <text x="457" y="78" text-anchor="middle" class="label">GtpuDecap</text>
+    <text x="457" y="96" text-anchor="middle" class="meta">key: endpoint/family/local IP/TEID</text>
+    <text x="457" y="112" text-anchor="middle" class="desc">IPv4/IPv6 outer and inner packets</text>
+    <text x="457" y="128" text-anchor="middle" class="desc">writes fteid_context and QFI</text>
+    <text x="457" y="147" text-anchor="middle" class="gate">0 UL  ·  1 DL  ·  2 unknown/control</text>
 
     <path d="M 140 101 L 170 101" class="flow"/>
-    <path d="M 320 101 L 360 101" class="flow-meta"/>
+    <path d="M 320 101 L 350 101" class="flow-meta"/>
 
-    <rect x="620" y="52" width="150" height="58" class="box-hot"/>
-    <text x="695" y="70" text-anchor="middle" class="label">pdr_ul</text>
-    <text x="695" y="87" text-anchor="middle" class="desc">WildcardMatch · inner flow</text>
-    <text x="695" y="101" text-anchor="middle" class="meta">TEID metadata + QFI</text>
+    <rect x="615" y="52" width="165" height="58" class="box-hot"/>
+    <text x="697" y="70" text-anchor="middle" class="label">pdr_ul</text>
+    <text x="697" y="87" text-anchor="middle" class="desc">WildcardMatch · inner flow</text>
+    <text x="697" y="101" text-anchor="middle" class="meta">fteid_context + QFI</text>
 
-    <rect x="620" y="125" width="150" height="58" class="box-hot"/>
-    <text x="695" y="143" text-anchor="middle" class="label">pdr_dl</text>
-    <text x="695" y="160" text-anchor="middle" class="desc">WildcardMatch · inner flow</text>
-    <text x="695" y="174" text-anchor="middle" class="meta">route domain + F-TEID fields</text>
+    <rect x="615" y="125" width="165" height="58" class="box-hot"/>
+    <text x="697" y="143" text-anchor="middle" class="label">pdr_dl</text>
+    <text x="697" y="160" text-anchor="middle" class="desc">WildcardMatch · inner flow</text>
+    <text x="697" y="174" text-anchor="middle" class="meta">route domain + fteid_context</text>
 
-    <rect x="620" y="198" width="150" height="58" class="box"/>
-    <text x="695" y="216" text-anchor="middle" class="label">GtpuResponder</text>
-    <text x="695" y="233" text-anchor="middle" class="desc">unknown G-PDU → Error Ind.</text>
-    <text x="695" y="247" text-anchor="middle" class="desc">Echo and control replies</text>
+    <rect x="615" y="198" width="165" height="58" class="box"/>
+    <text x="697" y="216" text-anchor="middle" class="label">GtpuResponder</text>
+    <text x="697" y="233" text-anchor="middle" class="desc">unknown G-PDU → Error Ind.</text>
+    <text x="697" y="247" text-anchor="middle" class="desc">Echo and control replies</text>
 
-    <path d="M 565 84 L 620 81" class="flow"/>
-    <text x="575" y="77" class="gate">gate 0</text>
-    <path d="M 565 113 L 590 113 L 590 154 L 620 154" class="flow"/>
-    <text x="572" y="128" class="gate">gate 1</text>
-    <path d="M 565 144 L 602 144 L 602 227 L 620 227" class="flow-control"/>
-    <text x="572" y="158" class="gate">gate 2</text>
+    <path d="M 565 81 L 615 81" class="flow"/>
+    <text x="572" y="76" class="gate">gate 0</text>
+    <path d="M 565 113 L 607 113 L 607 145 L 615 145" class="flow"/>
+    <text x="570" y="109" class="gate">gate 1</text>
+    <path d="M 565 140 L 599 140 L 599 227 L 615 227" class="flow-control"/>
+    <text x="570" y="136" class="gate">gate 2</text>
 
     <rect x="25" y="178" width="115" height="58" class="box-port"/>
     <text x="82" y="197" text-anchor="middle" class="label">N6 in</text>
@@ -78,16 +80,19 @@
     <text x="245" y="213" text-anchor="middle" class="meta">route_domain</text>
     <text x="245" y="227" text-anchor="middle" class="meta">vif_id</text>
     <path d="M 140 207 L 170 207" class="flow"/>
-    <path d="M 320 207 L 595 207 L 595 154 L 620 154" class="flow-meta"/>
-    <text x="365" y="199" class="gate">plain N6 path</text>
+    <path d="M 320 207 L 580 207 L 580 166 L 615 166" class="flow-meta"/>
+    <text x="365" y="200" class="gate">plain N6 path</text>
 
-    <rect x="820" y="88" width="155" height="105" class="box"/>
-    <text x="897" y="108" text-anchor="middle" class="label">PDR treatment</text>
-    <text x="897" y="127" text-anchor="middle" class="desc">per-direction Meter → UrrCount</text>
-    <text x="897" y="144" text-anchor="middle" class="desc">DL: optional AtsssSteer</text>
-    <text x="897" y="164" text-anchor="middle" class="meta">action_id + next_hop_id</text>
-    <path d="M 770 81 L 795 81 L 795 117 L 820 117" class="flow"/>
-    <path d="M 770 154 L 800 154 L 820 154" class="flow"/>
+    <rect x="810" y="88" width="170" height="105" class="box"/>
+    <text x="895" y="108" text-anchor="middle" class="label">PDR treatment</text>
+    <text x="895" y="127" text-anchor="middle" class="desc">per-direction Meter → UrrCount</text>
+    <text x="895" y="144" text-anchor="middle" class="desc">DL: optional AtsssSteer</text>
+    <text x="895" y="164" text-anchor="middle" class="meta">action_id + next_hop_id</text>
+    <path d="M 780 81 L 795 81 L 795 117 L 810 117" class="flow"/>
+    <path d="M 780 154 L 810 154" class="flow"/>
+
+    <path d="M 730 337 L 730 272 L 795 272 L 795 175 L 780 175" class="flow-meta"/>
+    <text x="736" y="267" class="gate">rt gate 4 · 5G-VN</text>
   </g>
 
   <line x1="25" y1="285" x2="975" y2="285" class="divider"/>
@@ -100,10 +105,10 @@
     <text x="100" y="375" text-anchor="middle" class="desc">PortOut</text>
     <text x="100" y="390" text-anchor="middle" class="meta">transport domain</text>
 
-    <rect x="240" y="337" width="190" height="64" class="box"/>
-    <text x="335" y="357" text-anchor="middle" class="label">rt_transport</text>
-    <text x="335" y="375" text-anchor="middle" class="desc">destination + transport_route_domain</text>
-    <text x="335" y="390" text-anchor="middle" class="meta">ARP/ND · TTL · Ethernet rewrite</text>
+    <rect x="225" y="337" width="215" height="64" class="box"/>
+    <text x="332" y="357" text-anchor="middle" class="label">rt_transport</text>
+    <text x="332" y="375" text-anchor="middle" class="desc">destination + transport_route_domain</text>
+    <text x="332" y="390" text-anchor="middle" class="meta">ARP/ND · TTL · Ethernet rewrite</text>
 
     <rect x="495" y="337" width="150" height="64" class="box"/>
     <text x="570" y="357" text-anchor="middle" class="label">GtpuEncap</text>
@@ -120,16 +125,16 @@
     <text x="930" y="375" text-anchor="middle" class="desc">plain IP</text>
     <text x="930" y="390" text-anchor="middle" class="meta">next hop</text>
 
-    <path d="M 240 369 L 175 369" class="flow"/>
-    <path d="M 495 369 L 430 369" class="flow"/>
+    <path d="M 225 369 L 175 369" class="flow"/>
+    <path d="M 495 369 L 440 369" class="flow"/>
     <path d="M 710 369 L 645 369" class="flow"/>
-    <path d="M 860 369 L 885 369" class="flow"/>
-    <text x="653" y="359" class="gate">tunnel hop</text>
-    <text x="866" y="359" class="gate">plain hop</text>
+    <path d="M 860 380 L 885 380" class="flow"/>
+    <text x="650" y="361" class="gate">tunnel hop</text>
+    <text x="862" y="416" class="gate">plain hop (gate 0)</text>
 
-    <path d="M 897 193 L 897 320 L 785 320 L 785 337" class="flow"/>
-    <path d="M 695 256 L 695 310 L 335 310 L 335 337" class="flow-control"/>
-    <text x="355" y="322" class="desc">GTP-U replies and End Markers enter rt_transport</text>
+    <path d="M 895 193 L 895 320 L 800 320 L 800 337" class="flow"/>
+    <path d="M 695 256 L 695 310 L 332 310 L 332 337" class="flow-control"/>
+    <text x="350" y="324" class="desc">GTP-U replies and End Markers enter rt_transport</text>
   </g>
 
   <text x="25" y="447" class="sub">Vif and Routers resolve neighbors with ARP/ND; unresolved routes fail closed. Default inner PDR address fields are IPv4.</text>
