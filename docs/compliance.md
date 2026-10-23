@@ -60,6 +60,26 @@ numeric CHOOSE ID in separate CP F-SEIDs gets distinct local F-TEIDs, and that
 deleting one session releases only its own allocation. These are implementation
 constraints, not 3GPP requirements.
 
+## Topology and coexistence: evidence comparison (inspected 2026-10-23)
+
+This compares one combined property: the project scenarios co-resident in one
+process, endpoints and attachments set by deployment configuration rather
+than fixed ports, and routed dual-stack outer transport. It is separate from
+the scored competition blocks in `docs/claims.md`. Their 82/100 is the last
+stored baseline, and this section does not change it. Each row cites what the
+project's own documentation or configuration shows. "Not shown" means the
+inspected source does not establish the property; it is not proof that the
+property is absent.
+
+| Project | What the inspected source shows | Not shown by that source |
+|---|---|---|
+| This UPF | Endpoint-tagged ingress feeds one decap that admits by complete F-TEID key (`ci/veth-layouts.sh`: eight real-veth layouts, including the same TEID on two endpoints). Outer IPv4/IPv6 is routed per transport domain after encap, with ARP/ND resolution (`deploy/upf.yaml` `rt_transport`). One daemon runs scenarios 2 (ULCL to N6 and to an N9 tunnel), 5 (local switch) and 6 (temporary forward and cleanup) beside the N6 path (`ci/iface-path.sh`). | Scenario 3 (N9 arrival at a PSA) has no lane of its own. Mode 4 (N9-to-N9 transit) is not established by the pinned R16 text. N19 group sessions and inner IPv6 UE PDRs are not supported. |
+| [OAI UPF](https://github.com/openairinterface/oai-cn5g-upf/blob/develop/docs/FEATURE_SET.md) | N3, N4 and N6 implemented; uplink classifier listed as implemented. | N9 and N19 marked not implemented; branching point and I-UPF/PSA/ULCL marked not implemented. |
+| [Open5GS](https://github.com/open5gs/open5gs/discussions/3090) | Several GTP-U server addresses, IPv4 and IPv6, each with a `network_instance` and `source_interface` ([`upf.yaml.in`](https://github.com/open5gs/open5gs/blob/main/configs/open5gs/upf.yaml.in)). | The maintainer's accepted answer says its UPF "lacks the N9 interface", which rules out the N9-dependent scenarios. |
+| [free5GC](https://github.com/free5gc/free5gc.github.io/blob/main/docs/guide/5-install-ueransim.md) | `gtpu.ifList` entries typed N3 or N9 with listed addresses. N6 goes through host forwarding and NAT. | Not shown: all scenarios co-resident in one instance, or deployment-defined attachments beyond the address list. |
+| [OMEC BESS UPF](https://github.com/omec-project/upf/blob/main/conf/upf.jsonc) | An `access` (N3) interface and a `core` interface that is "N6 or N9 (depending on the UPF's deployment [PSA-UPF or I-UPF])". | Not shown: N3, N6 and N9 at once, or more than two attachments. |
+| [eUPF](https://github.com/edgecomllc/eupf) | Roadmap checks "Single & Multi-port support" and "I-UPF/A-UPF ULCL/Branching (N9 interface)". It configures IPv4 N3 and N9 addresses and relies on kernel routing. | Not shown: outer IPv6, deployment-defined endpoint-to-attachment mapping, or all scenarios co-resident. |
+| [UPG-VPP](https://github.com/travelping/upg-vpp) | "IPv4 -- inner and outer" and "IPv6 -- inner and outer"; PDR/FAR support is "some parts"; Release 15. | N9 role combinations and attachment topology are not described: unknown, not unsupported. |
 
 ## Source Interface (TS 29.244 8.2.2, Table 8.2.2-1)
 
