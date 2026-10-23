@@ -392,7 +392,25 @@ check "the rule's key carries the N6 interface's route domain ($N6_DOMAIN)" \
 
 # And the frame is selected: the same datagram that was dropped a moment ago
 # now matches by the domain the Vif wrote, and crosses the downlink chain to
-# the encap.
+# the encap. rt_transport holds no packet for a neighbor it has not resolved --
+# it drops and counts it (BESS D-183) -- so the measured frame is sent only
+# once every binding the routes name is resolved.
+resolved=
+for _ in $(seq 1 100); do
+  resolved=$(bc action rt_transport get_neighbors 2>/dev/null | python3 -c '
+import json, sys
+ns = json.load(sys.stdin).get("neighbors", [])
+print("yes" if ns and all(n.get("state") == "ROUTER_NEIGHBOR_STATE_RESOLVED" for n in ns) else "no")
+' 2>/dev/null || echo no)
+  [ "$resolved" = yes ] && break
+  sleep 0.1
+done
+if [ "$resolved" = yes ]; then
+  echo "ok: rt_transport resolved the veth peer for every binding"
+else
+  echo "FAIL: rt_transport did not resolve the veth peer: $(bc action rt_transport get_neighbors 2>/dev/null | tr -d '\n ')" >&2
+  FAIL=1
+fi
 before_dl=$(gate_packets cnt_dl 0); before_dl=${before_dl:-0}
 send_downlink
 crossed=$(( $(wait_gate cnt_dl 0 "$(( before_dl + 1 ))") - before_dl ))

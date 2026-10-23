@@ -9,7 +9,7 @@ import "testing"
 // UPF refusing all but the first, and reports it as if the path were at fault.
 func TestSessionParamsPinOneValuePerSession(t *testing.T) {
 	const base = 0x0a2d0000 // 10.45.0.0
-	params := sessionParams(4, 0x900000, base, "10.20.30.2", "192.0.2.1")
+	params := sessionParams(4, 0x900000, base, []string{"10.20.30.2"}, "192.0.2.1")
 	if len(params) != 4 {
 		t.Fatalf("asked for 4 sessions, got %d", len(params))
 	}
@@ -35,9 +35,17 @@ func TestSessionParamsPinOneValuePerSession(t *testing.T) {
 	}
 
 	// Zero pins nothing: every session asks the UPF to choose.
-	for i, p := range sessionParams(4, 0, base, "10.20.30.2", "192.0.2.1") {
+	for i, p := range sessionParams(4, 0, base, []string{"10.20.30.2"}, "192.0.2.1") {
 		if p.FTEID != 0 {
 			t.Errorf("with -fteid 0, session %d pins %#x", i, p.FTEID)
+		}
+	}
+
+	// A -gnb list alternates: session i takes the (i mod n)-th address.
+	gnbs := []string{"10.20.30.2", "2001:db8:20::2"}
+	for i, p := range sessionParams(4, 0, base, gnbs, "192.0.2.1") {
+		if p.GnBIP != gnbs[i%2] {
+			t.Errorf("session %d's gNB is %s, want %s", i, p.GnBIP, gnbs[i%2])
 		}
 	}
 }

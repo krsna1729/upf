@@ -30,6 +30,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -261,16 +262,22 @@ func run() error {
 	nodeID := flag.String("node-id", "smf.local", "the Node ID this client advertises")
 	workers := flag.Int("workers", 16, "concurrent requests in flight")
 	sessions := flag.Int("sessions", 512, "sessions the phase covers")
-	mode := flag.String("mode", "bulk", "establish | cycle | bulk: what the sessions do")
+	mode := flag.String("mode", "bulk", "establish | cycle | bulk | handover: what the sessions do "+
+		"(handover: establish, then move each downlink tunnel with SNDEM and keep the sessions)")
 	rate := flag.Float64("rate", 0, "operations per second (0: as fast as the UPF answers)")
 	timeout := flag.Duration("timeout", 5*time.Second, "per-request timeout")
 	fteid := flag.Uint("fteid", 0,
 		"the F-TEIDs the sessions pin: session i pins value+i, as an SMF does "+
 			"(0: the UPF chooses every one, like an SMF that pins none)")
 	uePool := flag.String("ue-pool", "10.45.0.0/16", "the UE addresses the sessions use")
-	gnb := flag.String("gnb", "10.20.30.2", "the gNB's N3 address (the outer header's destination)")
+	gnb := flag.String("gnb", "10.20.30.2",
+		"the gNB's N3 address (the outer header's destination), IPv4 or IPv6; a comma-separated "+
+			"list gives session i the (i mod n)-th")
 	n3 := flag.String("n3", "192.0.2.1", "the UPF's N3 address (the F-TEID it is asked for)")
 	jsonOut := flag.String("json", "", "write the samples to this file")
+	hold := flag.Duration("hold", 0,
+		"after a successful run, keep the association (answering the UPF's heartbeats) this long, "+
+			"so the sessions outlive the run while a harness sends traffic through them")
 	level := flag.String("log-level", "warn", "log level: debug, info, warn, error")
 	flag.Parse()
 
@@ -303,7 +310,7 @@ func run() error {
 		return fmt.Errorf("association with %s: %w", *target, err)
 	}
 
-	params := sessionParams(*sessions, uint32(*fteid), base, *gnb, *n3)
+	params := sessionParams(*sessions, uint32(*fteid), base, strings.Split(*gnb, ","), *n3)
 	seids := make([]uint64, *sessions) // the UPF-side SEID of each session
 
 	phase := newPacer(*rate)
@@ -392,8 +399,22 @@ func run() error {
 			}
 			return n4sim.Delete(2+uint32(2**sessions+i), seids[i]), 0
 		})
+	case "handover":
+		// Establish all, then switch each downlink tunnel to a new TEID with
+		// SNDEM, so the UPF sends an End Marker on the old one; the sessions
+		// stay for -hold.
+		work(opEstablish, *sessions, func(i int) (message.Message, uint64) {
+			return n4sim.Establish(2+uint32(i), params[i]), 0
+		})
+		work(opModify, *sessions, func(i int) (message.Message, uint64) {
+			if seids[i] == 0 {
+				return nil, 0 // never established, so there is no session to name
+			}
+			s := params[i]
+			return n4sim.Handover(2+uint32(*sessions+i), seids[i], 2, s.TEID+handoverTEIDStep, s.GnBIP), 0
+		})
 	default:
-		return fmt.Errorf("-mode %q: want establish, cycle or bulk", *mode)
+		return fmt.Errorf("-mode %q: want establish, cycle, bulk or handover", *mode)
 	}
 
 	fmt.Printf("target %s, %d workers, %d sessions, mode %s\n\n", *target, *workers, *sessions, *mode)
@@ -448,8 +469,18 @@ func run() error {
 	if bad > 0 {
 		return fmt.Errorf("%d of %d requests did not get an accepted answer", bad, total)
 	}
+	if *hold > 0 {
+		// The line a harness waits for: every phase was answered, and the
+		// sessions now stand until the hold ends or this process is stopped.
+		fmt.Printf("holding the association for %s\n", *hold)
+		time.Sleep(*hold)
+	}
 	return nil
 }
+
+// handoverTEIDStep is how far -mode handover moves each session's downlink
+// TEID: session i's tunnel 0x100000+i becomes 0x110000+i.
+const handoverTEIDStep = 0x10000
 
 // opStats is one operation's result in the JSON report.
 type opStats struct {
@@ -554,7 +585,7 @@ func poolBase(pool string, sessions int) (uint32, error) {
 // of refusals as if they were the UPF's doing. An fteid of 0 pins nothing:
 // every session asks the UPF to choose, which is what an SMF that never pins
 // does.
-func sessionParams(n int, fteid, base uint32, gnb, n3 string) []n4sim.Session {
+func sessionParams(n int, fteid, base uint32, gnbs []string, n3 string) []n4sim.Session {
 	params := make([]n4sim.Session, n)
 	for i := range params {
 		pinned := uint32(0)
@@ -566,7 +597,7 @@ func sessionParams(n int, fteid, base uint32, gnb, n3 string) []n4sim.Session {
 			TEID:   uint32(0x100000 + i),
 			FTEID:  pinned,
 			UEIP:   offsetAddr(base, i),
-			GnBIP:  gnb,
+			GnBIP:  gnbs[i%len(gnbs)],
 			N3IP:   n3,
 		}
 	}

@@ -1,0 +1,303 @@
+# SPDX-License-Identifier: BSD-3-Clause
+
+# The post-encap transport path on a veth, with the real resolver: one PMD
+# port (the af_packet PMD on a kernel veth whose peer is a Linux host in its
+# own network namespace), the session chains deploy/veth-port.yaml carries, and
+# the transport Router deploy/upf.yaml carries -- dual-stack, destination-routed
+# in the tunnel's transport route domain, its N3 gateway resolved by ARP and by
+# Neighbor Discovery -- plus the End Marker port that feeds the same Router.
+# `ci/veth-transport.sh` deploys it and checks what leaves the port on the
+# peer's own capture; docs/router.md names what that proves.
+#
+# Addresses are this lane's own (198.51.100.0/24, 2001:db8:51::/64), so it
+# never shares a subnet with ci/veth-port.sh's 192.0.2.0/24. The peer holds
+# 198.51.100.2 (the inner traffic's source), 198.51.100.4 (the IPv4 gateway the
+# resolver binds; the lane removes it to make the gateway unreachable) and
+# 2001:db8:51::2 (the IPv6 gateway). The script repeats these values.
+
+ports:
+  - name: upf_port
+    driver: PMDPort
+    num_rx_queues: 1
+    num_tx_queues: 1
+    # ci/veth-transport.sh substitutes its run-isolated veth name here.
+    arg: {vdev: "net_af_packet0,iface=__VETH_IFACE__,qpairs=1"}
+  # End Markers enter here, as deploy/upf.yaml's cp_marker_n3: upfd writes
+  # one frame per marker to <-end-marker>.<transport domain>. The script
+  # substitutes an abstract socket name, so the root-owned daemon and the
+  # unprivileged controller meet without a file to share.
+  - name: cp_marker_n3
+    driver: UnixSocketPort
+    arg: {path: "__END_MARKER_PATH__"}
+
+modules:
+  - name: port_in
+    mclass: PortInc
+    arg: {port: upf_port}
+  # N3 (dual-stack, so the Vif answers ARP and ND for it) and N6, on one port,
+  # split by destination MAC. Gate 0: a frame no interface's MAC names (the
+  # peer's own multicast: router solicitations, MLD).
+  - name: vif
+    mclass: Vif
+    arg:
+      default_gate: 0
+      interfaces:
+        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:51:01", ip_addr: "198.51.100.1", ipv6_addr: "2001:db8:51::1", route_domain: 1, gate: 1}
+        - {id: 3, vlan: 0, mac_addr: "02:00:00:00:51:06", ip_addr: "198.51.100.6", route_domain: 3, gate: 3}
+  - name: sink_other
+    mclass: Sink
+  - name: mt_vif
+    mclass: MetadataTest
+    arg: {read: {vif_id: 4, route_domain: 4}}
+
+  # -- N3 ingress: deploy/upf.yaml's classifiers -------------------------------
+  # The Vif's own ARP/ND replies (sender = the interface's address) go back
+  # out the port; the peer's replies go to the transport Router's resolver;
+  # requests and solicitations end here (the Vif answered them); GTP-U goes to
+  # the decap.
+  - name: tag_n3
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+        - {name: transport_route_domain, size: 4, value_int: 1}
+  - name: n3_eth_sort
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 12, num_bytes: 2}
+      default_gate: 1
+  - name: n3_arp_opcode
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 20, num_bytes: 2}
+      default_gate: 0
+  - name: n3_arp_sender_sort
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 28, num_bytes: 4}
+      default_gate: 1
+  - name: n3_ipv6_sort
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 12, num_bytes: 2}
+      default_gate: 1
+  - name: n3_nd_type
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 20, num_bytes: 1}
+        - {offset: 54, num_bytes: 1}
+      default_gate: 2
+  - name: n3_nd_sender_sort
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 22, num_bytes: 8}
+        - {offset: 30, num_bytes: 8}
+      default_gate: 1
+  - name: decap0
+    mclass: GtpuDecap
+  - name: mt_md
+    mclass: MetadataTest
+    arg:
+      read: {endpoint_id: 4, fteid_context: 4, qfi: 1}
+
+  # -- N6 ingress: plain IP, as deploy/veth-port.yaml ---------------------------
+  - name: tag_n6
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: fteid_context, size: 4, value_int: 0}
+        - {name: qfi, size: 1, value_int: 255}
+
+  # -- End Markers: deploy/upf.yaml's set_marker_domain_n3 ----------------------
+  - name: cp_in_n3
+    mclass: PortInc
+    arg: {port: cp_marker_n3}
+  - name: set_marker_domain_n3
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: transport_route_domain, size: 4, value_int: 1}
+        - {name: vif_id, size: 4, value_int: 1}
+
+  # -- the PDR tables and chains the compiler writes into (deploy/veth-port.yaml)
+  - name: pdr_ul
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 26, num_bytes: 4}
+        - {offset: 30, num_bytes: 4}
+        - {offset: 23, num_bytes: 1}
+        - {offset: 34, num_bytes: 2}
+        - {offset: 36, num_bytes: 2}
+        - {attr_name: fteid_context, num_bytes: 4}
+        - {attr_name: qfi, num_bytes: 1}
+      max_tuples: 16
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_ul/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 16, num_bytes: 4}
+  - name: pdr_dl
+    mclass: WildcardMatch
+    arg:
+      fields:
+        - {offset: 26, num_bytes: 4}
+        - {offset: 30, num_bytes: 4}
+        - {offset: 23, num_bytes: 1}
+        - {offset: 34, num_bytes: 2}
+        - {offset: 36, num_bytes: 2}
+        - {attr_name: route_domain, num_bytes: 4}
+        - {attr_name: fteid_context, num_bytes: 4}
+        - {attr_name: qfi, num_bytes: 1}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_dl/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 16, num_bytes: 4}
+        - {attr_name: steering_policy_id, value_offset: 20, num_bytes: 4}
+  - name: mt_ul
+    mclass: Meter
+    arg: {capacity: 65536, levels: 2}
+  - name: cnt_ul
+    mclass: UrrCount
+    arg: {capacity: 65536}
+  - name: mt_dl
+    mclass: Meter
+    arg: {capacity: 65536, levels: 2}
+  - name: cnt_dl
+    mclass: UrrCount
+    arg: {capacity: 65536}
+  - name: atsss
+    mclass: AtsssSteer
+    arg: {policy_attr: steering_policy_id, next_hop_attr: next_hop_id}
+  # The inner hop: next-hop-id mode, which decrements the inner TTL once (the
+  # UPF is one IP hop for the UE's packet). Nothing after it touches the inner
+  # header.
+  - name: rt
+    mclass: Router
+  - name: enc
+    mclass: GtpuEncap
+    arg: {max_tunnels: 65536}
+  # The outer hop: deploy/upf.yaml's rt_transport for N3, dual-stack, with the
+  # resolver's timings made short enough for a lane to watch (D-180,
+  # route/neighbor_resolver.h): a binding is solicited on the tick that takes
+  # it up, an attempt sends 3 probes 100/200/200 ms apart, a resolved neighbor
+  # is reconfirmed after 1 s (a MAC change is followed within about that), and
+  # a failed one is retried every 500 ms. A frame whose gateway is unresolved
+  # goes to gate 2 -- counted on that gate, and onto a Sink, never the port.
+  - name: rt_transport
+    mclass: Router
+    arg:
+      mode: ROUTE_MODE_DESTINATION
+      max_domains: 2
+      max_ipv4_routes: 16
+      max_ipv6_routes: 16
+      max_ipv6_tbl8s: 16
+      domain_attr: transport_route_domain
+      punt_unresolved_gate: 2
+      neighbor_first_probe_ms: 0
+      neighbor_probe_interval_ms: 100
+      neighbor_max_probe_interval_ms: 200
+      neighbor_max_probes: 3
+      neighbor_reachable_lifetime_ms: 1000
+      neighbor_unreachable_retry_ms: 500
+      interfaces:
+        - {id: 1, egress_gate: 0, mac_addr: "02:00:00:00:51:01", addresses: ["198.51.100.1/24", "2001:db8:51::1/64"]}
+  - name: sink_unresolved
+    mclass: Sink
+  - name: port_out
+    mclass: PortOut
+    arg: {port: upf_port}
+
+connections:
+  - {upstream: port_in, downstream: vif}
+  - {upstream: vif, downstream: sink_other}
+  - {upstream: vif, downstream: tag_n3, ogate: 1}
+  - {upstream: vif, downstream: tag_n6, ogate: 3}
+
+  - {upstream: tag_n3, downstream: n3_eth_sort}
+  - {upstream: n3_eth_sort, downstream: n3_arp_opcode}
+  - {upstream: n3_eth_sort, downstream: n3_ipv6_sort, ogate: 1}
+  - {upstream: n3_arp_opcode, downstream: sink_other}
+  - {upstream: n3_arp_opcode, downstream: n3_arp_sender_sort, ogate: 1}
+  - {upstream: n3_arp_sender_sort, downstream: port_out}
+  - {upstream: n3_arp_sender_sort, downstream: rt_transport, ogate: 1}
+  - {upstream: n3_ipv6_sort, downstream: n3_nd_type}
+  - {upstream: n3_ipv6_sort, downstream: decap0, ogate: 1}
+  - {upstream: n3_nd_type, downstream: sink_other}
+  - {upstream: n3_nd_type, downstream: n3_nd_sender_sort, ogate: 1}
+  - {upstream: n3_nd_type, downstream: decap0, ogate: 2}
+  - {upstream: n3_nd_sender_sort, downstream: port_out}
+  - {upstream: n3_nd_sender_sort, downstream: rt_transport, ogate: 1}
+  - {upstream: decap0, downstream: mt_md, ogate: 0}
+  - {upstream: decap0, downstream: pdr_dl, ogate: 1}
+  - {upstream: mt_md, downstream: pdr_ul}
+  - {upstream: pdr_ul, downstream: mt_ul}
+  - {upstream: mt_ul, downstream: cnt_ul}
+  - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
+  - {upstream: cnt_ul, downstream: rt}
+
+  - {upstream: tag_n6, downstream: mt_vif}
+  - {upstream: mt_vif, downstream: pdr_dl}
+  - {upstream: pdr_dl, downstream: mt_dl}
+  - {upstream: mt_dl, downstream: cnt_dl}
+  - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
+  - {upstream: cnt_dl, downstream: atsss}
+  - {upstream: atsss, downstream: rt}
+
+  - {upstream: rt, downstream: port_out}
+  - {upstream: rt, downstream: enc, ogate: 1}
+  - {upstream: enc, downstream: rt_transport}
+  - {upstream: cp_in_n3, downstream: set_marker_domain_n3}
+  - {upstream: set_marker_domain_n3, downstream: rt_transport}
+  - {upstream: rt_transport, downstream: port_out}
+  - {upstream: rt_transport, downstream: sink_unresolved, ogate: 2}
+
+workers:
+  - {wid: 0, core: 0}
+
+resources:
+  rt/next_hops:
+    - key: {id: 1}
+      value: {egress_gate: 0}
+    - key: {id: 2}
+      value: {egress_gate: 1}
+  # The N3 gateway per family, both resolver-owned: no MAC is written here.
+  rt_transport/neighbors:
+    - key: {id: 1}
+      value: {interface_id: 1, ipv4: "198.51.100.4"}
+    - key: {id: 2}
+      value: {interface_id: 1, ipv6: "2001:db8:51::2"}
+  rt_transport/routes:
+    - key: {ipv4: "0.0.0.0", prefix_length: 0, domain: 1}
+      value: {next_hop_id: 1}
+    - key: {ipv6: "::", prefix_length: 0, domain: 1}
+      value: {next_hop_id: 2}
+  n3_eth_sort/rules:
+    - key: {fields: [{value_bin: "CAY="}]}
+      value: {gate: 0}
+  n3_arp_opcode/rules:
+    - key: {fields: [{value_bin: "AAE="}]}
+      value: {gate: 0}
+    - key: {fields: [{value_bin: "AAI="}]}
+      value: {gate: 1}
+  n3_arp_sender_sort/rules:
+    - key: {fields: [{value_bin: "xjNkAQ=="}]}
+      value: {gate: 0}
+  n3_ipv6_sort/rules:
+    - key: {fields: [{value_bin: "ht0="}]}
+      value: {gate: 0}
+  n3_nd_type/rules:
+    - key: {fields: [{value_bin: "Og=="}, {value_bin: "hw=="}]}
+      value: {gate: 0}
+    - key: {fields: [{value_bin: "Og=="}, {value_bin: "iA=="}]}
+      value: {gate: 1}
+  n3_nd_sender_sort/rules:
+    - key: {fields: [{value_bin: "IAENuABRAAA="}, {value_bin: "AAAAAAAAAAE="}]}
+      value: {gate: 0}

@@ -37,7 +37,7 @@ type Session struct {
 	TEID   uint32 // the TEID the gNB expects on the downlink
 	FTEID  uint32 // the uplink F-TEID the SMF pins; 0: the UPF chooses one
 	UEIP   string // the UE's address, an uplink PDR's key and a downlink PDR's
-	GnBIP  string // the gNB's N3 address: the outer header's destination
+	GnBIP  string // the gNB's N3 address (IPv4 or IPv6): the outer header's destination
 	N3IP   string // the UPF's N3 address: the F-TEID the UPF answers with
 	SDF    string // the uplink filter; empty: the default permit for port 53
 }
@@ -111,7 +111,7 @@ func Establish(seq uint32, s Session) *message.SessionEstablishmentRequest {
 			ie.NewApplyAction(applyForw),
 			ie.NewForwardingParameters(
 				ie.NewDestinationInterface(ie.DstInterfaceAccess),
-				ie.NewOuterHeaderCreation(0x0100, s.TEID, s.GnBIP, "", 0, 0, 0),
+				outerHeaderCreation(s.TEID, s.GnBIP),
 			),
 		),
 		ie.NewCreateQER(
@@ -120,6 +120,16 @@ func Establish(seq uint32, s Session) *message.SessionEstablishmentRequest {
 			ie.NewMBR(1000, 2000),
 		),
 	)
+}
+
+// outerHeaderCreation is the OHC toward a gNB: GTP-U/UDP/IPv4 (description
+// 0x0100) for an IPv4 address, GTP-U/UDP/IPv6 (0x0200) for an IPv6 one (TS
+// 29.244 8.2.56).
+func outerHeaderCreation(teid uint32, gnbIP string) *ie.IE {
+	if ip := net.ParseIP(gnbIP); ip != nil && ip.To4() == nil {
+		return ie.NewOuterHeaderCreation(0x0200, teid, "", gnbIP, 0, 0, 0)
+	}
+	return ie.NewOuterHeaderCreation(0x0100, teid, gnbIP, "", 0, 0, 0)
 }
 
 // Modify rewrites the downlink FAR's outer header: the same session (same
@@ -131,7 +141,22 @@ func Modify(seq uint32, seid uint64, farID uint32, teid uint32, gnbIP string) *m
 		ie.NewUpdateFAR(ie.NewFARID(farID), ie.NewApplyAction(applyForw),
 			ie.NewForwardingParameters(
 				ie.NewDestinationInterface(ie.DstInterfaceAccess),
-				ie.NewOuterHeaderCreation(0x0100, teid, gnbIP, "", 0, 0, 0),
+				outerHeaderCreation(teid, gnbIP),
+			)),
+	)
+}
+
+// Handover is Modify as a path switch: the FAR's new tunnel in Update
+// Forwarding Parameters and the message's PFCPSMReq-Flags with SNDEM (0x02,
+// TS 29.244 8.2.31), which asks the UPF to send an End Marker on the tunnel it
+// leaves (5.3.2).
+func Handover(seq uint32, seid uint64, farID uint32, teid uint32, gnbIP string) *message.SessionModificationRequest {
+	return message.NewSessionModificationRequest(0, 0, seid, seq, 0,
+		ie.NewPFCPSMReqFlags(0x02),
+		ie.NewUpdateFAR(ie.NewFARID(farID), ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceAccess),
+				outerHeaderCreation(teid, gnbIP),
 			)),
 	)
 }
