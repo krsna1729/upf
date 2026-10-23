@@ -3069,17 +3069,21 @@ func rulePriority(precedence uint32) int64 {
 // ruleKey is the WildcardMatch rule key for a PDR: for every field of the
 // table, the mask the PDI constrains it with, and the value the packet must
 // carry. A field the PDI does not name is masked out, which is what lets one
-// table hold PDRs of different shapes.
+// table hold PDRs of different shapes. A field the PDI constrains to a range
+// (an SDF filter's ports) is masked out too and named in the key's ranges
+// (BESS D-185: a ranged field's mask is zero, so the range costs no tuple).
 //
 // The value must be canonical (value & ^mask == 0), and the key is the
-// concatenation of mask then value per field.
+// concatenation of mask then value per field, then the ranges.
 func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 	// The table's key message is WildcardMatchRuleKey: one FieldData per
-	// field, values and masks in two parallel lists (protobuf JSON, which is
-	// how the SDK builds it: a bytes field is base64).
+	// field, values and masks in two parallel lists, and the ranges by field
+	// index (protobuf JSON, which is how the SDK builds it: a bytes field is
+	// base64).
 	values := make([]map[string]any, 0, len(fields))
 	masks := make([]map[string]any, 0, len(fields))
-	for _, f := range fields {
+	var ranges []map[string]any
+	for i, f := range fields {
 		width := f.width()
 		mask := make([]byte, width)
 		value := make([]byte, width)
@@ -3087,14 +3091,21 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("the PDI's %s: %w", f, err)
 		}
-		if ok {
+		switch {
+		case ok && m.ranged:
+			ranges = append(ranges, map[string]any{"field": uint32(i), "low": m.low, "high": m.high})
+		case ok:
 			copy(mask, m.mask)
 			copy(value, m.value)
 		}
 		values = append(values, map[string]any{"value_bin": value})
 		masks = append(masks, map[string]any{"value_bin": mask})
 	}
-	return map[string]any{"values": values, "masks": masks}, nil
+	key := map[string]any{"values": values, "masks": masks}
+	if len(ranges) > 0 {
+		key["ranges"] = ranges
+	}
+	return key, nil
 }
 
 // variants is the PDR as one match per (SDF filter, QFI) its PDI names. A PDI
@@ -3151,10 +3162,13 @@ func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 // match is one field's constraint: the bits a PDI fixes, and the mask that says
 // which of them matter. The two differ where the PDI names a prefix -- an SDF
 // filter's "to 10.10.0.0/16" is a rule about a /16, not about the address
-// 10.10.0.0 -- and the mask is what makes it so.
+// 10.10.0.0 -- and the mask is what makes it so. A ranged constraint (an SDF
+// filter's "1000-2000") is the inclusive bounds instead, with no mask.
 type match struct {
-	value []byte
-	mask  []byte
+	value     []byte
+	mask      []byte
+	ranged    bool
+	low, high uint64
 }
 
 // ones is a mask of n bytes, all bits set.
@@ -3164,6 +3178,23 @@ func ones(n int) []byte {
 		b[i] = 0xff
 	}
 	return b
+}
+
+// portMatch is an SDF filter's port constraint (8.2.5's "port" or
+// "port-port"): one port is a masked value, a range is a WildcardMatch range,
+// and the whole domain constrains nothing -- the form BESS reads back, since it
+// drops a range over a field's whole domain (D-185).
+func portMatch(lo, hi uint16) (match, bool, error) {
+	switch {
+	case lo == hi:
+		b := make([]byte, 2)
+		binary.BigEndian.PutUint16(b, lo)
+		return match{value: b, mask: ones(2)}, true, nil
+	case lo == 0 && hi == math.MaxUint16:
+		return match{}, false, nil
+	default:
+		return match{ranged: true, low: uint64(lo), high: uint64(hi)}, true, nil
+	}
 }
 
 // ueAddr reports whether this PDI address names the subscriber's address.
@@ -3339,27 +3370,12 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 		return match{}, false, nil
 	case SrcPort:
 		if sd != nil && sd.sportOK {
-			// A mask can hold one port, not a range: the WildcardMatch path
-			// refuses a range here rather than matching more widely than the
-			// filter.
-			if sd.sportLo != sd.sportHi {
-				return match{}, false, fmt.Errorf("%w: port range %d-%d",
-					errNotExpressible, sd.sportLo, sd.sportHi)
-			}
-			b := make([]byte, 2)
-			binary.BigEndian.PutUint16(b, sd.sportLo)
-			return match{value: b, mask: ones(2)}, true, nil
+			return portMatch(sd.sportLo, sd.sportHi)
 		}
 		return match{}, false, nil
 	case DstPort:
 		if sd != nil && sd.dportOK {
-			if sd.dportLo != sd.dportHi {
-				return match{}, false, fmt.Errorf("%w: port range %d-%d",
-					errNotExpressible, sd.dportLo, sd.dportHi)
-			}
-			b := make([]byte, 2)
-			binary.BigEndian.PutUint16(b, sd.dportLo)
-			return match{value: b, mask: ones(2)}, true, nil
+			return portMatch(sd.dportLo, sd.dportHi)
 		}
 		return match{}, false, nil
 	case QFI:
@@ -4313,7 +4329,17 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 			if err != nil {
 				return fmt.Errorf("Outer Header Creation: %w", err)
 			}
+			// The peer is the IPv4 address when the IE carries one (the
+			// description's 0x0100), else the IPv6 address (0x0200): the
+			// tunnel's local endpoint is chosen by the peer's family
+			// (tunnelEndpoint), so either family is carried as is.
 			peer, ok := netip.AddrFromSlice(fields.IPv4Address)
+			if !ok {
+				peer, ok = netip.AddrFromSlice(fields.IPv6Address)
+				if ok && peer.Is4In6() {
+					return fmt.Errorf("Outer Header Creation names the IPv4-mapped IPv6 address %s", peer)
+				}
+			}
 			if fields.TEID == 0 {
 				if ok && peer.Unmap().IsUnspecified() {
 					// A zero TEID with the unspecified address is no tunnel:
@@ -4328,7 +4354,7 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 				return errors.New("Outer Header Creation without a TEID")
 			}
 			if !ok {
-				return errors.New("Outer Header Creation without an IPv4 address")
+				return errors.New("Outer Header Creation without an IPv4 or IPv6 address")
 			}
 			f.hasOuter, f.teid, f.peer = true, fields.TEID, peer.Unmap()
 		case ie.TransportLevelMarking:
@@ -4665,9 +4691,9 @@ type sdfFilter struct {
 	dstAssigned bool
 	// sportLo/sportHi and dportLo/dportHi are the SDF filter's port *ranges*,
 	// inclusive, with sportOK/dportOK saying the filter named one at all
-	// (TS 29.244 8.2.5's IPFilterRule carries "port" or "port-port"). A range
-	// that is not one value has no mask to express it in the WildcardMatch key,
-	// so the key builder refuses it there (matchValue).
+	// (TS 29.244 8.2.5's IPFilterRule carries "port" or "port-port"). The key
+	// builder writes one port as a masked value and a range as a WildcardMatch
+	// range (portMatch).
 	sportLo, sportHi uint16
 	sportOK          bool
 	dportLo, dportHi uint16
@@ -4886,9 +4912,8 @@ type portRange struct {
 }
 
 // parseFilterPort reads one port of a flow description: a number, or the
-// inclusive range "low-high". The range is kept whole; whether a table can
-// carry it is the table's question, answered where the rule is built (a
-// WildcardMatch mask cannot).
+// inclusive range "low-high". The range is kept whole; the key builder
+// decides its form (portMatch).
 func parseFilterPort(word string) (portRange, error) {
 	if lo, hi, ok := strings.Cut(word, "-"); ok {
 		a, err := strconv.ParseUint(lo, 10, 16)

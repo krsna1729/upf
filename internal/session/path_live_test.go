@@ -136,6 +136,56 @@ func TestLiveSessionCarriesPacketsWithAnSDFPrefix(t *testing.T) {
 		"permit out udp from any to 10.45.0.0/16 53"), false)
 }
 
+// TestLiveSessionCarriesPacketsWithAPortRange: the downlink filter names a
+// port range around the frames' destination port (53) instead of the port, so
+// the rule is a WildcardMatch range on that field (BESS D-185) and the packets
+// must still cross.
+func TestLiveSessionCarriesPacketsWithAPortRange(t *testing.T) {
+	carriesPackets(t, pathEstablishmentWithSDF(0x3334, "10.45.0.2",
+		"permit out udp from any to 10.45.0.0/16 50-60"), false)
+}
+
+// TestLiveSessionCarriesNothingOutsideAPortRange is the range's other edge: a
+// range that stops one port short of the frames' 53 (54-60) must select none of
+// them. Without it, a range compiled to a masked-out field would pass the arm
+// above while matching every port.
+func TestLiveSessionCarriesNothingOutsideAPortRange(t *testing.T) {
+	target := os.Getenv("UPF_BESS_TARGET")
+	if target == "" {
+		t.Skip("set UPF_BESS_TARGET (ci/session-path.sh does) to run against a live bessd")
+	}
+	ctx := context.Background()
+	client, err := bess.Dial(ctx, target)
+	if err != nil {
+		t.Fatalf("dialing %s: %v", target, err)
+	}
+	defer client.Close()
+	if err := client.Refresh(ctx); err != nil {
+		t.Fatalf("reading the daemon's schema: %v", err)
+	}
+	c := New(liveConfig(), client, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	resp := c.Establish(pathEstablishmentWithSDF(0x3335, "10.45.0.2",
+		"permit out udp from any to 10.45.0.0/16 54-60")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the daemon refused the establishment with cause %d", got)
+	}
+	defer func() {
+		del := message.NewSessionDeletionRequest(0, 0, upFSEID(t, resp), 9, 0)
+		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
+			t.Errorf("the deletion answered cause %d", got)
+		}
+	}()
+	// The uplink is not constrained by the downlink filter: its packets
+	// crossing is what says the session reached the packet path at all.
+	waitForPackets(t, ctx, client, "rt", 10*time.Second)
+	before := gatePackets(t, ctx, client, "enc")
+	time.Sleep(time.Second)
+	if n := gatePackets(t, ctx, client, "enc") - before; n != 0 {
+		t.Errorf("a range of 54-60 let %v downlink packets to port 53 through", n)
+	}
+}
+
 // carriesPackets establishes one session and waits for both chains to carry
 // packets. controlArm belongs to the daemon's first session: it is the reading
 // that makes the later counts evidence (the sources run from the moment the

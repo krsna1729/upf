@@ -47,13 +47,13 @@ func TestStatsCountWhatTheSMFAsked(t *testing.T) {
 		t.Errorf("after one modification the counters are %+v, want one", got)
 	}
 
-	// A refusal: a port range is a rule the classifier cannot carry.
+	// A refusal: an IPv6 filter address is a rule the IPv4 key cannot carry.
 	if got := cause(t, c.Establish(message.NewSessionEstablishmentRequest(0, 0, 2, 3, 0,
 		ie.NewFSEID(2, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any to assigned 1000-2000", "", "", "", 0)),
+				ie.NewSDFFilter("permit out udp from 2001:db8::1 to assigned", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
 			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess)))))); got != ie.CauseRuleCreationModificationFailure {

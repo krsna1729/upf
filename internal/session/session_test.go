@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -2609,24 +2610,92 @@ func TestDropFARNeedsNoActionRecord(t *testing.T) {
 	}
 }
 
-func TestPortRangeIsRefusedNotMatchedTooWidely(t *testing.T) {
-	rec := &recorder{}
-	c := New(testConfig(), rec, quietLogger())
-	req := message.NewSessionEstablishmentRequest(0, 0, 0x5555, 1, 0,
-		ie.NewFSEID(0x5555, nil, nil),
-		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
-			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any to assigned 1000-2000", "", "", "", 0)),
-			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
-			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
-	)
-	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
-		t.Errorf("a port range answered cause %d, want a rule failure", got)
+// An SDF port range is a WildcardMatch range on its field (BESS D-185), with
+// the field masked out: never a widened mask, never a refusal. A range over the
+// whole port domain constrains nothing, the form BESS reads back.
+func TestAPortRangeIsARangeOnItsField(t *testing.T) {
+	const dstPort = 4 // testConfig's downlink fields: SrcIP DstIP Proto SrcPort DstPort ...
+	for _, tc := range []struct {
+		filter string
+		ranges []map[string]any
+	}{
+		{"permit out udp from any to assigned 1000-2000",
+			[]map[string]any{{"field": uint32(dstPort), "low": uint64(1000), "high": uint64(2000)}}},
+		{"permit out udp from any to assigned 0-65535", nil},
+	} {
+		rec := &recorder{}
+		c := New(testConfig(), rec, quietLogger())
+		req := message.NewSessionEstablishmentRequest(0, 0, 0x5555, 1, 0,
+			ie.NewFSEID(0x5555, nil, nil),
+			ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
+					ie.NewSDFFilter(tc.filter, "", "", "", 0)),
+				ie.NewFARID(1)),
+			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
+		)
+		if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+			t.Fatalf("%q answered cause %d", tc.filter, got)
+		}
+		rs := rules(rec.last())
+		if len(rs) != 1 {
+			t.Fatalf("%q wrote %d rules, want 1", tc.filter, len(rs))
+		}
+		if m := rs[0].mask(dstPort); !bytes.Equal(m, []byte{0, 0}) {
+			t.Errorf("%q: the destination port's mask is %x, want it masked out", tc.filter, m)
+		}
+		got, _ := rs[0].change.Key["ranges"].([]map[string]any)
+		if !reflect.DeepEqual(got, tc.ranges) {
+			t.Errorf("%q: the key's ranges are %v, want %v", tc.filter, got, tc.ranges)
+		}
 	}
-	if len(rec.txns) != 0 {
-		t.Error("a refused session wrote to the dataplane")
+}
+
+// An Outer Header Creation toward an IPv6 peer (description 0x0200) is a tunnel
+// whose outer header is IPv6 end to end: the peer as named, and the local
+// address the N3 endpoint's IPv6 one. An IPv4-mapped address in the IPv6 field
+// names no IPv6 peer and is refused.
+func TestAnIPv6OuterHeaderCreationIsAnIPv6Tunnel(t *testing.T) {
+	for _, tc := range []struct {
+		peer   string
+		accept bool
+	}{
+		{"2001:db8:3::2", true},
+		{"::ffff:10.20.30.2", false},
+	} {
+		cfg := testConfig()
+		cfg.FTEIDEndpoints[0].IPv6 = netip.MustParseAddr("2001:db8:3::1")
+		rec := &recorder{}
+		c := New(cfg, rec, quietLogger())
+		req := message.NewSessionEstablishmentRequest(0, 0, 0x5557, 1, 0,
+			ie.NewFSEID(0x5557, nil, nil),
+			ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0)),
+				ie.NewFARID(1)),
+			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess),
+					ie.NewOuterHeaderCreation(0x0200, 0x11223344, "", tc.peer, 0, 0, 0))),
+		)
+		got := cause(t, c.Establish(req))
+		if !tc.accept {
+			if got == ie.CauseRequestAccepted {
+				t.Errorf("an IPv4-mapped OHC peer %s was accepted", tc.peer)
+			}
+			continue
+		}
+		if got != ie.CauseRequestAccepted {
+			t.Fatalf("an IPv6 OHC peer answered cause %d", got)
+		}
+		dl := rules(rec.last())[0]
+		tunnel := find(t, rec.last(), cfg.Down.Tunnels+"/tunnels", "action_id", dl.actionID())
+		if p := tunnel.Value["peer_address"]; !bytes.Equal(p.([]byte), netip.MustParseAddr(tc.peer).AsSlice()) {
+			t.Errorf("the tunnel's peer is %x, want %s", p, tc.peer)
+		}
+		if l := tunnel.Value["local_address"]; !bytes.Equal(l.([]byte), netip.MustParseAddr("2001:db8:3::1").AsSlice()) {
+			t.Errorf("the tunnel's local address is %x, want the endpoint's IPv6 2001:db8:3::1", l)
+		}
 	}
 }
 
