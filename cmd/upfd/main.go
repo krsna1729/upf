@@ -96,15 +96,6 @@ func run() error {
 		"the WildcardMatch module holding the uplink PDR rules")
 	pdrTableDL := flag.String("pdr-table-dl", "pdr_dl",
 		"the WildcardMatch module holding the downlink PDR rules")
-	firewallUL := flag.String("firewall-ul", "",
-		"the uplink firewall module whose \"<name>/rules\" policy holds the uplink PDRs "+
-			"instead of -pdr-table-ul: BESS's `firewall` table, whose rules carry CIDR "+
-			"prefixes of either family, a protocol and port *ranges*. Empty (the default): "+
-			"the WildcardMatch path, where a port range and an IPv6 prefix are refused. No "+
-			"deployed graph carries that module yet, so naming one points at a module the "+
-			"daemon does not have (docs/claims.md)")
-	firewallDL := flag.String("firewall-dl", "",
-		"the downlink firewall module, as -firewall-ul is the uplink one")
 	metersDL := flag.String("meters-dl", "mt_dl", "the downlink Meter module")
 	countersUL := flag.String("counters-ul", "cnt_ul",
 		"the uplink UrrCount module (per-rule usage counters); empty: the graph charges nothing")
@@ -270,7 +261,6 @@ func run() error {
 			atsss:         *atsss,
 			routeMode:     mode,
 			pdrTableUL:    *pdrTableUL, pdrTableDL: *pdrTableDL,
-			firewallUL: *firewallUL, firewallDL: *firewallDL,
 			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
 			gtpuDecap:      *gtpuDecap,
@@ -356,10 +346,8 @@ func run() error {
 		}
 		ready := []any{"bess", *bessAddr, "bess_version", client.Version(),
 			"daemon_epoch", client.Epoch(), "fteid_endpoints", graph.FTEIDEndpoints,
-			// The rule home each direction uses: the WildcardMatch table, or
-			// the firewall opt-in the deployment named.
-			"uplink", ruleHome(graph.Up),
-			"downlink", ruleHome(graph.Down)}
+			"uplink", graph.Up.PDRTable,
+			"downlink", graph.Down.PDRTable}
 		if graph.Instances != nil {
 			ready = append(ready, "network_instances", strings.Join(graph.Instances.Names(), ","))
 		}
@@ -711,8 +699,6 @@ type graphArgs struct {
 	maxDomains     uint32
 	pdrTableUL     string
 	pdrTableDL     string
-	firewallUL     string
-	firewallDL     string
 	pdrFieldsUL    string
 	pdrFieldsDL    string
 	gtpuDecap      string
@@ -728,14 +714,6 @@ type graphArgs struct {
 	tunnels        string
 	tunnelsUL      string
 	endMarker      string
-}
-
-// ruleHome names a direction's rule home, for the readiness log.
-func ruleHome(d session.Direction) string {
-	if d.Firewall != "" {
-		return "firewall:" + d.Firewall
-	}
-	return "wildcard:" + d.PDRTable
 }
 
 // graphConfig is the deployed graph's shape, from the flags.
@@ -809,13 +787,8 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		Up: session.Direction{
 			PDRTable:  a.pdrTableUL,
 			PDRFields: upFields,
-			// The uplink's PDRs may live in a firewall module instead of the
-			// WildcardMatch table (BESS's `firewall`, whose rules carry port
-			// ranges and both address families); empty is the table. The two
-			// are one home each (the check above).
-			Firewall: a.firewallUL,
-			Meters:   a.metersUL,
-			Counters: a.countersUL,
+			Meters:    a.metersUL,
+			Counters:  a.countersUL,
 			// An uplink forward can add an outer header of its own: indirect
 			// data forwarding (Destination Interface Access) and the uplink of
 			// an N9 tunnel (Destination Interface Core with an Outer Header
@@ -828,7 +801,6 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		Down: session.Direction{
 			PDRTable:  a.pdrTableDL,
 			PDRFields: downFields,
-			Firewall:  a.firewallDL,
 			Meters:    a.metersDL,
 			Counters:  a.countersDL,
 			NextHop:   a.n3NextHop,

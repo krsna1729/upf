@@ -177,48 +177,10 @@ the classifier and the meter. The graph has `pdr_ul → mt_ul → rt` and
 Both results — the gate and the classifier's result record — come from one lookup
 (`{gate, ActionId}`, the BESS-side item *Classifier result model*).
 
-**The firewall path (opt-in).** A direction may name a BESS `firewall` module
-instead of its WildcardMatch table (`session.Direction.Firewall`, `upfd
--firewall-ul`/`-firewall-dl`). Its table is tuple space over the *masked fields
-alone* — one group per (family, protocol, source prefix length, destination
-prefix length) — and a rule's ports are checked after its group's key hits, so
-a port **range** costs it no group, no mask and no entry (BESS D-147); IPv4 and
-IPv6 rules live in one policy. Those are the two shapes a 4-byte mask cannot
-carry, and they are what the WildcardMatch path refuses rather than widening
-(`internal/session`: the SDF's port range, and a prefix that is not IPv4).
-
-Three things follow from the module's own shape, and they are what a deployment
-has to know before naming one:
-
-- **The policy is written whole.** `<module>/rules` is a *singleton* holding the
-  ordered policy, and the module builds the table whole and swaps it. So the
-  compiler writes every live session's rules of that module, not one session's:
-  a write of its own would erase the rules of the sessions already programmed,
-  and a packet no rule matches is *dropped*, not passed. The order is the
-  spec's own — TS 29.244 8.2.11 has the lower Precedence value win and a
-  firewall list applies its first matching rule, so the list is sorted by
-  Precedence ascending, with no inversion (unlike `rulePriority`, where the
-  classifier applies the *higher* priority).
-- **A rule is a match, not an action.** `FirewallArg.Rule` carries
-  `src_ip`/`dst_ip` (CIDR strings whose length is mandatory), `proto`, the four
-  port-range fields and `drop`; the module's only words are drop and pass, it
-  passes a matching packet on the gate it arrived on and writes no packet
-  metadata. So a firewall rule cannot name the ActionId or the next hop the
-  WildcardMatch path's rule names, nor the PDI's QFI, the route domain or the
-  tunnel: those stay fields of the WildcardMatch key, and a deployment that
-  wants meters, tunnels or per-rule counters behind the classifier needs BESS
-  to carry an action word in the rule first. A PDR that buffers is refused on
-  this path for the same reason (its packets are delivered on the store's gate,
-  and a firewall rule has only the one it arrived on). What the two paths do
-  share is the choice of sides: the uplink's rule is its UE address (or the
-  SDF's source), the downlink's is the SDF's destination or the UE's.
-- **No deployed graph names the module.** It is BESS's D-147 work and is not in
-  the stage the `ci/` arms run against, and a graph that names a module the
-  daemon does not have fails to load — so no `deploy/*.yaml` graph carries it,
-  and the flag is the only way to ask for the path. Nothing about this changes
-  a deployment that does not pass it: with no module named, both directions are
-  the WildcardMatch table with its refusals
-  (`TestTheFirewallPathIsOptIn`).
+**What the key cannot carry is refused.** A 4-byte masked key has no form for
+an SDF port **range** or a prefix that is not IPv4, so the compiler refuses
+those PDRs with cause 73 rather than widening the rule (`internal/session`,
+`matchValue`; claims status-6 and status-7).
 
 **The action record** (one cache line, read once, never written by a worker):
 
@@ -388,7 +350,7 @@ that MBR allows for 51-byte packets plus a token bucket's slack.
 | OMEC pattern | Why it is unnecessary here | What this repo does instead |
 |---|---|---|
 | A goroutine and a `ModuleCommand` per PDR/FAR/QER, unordered; `SendMsgToUPFWithCompletion` per session | BESS's transaction engine orders, validates and rolls back server-side; a client that orders internals has to reimplement all of it | one `Transaction` per session change, `WithExpectedGeneration` when the caller has a generation in hand |
-| Cartesian expansion of port ranges into many rules | a range is a set of masked values **per field** (an n-bit field decomposes into at most 2n-2 masked entries), and a rule whose masks cover several fields matches the *product* of those per-field sets: a two-port range is up to 30x30 entries, a smaller product than OMEC's naive expansion but still a product. `max_tuples` is the budget that bounds it, and a rule whose masks cannot carry the constraint is refused rather than widened (docs/claims.md) | one rule per PDR with a masked key, and the opt-in firewall path (above) for the ranges that key cannot carry: a range there costs no group, no mask and no entry |
+| Cartesian expansion of port ranges into many rules | a range is a set of masked values **per field** (an n-bit field decomposes into at most 2n-2 masked entries), and a rule whose masks cover several fields matches the *product* of those per-field sets: a two-port range is up to 30x30 entries, a smaller product than OMEC's naive expansion but still a product. `max_tuples` is the budget that bounds it, and a rule whose masks cannot carry the constraint is refused rather than widened (docs/claims.md) | one rule per PDR with a masked key; a port range is refused (claims status-6) |
 | Client-side establishment, then a second pass to modify | desired state is the model: `ApplyPipeline` diffs and plans, and resource contents ride along in the same call | `Pipeline` + `PlanPipeline` before a change, `ApplyPipeline` for topology |
 | Retries, idempotency and "did it apply?" reinvented in the client | the SDK owns it: one request id per logical transaction, `GetTransaction` after an unanswered send, `DaemonRestartedError` when the epoch moved | `internal/bess` wraps exactly that and nothing else |
 | State in the controller that the dataplane also holds (and they drift) | the dataplane is the state of record; sessions are reconstructible | the controller keeps only what PFCP needs (session ids, SEIDs, the last reported counters) |
@@ -502,9 +464,8 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   alone. The maps the compiler owns are emptied in the daemon with
   `Control.ResetResources`: one request names them, the daemon converges each
   to no entries and applies the erases in batches, so no session key is read
-  over the wire and the 64 MiB message limit no longer bounds a table. Two
-  resources are not whole-table clears. A firewall is a singleton whose value is
-  the whole policy, so the sweep replaces a non-empty policy with an empty one.
+  over the wire and the 64 MiB message limit no longer bounds a table. One
+  resource is not a whole-table clear.
   An ARP responder table holds the interface's own entry beside the subscribers'
   -- the one table with two writers -- so the sweep reads it with
   `ReadResource`'s pages and erases only the addresses inside the interface's
@@ -804,9 +765,7 @@ session.
 For GTP-U sessions, the shipped `pdr_ul` and `pdr_dl` stages are shared
 `WildcardMatch` tables; there is no separate per-session selector. The compiler
 writes composite admission keys to `GtpuDecap`. Endpoint metadata and
-`route_domain` also form part of the downlink PDR key. The optional `Firewall`
-path cannot match endpoint-scoped F-TEID metadata, so the compiler refuses
-F-TEID PDRs when that path is selected.
+`route_domain` also form part of the downlink PDR key.
 
 ## Where a table lives: shared, per-worker, or behind a ring
 
@@ -885,9 +844,9 @@ instances are bounded by the domain count, so the number of domains must stay
 small. The fixed cost and realistic prefix distribution are measurements to
 make; what is settled is the shape.
 
-**The control plane has three O(total sessions) operations**, and they fail
-before the dataplane footprint above becomes the limit. They are all ours, and
-the 1M target is a claim about the whole system, so all three have to be
+**The control plane has two O(total sessions) operations**, and they fail
+before the dataplane footprint above becomes the limit. They are both ours, and
+the 1M target is a claim about the whole system, so both have to be
 addressed:
 
 1. **`Compiler.Sweep`.** The sweep no longer reads session tables key by key:
@@ -898,29 +857,7 @@ addressed:
    is gone from the sweep's path; the remaining per-key work is the ARP
    subscribers', whose number is the interfaces' pools, not the sessions'. See
    "Restart and failure semantics".
-2. **The firewall policy is a whole-policy singleton, so every session change
-   rewrites every session's rules.** `compile.go`'s `firewallChanges` builds
-   "the whole policy of every configured firewall module ... every live
-   session's rules", because BESS's `Firewall` exposes `rules` as a singleton
-   (`ResourceTable::Singleton<FirewallArg>("rules", false)`, D-147) that takes
-   the policy, not a rule. That is O(all rules) per change -- the shared-table
-   scaling problem, in the control plane -- and it would bite precisely the
-   deployment that needs that path (ranges and IPv6 at scale). It is a
-   *deliberate* property of that module (one table, replaced whole, published by
-   RCU, workers never paused: right for a firewall, wrong for per-session
-   programming), and it is opt-in today (a no-op for a deployment that
-   configures no firewall module, which is every deployment today), so it is a
-   trap for the future rather than a present defect. The UPF's PDR classifiers
-   use keyed rule resources: BESS `WildcardMatch` and `ExactMatch` expose
-   `rules` as `ResourceTable::Map<Key, Value>` with `settings` separate, so a
-   session update writes only affected PDR keys. `Firewall` does not: it exposes
-   one `rules` singleton, so each session update replaces the whole policy. This
-   is a future limit of the opt-in firewall path, not a defect in the default
-   PDR path. Firewall support at session scale needs a keyed or per-session
-   resource contract; do not add a second classifier profile to duplicate the
-   PDR path. The general lesson is worth keeping: a whole-policy write is O(all
-   rules), so check each new resource's write granularity.
-3. **The URR report loop's read path.** `upfd` calls `Compiler.EvaluateAll` once
+2. **The URR report loop's read path.** `upfd` calls `Compiler.EvaluateAll` once
    per `-urr-interval` tick (`cmd/upfd/main.go`), which walks every session, and
    each session's `Evaluate` makes its **own** `reader.RuleCounts` RPC per
    counter module (`internal/session/report.go`) -- at 1M sessions that is one to

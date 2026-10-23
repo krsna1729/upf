@@ -237,17 +237,6 @@ type Direction struct {
 	PDRTable string
 	// PDRFields is that table's key, in the graph's order.
 	PDRFields []Field
-	// Firewall is the firewall module ("fw_ul", "fw_dl") whose "<name>/rules"
-	// singleton holds this direction's PDRs on the opt-in firewall path
-	// (docs/design.md, "The firewall path"): one ordered policy of masked
-	// 5-tuple rules -- prefix and length per address, protocol, port *ranges* --
-	// where IPv4 and IPv6 rules live in one table. It replaces PDRTable for
-	// this direction; the fields a WildcardMatch key could carry and a
-	// firewall key cannot (the QFI, the route domain, the tunnel) are not part
-	// of it. Empty, the default, is the WildcardMatch path with its refusals:
-	// the installed graph carries no firewall module yet, so no deployment
-	// names one (docs/claims.md).
-	Firewall string
 	// Meters is the Meter module its QER meters live in. The module is
 	// built with `levels: 2`: the classifier's result writes the PDR's own
 	// rate-bearing QER first and the session's shared one second, so a packet
@@ -1446,8 +1435,7 @@ func (p *idPool) release(id uint32) {
 }
 
 // resource names, as the deployed graph spells them.
-func rulesRes(d Direction) string    { return d.PDRTable + "/rules" }
-func firewallRes(d Direction) string { return d.Firewall + "/rules" }
+func rulesRes(d Direction) string { return d.PDRTable + "/rules" }
 
 func (c *Compiler) teidRes() string { return c.cfg.GTPUDecap + "/fteids" }
 func metersRes(d Direction) string  { return d.Meters + "/meters" }
@@ -1570,15 +1558,6 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	all = append(all, s.stale...)
 	for _, p := range all {
 		dir := c.direction(p)
-		if dir.Firewall != "" {
-			// The rule lives in the direction's firewall policy, which this
-			// deletion rewrites below (a policy holds the rules of every live
-			// session, so one session's are not a change of their own). The
-			// WildcardMatch key would not even be built: a PDR the firewall
-			// path carries may name a port range or an IPv6 prefix, which that
-			// key refuses.
-			continue
-		}
 		keys, err := p.ruleKeys(dir.PDRFields)
 		if err != nil {
 			// The session's rules were written with these keys, so this is a
@@ -1673,19 +1652,6 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			add(bess.Change{Resource: metersRes(c.cfg.Down), Key: map[string]any{"id": q.meterDL}})
 		}
 	}
-	// A firewall policy this session had rules in is rewritten without them:
-	// the resource is a singleton, so what a deletion withdraws is one rule of
-	// a list, not a key. The session is still in the model here (it is deleted
-	// once this transaction has landed), so it is named as the one to leave
-	// out. The policy is built under the lock, because it reads every live
-	// session's PDRs.
-	c.mu.Lock()
-	policies, err := c.firewallChanges(nil, s)
-	c.mu.Unlock()
-	if err != nil {
-		return fmt.Errorf("rewriting the firewall policies: %w", err)
-	}
-	changes = append(changes, policies...)
 	if len(changes) != 0 {
 		if err := c.ap.Apply(ctx, changes...); err != nil {
 			return err
@@ -1734,11 +1700,6 @@ func (c *Compiler) settle(s *Session) {
 	live := map[string]bool{}
 	for _, p := range s.PDRs {
 		dir := c.direction(p)
-		if dir.Firewall != "" {
-			// A firewall-path PDR holds no rule key: its rule is a rule of the
-			// direction's policy, which no session claims (compile).
-			continue
-		}
 		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
 			for _, key := range keys {
 				live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
@@ -1754,9 +1715,6 @@ func (c *Compiler) settle(s *Session) {
 	}
 	for _, p := range gones {
 		dir := c.direction(p)
-		if dir.Firewall != "" {
-			continue
-		}
 		keys, err := p.ruleKeys(dir.PDRFields)
 		if err != nil {
 			continue

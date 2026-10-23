@@ -49,13 +49,6 @@ func liveConfig() Config {
 	if os.Getenv("UPF_ROUTE_MODE") == "destination" {
 		cfg.RouteMode = RouteByDestination
 	}
-	// UPF_FIREWALL=1 selects the opt-in firewall path
-	// (`deploy/firewall-path.yaml`): it holds each direction's PDRs as one
-	// ordered policy rather than using the WildcardMatch result path.
-	if os.Getenv("UPF_FIREWALL") == "1" {
-		cfg.Up.PDRTable, cfg.Up.PDRFields, cfg.Up.Firewall = "", nil, "fw_ul"
-		cfg.Down.PDRTable, cfg.Down.PDRFields, cfg.Down.Firewall = "", nil, "fw_dl"
-	}
 	// MaxActions, MaxMeters and MaxTEIDs keep their defaults. The live graphs
 	// set matching capacities on Meter, UrrCount and GtpuEncap; compiler ID
 	// spaces must fit those resource limits or the session is refused.

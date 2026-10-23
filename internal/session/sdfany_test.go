@@ -132,39 +132,3 @@ func TestFiltersAndQFIsMultiplyAndModificationErasesWhatItDrops(t *testing.T) {
 		t.Errorf("the deletion erased %d uplink rules, want 1", len(erased))
 	}
 }
-
-func TestSeveralSDFFiltersAreSeveralFirewallRules(t *testing.T) {
-	rec := &recorder{}
-	c := New(firewallConfig("", "fw_dl"), rec, quietLogger())
-	req := message.NewSessionEstablishmentRequest(0, 0, 0x7b04, 1, 0,
-		ie.NewFSEID(0x7b04, nil, nil),
-		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(100),
-			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter(udp53, "", "", "", 0),
-				ie.NewSDFFilter(tcp443, "", "", "", 0)),
-			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
-			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
-	)
-	if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
-		t.Fatalf("cause %d", got)
-	}
-	list := firewallPolicy(t, rec.last(), "fw_dl/rules")
-	ports := map[uint32]bool{}
-	for _, r := range list {
-		p, _ := r["src_port_low"].(uint32)
-		ports[p] = true
-	}
-	if len(list) != 2 || !ports[53] || !ports[443] {
-		t.Errorf("the list is %v, want a rule for source port 53 and one for 443", list)
-	}
-}
-
-func TestTheFirewallPathRefusesAPDIThatNamesAQFI(t *testing.T) {
-	rec := &recorder{}
-	c := New(firewallConfig("fw_ul", ""), rec, quietLogger())
-	if got := cause(t, c.Establish(uplinkPDI(0x7b05, []string{udp53}, []uint8{5}))); got != ie.CauseRuleCreationModificationFailure {
-		t.Errorf("cause %d, want a rule failure: the firewall has no QFI field, so the rule would match every flow", got)
-	}
-}

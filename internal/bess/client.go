@@ -576,8 +576,7 @@ func (c *Client) ResetResources(ctx context.Context, names ...string) (uint64, e
 // Naming several resources packs all of them into one response, and the daemon
 // refuses a response above its 64 MiB message limit with RESOURCE_EXHAUSTED
 // ("name fewer resources"). Use ResourcePages for a table that may be large;
-// Contents is for a small table or a singleton (the firewall policy in
-// session.Compiler.Sweep).
+// Contents is for a small table or a singleton.
 func (c *Client) Contents(ctx context.Context, names ...string) (map[string][]Entry, error) {
 	snap, err := c.sdk.Pipeline(ctx, sdk.WithResources(names...))
 	if err != nil {

@@ -27,14 +27,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-# FIREWALL=1 runs the lane on BESS's own `firewall` module, in both directions
-# (deploy/firewall-path.yaml).
-FIREWALL=${FIREWALL:-0}
-if [ "$FIREWALL" = 1 ]; then
-  GRAPH=${GRAPH:-$ROOT/deploy/firewall-path.yaml}
-else
-  GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
-fi
+GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 SECONDS_RUN=${SECONDS_RUN:-3}
 
@@ -68,7 +61,7 @@ bessd_apply "$RENDERED"
 # The Go half: the control arm (counters zero), the session, then the counters
 # again. Run from the repository root so the module and its workspace resolve.
 cd "$ROOT"
-MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_FIREWALL=$FIREWALL UPF_ROUTE_MODE=${ROUTE_MODE:-hop} \
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_ROUTE_MODE=${ROUTE_MODE:-hop} \
   $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveSessionSendsTheEndMarkerOnSNDEM|TestLiveErrorIndicationBecomesAnERIRReport|TestLiveEndMarkerBecomesAnEMRRReport|TestLiveGBRSplitsTheMeter' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log, per dump (the helper

@@ -293,37 +293,27 @@
   {
    "id": "status-6",
    "scope": "status",
-   "evidence": [
-    "TestAPortRangeCompilesToAFirewallRuleWithItsRange",
-    "TestPortRangeIsRefusedNotMatchedTooWidely"
-   ],
+   "evidence": [],
    "result": {
-    "state": "ok",
-    "evidence": {
-     "TestAPortRangeCompilesToAFirewallRuleWithItsRange": {
-      "state": "ok"
-     },
-     "TestPortRangeIsRefusedNotMatchedTooWidely": {
-      "state": "ok"
-     }
-    }
+    "state": "gap",
+    "evidence": {}
    },
    "clause": "8.2.5",
    "part": "ies",
    "title": "a port **range** in an SDF filter",
-   "declared": "refused **on the WildcardMatch path**, deliberately: a mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter. The opt-in firewall path carries it instead: its ports are checked after the group's masked key hits, so a range costs no group, no mask and no entry",
+   "declared": "refused, deliberately: a WildcardMatch mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter, so the session is refused with cause 73",
    "spec": "TS 29.244",
    "messages": [
     "Shared information elements"
    ],
    "message": "Shared information elements",
    "statement": "",
-   "detail": "refused **on the WildcardMatch path**, deliberately: a mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter. The opt-in firewall path carries it instead: its ports are checked after the group's masked key hits, so a range costs no group, no mask and no entry",
-   "effect": "",
+   "detail": "refused, deliberately: a WildcardMatch mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter, so the session is refused with cause 73",
+   "effect": "an SMF that provisions a port range (8.2.5's \"port-port\") is refused rather than served; matching a range needs a classifier that checks ranges after its masked key hits",
    "extra": [
     {
      "name": "evidence",
-     "value": "TestPortRangeIsRefusedNotMatchedTooWidely (the refusal), TestAPortRangeCompilesToAFirewallRuleWithItsRange (the rule)"
+     "value": "TestPortRangeIsRefusedNotMatchedTooWidely (the refusal: no rule wider than the filter)"
     }
    ],
    "kind": "conformance",
@@ -340,21 +330,13 @@
    "id": "status-7",
    "scope": "status",
    "evidence": [
-    "TestAMixedFamilyFirewallRuleIsRefused",
     "TestANonIPv4PDIIsRefusedNotWidened",
-    "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly",
     "TestAnSDFPrefixIsAPrefixNotAnAddress"
    ],
    "result": {
     "state": "ok",
     "evidence": {
-     "TestAMixedFamilyFirewallRuleIsRefused": {
-      "state": "ok"
-     },
      "TestANonIPv4PDIIsRefusedNotWidened": {
-      "state": "ok"
-     },
-     "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
       "state": "ok"
      },
      "TestAnSDFPrefixIsAPrefixNotAnAddress": {
@@ -365,19 +347,19 @@
    "clause": "8.2.5",
    "part": "ies",
    "title": "a non-IPv4 UE address on the IPv4 PDR path, and an SDF prefix whose address carries host bits",
-   "declared": "refused with cause 73 for a non-IPv4 UE PDI on the WildcardMatch path, whose address fields are four bytes; IPv6 SDF prefixes are supported on the opt-in firewall path, but mixed-family firewall rules are refused. A prefix with host bits is canonicalized to its network",
+   "declared": "refused with cause 73 for a non-IPv4 UE PDI or an IPv6 SDF prefix: the WildcardMatch address fields are four bytes. A prefix with host bits is canonicalized to its network",
    "spec": "TS 29.244",
    "messages": [
     "Shared information elements"
    ],
    "message": "Shared information elements",
    "statement": "",
-   "detail": "refused with cause 73 for a non-IPv4 UE PDI on the WildcardMatch path, whose address fields are four bytes; IPv6 SDF prefixes are supported on the opt-in firewall path, but mixed-family firewall rules are refused. A prefix with host bits is canonicalized to its network",
+   "detail": "refused with cause 73 for a non-IPv4 UE PDI or an IPv6 SDF prefix: the WildcardMatch address fields are four bytes. A prefix with host bits is canonicalized to its network",
    "effect": "",
    "extra": [
     {
      "name": "evidence",
-     "value": "TestANonIPv4PDIIsRefusedNotWidened, TestAnSDFPrefixIsAPrefixNotAnAddress, TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly, TestAMixedFamilyFirewallRuleIsRefused"
+     "value": "TestANonIPv4PDIIsRefusedNotWidened (both refusals), TestAnSDFPrefixIsAPrefixNotAnAddress"
     }
    ],
    "kind": "conformance",
@@ -389,85 +371,6 @@
    "message_spec": "TS 29.244",
    "message_spec_version": "16.9.1",
    "message_clause": "8.2"
-  },
-  {
-   "id": "status-8",
-   "scope": "status",
-   "evidence": [
-    "TestAFirewallDeploymentThatBuffersIsRefused",
-    "TestAFirewallRuleCarriesThePDRAVerdict",
-    "TestAMixedFamilyFirewallRuleIsRefused",
-    "TestAPortRangeCompilesToAFirewallRuleWithItsRange",
-    "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly",
-    "TestDeletingASessionRewritesTheFirewallPolicy",
-    "TestGraphConfigMapsTheFlags",
-    "TestTheFirewallPathIsOptIn",
-    "TestTheFirewallPolicyIsTheUnionOfTheLiveSessions",
-    "TestTheSweepReplacesAStaleFirewallPolicy"
-   ],
-   "result": {
-    "state": "ok",
-    "evidence": {
-     "TestAFirewallDeploymentThatBuffersIsRefused": {
-      "state": "ok"
-     },
-     "TestAFirewallRuleCarriesThePDRAVerdict": {
-      "state": "ok"
-     },
-     "TestAMixedFamilyFirewallRuleIsRefused": {
-      "state": "ok"
-     },
-     "TestAPortRangeCompilesToAFirewallRuleWithItsRange": {
-      "state": "ok"
-     },
-     "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
-      "state": "ok"
-     },
-     "TestDeletingASessionRewritesTheFirewallPolicy": {
-      "state": "ok"
-     },
-     "TestGraphConfigMapsTheFlags": {
-      "state": "ok"
-     },
-     "TestTheFirewallPathIsOptIn": {
-      "state": "ok"
-     },
-     "TestTheFirewallPolicyIsTheUnionOfTheLiveSessions": {
-      "state": "ok"
-     },
-     "TestTheSweepReplacesAStaleFirewallPolicy": {
-      "state": "ok"
-     }
-    }
-   },
-   "clause": null,
-   "part": "engineering",
-   "title": "the **opt-in firewall path** itself (BESS's `firewall`, D-147): the match a PDR compiles to where the WildcardMatch key cannot carry it",
-   "declared": "**partly in, and unarmed.** `upfd -firewall-ul`/`-firewall-dl` name the module a direction's PDRs go into instead of `-pdr-table-*`: its `<name>/rules` singleton holds the *whole ordered policy*, so the compiler writes every live session's rules of that module (a write of one session's alone would erase the others', and a packet no rule matches is dropped), ordered by Precedence ascending -- 8.2.11's lower value wins and a firewall list applies its first matching rule, so no inversion here -- and replaces it on a deletion and in the startup sweep (an empty policy). A rule's fields are `FirewallArg.Rule`'s: `src_ip`/`dst_ip` (CIDR strings, length mandatory), `proto`, the four port-range bounds, `drop`. What it **cannot** carry is any action: the module's words are drop and pass, it writes no packet metadata, so a rule cannot name the PDR's ActionId or next hop (nor the QFI, the route domain or the tunnel), and a PDR that buffers is refused (no gate to the store). Nothing is live: the installed stage carries no `firewall` module, and a graph that names a module the daemon does not have fails to load, so no `deploy/*.yaml` graph declares one and the arms in `ci/` run the WildcardMatch path with its refusals untouched",
-   "spec": "TS 29.244",
-   "group": "datapath composition",
-   "messages": [
-    "Cross-cutting (no message)"
-   ],
-   "message": "Cross-cutting (no message)",
-   "statement": "",
-   "detail": "**partly in, and unarmed.** `upfd -firewall-ul`/`-firewall-dl` name the module a direction's PDRs go into instead of `-pdr-table-*`: its `<name>/rules` singleton holds the *whole ordered policy*, so the compiler writes every live session's rules of that module (a write of one session's alone would erase the others', and a packet no rule matches is dropped), ordered by Precedence ascending -- 8.2.11's lower value wins and a firewall list applies its first matching rule, so no inversion here -- and replaces it on a deletion and in the startup sweep (an empty policy). A rule's fields are `FirewallArg.Rule`'s: `src_ip`/`dst_ip` (CIDR strings, length mandatory), `proto`, the four port-range bounds, `drop`. What it **cannot** carry is any action: the module's words are drop and pass, it writes no packet metadata, so a rule cannot name the PDR's ActionId or next hop (nor the QFI, the route domain or the tunnel), and a PDR that buffers is refused (no gate to the store). Nothing is live: the installed stage carries no `firewall` module, and a graph that names a module the daemon does not have fails to load, so no `deploy/*.yaml` graph declares one and the arms in `ci/` run the WildcardMatch path with its refusals untouched",
-   "effect": "",
-   "extra": [
-    {
-     "name": "evidence",
-     "value": "TestAPortRangeCompilesToAFirewallRuleWithItsRange, TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly, TestAMixedFamilyFirewallRuleIsRefused, TestAFirewallRuleCarriesThePDRAVerdict, TestAFirewallDeploymentThatBuffersIsRefused, TestTheFirewallPolicyIsTheUnionOfTheLiveSessions, TestDeletingASessionRewritesTheFirewallPolicy, TestTheSweepReplacesAStaleFirewallPolicy, TestTheFirewallPathIsOptIn; `cmd/upfd`: TestGraphConfigMapsTheFlags"
-    }
-   ],
-   "kind": "engineering",
-   "block": 7,
-   "claim": "an opt-in firewall path carries the match the wildcard key cannot",
-   "spec_version": "16.9.1",
-   "release": "16",
-   "file": "docs/spec/29.244-v16.9.1.txt",
-   "message_spec": "",
-   "message_spec_version": "16.9.1",
-   "message_clause": ""
   },
   {
    "id": "status-9",
@@ -523,7 +426,6 @@
     "TestSweepReportsAnUnreadableDataplane",
     "TestSweepStopsAtTheFirstFailedBatch",
     "TestSweepWithNothingToEraseWritesNothing",
-    "TestTheSweepReplacesAStaleFirewallPolicy",
     "ci/n4-path.sh"
    ],
    "result": {
@@ -553,9 +455,6 @@
      "TestSweepWithNothingToEraseWritesNothing": {
       "state": "ok"
      },
-     "TestTheSweepReplacesAStaleFirewallPolicy": {
-      "state": "ok"
-     },
      "ci/n4-path.sh": {
       "state": "ok"
      }
@@ -564,7 +463,7 @@
    "clause": null,
    "part": "engineering",
    "title": "a restarted controller does not inherit its predecessor's dataplane state: `upfd` empties the session tables in bounded transactions before its PFCP socket opens, and with `-checkpoint` the journal's sessions are replayed after it, so the run holds exactly the sessions it can name",
-   "declared": "in (docs/design.md's restart wall, no PFCP clause): the sweep empties the compiler's maps in the daemon with `ResetResources` (one request, batched inside the daemon: no session key is read over the wire and the 64 MiB message limit no longer bounds a table), replaces a non-empty firewall policy singleton with an empty one, and reads the ARP responder tables through `ReadResource`'s bounded pages, erasing only the entries inside the interface's declared pools, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse), and leaves every resource the graph itself declares; a *firewall policy* has no key to erase -- its resource is a singleton -- so a non-empty one is replaced by an empty policy (a rule's verdict is drop or pass, so one left behind would pass packets no session owns); a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
+   "declared": "in (docs/design.md's restart wall, no PFCP clause): the sweep empties the compiler's maps in the daemon with `ResetResources` (one request, batched inside the daemon: no session key is read over the wire and the 64 MiB message limit no longer bounds a table), and reads the ARP responder tables through `ReadResource`'s bounded pages, erasing only the entries inside the interface's declared pools, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse), and leaves every resource the graph itself declares; a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
    "spec": "TS 29.244",
    "group": "control plane",
    "messages": [
@@ -572,12 +471,12 @@
    ],
    "message": "Cross-cutting (no message)",
    "statement": "",
-   "detail": "in (docs/design.md's restart wall, no PFCP clause): the sweep empties the compiler's maps in the daemon with `ResetResources` (one request, batched inside the daemon: no session key is read over the wire and the 64 MiB message limit no longer bounds a table), replaces a non-empty firewall policy singleton with an empty one, and reads the ARP responder tables through `ReadResource`'s bounded pages, erasing only the entries inside the interface's declared pools, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse), and leaves every resource the graph itself declares; a *firewall policy* has no key to erase -- its resource is a singleton -- so a non-empty one is replaced by an empty policy (a rule's verdict is drop or pass, so one left behind would pass packets no session owns); a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
+   "detail": "in (docs/design.md's restart wall, no PFCP clause): the sweep empties the compiler's maps in the daemon with `ResetResources` (one request, batched inside the daemon: no session key is read over the wire and the 64 MiB message limit no longer bounds a table), and reads the ARP responder tables through `ReadResource`'s bounded pages, erasing only the entries inside the interface's declared pools, in transactions of a bounded size (at most 1000 changes each, stopping at the first the daemon refuses: a partial sweep is the caller's to refuse), and leaves every resource the graph itself declares; a dataplane it cannot read back, like a sweep that fails part-way, is fatal at startup rather than served over",
    "effect": "",
    "extra": [
     {
      "name": "evidence",
-     "value": "TestSweepNamesTheGraphsResources, TestSweepResetsOnlyTheSessionTables, TestSweepWithNothingToEraseWritesNothing, TestSweepReportsAnUnreadableDataplane, TestSweepErasesInBoundedBatchesAtScale, TestSweepStopsAtTheFirstFailedBatch, TestSweepLeavesNothingErasedWhenTheReadbackFails, TestTheSweepReplacesAStaleFirewallPolicy, TestLiveStartupSweepErasesStaleSessions; `ci/n4-path.sh`'s restart step (a second controller against a daemon still holding the first one's session: the rules go, and the packets that crossed stop being selected) and its checkpoint phase (a third run replays the journal after the same sweep, and the packets cross again)"
+     "value": "TestSweepNamesTheGraphsResources, TestSweepResetsOnlyTheSessionTables, TestSweepWithNothingToEraseWritesNothing, TestSweepReportsAnUnreadableDataplane, TestSweepErasesInBoundedBatchesAtScale, TestSweepStopsAtTheFirstFailedBatch, TestSweepLeavesNothingErasedWhenTheReadbackFails, TestLiveStartupSweepErasesStaleSessions; `ci/n4-path.sh`'s restart step (a second controller against a daemon still holding the first one's session: the rules go, and the packets that crossed stop being selected) and its checkpoint phase (a third run replays the journal after the same sweep, and the packets cross again)"
     }
    ],
    "kind": "engineering",
@@ -833,7 +732,7 @@
     }
    },
    "clause": "5.2.1A",
-   "title": "uplink SDF filters are oriented to the packet direction before rule generation (`matchValue`, `firewallRule`)",
+   "title": "uplink SDF filters are oriented to the packet direction before rule generation (`matchValue`)",
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
@@ -841,7 +740,7 @@
    ],
    "message": "Session Modification",
    "statement": "5.2.1A.2A: the CP copies the PCF's (downlink-form) Flow Description into **both** PDRs; for Source Interface ACCESS the UP \"shall swap the source and destination address/port\"",
-   "detail": "uplink SDF filters are oriented to the packet direction before WildcardMatch rule generation (`matchValue`). F-TEID uplink PDRs are refused on the firewall path because that classifier cannot match endpoint-scoped admission metadata.",
+   "detail": "uplink SDF filters are oriented to the packet direction before WildcardMatch rule generation (`matchValue`).",
    "effect": "Open5GS copies the flow description unmodified into UL PDRs (`smf_bearer_tft_update`) and its **UPF swaps** for `src_if == ACCESS` (`lib/pfcp/handler.c:712`, `ogs_ipfw_rule_swap`): `from 8.8.8.8 53 to assigned` would match no uplink packet here. **High** **Fixed** (`pdr.oriented()`, consumed by the WildcardMatch key; test `TestAnUplinkPDRKeysTheWildcardRuleOnTheSwappedFilter`, fail-first: the unswapped rule demanded source 8.8.8.8 and source port 53).",
    "extra": [
     {
@@ -926,7 +825,7 @@
    "message": "Session Establishment",
    "statement": "7.5.2.2-2: several QFI IEs are a list, match any",
    "detail": "the last IE wins",
-   "effect": "silent narrowing **Fixed** with finding 2. The firewall path, whose table has no QFI field, now refuses a PDI that names one (it matched every flow before).",
+   "effect": "silent narrowing **Fixed** with finding 2.",
    "extra": [
     {
      "name": "evidence",
@@ -1190,8 +1089,6 @@
    "scope": "status",
    "evidence": [
     "TestADestinationAddressIsNotTheSessionsUEAddress",
-    "TestAFirewallRuleRefusesTheSDContradiction",
-    "TestAFirewallRulesUESideFollowsThePDIsSD",
     "TestAPDIsDestinationAddressGoesInTheDestinationField",
     "TestAPDIsDestinationAndTheSDFsMustAgree"
    ],
@@ -1199,12 +1096,6 @@
     "state": "ok",
     "evidence": {
      "TestADestinationAddressIsNotTheSessionsUEAddress": {
-      "state": "ok"
-     },
-     "TestAFirewallRuleRefusesTheSDContradiction": {
-      "state": "ok"
-     },
-     "TestAFirewallRulesUESideFollowsThePDIsSD": {
       "state": "ok"
      },
      "TestAPDIsDestinationAddressGoesInTheDestinationField": {
@@ -1217,7 +1108,7 @@
    },
    "clause": "8.2.62",
    "part": "ies",
-   "title": "**the S/D half is in**: the bit is read (`pdr.ueIPDst`) and the address goes into the key's destination field (or the firewall rule's `dst_ip`) with the source left to the filter; a bit clear keeps the direction's own reading, which is what a PDI without it means. The bit also says an Access PDR's destination is not the session's UE address: it is neither inherited by a PDI that names none (such a session is refused, cause 73) nor asked of the interface's pool. A filter naming a destination the address is not inside is refused rather than read as one of the two. **IPv6 stands: refused**",
+   "title": "**the S/D half is in**: the bit is read (`pdr.ueIPDst`) and the address goes into the key's destination field with the source left to the filter; a bit clear keeps the direction's own reading, which is what a PDI without it means. The bit also says an Access PDR's destination is not the session's UE address: it is neither inherited by a PDI that names none (such a session is refused, cause 73) nor asked of the interface's pool. A filter naming a destination the address is not inside is refused rather than read as one of the two. **IPv6 stands: refused**",
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
@@ -1225,12 +1116,12 @@
    ],
    "message": "Shared information elements",
    "statement": "8.2.62: the UE IP address has an S/D flag (bit 3: clear is a source, set a destination), IPv6 is a prefix (default /64, IPv6D/IP6PL lengths; only the prefix part matches)",
-   "detail": "**the S/D half is in**: the bit is read (`pdr.ueIPDst`) and the address goes into the key's destination field (or the firewall rule's `dst_ip`) with the source left to the filter; a bit clear keeps the direction's own reading, which is what a PDI without it means. The bit also says an Access PDR's destination is not the session's UE address: it is neither inherited by a PDI that names none (such a session is refused, cause 73) nor asked of the interface's pool. A filter naming a destination the address is not inside is refused rather than read as one of the two. **IPv6 stands: refused**",
+   "detail": "**the S/D half is in**: the bit is read (`pdr.ueIPDst`) and the address goes into the key's destination field with the source left to the filter; a bit clear keeps the direction's own reading, which is what a PDI without it means. The bit also says an Access PDR's destination is not the session's UE address: it is neither inherited by a PDI that names none (such a session is refused, cause 73) nor asked of the interface's pool. A filter naming a destination the address is not inside is refused rather than read as one of the two. **IPv6 stands: refused**",
    "effect": "an uplink PDR matching a *destination* address (the CP function's, for DHCP/RADIUS, 5.2.1's example) is keyed on the destination it named; the IPv6 prefix half (a framed route, a /64 for prefix delegation) is still the gap `docs/design.md` records",
    "extra": [
     {
      "name": "evidence",
-     "value": "`TestAPDIsDestinationAddressGoesInTheDestinationField`, `TestADestinationAddressIsNotTheSessionsUEAddress`, `TestAPDIsDestinationAndTheSDFsMustAgree`, `TestAFirewallRulesUESideFollowsThePDIsSD`, `TestAFirewallRuleRefusesTheSDContradiction`"
+     "value": "`TestAPDIsDestinationAddressGoesInTheDestinationField`, `TestADestinationAddressIsNotTheSessionsUEAddress`, `TestAPDIsDestinationAndTheSDFsMustAgree`"
     }
    ],
    "kind": "conformance",
@@ -2086,7 +1977,6 @@
    "scope": "competition",
    "evidence": [
     "TestAPDINamingAQFIKeysTheRuleOnIt",
-    "TestAPortRangeCompilesToAFirewallRuleWithItsRange",
     "TestPortRangeIsRefusedNotMatchedTooWidely",
     "TestSeveralSDFFiltersAreSeveralRules"
    ],
@@ -2094,9 +1984,6 @@
     "state": "ok",
     "evidence": {
      "TestAPDINamingAQFIKeysTheRuleOnIt": {
-      "state": "ok"
-     },
-     "TestAPortRangeCompilesToAFirewallRuleWithItsRange": {
       "state": "ok"
      },
      "TestPortRangeIsRefusedNotMatchedTooWidely": {
@@ -2169,7 +2056,7 @@
      [
       "**us**",
       "precedence; F-TEID+CHID; UE IP; NI+QFI",
-      "SDF+ranges on the generic path (the opt-in firewall path compiles them; no live arm)"
+      "SDF+ranges (a port range is refused, status-6)"
      ]
     ]
    },
@@ -2181,7 +2068,7 @@
     "**OMEC** \u2014 precedence `pfcpiface/bess.go:1182`; F-TEID+CHID `messages_session.go:163-177`; UE IP `bess.go:1187-1198`; ranges `parse_pdr.go:128-140`; NI/QFI unread `parse_pdr.go:619-636`",
     "**eUPF** \u2014 F-TEID+CHID `cmd/core/pdr_creation_context.go:109-132`; UE IP `cmd/ebpf/xdp/n3n6_entrypoint.c:70`; ranges `cmd/ebpf/xdp/sdf_filter.h:101-102`; precedence absent; QFI header-only `n3n6_entrypoint.c:128`",
     "**free5GC** \u2014 its three credits are in `free5gc/gtp5g` (not the go-upf tree): precedence `src/pfcp/pdr.c:538-551`; UE IP `src/pfcp/pdr.c:314-318`; ranges `src/pfcp/pdr.c:266-273`; go-upf discards NI (`gtp5g.go:377`) and allocates no TEID",
-    "**us** \u2014 `docs/claims.md`: status-1..3, 7, 9, 15-17, 23; ranges: status-6 is the refusals, the opt-in firewall path compiles them on both sides"
+    "**us** \u2014 `docs/claims.md`: status-1..3, 7, 9, 15-17, 23; ranges: status-6 (refused)"
    ],
    "spec_version": "16.9.1",
    "release": "16",
@@ -2387,7 +2274,6 @@
    "scope": "competition",
    "evidence": [
     "TestANonIPv4PDIIsRefusedNotWidened",
-    "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly",
     "TestCHOOSEV6AndDualStackCreatedFTEIDFlags",
     "datapath/gtpu_datapath_test.cc",
     "ci/smoke-gtpu.sh"
@@ -2396,9 +2282,6 @@
     "state": "ok",
     "evidence": {
      "TestANonIPv4PDIIsRefusedNotWidened": {
-      "state": "ok"
-     },
-     "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
       "state": "ok"
      },
      "TestCHOOSEV6AndDualStackCreatedFTEIDFlags": {

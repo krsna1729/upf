@@ -104,21 +104,6 @@ func TestGraphConfigMapsTheFlags(t *testing.T) {
 		cfg.Down.PDRFields[6] != session.FTEIDContext {
 		t.Errorf("PDR table fields: up %v, down %v", cfg.Up.PDRFields, cfg.Down.PDRFields)
 	}
-	// The firewall path is opt-in: with no module named, both directions are
-	// the WildcardMatch table, and a named module is what the direction's PDRs
-	// go into instead.
-	if cfg.Up.Firewall != "" || cfg.Down.Firewall != "" {
-		t.Errorf("the default graph opts into a firewall path: up %q, down %q",
-			cfg.Up.Firewall, cfg.Down.Firewall)
-	}
-	args = validArgs()
-	args.firewallUL, args.firewallDL = "fw_ul", "fw_dl"
-	if cfg, err = graphConfig(args); err != nil {
-		t.Fatalf("graphConfig with firewall modules: %v", err)
-	}
-	if cfg.Up.Firewall != "fw_ul" || cfg.Down.Firewall != "fw_dl" {
-		t.Errorf("firewall modules: up %q, down %q", cfg.Up.Firewall, cfg.Down.Firewall)
-	}
 }
 
 // TestGraphConfigRefusesBadInput: what cannot be a graph is refused with the flag

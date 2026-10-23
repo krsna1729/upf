@@ -14,7 +14,7 @@ name: CI
 #                         session-instances, session-live, n4-path,
 #                         session-report, pdrmatch-path, pdrmatch-2dn,
 #                         meter-compose, buffer-path, atsss-steer, then
-#                         session-path on the custom and firewall graphs.
+#                         session-path on the custom graph.
 #   weekly (Sun 04:42)    ci/verify.sh --benches: every cited lane that can run
 #                         on a hosted runner, the cited benchmarks, and the Go
 #                         race run. The interop and CNTC suites need containers
@@ -107,7 +107,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/bess
-          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('.github/bess-firewall-result.patch') }}-v3
+          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v4
 
       # The checkout and the dependency install are not part of the cache: a
       # runner is fresh every run, so the pinned fork is what install-deps.sh
@@ -122,9 +122,6 @@ jobs:
           git -C .ci/bess fetch -q --depth 1 origin '${{ steps.pin.outputs.sha }}'
           git -C .ci/bess checkout -q FETCH_HEAD
           git -C .ci/bess rev-parse HEAD
-          # The firewall's rule result is a fork change not yet upstream: apply
-          # it to the pinned commit so the fork's own pin stays a real ref.
-          git -C .ci/bess apply "$GITHUB_WORKSPACE/.github/bess-firewall-result.patch"
 
       # Ubuntu 24.04's default g++ is 13, and the pinned fork's bessctl uses
       # <print> (C++23), which GCC 13 does not have: build with gcc-14/g++-14.
@@ -213,7 +210,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: build/bess
-          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('.github/bess-firewall-result.patch') }}-v3
+          key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v4
 
       # The plugin is small, but a cache saves meson setup on every run and
       # keeps a pin bump's rebuild incremental.
@@ -263,11 +260,10 @@ jobs:
             echo "=== $lane"
             "$lane"
           done
-          # The default lane exercises the generic matcher. These two run the
-          # other deploy graphs through the same driver, so a strategy's graph
+          # The default lane exercises the generic matcher. This runs the
+          # custom deploy graph through the same driver, so its strategy
           # cannot rot behind the unit tests.
           PROFILE=custom ci/session-path.sh
-          FIREWALL=1 ci/session-path.sh
 
       - name: Weekly full evidence
         if: github.event_name == 'schedule' && github.event.schedule == '42 4 * * 0'

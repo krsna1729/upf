@@ -21,9 +21,6 @@ type sweepFake struct {
 	contents map[string][]bess.Entry
 	changes  [][]bess.Change
 	cleared  []string
-	// reads is every Contents call's resource list, as made: what the sweep
-	// asked the daemon to pack into one response, call by call.
-	reads [][]string
 	// resets is every ResetResources call's names: the whole tables the sweep
 	// emptied in the daemon.
 	resets [][]string
@@ -90,26 +87,6 @@ func (f *sweepFake) ResourcePages(_ context.Context, name string, visit func(bes
 		}
 	}
 	return nil
-}
-
-func (f *sweepFake) Contents(_ context.Context, names ...string) (map[string][]bess.Entry, error) {
-	f.reads = append(f.reads, append([]string(nil), names...))
-	if f.err != nil {
-		return nil, f.err
-	}
-	// The daemon's own refusal, and the reason the sweep reads one resource per
-	// call: every resource named is packed into one response, and one above
-	// kMaxMessageBytes (64 MiB) is RESOURCE_EXHAUSTED ("name fewer resources").
-	// A read naming the whole session layer is what a 1M-session dataplane
-	// answers that to.
-	if len(names) > 1 {
-		return nil, fmt.Errorf("bess: pipeline: rpc error: code = ResourceExhausted desc = the pipeline with its resources is above the 67108864-byte message limit: name fewer resources")
-	}
-	out := map[string][]bess.Entry{}
-	for _, n := range names {
-		out[n] = f.contents[n]
-	}
-	return out, nil
 }
 
 // TestSweepNamesTheGraphsResources pins the exact names a startup sweep reads:

@@ -101,9 +101,7 @@ is refused.
 
 Admission does not replace the inner PDR match. The classifier still needs the
 UE address and any SDF/QFI constraints its key represents. A session with no UE
-address cannot be represented by the current classifier and is refused. The
-optional firewall classifier cannot match endpoint-scoped F-TEID metadata, so
-the compiler refuses F-TEID PDRs with that profile.
+address cannot be represented by the current classifier and is refused.
 
 ## Code and executable evidence
 
