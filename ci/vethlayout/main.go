@@ -658,16 +658,17 @@ func graphFor(cfg layout, eps []endpoint, p plan, ifaces []string) (map[string]a
 	endpointRules := []map[string]any{rule([][]byte{be32(1)}, 1), rule([][]byte{be32(2)}, 2)}
 	resources["endpoint_check/rules"] = endpointRules
 	resources["endpoint_check_dl/rules"] = endpointRules
-	// Every rt next hop is static: the PDR result's next_hop_id references
-	// rt/next_hops, and a next hop bound to a neighbor is referenced through
-	// rt/neighbors instead (BESS D-184), so a resolver-owned N6 hop would
-	// refuse every uplink session. The N6 side of this lane is a counter, not
-	// a neighbor test; rt_transport carries the dynamic resolution.
+	// Production's shape (deploy/upf.yaml): the N6 hop is resolver-owned, bound
+	// to the first N6 attachment's peer, while the access, N9 and 5G VN hops are
+	// static gates. One PDR result column names both kinds through
+	// rt/next_hops; BESS counts a bound id on rt/neighbors (D-187).
 	resources["rt/next_hops"] = []map[string]any{
-		{"key": map[string]any{"id": hopN6}, "value": map[string]any{"egress_gate": 0}},
 		{"key": map[string]any{"id": hopAccess}, "value": map[string]any{"egress_gate": hopAccess - 1}},
 		{"key": map[string]any{"id": hopN9}, "value": map[string]any{"egress_gate": hopN9 - 1}},
 		{"key": map[string]any{"id": hopVN}, "value": map[string]any{"egress_gate": hopVN - 1}},
+	}
+	resources["rt/neighbors"] = []map[string]any{
+		{"key": map[string]any{"id": hopN6}, "value": map[string]any{"interface_id": 1, "ipv4": p.n6Peer}},
 	}
 	resources["rt_transport/neighbors"] = transportNeighbors
 	resources["rt_transport/routes"] = transportRoutes
@@ -802,7 +803,10 @@ func drive(name, target, handshake string) error {
 		}
 	}
 	fmt.Println("vethlayout: Mode 4 (N9-to-N9 transit) is not established by any cited procedure and is not driven")
-	if err := awaitNeighbors(ctx, client, len(eps)-len(attachments(eps, "n6"))); err != nil {
+	if err := awaitNeighbors(ctx, client, map[string]int{
+		"rt":           1, // the N6 hop
+		"rt_transport": len(eps) - len(attachments(eps, "n6")),
+	}); err != nil {
 		return err
 	}
 	// The shell drives Modes 1, 2, 3 and 5 with every session above live.
@@ -835,28 +839,41 @@ func drive(name, target, handshake string) error {
 	return nil
 }
 
-// awaitNeighbors waits until rt_transport's resolver reports every bound
-// neighbor -- one per N3/N9 attachment -- resolved (its get_neighbors action;
-// a bound next hop is not in rt_transport/next_hops, BESS D-184). rt's hops
-// are static. The shell measures exact counts only after this, so no packet of
-// its is held for resolution.
-func awaitNeighbors(ctx context.Context, client *bess.Client, transport int) error {
+// awaitNeighbors waits until each Router's resolver reports the expected
+// number of bound neighbors, all resolved (its get_neighbors action; a bound
+// next hop is not in <router>/next_hops, BESS D-183): rt's N6 hop and one per
+// N3/N9 attachment on rt_transport. The shell measures exact counts only after
+// this, so no packet of its is dropped for an unresolved neighbor.
+func awaitNeighbors(ctx context.Context, client *bess.Client, want map[string]int) error {
 	const resolved = "ROUTER_NEIGHBOR_STATE_RESOLVED"
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		states, err := neighborStates(ctx, client, "rt_transport")
 		var pending []string
-		for id, state := range states {
-			if state != resolved {
-				pending = append(pending, fmt.Sprintf("%d: %s", id, state))
+		var readErr error
+		got := make(map[string]map[uint32]string, len(want))
+		for module, n := range want {
+			states, err := neighborStates(ctx, client, module)
+			if err != nil {
+				readErr = err
+				pending = append(pending, module+": unread")
+				continue
+			}
+			got[module] = states
+			if len(states) != n {
+				pending = append(pending, fmt.Sprintf("%s: %d of %d bound", module, len(states), n))
+			}
+			for id, state := range states {
+				if state != resolved {
+					pending = append(pending, fmt.Sprintf("%s %d: %s", module, id, state))
+				}
 			}
 		}
-		if err == nil && len(pending) == 0 && len(states) == transport {
-			fmt.Printf("vethlayout: rt_transport neighbors resolved: %v\n", states)
+		if len(pending) == 0 {
+			fmt.Printf("vethlayout: neighbors resolved: %v\n", got)
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("neighbors unresolved after 30s: %v of %v (read error: %v)", pending, states, err)
+			return fmt.Errorf("neighbors unresolved after 30s: %v (read error: %v)", pending, readErr)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}

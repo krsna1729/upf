@@ -442,7 +442,9 @@ connections:
 
 resources:
   # Hop 1 is the resolver-owned N6 next hop (rt/neighbors below); only static
-  # egress ids are listed here.
+  # egress ids are listed here. The PDR results' next_hop_id column references
+  # rt/next_hops and names both kinds: BESS counts a bound id against
+  # rt/neighbors, its holder (D-187). ci/veth-layouts.sh runs this shape.
   rt/next_hops:
     - key: {id: 2}
       value: {egress_gate: 1}
