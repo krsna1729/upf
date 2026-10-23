@@ -13,7 +13,10 @@
 #                                                                                                 rt -> enc -> dump_n3 (ogates 1, 2)
 #             src_vn  -> rewrite_vn  -/                                                            rt -> dump_lan     (ogate 3, the service LAN)
 #                                                                                                 rt -> pdr_dl       (ogate 4, the 5G VN re-injection)
+#   N9        src_n9  -> rewrite_n9  -> tag_n9 -> decap0 (Mode 3's uplink: ogate 0, pdr_ul)
+#             src_ulcl_dn9 -> rewrite_ulcl_dn9 -/      (Mode 2's remote-PSA downlink: ogate 1, pdr_dl)
 #   downlink  src_dn -> rewrite_dn -> l2_sort -> tag_n6 -> vif_n6 -> pdr_dl -> mt_dl -> cnt_dl -> atsss -> rt
+#             src_dn1 -> rewrite_dn1 -/ (Mode 1's downlink)
 #             src_arp -> rewrite_arp -> l2_sort -> arp_n6 -> dump_arp -> merge_n6 -> dump_n6 -> sink_n6
 #             (src_arp2 -> rewrite_arp2, the pair of addresses one session holds)
 #
@@ -48,8 +51,15 @@
 #   rewrite_ulcl_n9  the same TEID and source, to 10.46.0.2:53 (the N9 branch)
 #   rewrite_vn   a G-PDU to TEID 0x11223347 holding 10.45.0.5:5000 -> 10.45.0.6:5000
 #                (the 5G VN case: one UE's packet to another UE of the same VN)
+#   rewrite_n9   a G-PDU to 192.0.2.9 (the N9 endpoint) and TEID 0x11223344 -- S1's
+#                TEID, on the other endpoint -- holding 10.45.0.9:5000 -> 8.8.8.8:53
+#                (Mode 3: S9's uplink, arriving over N9 from an I-UPF)
+#   rewrite_ulcl_dn9  a G-PDU to 192.0.2.9 and TEID 0x1122334c holding
+#                10.46.0.2:53 -> 10.45.0.8:5000 (Mode 2: the remote PSA's downlink)
 #   rewrite_dn   the data network's answer 8.8.8.8:5000 -> 10.45.0.7:53, to the
 #                interface's MAC (02:00:00:00:06:01 from 02:00:00:00:06:02)
+#   rewrite_dn1  the same answer to S1's UE, 8.8.8.8:5000 -> 10.45.0.2:53 (Mode 1's
+#                downlink)
 #   rewrite_arp  an ARP request for 10.45.0.2 from 192.0.2.2
 #   rewrite_arp2 the same for 10.44.0.2 (the sibling of 10.46.0.2: one
 #                session's two addresses, one transaction, one probe slot)
@@ -78,6 +88,15 @@ modules:
         - {name: endpoint_id, size: 4, value_int: 1}
         - {name: route_domain, size: 4, value_int: 0}
         - {name: transport_route_domain, size: 4, value_int: 1}
+  # The N9 endpoint's tag: endpoint 2 is what admits a G-PDU on an N9 F-TEID
+  # and refuses it on an N3 one, whatever the TEID.
+  - name: tag_n9
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 2}
+        - {name: route_domain, size: 4, value_int: 0}
+        - {name: transport_route_domain, size: 4, value_int: 2}
   # -- the uplink streams ------------------------------------------------------
   - name: src_up
     mclass: Source
@@ -129,6 +148,23 @@ modules:
     arg:
       templates:
         - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM0dFAAAlEjQAAEARVDAKLQAFCi0ABhOIE4gAEQAAaGVsbG8tdXBm"
+  # The N9 arrivals: Mode 3's uplink and Mode 2's remote-PSA downlink.
+  - name: src_n9
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_n9
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM0RFAAAlEjQAAEARTk8KLQAJCAgICBOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_ulcl_dn9
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_ulcl_dn9
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM0xFAAAlEjQAAEARVDAKLgACCi0ACAA1E4gAEQAAaGVsbG8tdXBm"
 
   - name: pdr_ul
     mclass: WildcardMatch
@@ -189,6 +225,14 @@ modules:
     arg:
       templates:
         - "AgAAAAYBAgAAAAYCCABFuAAlEjQAAEARTZkICAgICi0ABxOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_dn1
+    mclass: Source
+    arg: {pkt_size: 51, burst: 32}
+  - name: rewrite_dn1
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAYBAgAAAAYCCABFuAAlEjQAAEARTZ4ICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
   # The plain N6 ingress tag, on l2_sort's IP gate (the ARP streams share
   # l2_sort, and the tag must cover every path into pdr_dl). pdr_dl keys on the
   # tunnel context and QFI, which only the decap writes; a plain N6 frame
@@ -293,6 +337,11 @@ connections:
   - {upstream: src_vn, downstream: rewrite_vn}
   - {upstream: rewrite_vn, downstream: tag_n3}
   - {upstream: tag_n3, downstream: decap0}
+  - {upstream: src_n9, downstream: rewrite_n9}
+  - {upstream: rewrite_n9, downstream: tag_n9}
+  - {upstream: src_ulcl_dn9, downstream: rewrite_ulcl_dn9}
+  - {upstream: rewrite_ulcl_dn9, downstream: tag_n9}
+  - {upstream: tag_n9, downstream: decap0}
   - {upstream: decap0, downstream: mt_md, ogate: 0}
   - {upstream: decap0, downstream: pdr_dl, ogate: 1}
   - {upstream: mt_md, downstream: pdr_ul}
@@ -318,6 +367,8 @@ connections:
 
   - {upstream: src_dn, downstream: rewrite_dn}
   - {upstream: rewrite_dn, downstream: l2_sort}
+  - {upstream: src_dn1, downstream: rewrite_dn1}
+  - {upstream: rewrite_dn1, downstream: l2_sort}
   - {upstream: src_arp, downstream: rewrite_arp}
   - {upstream: rewrite_arp, downstream: l2_sort}
   - {upstream: src_arp2, downstream: rewrite_arp2}
