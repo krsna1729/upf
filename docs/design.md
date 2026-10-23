@@ -63,82 +63,43 @@ The datapath therefore never chases relations: the PFCP side resolves
 
 ### Control and Reporting Pipeline: Dataplane ──▶ Controller ──▶ SMF
 
-Complementary architecture: dataplane events, `upfd` state handlers, and PFCP report messages (TS 29.244):
+Dataplane events, the `upfd` code that reads them, and the PFCP report each becomes (TS 29.244 7.5.8). `upfd` sends three kinds of report:
 
 ```mermaid
 flowchart LR
-    subgraph BESS["1. Dataplane Event (BESS)"]
-        direction TB
-        E1["<b>1. First DL packet in IDLE</b><br/>FAR apply_action: BUFF<br/>pkt queued in PacketStore"]
-        E2["<b>2. URR Quota / Threshold Hit</b><br/>UrrCount (cnt_ul / cnt_dl)<br/>VOLQU, TIMQU, VOLTH, START/STOP"]
-        E3["<b>3. GTP-U Error Indication</b><br/>Peer gNB/UPF lost tunnel<br/>GtpuResponder intercepts Msg 26"]
-        E4["<b>4. GTP-U End Marker Received</b><br/>Handover path switch<br/>ingress_ul detects Type 254"]
-        E5["<b>5. GTP-U Path Failure</b><br/>Echo Req timeout &amp; max retries<br/>GtpuResponder peer unreachable"]
-        E6["<b>6. FAR Dest = CP-Function</b><br/>Subscriber DHCP / IPv6 RA<br/>PDR matches signaling SDF"]
-    end
-
-    subgraph UPFD["2. UPF Controller (upfd)"]
-        direction TB
-        C1["<b>session.Compiler.ddnSent</b><br/>One notification per episode<br/>Arms buffering release hook"]
-        C2["<b>report.go (URR Reader)</b><br/>Reads BESS counter registers<br/>Calculates consumed volume/time"]
-        C3["<b>erir.go (Peer+TEID Tracker)</b><br/>Correlates remote TEID &amp; peer<br/>Deduplicates repeated errors"]
-        C4["<b>endmarker.go (EMPU handler)</b><br/>Matches session &amp; arrival interface<br/>Guards against stale echoes"]
-        C5["<b>n4.Server (Node Health)</b><br/>Tracks peer path failure<br/>Node-level state, not session"]
-        C6["<b>CP Punting Tunnel Worker</b><br/>Decapsulates &amp; queues payload<br/>Encapsulates into N4-u stream"]
-    end
-
-    subgraph SMF["3. SMF N4 Report Message"]
-        direction TB
-        M1["<b>Downlink Data Report</b><br/>PFCP Session Report (PDR ID)<br/>SMF pages UE &amp; switches to FORW"]
-        M2["<b>Usage Report</b><br/>PFCP Session Report (URR ID)<br/>Volume/duration accounting &amp; quota"]
-        M3["<b>Error Indication Report</b><br/>PFCP Session Report (F-TEID)<br/>SMF initiates bearer repair/delete"]
-        M4["<b>End Marker Reception Report</b><br/>PFCP Session Report (PDR ID)<br/>SMF confirms path switch to RAN"]
-        M5["<b>User Plane Path Failure Report</b><br/>PFCP Node Report (Peer IP)<br/>SMF reroutes sessions around node"]
-        M6["<b>N4-u User Data / G-PDU</b><br/>GTP-U tunnel to SMF F-TEID<br/>SMF internal DHCP / IP server"]
-    end
-
-    E1 --> C1 --> M1
-    E2 --> C2 --> M2
-    E3 --> C3 --> M3
-    E4 --> C4 --> M4
-    E5 --> C5 --> M5
-    E6 --> C6 --> M6
+    E1["<b>First DL packet for a BUFF rule</b><br/>stamped by cnt_buf, held in PacketStore"] --> C1["<b>session/downlink.go</b><br/>polled each tick; one notification<br/>per episode (ddnSent)"] --> M1["<b>Downlink Data Report</b><br/>Session Report, DLDR, PDR ID"]
+    E2["<b>URR counters</b><br/>UrrCount cnt_ul / cnt_dl"] --> C2["<b>session/report.go</b><br/>volume/time thresholds and quotas"] --> M2["<b>Usage Report</b><br/>Session Report, USAR, URR ID"]
+    E3["<b>GTP-U Error Indication</b><br/>counted by GtpuResponder<br/>on decap gate 2 (get_errors)"] --> C3["<b>session/erir.go</b><br/>polled each tick; new counts<br/>matched to FAR F-TEIDs"] --> M3["<b>Error Indication Report</b><br/>Session Report, ERIR, remote F-TEID"]
 ```
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant DP as Dataplane (BESS)
-    participant UPFD as UPF Controller (upfd)
-    participant SMF as Control Plane (SMF)
+    participant UPFD as upfd
+    participant SMF as SMF
 
-    Note over DP,SMF: Event 1: Downlink Data Notification (Paging)
-    DP->>UPFD: First DL packet buffered in PacketStore
-    UPFD->>SMF: PFCP Session Report Request (Downlink Data Report)
-    SMF->>UPFD: PFCP Session Modification Request (FAR: FORW, apply buffered)
-    UPFD->>DP: Release buffered packets to encap/gNB
+    Note over DP,SMF: Downlink data notification
+    UPFD->>DP: read the buffering counters (first-packet stamp)
+    UPFD->>SMF: Session Report Request (Downlink Data Report)
+    SMF->>UPFD: Session Modification Request (FAR → FORW)
+    UPFD->>DP: release the held packets to encap
 
-    Note over DP,SMF: Event 2: URR Quota / Threshold Monitoring
-    DP->>UPFD: UrrCount exceeds threshold (VOLTH / VOLQU)
-    UPFD->>SMF: PFCP Session Report Request (Usage Report: Volume/Duration)
-    SMF->>UPFD: PFCP Session Modification Request (Grant new quota / Terminate)
+    Note over DP,SMF: Usage reporting
+    UPFD->>DP: read URR counters
+    UPFD->>SMF: Session Report Request (Usage Report)
+    SMF->>UPFD: Session Modification Request (new quota or removal)
 
-    Note over DP,SMF: Event 3: GTP-U Error Indication (Broken Remote Tunnel)
-    DP->>UPFD: GtpuResponder catches Error Indication (remote TEID)
-    UPFD->>SMF: PFCP Session Report Request (Error Indication Report: F-TEID)
-
-    Note over DP,SMF: Event 4: Handover End Marker Switch
-    DP->>UPFD: End Marker (Type 254) arrives on old path
-    UPFD->>SMF: PFCP Session Report Request (End Marker Reception Report)
-
-    Note over DP,SMF: Event 5: GTP-U Path Failure (Echo Heartbeat Timeout)
-    DP->>UPFD: Peer Echo Request unanswered after N retries
-    UPFD->>SMF: PFCP Node Report Request (User Plane Path Failure Report)
-
-    Note over DP,SMF: Event 6: CP-Function Punting (DHCP / Router Solicitation)
-    DP->>UPFD: PDR matches signaling packet (Dest = CP-Function)
-    UPFD->>SMF: Forward over N4-u GTP-U tunnel to SMF F-TEID
+    Note over DP,SMF: Error Indication
+    UPFD->>DP: read the responder's Error Indication table
+    UPFD->>SMF: Session Report Request (Error Indication Report, F-TEID)
 ```
+
+Not implemented: End Marker reception reports, User Plane Path Failure Node
+Reports, and forwarding to the CP function (Destination Interface 3 is refused,
+cause 73; see `docs/compliance.md`). End Marker *construction* on SNDEM is
+implemented (`session/endmarker.go`); it is a message this node sends, not a
+report.
 
 ## The packet path, and how its cost is proven
 
