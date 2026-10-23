@@ -35,7 +35,9 @@ behavior, not PMD, queue, Vif, or physical-port counts.
 uplink PDR 1, verifies the N3 tunnel, waits for the driver's local four-second
 timer (a model of the SMF timer), restores FAR 1, removes FAR 9, then verifies
 the live session sends the next packet through N6 with no N3 output.
-`TestTemporaryAccessForwardFARRetainsSessionAfterCleanup` verifies the
+`ci/veth-layouts.sh` runs the same leg and cleanup on S10, a session of its
+own, while every other scenario's session stays live, on every attachment
+layout. `TestTemporaryAccessForwardFARRetainsSessionAfterCleanup` verifies the
 compiler's tunnel-record lifecycle. The fixture does not exercise N2 signaling,
 RAN endpoint allocation, or all of TS 23.502 §4.9.1.3; Mode 6 remains
 **Conditional**.
@@ -49,12 +51,12 @@ procedure-backed cases above; Mode 4 remains unestablished by the pinned text.
 **Runtime coexistence boundary.** One `upfd` process owns one `bessd` graph and
 is its only controller writer. That process can hold many independent
 PDU-session contexts at once. The Mode 5 fixture establishes S4 and S5 as
-separate CP F-SEIDs in the same compiler and common SMF/PSA
-(`ci/ifacepath/main.go`); this is local switching, not an N19 group-level PFCP
-session. `internal/n4` accepts one CP-function association at a time and
-rejects a second (`TestSecondCPFunctionIsRejected`). Do not run a second
-`upfd` against the same `bessd`: each startup sweep erases shared
-session-owned resources, and each compiler's ID and ownership state is
+separate CP F-SEIDs in the same compiler and common SMF/PSA (`ci/scenario`,
+driven by `ci/ifacepath` and `ci/vethlayout`); this is local switching, not an
+N19 group-level PFCP session. `internal/n4` accepts one CP-function
+association at a time and rejects a second (`TestSecondCPFunctionIsRejected`).
+Do not run a second `upfd` against the same `bessd`: each startup sweep erases
+shared session-owned resources, and each compiler's ID and ownership state is
 process-local. `TestCHOOSEIDStateIsScopedToPFCPSession` checks that the same
 numeric CHOOSE ID in separate CP F-SEIDs gets distinct local F-TEIDs, and that
 deleting one session releases only its own allocation. These are implementation
@@ -65,15 +67,15 @@ constraints, not 3GPP requirements.
 This compares one combined property: the project scenarios co-resident in one
 process, endpoints and attachments set by deployment configuration rather
 than fixed ports, and routed dual-stack outer transport. It is separate from
-the scored competition blocks in `docs/claims.md`. Their 82/100 is the last
-stored baseline, and this section does not change it. Each row cites what the
+the scored competition blocks in `docs/claims.md` and does not change their
+scores. Each row cites what the
 project's own documentation or configuration shows. "Not shown" means the
 inspected source does not establish the property; it is not proof that the
 property is absent.
 
 | Project | What the inspected source shows | Not shown by that source |
 |---|---|---|
-| This UPF | Endpoint-tagged ingress feeds one decap that admits by complete F-TEID key (`ci/veth-layouts.sh`: eight real-veth layouts, including the same TEID on two endpoints). Outer IPv4/IPv6 is routed per transport domain after encap, with ARP/ND resolution (`deploy/upf.yaml` `rt_transport`). One daemon runs scenarios 2 (ULCL to N6 and to an N9 tunnel), 5 (local switch) and 6 (temporary forward and cleanup) beside the N6 path (`ci/iface-path.sh`). | Scenario 3 (N9 arrival at a PSA) has no lane of its own. Mode 4 (N9-to-N9 transit) is not established by the pinned R16 text. N19 group sessions and inner IPv6 UE PDRs are not supported. |
+| This UPF | Endpoint-tagged ingress feeds one decap that admits by complete F-TEID key (`ci/veth-layouts.sh`: nine real-veth layouts on up to four promiscuous PMD ports, including the same TEID on two endpoints and every endpoint attached twice). Outer IPv4/IPv6 is routed per transport domain after encap with ARP/ND resolution: `ci/veth-transport.sh` shows both families resolved, the outer hop count decremented once with the inner untouched, End Markers through the same Router, a neighbor's MAC change followed, and an unreachable gateway failing closed. One compiler holds the sessions of scenarios 1, 2 (ULCL to N6 and to an N9 tunnel, and the remote PSA's N9 downlink), 3 (N9 arrival at a PSA, plain N6 egress), 5 (local switch) and 6 (temporary forward and cleanup) at once: `ci/iface-path.sh` runs the streams of 1, 2, 3 and 5 together on one daemon, and `ci/veth-layouts.sh` drives all five through the compiled pipeline on every attachment of each layout. | Mode 4 (N9-to-N9 transit) is not established by the pinned R16 text and no lane drives it. N19 group sessions and inner IPv6 UE PDRs are not supported. |
 | [OAI UPF](https://github.com/openairinterface/oai-cn5g-upf/blob/develop/docs/FEATURE_SET.md) | N3, N4 and N6 implemented; uplink classifier listed as implemented. | N9 and N19 marked not implemented; branching point and I-UPF/PSA/ULCL marked not implemented. |
 | [Open5GS](https://github.com/open5gs/open5gs/discussions/3090) | Several GTP-U server addresses, IPv4 and IPv6, each with a `network_instance` and `source_interface` ([`upf.yaml.in`](https://github.com/open5gs/open5gs/blob/main/configs/open5gs/upf.yaml.in)). | The maintainer's accepted answer says its UPF "lacks the N9 interface", which rules out the N9-dependent scenarios. |
 | [free5GC](https://github.com/free5gc/free5gc.github.io/blob/main/docs/guide/5-install-ueransim.md) | `gtpu.ifList` entries typed N3 or N9 with listed addresses. N6 goes through host forwarding and NAT. | Not shown: all scenarios co-resident in one instance, or deployment-defined attachments beyond the address list. |

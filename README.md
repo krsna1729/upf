@@ -30,9 +30,10 @@ datapath, a `bess-dev` stage: this tree reads its own copy under `build/bess/`
 (untracked), vendored from a built checkout of the BESS fork
 (`github.com/krsna1729/bess`) with `ci/vendor-bess.sh`; the layout and the
 `BESS`/`STAGE`/`DPDK_LIB` overrides are in the header of `ci/bess-env.sh`.
-No NIC is needed for the lanes below. `ci/veth-port.sh` and
-`ci/veth-layouts.sh` need root; they create isolated veth pairs and delete only
-the pairs they created. The other lanes run unprivileged and start their own
+No NIC is needed for the lanes below. `ci/veth-port.sh`,
+`ci/veth-transport.sh` and `ci/veth-layouts.sh` need root; they create
+isolated veth pairs (and, for veth-transport, a network namespace) and delete
+only what they created. The other lanes run unprivileged and start their own
 daemon on free ports.
 
 ### The Go side — no BESS needed
@@ -81,9 +82,11 @@ MAC from ARP/ND.
 `ci/session-path.sh` exercises a PFCP-programmed session on both synthetic
 packet chains and checks the End Marker. `ci/veth-port.sh` exercises a
 compiler-programmed session and routed egress on a real veth.
-`ci/veth-layouts.sh` exercises eight one-to-three-PMD attachment layouts with
-real N3/N9 G-PDUs, N6 traffic, endpoint-scoped admission and an unknown-TEID
-case.
+`ci/veth-layouts.sh` exercises nine one-to-four-PMD attachment layouts, each as
+the production-shaped graph with one compiler holding every permitted
+scenario's sessions (Modes 1, 2, 3, 5 and 6): each scenario's real N3/N9
+G-PDUs or N6 traffic on every attachment, endpoint-scoped admission and an
+unknown-TEID case.
 
 ## The inner loop
 
@@ -110,9 +113,10 @@ Run the lane that proves the path you touched:
 | `ci/n4-path.sh` | PFCP message → compiler → one transaction → packets; restart and checkpoint replay |
 | `ci/session-report.sh` | URR reports — period, threshold, quota — over PFCP |
 | `ci/buffer-path.sh` | BAR buffering, DDN, and the duration's expiry |
-| `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names; a ULCL session's two uplink PDRs take the data network's hop and an N9 tunnel |
+| `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names; a ULCL session's two uplink PDRs take the data network's hop and an N9 tunnel, and its remote PSA's downlink arrives on N9; Modes 1, 2, 3 and 5 live together with every stream at once, each session's bytes at its own exit |
 | `ci/veth-port.sh` | one PMD port split into N3/N6/N9; the post-encap Router resolves its outer next hop on the veth (needs root) |
-| `ci/veth-layouts.sh` | eight real-veth layouts: all five 1–3-PMD partitions, MAC/VLAN demux, direct per-port tags, same N3/N9 local IPv4+TEID, and unknown-TEID handling (needs root) |
+| `ci/veth-transport.sh` | the outer transport Router on a veth, byte-checked on the peer: ARP and ND resolution, outer TTL/hop limit decremented once with the inner TTL untouched (IPv4 and IPv6 tunnels), routed End Markers, a neighbor MAC change followed, an unreachable gateway failing closed (needs root) |
+| `ci/veth-layouts.sh` | nine real-veth layouts: all five 1–3-PMD partitions, MAC/VLAN demux, direct per-port tags, four-port fan-in; each the production-shaped graph with Modes 1, 2, 3, 5 and 6 established together and driven on every attachment, same N3/N9 local IPv4+TEID, and unknown-TEID handling (needs root) |
 | `ci/session-instances.sh` | one subscriber address served by two network instances, each with its own F-TEID and exit |
 | `ci/atsss-steer.sh` | a MAR's two accesses, the health table, policy update and erase; every window byte-checked |
 | `ci/bench-n4.sh` | the N4 envelope: establish / modify / delete rates |

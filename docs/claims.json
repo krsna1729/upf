@@ -293,27 +293,37 @@
   {
    "id": "status-6",
    "scope": "status",
-   "evidence": [],
+   "evidence": [
+    "TestAPortRangeIsARangeOnItsField",
+    "ci/session-path.sh"
+   ],
    "result": {
-    "state": "gap",
-    "evidence": {}
+    "state": "ok",
+    "evidence": {
+     "TestAPortRangeIsARangeOnItsField": {
+      "state": "ok"
+     },
+     "ci/session-path.sh": {
+      "state": "ok"
+     }
+    }
    },
    "clause": "8.2.5",
    "part": "ies",
    "title": "a port **range** in an SDF filter",
-   "declared": "refused, deliberately: a WildcardMatch mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter, so the session is refused with cause 73",
+   "declared": "in: a range is a WildcardMatch range on its field (BESS D-186): the field's mask is zero and the key's `ranges` names the field and the inclusive bounds, so the range costs no tuple; one port stays a masked value, and the whole port domain (0-65535) constrains nothing",
    "spec": "TS 29.244",
    "messages": [
     "Shared information elements"
    ],
    "message": "Shared information elements",
    "statement": "",
-   "detail": "refused, deliberately: a WildcardMatch mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter, so the session is refused with cause 73",
-   "effect": "an SMF that provisions a port range (8.2.5's \"port-port\") is refused rather than served; matching a range needs a classifier that checks ranges after its masked key hits",
+   "detail": "in: a range is a WildcardMatch range on its field (BESS D-186): the field's mask is zero and the key's `ranges` names the field and the inclusive bounds, so the range costs no tuple; one port stays a masked value, and the whole port domain (0-65535) constrains nothing",
+   "effect": "",
    "extra": [
     {
      "name": "evidence",
-     "value": "TestPortRangeIsRefusedNotMatchedTooWidely (the refusal: no rule wider than the filter)"
+     "value": "`internal/session`: TestAPortRangeIsARangeOnItsField (the key's range and zero mask; the whole domain dropped); `ci/session-path.sh`: TestLiveSessionCarriesPacketsWithAPortRange (50-60 carries port 53) and TestLiveSessionCarriesNothingOutsideAPortRange (54-60 carries none of it)"
     }
    ],
    "kind": "conformance",
@@ -1977,7 +1987,7 @@
    "scope": "competition",
    "evidence": [
     "TestAPDINamingAQFIKeysTheRuleOnIt",
-    "TestPortRangeIsRefusedNotMatchedTooWidely",
+    "TestAPortRangeIsARangeOnItsField",
     "TestSeveralSDFFiltersAreSeveralRules"
    ],
    "result": {
@@ -1986,10 +1996,10 @@
      "TestAPDINamingAQFIKeysTheRuleOnIt": {
       "state": "ok"
      },
-     "TestPortRangeIsRefusedNotMatchedTooWidely": {
+     "TestSeveralSDFFiltersAreSeveralRules": {
       "state": "ok"
      },
-     "TestSeveralSDFFiltersAreSeveralRules": {
+     "TestAPortRangeIsARangeOnItsField": {
       "state": "ok"
      }
     }
@@ -2004,7 +2014,7 @@
    ],
    "message": "Competition",
    "scores": {
-    "us": "**80**",
+    "us": "**100**",
     "OAI-CN5G": "80",
     "open5gs": "100",
     "free5GC": "60",
@@ -2055,8 +2065,8 @@
      ],
      [
       "**us**",
-      "precedence; F-TEID+CHID; UE IP; NI+QFI",
-      "SDF+ranges (a port range is refused, status-6)"
+      "precedence; F-TEID+CHID; UE IP; SDF+ranges (WildcardMatch ranges, status-6); NI+QFI",
+      "\u2014"
      ]
     ]
    },
@@ -2068,7 +2078,7 @@
     "**OMEC** \u2014 precedence `pfcpiface/bess.go:1182`; F-TEID+CHID `messages_session.go:163-177`; UE IP `bess.go:1187-1198`; ranges `parse_pdr.go:128-140`; NI/QFI unread `parse_pdr.go:619-636`",
     "**eUPF** \u2014 F-TEID+CHID `cmd/core/pdr_creation_context.go:109-132`; UE IP `cmd/ebpf/xdp/n3n6_entrypoint.c:70`; ranges `cmd/ebpf/xdp/sdf_filter.h:101-102`; precedence absent; QFI header-only `n3n6_entrypoint.c:128`",
     "**free5GC** \u2014 its three credits are in `free5gc/gtp5g` (not the go-upf tree): precedence `src/pfcp/pdr.c:538-551`; UE IP `src/pfcp/pdr.c:314-318`; ranges `src/pfcp/pdr.c:266-273`; go-upf discards NI (`gtp5g.go:377`) and allocates no TEID",
-    "**us** \u2014 `docs/claims.md`: status-1..3, 7, 9, 15-17, 23; ranges: status-6 (refused)"
+    "**us** \u2014 `docs/claims.md`: status-1..3, 7, 9, 15-17, 23; ranges: status-6 (WildcardMatch ranges)"
    ],
    "spec_version": "16.9.1",
    "release": "16",
@@ -2227,7 +2237,8 @@
    "scope": "competition",
    "evidence": [
     "ci/smoke-gtpu.sh",
-    "ci/veth-port.sh"
+    "ci/veth-port.sh",
+    "ci/veth-transport.sh"
    ],
    "result": {
     "state": "ok",
@@ -2236,6 +2247,9 @@
       "state": "ok"
      },
      "ci/veth-port.sh": {
+      "state": "ok"
+     },
+     "ci/veth-transport.sh": {
       "state": "ok"
      }
     }
@@ -2276,7 +2290,9 @@
     "TestANonIPv4PDIIsRefusedNotWidened",
     "TestCHOOSEV6AndDualStackCreatedFTEIDFlags",
     "datapath/gtpu_datapath_test.cc",
-    "ci/smoke-gtpu.sh"
+    "ci/smoke-gtpu.sh",
+    "TestAnIPv6OuterHeaderCreationIsAnIPv6Tunnel",
+    "ci/veth-transport.sh"
    ],
    "result": {
     "state": "ok",
@@ -2291,6 +2307,12 @@
       "state": "ok"
      },
      "ci/smoke-gtpu.sh": {
+      "state": "ok"
+     },
+     "TestAnIPv6OuterHeaderCreationIsAnIPv6Tunnel": {
+      "state": "ok"
+     },
+     "ci/veth-transport.sh": {
       "state": "ok"
      }
     }
@@ -2313,7 +2335,7 @@
     "eUPF": "0",
     "OMEC": "0"
    },
-   "detail": "`GtpuDecap` parses IPv6 outer headers and accepts IPv6 inner packets; `GtpuEncap` writes IPv6 outer headers, and `rt_transport` routes N3/N9 transport domains over IPv6. PFCP UE IPv6 address assignment and IPv6 UE PDR matching remain unsupported because the default WildcardMatch address fields are four-byte IPv4 fields. This scores 33 for outer/N9 transport only; UPG-VPP also scores 33.",
+   "detail": "`GtpuDecap` parses IPv6 outer headers and accepts IPv6 inner packets; the compiler accepts an IPv6 Outer Header Creation peer (TestAnIPv6OuterHeaderCreationIsAnIPv6Tunnel) and `GtpuEncap` writes the IPv6 outer header, which `rt_transport` routes after resolving the peer by Neighbor Discovery (`ci/veth-transport.sh`, on a real veth). PFCP UE IPv6 address assignment and IPv6 UE PDR matching remain unsupported because the default WildcardMatch address fields are four-byte IPv4 fields. This scores 33 for outer/N9 transport only; UPG-VPP also scores 33.",
    "statement": "",
    "kind": "competition",
    "block": 9,
@@ -2381,7 +2403,8 @@
    "scope": "competition",
    "evidence": [
     "ci/iface-path.sh",
-    "ci/route-path.sh"
+    "ci/route-path.sh",
+    "ci/veth-layouts.sh"
    ],
    "result": {
     "state": "ok",
@@ -2390,6 +2413,9 @@
       "state": "ok"
      },
      "ci/route-path.sh": {
+      "state": "ok"
+     },
+     "ci/veth-layouts.sh": {
       "state": "ok"
      }
     }
@@ -2404,7 +2430,7 @@
    ],
    "message": "Competition",
    "scores": {
-    "us": "**50**",
+    "us": "**100**",
     "OAI-CN5G": "0",
     "open5gs": "0",
     "free5GC": "0",
@@ -2421,7 +2447,8 @@
    "file": "docs/spec/29.244-v16.9.1.txt",
    "message_spec": "",
    "message_spec_version": "16.9.1",
-   "message_clause": ""
+   "message_clause": "",
+   "field": "Sub-features: Network Instance to route domain, and branching on N9. Ours: the instance selects the route domain and the egress (`ci/route-path.sh`, `ci/iface-path.sh`); one session's uplink PDRs split its traffic per packet between N6 and an N9 tunnel on one TEID (`ci/iface-path.sh` ulcl window; Mode 2 in `ci/veth-layouts.sh` on every layout), and the PSA side takes N9 arrivals to plain N6 egress (Mode 3, same process). The far end of each N9 tunnel is this UPF in the other role or a scripted peer, not a second UPF instance. OMEC has ULCL/N9 (50); nothing else claims it."
   },
   {
    "id": "competition-12",
@@ -2549,7 +2576,7 @@
    },
    "clause": "8.2.3",
    "part": "ies",
-   "title": "local F-TEID admission is scoped by attachment endpoint across one, two and three PMD ports",
+   "title": "local F-TEID admission is scoped by attachment endpoint, and every permitted scenario runs, across one to four PMD ports",
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
@@ -2557,23 +2584,65 @@
    ],
    "message": "Shared information elements",
    "statement": "a local F-TEID is the local transport address plus TEID; the UPF must deliver a G-PDU to the PDR context for the endpoint that received it",
-   "detail": "`ci/veth-layouts.sh` generates eight real-veth graphs: one PMD with MAC, VLAN and hybrid Vif demux; all three two-PMD pairings; and three PMDs with Vif or direct per-port tags. Each sends N3 and N9 G-PDUs with the same TEID, N6 IPv4 traffic, and one unknown-TEID G-PDU. `one-vlan` also reuses the N3/N9 local IPv4 address.",
-   "effect": "the endpoint tag and local address select the composite admission key before decap; N3 and N9 traffic remain separate, N6 keeps its route domain, and an unknown TEID reaches the unknown path",
+   "detail": "`ci/veth-layouts.sh` generates nine real-veth graphs on promiscuous PMD ports (PROMISC asserted once the PMDs run): one PMD with MAC, VLAN and hybrid Vif demux; all three two-PMD pairings; three PMDs with Vif or direct per-port tags; and four PMDs with every endpoint attached twice. One compiler establishes the sessions of Modes 1, 2, 3, 5 and 6 before any traffic, then each scenario's packets are sent on every attachment of its endpoint through the compiled pipeline, with exact decap, rt and enc counts and the egress seen on the wire. `one-vlan` also reuses the N3/N9 local IPv4 address; one unknown-TEID G-PDU per layout reaches the unknown path.",
+   "effect": "the endpoint tag and local address select the composite admission key before decap; no port, Vif or attachment count is fixed; Mode 4 is not driven (not established by the pinned R16 text)",
    "extra": [
     {
      "name": "evidence",
-     "value": "`ci/veth-layouts.sh` (eight AF_PACKET PMD layouts, exact gate counts)"
+     "value": "`ci/veth-layouts.sh` (nine AF_PACKET PMD layouts, up to four ports; Modes 1, 2, 3, 5, 6 on every attachment; exact gate counts)"
     }
    ],
    "kind": "conformance",
    "block": 4,
-   "claim": "endpoint-scoped F-TEID admission works across all 1-3 PMD attachment partitions",
+   "claim": "endpoint-scoped F-TEID admission and the permitted scenarios work across every attachment layout, up to four PMD ports",
    "spec_version": "16.9.1",
    "release": "16",
    "file": "docs/spec/29.244-v16.9.1.txt",
    "message_spec": "TS 29.244",
    "message_spec_version": "16.9.1",
    "message_clause": "8.2"
+  },
+  {
+   "id": "status-41",
+   "scope": "status",
+   "evidence": [
+    "ci/veth-transport.sh"
+   ],
+   "result": {
+    "state": "ok",
+    "evidence": {
+     "ci/veth-transport.sh": {
+      "state": "ok"
+     }
+    }
+   },
+   "clause": "7.5.2.3",
+   "part": "procedures",
+   "title": "outer IPv4 and IPv6 transport is routed after encap with ARP/ND resolution, and fails closed",
+   "declared": "",
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Establishment"
+   ],
+   "message": "Session Establishment",
+   "statement": "a local F-TEID is the local transport address plus TEID; the UPF must deliver a G-PDU to the PDR context for the endpoint that received it",
+   "detail": "`ci/veth-transport.sh` runs upfd and bessd on a real veth whose peer is a Linux namespace. Neither gateway has a configured MAC: rt_transport resolves the IPv4 one by ARP and the IPv6 one by Neighbor Discovery. G-PDUs and End Markers toward an IPv4 and an IPv6 gNB leave with the resolved MAC, the outer TTL/hop limit decremented once and the inner TTL untouched. When the peer's MAC changes, both gateways re-resolve and later frames carry the new MAC. When the IPv4 gateway stops answering, no IPv4 tunnel frame reaches the wire with any MAC and the Router's unresolved gate counts them, while IPv6 keeps flowing.",
+   "effect": "dynamic neighbors only on the transport side; the inner FAR router's hops are configured",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`ci/veth-transport.sh` (91 byte- and counter-level checks on the peer's capture)"
+    }
+   ],
+   "kind": "conformance",
+   "block": 8,
+   "claim": "post-encap transport routes both outer families by resolved neighbor and never invents a MAC",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.2"
   }
  ],
  "aliases": {

@@ -178,9 +178,12 @@ Both results — the gate and the classifier's result record — come from one l
 (`{gate, ActionId}`, the BESS-side item *Classifier result model*).
 
 **What the key cannot carry is refused.** A 4-byte masked key has no form for
-an SDF port **range** or a prefix that is not IPv4, so the compiler refuses
-those PDRs with cause 73 rather than widening the rule (`internal/session`,
-`matchValue`; claims status-6 and status-7).
+a prefix that is not IPv4, so the compiler refuses those PDRs with cause 73
+rather than widening the rule (`internal/session`, `matchValue`; claims
+status-7). An SDF port **range** is carried: WildcardMatch checks inclusive
+per-field ranges after the masked key hits (BESS D-186), so the compiler masks
+the port out and names the bounds in the key's `ranges` (`portMatch`; claims
+status-6).
 
 **The action record** (one cache line, read once, never written by a worker):
 
@@ -350,7 +353,7 @@ that MBR allows for 51-byte packets plus a token bucket's slack.
 | OMEC pattern | Why it is unnecessary here | What this repo does instead |
 |---|---|---|
 | A goroutine and a `ModuleCommand` per PDR/FAR/QER, unordered; `SendMsgToUPFWithCompletion` per session | BESS's transaction engine orders, validates and rolls back server-side; a client that orders internals has to reimplement all of it | one `Transaction` per session change, `WithExpectedGeneration` when the caller has a generation in hand |
-| Cartesian expansion of port ranges into many rules | a range is a set of masked values **per field** (an n-bit field decomposes into at most 2n-2 masked entries), and a rule whose masks cover several fields matches the *product* of those per-field sets: a two-port range is up to 30x30 entries, a smaller product than OMEC's naive expansion but still a product. `max_tuples` is the budget that bounds it, and a rule whose masks cannot carry the constraint is refused rather than widened (docs/claims.md) | one rule per PDR with a masked key; a port range is refused (claims status-6) |
+| Cartesian expansion of port ranges into many rules | a range as masked values is a set **per field** (an n-bit field decomposes into at most 2n-2 masked entries), and a rule whose masks cover several fields matches the *product* of those per-field sets: a two-port range is up to 30x30 entries. BESS's WildcardMatch checks inclusive per-field ranges after its masked key hits (D-186), so a range costs no mask and no tuple | one rule per PDR with a masked key; a port range is a WildcardMatch range on its field, the field's mask zero (claims status-6) |
 | Client-side establishment, then a second pass to modify | desired state is the model: `ApplyPipeline` diffs and plans, and resource contents ride along in the same call | `Pipeline` + `PlanPipeline` before a change, `ApplyPipeline` for topology |
 | Retries, idempotency and "did it apply?" reinvented in the client | the SDK owns it: one request id per logical transaction, `GetTransaction` after an unanswered send, `DaemonRestartedError` when the epoch moved | `internal/bess` wraps exactly that and nothing else |
 | State in the controller that the dataplane also holds (and they drift) | the dataplane is the state of record; sessions are reconstructible | the controller keeps only what PFCP needs (session ids, SEIDs, the last reported counters) |
@@ -514,8 +517,8 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
    outside the interface's pool, puts the interface's domain in the rule's key
    wherever the graph declares it (`domain` in `-pdr-fields-*`), and sends a
    forward out by the FAR's instance (or the PDI's) rather than by the
-   direction's. Port ranges stay refused rather than widened (see the
-   classifier work below).
+   direction's. An SDF port range is a WildcardMatch range on its field
+   (BESS D-186): the key masks the port out and names the inclusive bounds.
    *Out:* the vif wiring's hardware half (the section above: a real port's
    interface writes `route_domain`, and the software half of that is proven on
    a veth by `ci/veth-port.sh` -- what is left is the packet-placement
@@ -583,10 +586,11 @@ Different MACs can distinguish interfaces on one VLAN; a shared MAC can
 distinguish them on different VLANs. The Vif is configured by `VifArg` and
 `VifCommandAddArg` (`protobuf/module_msg.proto`).
 
-`ci/veth-layouts.sh` exercises these port partitions as eight attachment
+`ci/veth-layouts.sh` exercises these port partitions as nine attachment
 cases. The five partitions are complete for one interface each and one to
 three PMDs; the remaining rows vary how a shared port tags the logical
-interface or whether a three-port graph uses Vif:
+interface or whether a three-port graph uses Vif, and one attaches every
+logical endpoint to two of four ports:
 
 | PMDs | test case | ingress discriminator |
 |---:|---|---|
@@ -598,14 +602,21 @@ interface or whether a three-port graph uses Vif:
 | 2 | `two-n6n9-n3` | N6/N9 share one Vif; N3 has its own PMD |
 | 3 | `three-vif` | one Vif per PMD |
 | 3 | `three-direct` | one destination-MAC filter and endpoint tag per PMD path; no Vif |
+| 4 | `four-fanin` | every logical endpoint on two ports; two ports shared by two endpoints |
 
-Every case sends real N3 and N9 G-PDUs plus N6 IP traffic. The arm checks the
-route-domain split, the endpoint/F-TEID admission gates, and the unknown-TEID
-path. These are attachment and admission cases, not eight repeats of the full
-PFCP mode fixture: `ci/iface-path.sh` covers Source/Destination Interface
-scenarios, and `ci/veth-port.sh` covers a compiler-programmed session on a
-real port. Other VLAN/MAC assignments are deployment values within the same
-partition classes, not additional PMD topologies.
+Every case is the production-shaped graph (decap, both PDR chains, `rt`, `enc`
+and `rt_transport`, each Router interface on its own attachment) programmed by
+one compiler that holds the sessions of every permitted scenario -- Modes 1,
+2, 3, 5 and 6, never Mode 4 -- before any packet is sent. Each scenario's real
+G-PDUs or N6 IP traffic go out on every attachment of their endpoint, and the
+arm checks the route-domain split, the endpoint/F-TEID admission gates, the
+exact decap/`rt`/`enc` gates each scenario names, the egress attachment, and
+the unknown-TEID path; every phase is replayed after Mode 6's leg and cleanup.
+Each logical endpoint has one local address across its attachments, the
+compiler's one per endpoint and family. `ci/iface-path.sh` covers the
+Source/Destination Interface grammar, and `ci/veth-port.sh` covers `upfd` on
+a real port. Other VLAN/MAC assignments are deployment values within the
+same partition classes, not additional PMD topologies.
 
 For a shared local transport IP, the attachment discriminator is still
 required before decap. `one-vlan` proves the configured N3/N9 endpoints remain
@@ -684,9 +695,11 @@ list, not in the basis of the placement policy.
 **What a veth proves, and what it cannot.** `ci/veth-port.sh` deploys the
 single-PMD graph, programs a downlink PDR over N4, and checks the Vif's
 route-domain match, post-encap Router, outer L2 rewrite and queue spread.
-`ci/veth-layouts.sh` generates the eight attachment graphs in the matrix above
-and checks real N3/N9 G-PDUs, N6 traffic, endpoint/F-TEID admission and the
-unknown-TEID path. Both lanes create isolated veth pairs and remove only their
+`ci/veth-layouts.sh` generates the nine production-shaped attachment graphs in
+the matrix above and drives every permitted scenario's sessions through them:
+real N3/N9 G-PDUs and N6 traffic on every attachment, endpoint/F-TEID
+admission, the exact Router and encap gates, and the unknown-TEID path. Both
+lanes create isolated veth pairs and remove only their
 own interfaces.
 
 What the veth cannot do is the measurement this section is about. The af_packet
@@ -1190,7 +1203,14 @@ missing, or a starved box and a slow UPF look alike.
   lane holds the subscriber ARP answer: a request for a live session's UE
   address is answered with the interface's MAC and the session's address, one
   session's two colliding addresses ride one transaction and both survive, and a
-  deleted session's address stops being answered.
+  deleted session's address stops being answered. Its `concurrent` window holds
+  Modes 1, 2, 3 and 5 at once (Mode 3's N9 arrival on Mode 1's TEID at the
+  other endpoint) with every stream running, each session's bytes at its own
+  exit and at no other.
+- `ci/veth-layouts.sh` + `ci/vethlayout` — every attachment layout as the
+  production-shaped graph, with one compiler holding the sessions of Modes 1,
+  2, 3, 5 and 6 (`ci/scenario`) and every scenario's packets sent on every
+  attachment; exact decap, Router and encap counts per phase.
 
 ---
 

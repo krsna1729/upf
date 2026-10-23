@@ -5,7 +5,7 @@ requirement, the evidence it cites and the last run's verdict are one record.
 Edit the JSON and re-run; never this file. Named tests and the narrative sit in
 the JSON, not here.
 
-**51 claims · 47 ok · 2 gap · 2 skip · 0 fail**
+**52 claims · 49 ok · 1 gap · 2 skip · 0 fail**
 
 `ok` proved by the evidence named · `gap` a documented missing capability ·
 `skip` needs an environment this run lacks · `FAIL` a regression.
@@ -15,16 +15,6 @@ claim below names the specification, release version and clause it reads.
 The reference texts are in `docs/spec/`, with their official source URLs.
 
 ## Open
-
-### status-6 · TS 29.244 V16.9.1 §8.2.5 · gap
-
-a port range in an SDF filter matches as a range
-
-refused, deliberately: a WildcardMatch mask cannot express a range (2n-2 prefixes per field, charged to the table's `max_tuples` budget), and a rule that cannot express it must not match more widely than the filter, so the session is refused with cause 73
-
-an SMF that provisions a port range (8.2.5's "port-port") is refused rather than served; matching a range needs a classifier that checks ranges after its masked key hits
-
-No evidence in this tree.
 
 ### status-36 · TS 29.244 V16.9.1 §5.4.15 · gap
 
@@ -49,7 +39,7 @@ The code is not in question.
 - **status-28** · TS 29.244 V16.9.1 §5.10 — a peer Error Indication becomes an ERIR report to the SMF · test · live test · lane ×2
 - **status-22** · TS 29.281 V16.2.0 §7.3.1 — a G-PDU on an unknown TEID is discarded and an Error Indication returned · lane
 
-### Session Establishment · TS 29.244 V16.9.1 §7.5.2 · 10 claims (10 ok)
+### Session Establishment · TS 29.244 V16.9.1 §7.5.2 · 11 claims (11 ok)
 
 - **status-25** · TS 29.244 V16.9.1 §5.2.1 — the uplink lookup names the tunnel the packet arrived on · lane ×2 · graph
 - **status-37** · TS 29.244 V16.9.1 §5.2.1 — downlink PDR keys include route domain for overlapping network instances · test
@@ -60,6 +50,7 @@ The code is not in question.
 - **status-32** · TS 29.244 V16.9.1 §7.5.2.2 — pfcpsim's zero TEID, QER 0, QFI 0 and inert period are accepted · test ×2 · lane
 - **status-35** · TS 29.244 V16.9.1 §7.5.2.2 — several QERs' rates are enforced together, not one of them · lane
 - **status-24** · TS 29.244 V16.9.1 §7.5.2.3 — FAR options: Forwarding Policy is held; L7 actions are refused (cause 73) · test ×3
+- **status-41** · TS 29.244 V16.9.1 §7.5.2.3 — post-encap transport routes both outer families by resolved neighbor and never invents a MAC · lane
 - **status-38** · TS 29.244 V16.9.1 §7.5.2.8 — a MAR's two access actions are compiled to one steering policy and selected by health · test ×7 · lane
 
 ### Session Modification · TS 29.244 V16.9.1 §7.5.4 · 5 claims (1 gap, 4 ok)
@@ -81,14 +72,14 @@ The code is not in question.
 - **status-27** · TS 29.244 V16.9.1 §8.2.26 — NOCP decides the Downlink Data Report; BUFF alone buffers silently · test
 - **status-30** · TS 29.244 V16.9.1 §8.2.41 — the Usage Report Trigger is octets 5-7 of its IE · test
 
-### Shared information elements · TS 29.244 V16.9.1 §8.2 · 10 claims (1 gap, 9 ok)
+### Shared information elements · TS 29.244 V16.9.1 §8.2 · 10 claims (10 ok)
 
 - **status-1** · TS 29.244 V16.9.1 §8.2.3 — an F-TEID with the CH flag (no TEID) is assigned one · test ×3 · lane
 - **status-2** · TS 29.244 V16.9.1 §8.2.3 — PDIs sharing a CHOOSE ID share one F-TEID · test ×5 · live test · lane
 - **status-3** · TS 29.244 V16.9.1 §8.2.3 — the UPF refuses unconfigured F-TEID families and reports configured IPv6 families · test ×2
-- **status-39** · TS 29.244 V16.9.1 §8.2.3 — endpoint-scoped F-TEID admission works across all 1-3 PMD attachment partitions · lane
+- **status-39** · TS 29.244 V16.9.1 §8.2.3 — endpoint-scoped F-TEID admission and the permitted scenarios work across every attachment layout, up to four PMD ports · lane
 - **status-19** · TS 29.244 V16.9.1 §8.2.5 — a match field the parser does not handle is refused, never ignored · test
-- **status-6** · TS 29.244 V16.9.1 §8.2.5 — a port range in an SDF filter matches as a range · **gap**
+- **status-6** · TS 29.244 V16.9.1 §8.2.5 — a port range in an SDF filter matches as a range · test · lane
 - **status-7** · TS 29.244 V16.9.1 §8.2.5 — non-IPv4 UE addresses are refused by the IPv4 PDR key; SDF prefix host bits are canonicalized · test ×2
 - **status-23** · TS 29.244 V16.9.1 §8.2.62 — the UE IP S/D bit places the address on the right side of the key · test ×3
 - **status-9** · TS 29.244 V16.9.1 §8.2.62 — a PDI with no UE IP IE matches by its F-TEID · test
@@ -115,16 +106,16 @@ run lacks.
 | **1** association, heartbeat, restart detection (3) | **100** | 100 | 100 | 100 | 100 | 100 | 100 | test ×3 |
 | **2** session establishment, modification, deletion (3) | **100** | 100 | 100 | 100 | 100 | 100 | 100 | test · lane |
 | **3** Session Report Request: USAR, DLDR (2) | **100** | 100 | 100 | 100 | 50 | 0 | 0 | test · lane |
-| **4** PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5) | 80 | 80 | 100 | 60 | 80 | 60 | 80 | test ×3 |
+| **4** PDI sub-features: precedence, F-TEID + CHID, UE IP, SDF + ranges, NI + QFI (5) | **100** | 80 | 100 | 60 | 80 | 60 | 80 | test ×3 |
 | **5** QER: gate, MBR, per-flow or GBR (3) | **100** | 67 | 67 | 33 | 0 | 67 | 67 | test ×2 |
 | **6** URR: volume, time, thresholds, quota + enforcement, linked (5) | **100** | 60 | 60 | 60 | 100 | 0 | 0 | test ×3 |
 | **7** BAR + DDN: buffering, DDN, duration, drop-buffered (4) | **100** | 75 | 75 | 25 | 0 | 0 | 25 | test · lane |
-| **8** GTP-U: decap, encap, echo, end marker, DSCP copy (5) | **100** | 40 | 80 | 40 | 40 | 40 | 80 | lane ×2 |
-| **9** IPv6: PFCP UE IP, inner PDR matching, and outer N9 transport (3) | **33** | 0 | 0 | 0 | 33 | 0 | 0 | test ×2 · lane · other |
+| **8** GTP-U: decap, encap, echo, end marker, DSCP copy (5) | **100** | 40 | 80 | 40 | 40 | 40 | 80 | lane ×3 |
+| **9** IPv6: PFCP UE IP, inner PDR matching, and outer N9 transport (3) | **33** | 0 | 0 | 0 | 33 | 0 | 0 | test ×3 · lane ×2 · other |
 | **10** MAR / ATSSS-LL (2) | **50** | 50 | 0 | 0 | 50 | 0 | 0 | test ×2 · lane |
-| **11** ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 | lane ×2 |
+| **11** ULCL / N9 route domains (2) | **100** | 0 | 0 | 0 | 0 | 0 | 50 | lane ×3 |
 | **12** real-SMF interop (1) · skip | **100** | 0 | 100 | 0 | 0 | 0 | 0 | lane |
-| **mean (12 blocks)** | **84** | **56** | **65** | **43** | **46** | **31** | **42** | |
+| **mean (12 blocks)** | **90** | **56** | **65** | **43** | **46** | **31** | **42** | |
 
 ### Field notes
 
@@ -141,7 +132,7 @@ run lacks.
 | OMEC | precedence; F-TEID+CHID; UE IP; SDF+ranges | NI+QFI; ranges wider than 100 ports refused |
 | eUPF | F-TEID+CHID; UE IP; SDF+ranges | precedence; NI; QFI |
 | free5GC | precedence; UE IP; SDF+ranges (gtp5g kernel) | F-TEID+CHID; NI+QFI |
-| **us** | precedence; F-TEID+CHID; UE IP; NI+QFI | SDF+ranges (a port range is refused, status-6) |
+| **us** | precedence; F-TEID+CHID; UE IP; SDF+ranges (WildcardMatch ranges, status-6); NI+QFI | — |
 
 **sources (file:line, audited commit)**
 
@@ -151,13 +142,15 @@ run lacks.
 - **OMEC** — precedence `pfcpiface/bess.go:1182`; F-TEID+CHID `messages_session.go:163-177`; UE IP `bess.go:1187-1198`; ranges `parse_pdr.go:128-140`; NI/QFI unread `parse_pdr.go:619-636`
 - **eUPF** — F-TEID+CHID `cmd/core/pdr_creation_context.go:109-132`; UE IP `cmd/ebpf/xdp/n3n6_entrypoint.c:70`; ranges `cmd/ebpf/xdp/sdf_filter.h:101-102`; precedence absent; QFI header-only `n3n6_entrypoint.c:128`
 - **free5GC** — its three credits are in `free5gc/gtp5g` (not the go-upf tree): precedence `src/pfcp/pdr.c:538-551`; UE IP `src/pfcp/pdr.c:314-318`; ranges `src/pfcp/pdr.c:266-273`; go-upf discards NI (`gtp5g.go:377`) and allocates no TEID
-- **us** — `docs/claims.md`: status-1..3, 7, 9, 15-17, 23; ranges: status-6 (refused)
+- **us** — `docs/claims.md`: status-1..3, 7, 9, 15-17, 23; ranges: status-6 (WildcardMatch ranges)
 
 </details>
 
 Audited 2026-10-20 against each project's checkout; cells are lower bounds (silence counts as absent). OAI's precedence credit is the simple-switch path -- its XDP array follows PFCP order; free5GC's three credits are in the gtp5g kernel module, its userspace tree has no matcher; open5gs' NI is a setup-time choice of the DNN's GTP-U resource and needs an external SMF to be exercised.
 
 **block 9** — IPv6 has three capabilities here: PFCP UE IPv6 address assignment, inner PDR matching, and N9 transport over IPv6. The endpoint-scoped GTP-U path supports IPv6 outer transport, including configured N9 endpoints, while the compiler refuses IPv6 UE-address PDRs rather than widen the four-byte WildcardMatch key. GtpuDecap accepts IPv6 inner packets, but no IPv6 UE PDR matches them. This earns 33 for outer/N9 transport only; UPG-VPP also scores 33.
+
+**block 11** — Sub-features: Network Instance to route domain, and branching on N9. Ours: the instance selects the route domain and the egress (`ci/route-path.sh`, `ci/iface-path.sh`); one session's uplink PDRs split its traffic per packet between N6 and an N9 tunnel on one TEID (`ci/iface-path.sh` ulcl window; Mode 2 in `ci/veth-layouts.sh` on every layout), and the PSA side takes N9 arrivals to plain N6 egress (Mode 3, same process). The far end of each N9 tunnel is this UPF in the other role or a scripted peer, not a second UPF instance. OMEC has ULCL/N9 (50); nothing else claims it.
 
 **block 12** — free5GC v4.3.0 SMF drove upfd through establishment, modification and deletion unshimmed (docs/interop.md, run fixes-ccf667c; ci/interop/run.sh). open5gs 100: its UPF is the field's production interop.
 

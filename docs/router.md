@@ -48,8 +48,9 @@ those ids like any other next hop. An id is either static
 A destination-mode Router enables a family only when its FIB is sized:
 `rt_transport` in `deploy/upf.yaml` sets `max_ipv4_routes` and
 `max_ipv6_routes` (dual-stack outer transport); `deploy/veth-port.yaml` sets
-only `max_ipv4_routes`, so its outer IPv6 frames are dropped and counted. A
-next-hop-mode Router (`rt`) has no FIB and forwards both families by id.
+only `max_ipv4_routes`, so its outer IPv6 frames are dropped and counted;
+`deploy/veth-transport.yaml` sets both. A next-hop-mode Router (`rt`) has no
+FIB and forwards both families by id.
 
 ## ARP and Neighbor Discovery
 
@@ -71,6 +72,23 @@ Unresolved or unreachable neighbors fail closed in this graph; no punt gate is
 configured. A valid reply or advertisement updates the next-hop adjacency
 without changing the route that names it. `docs/neighbor-resolution.md` in the
 BESS tree documents identity checks, timers and publication semantics.
+
+## Live evidence on a veth
+
+`ci/veth-transport.sh` runs `deploy/veth-transport.yaml` (deploy/upf.yaml's
+dual-stack `rt_transport` and End Marker port on one af_packet PMD) against a
+Linux peer in its own network namespace, with upfd/n4bench programming an
+IPv4-gNB and an IPv6-gNB session and handing both over with SNDEM. Every check
+reads the peer's tcpdump capture byte by byte: both gateways are learned by ARP
+and ND (no configured MAC); the IPv4 and IPv6 End Markers leave through
+`rt_transport` with the old TEID and the resolved MAC; a G-PDU's outer TTL or
+hop limit leaves at 63 (built 64, decremented once, IPv4 checksum valid) while
+its inner TTL is the inner hop's (sent N, leaves N-1); after the peer's MAC
+changes, both families re-resolve and carry the new MAC; after the IPv4
+gateway's address is removed, no IPv4 tunnel frame reaches the wire and each
+lands on the lane's `punt_unresolved_gate` (a Sink, counted on gate 2). The
+lane shortens the resolver timers (reachable lifetime 1 s, three probes
+100/200/200 ms apart, retry 500 ms) so those transitions take seconds.
 
 ## Packet handling and limits
 
