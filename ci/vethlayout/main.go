@@ -222,7 +222,7 @@ func graphFor(cfg layout, eps []endpoint, ifaces []string) (map[string]any, erro
 			})
 		}
 		modules = append(modules, module(vifName, "Vif", map[string]any{
-			"default_gate": 0, "vif_id_attr": "neighbor_interface_id", "interfaces": interfaces,
+			"default_gate": 0, "interfaces": interfaces,
 		}))
 		connections = append(connections, wire(inc, vifName, nil), wire(vifName, "sink_unclassified", new(uint32(0))))
 		for _, name := range cfg.groups[i] {

@@ -138,9 +138,10 @@ modules:
     arg: {capacity: 65536}
   # A PDR result carries the route domain mapped from its PDI Network Instance
   # on both directions. Plain N6 ingress gets the same domain from the Vif.
+  # The inner FIB is IPv4 only, sized for this lab's two routes.
   - name: rt
     mclass: Router
-    arg: {mode: ROUTE_MODE_DESTINATION, max_domains: 1}
+    arg: {mode: ROUTE_MODE_DESTINATION, max_domains: 1, max_ipv4_routes: 16}
   # The port: the router's frames and the interface's own (l2_sort's ARP gate)
   # leave by it together, and dump_n6 is where the lane reads them.
   - name: merge_n6

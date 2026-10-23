@@ -686,7 +686,7 @@ distinct when both use the same local IPv4 address and TEID, because the Vif's
 VLAN and the graph's endpoint tag carry the difference.
 
 
-`Vif` writes the attachment's `vif_id`, `neighbor_interface_id`, and
+`Vif` writes the attachment's `vif_id` and
 `route_domain`. A PDR table reads `route_domain` only when its configured key
 declares that field; `deploy/veth-port.yaml` and `deploy/upf.yaml`'s `pdr_dl`
 do. The compiler resolves each PFCP Network Instance against
@@ -1319,7 +1319,7 @@ The inner `rt` has a dynamic N6 next hop plus static gate mappings for tunnel
 egress and optional reinjection.
 
 The Router's `NeighborResolver` learns ARP and IPv6 ND state. `Vif` tags
-incoming control frames with `neighbor_interface_id`; Router validates and
+incoming control frames with `vif_id`; Router validates and
 queues them to the bounded control-side resolver path. The maintenance path
 updates complete next-hop records and emits ARP/ND solicitations on the
 configured gate. Neighbor updates change adjacency, not the route that names

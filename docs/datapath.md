@@ -359,7 +359,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | `deploy/meter-compose.yaml` / `ci/meter-compose.sh` | the composition probe: `classifier -> mt (levels: 2)`, two meter ids in one result record, proving that the stack polices the flow's bucket then the session's |
 | `Meter` | one per direction | `<module>/meters`, the QER's committed and peak rate; a closed gate compiles to the drop gate. The model is a two-rate three-colour meter: `committed_rate`/`peak_rate` are the QER's GBR/MBR and the bursts its Averaging Window, and the packet leaves on the gate that is its colour — 0 green, 1 yellow (between the guarantee and the ceiling), 2 red. The graphs connect 0 and 1 to the chain and leave 2 unwired, which is the drop; an unwired gate has no Track hook, so red's drops are read from the module's own state rather than `bess_gate_packets_total` |
 | `PacketStore` | the buffering branch (`buffer-path.yaml`) | `key_attrs: ["action_id"]`, `max_packets`, `max_packets_per_flow`, `timeout_ms`; one owner task, any number of workers. `release`/`drop`/`clear` are commands that enqueue into the store's own request ring (`Command::THREAD_SAFE` since BESS `cdeb4e77`), and its `flows` table is live configuration (`requires_paused_workers: false`), so neither a command nor a flow write is refused with EBUSY or RESOURCE_BUSY and nothing stops the datapath; a command is **accepted, not completed** -- the store's owner task applies it on a later run -- so a caller that needs the effect reads it back (`ps/flows`, the drop and release counters, `GetDesc`). A flow the store holds nothing for is a no-op (ENOENT is gone; the only refusal left is ENOSPC, a full request ring), an upsert or an erase moves no packet, and an erase removes configuration only -- `drop` is what frees what a flow holds (BESS's note: `packet_store: the flow key is a configured attribute, not a fixed pair`, 96d22a8f). The `flows` entries are the SMF's own numbers: `internal/session` writes one per buffering rule (`writeFlowEntry`), keyed by the rule's ActionId, with `timeout_ns` from 8.2.29's DL Buffering Duration and `max_packets_per_flow` from 8.2.30's Suggested Packet Count, each left out where the SMF named none; a modification's Update BAR rewrites it, a deletion erases it, and the startup sweep names the table. BESS's `LimitsFor` resolves it per flow; the store then enforces the cap on every arrival (`StoreBatch`) and, when `total_packets_` reaches `max_packets`, ages each flow's packets past its `timeout_ns` out with `bess::PacketFree` in `EvictExpired` -- a silent discard (no gate, no metric; only `GetDesc`'s stored count falls), distinct from the `drop` command's counted free and from the gate-1 eviction the cap uses |
-| `Vif` | `deploy/upf.yaml`, `deploy/veth-port.yaml` | splits logical reference points by VLAN/MAC and writes `neighbor_interface_id` plus `route_domain`; ARP/ND replies are dispatched to the Router resolver for the interface that owns them |
+| `Vif` | `deploy/upf.yaml`, `deploy/veth-port.yaml` | splits logical reference points by VLAN/MAC and writes `vif_id` plus `route_domain`; the Router takes ARP/ND replies on the interface `vif_id` names |
 
 ## Framework and library surface we use
 
@@ -368,7 +368,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | control_v2, one transaction per session change | `internal/session` writes a session's rules, actions, meters, counters and tunnels together or not at all, with a request id that survives retries |
 | resources and codecs (D-129) | the tables above: configuration written in a transaction, a codec that validates the key, and a readback the startup sweep uses. The store's `flows` is one of them (one entry per flow id, each field optional, absent meaning the module-wide argument), written by the session compiler with the SMF's own numbers (8.2.29's duration as `timeout_ns`, 8.2.30's count as `max_packets_per_flow`) in the same transaction as the rule: an upsert or an erase moves no packet and stops no worker, and an erase is configuration only — `drop` is what frees what a flow holds |
 | module commands | `get_counts` (counters), `get_errors` (the responder's Error Indication table: monotonic counts, no clear, read by the report tick), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
-| metadata attributes | `action_id` (PDR result, read by counters/encap/store), `fteid_context` (written by decap, read by the PDR tables), `endpoint_id` (tagged before decap, read by decap), `qfi` (decap output, read by the PDR tables), `route_domain` (Vif/PDR result, read by tables and inner Router), `neighbor_interface_id` (Vif output, read by Router resolver), and `transport_route_domain` (encap/tag output, read by `rt_transport`) |
+| metadata attributes | `action_id` (PDR result, read by counters/encap/store), `fteid_context` (written by decap, read by the PDR tables), `endpoint_id` (tagged before decap, read by decap), `qfi` (decap output, read by the PDR tables), `route_domain` (Vif/PDR result, read by tables and inner Router), `vif_id` (Vif or tag output, read by the Router's neighbor input), and `transport_route_domain` (encap/tag output, read by `rt_transport`) |
 | slot tables (`dataplane/slot_table.h`) | every per-rule table: ids are 1..capacity, an erased key retires for a grace period, and publishing into a retiring slot is refused — which is why released ids wait their walk (`docs/design.md`, the id pool) |
 | packet ownership | `bess::PacketRef` and the store's explicit free/release path; our modules copy no packet and allocate none |
 | tasks (`RegisterTask`/`RunTask`) | BESS's store drains released packets from a task; **none of our modules has one** — nothing in our packet path runs between packets |
@@ -582,9 +582,8 @@ and the measurement that needs a NIC is the one below.
 The UPF's N3, N6 and N9 reference points can share a port. `Vif`
 (`core/modules/vif.{h,cc}`) matches a frame by `(VLAN, destination MAC)` and
 sends it through that interface's output gate. It writes `route_domain` and
-the configured `vif_id_attr`; the graphs name that attribute
-`neighbor_interface_id` so the Router can associate ARP/ND traffic with its
-resolver interface. `deploy/upf.yaml` uses a separate N6 Vif, with `arp_n6`
+`vif_id`, which the Router reads by default to associate ARP/ND traffic with
+its interface. `deploy/upf.yaml` uses a separate N6 Vif, with `arp_n6`
 before it to answer for the UPF and subscriber addresses; the N3/N9 Vif feeds
 endpoint tags and the GTP-U path. `deploy/veth-port.yaml` uses one Vif for its
 three logical interfaces.
@@ -593,12 +592,15 @@ Both metadata attributes need readers. BESS allocates no offset for an
 unread attribute (`core/metadata.cc`, `FillOffsetArrays`); Vif writes
 `route_domain` only when the route-domain and interface-ID offsets both exist
 (`vif.cc`'s `write_metadata` guard). A PDR table can read `route_domain`; the
-Router reads `neighbor_interface_id`. A graph without those consumers must add
+Router reads `vif_id`. A graph without those consumers must add
 `MetadataTest` readers.
 
-**Router domains are eager.** `Router` creates every domain's FIB in `Init`
-(`router.cc`'s `CreateDomain` loop). Keep IDs small and set `max_domains` just
-above the largest ID; `upfd -max-domains` must match the graph.
+**Router domains and FIBs.** Only a destination-mode Router holds FIBs: it
+builds domain 0's for each enabled family at `Init` and another domain's on
+its first route, so keep domain IDs small and `max_domains` just above the
+largest. A next-hop-mode Router (the inner `rt` in most graphs) has none and
+takes no `max_domains`. `upfd -max-domains` bounds the deployment's domain IDs;
+where the inner Router routes by destination, it must match that Router.
 
 ### What is proven where
 

@@ -84,8 +84,9 @@ func run() error {
 			"routes are the egress table) and an instance line may name no egress. empty: the "+
 			"one-instance deployment, where no PDI's Network Instance is read")
 	maxDomains := flag.Uint("max-domains", 1,
-		"the graph's Router max_domains: every -instances domain must be below it, "+
-			"and a packet classified in one the router does not have resolves to no table")
+		"the bound on route-domain ids: every -instances domain must be below it. With "+
+			"-route-mode=destination it must equal the inner Router's max_domains, or a packet "+
+			"classified in a domain the router does not have resolves to no table")
 	pdrFieldsUL := flag.String("pdr-fields-ul", "src,dst,proto,sport,dport,fteid,qfi",
 		"the uplink PDR table's fields, in the graph's order")
 	pdrFieldsDL := flag.String("pdr-fields-dl", "src,dst,proto,sport,dport,domain,fteid,qfi",

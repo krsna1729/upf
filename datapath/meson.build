@@ -61,11 +61,15 @@ upf_datapath = shared_module(
 gtest_dep = dependency('gtest', required: false)
 bess_static_dep = dependency('bess-dev-static', required: false)
 if gtest_dep.found() and bess_static_dep.found()
+  # DT_RPATH, not RUNPATH: the loader applies RUNPATH only to the binary's own
+  # DT_NEEDED, and DPDK's shared libraries load their siblings (librte_kvargs,
+  # librte_telemetry, ...) from the same unexported directory.
   gtpu_datapath_test = executable(
     'gtpu_datapath_test',
     'gtpu_datapath_test.cc',
     include_directories: include_directories('.'),
     dependencies: [bess_static_dep, protobuf_dep, gtest_dep],
+    link_args: ['-Wl,--disable-new-dtags'],
   )
   test('gtpu_datapath', gtpu_datapath_test)
 endif

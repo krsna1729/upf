@@ -124,9 +124,8 @@ modules:
     arg: {capacity: 65536}
   - name: rt
     mclass: Router
-    # Two route domains: this graph serves two network instances, and the
-    # Router's `max_domains` is the bound upfd's -max-domains must agree with.
-    arg: {max_domains: 2}
+    # Two route domains (upfd -max-domains 2): they key the PDR tables; this
+    # Router forwards by next-hop id and holds no FIB.
   - name: sink_n6
     mclass: Sink
   # The second instance's exit (the `ims` instance's next hop 3): a convention

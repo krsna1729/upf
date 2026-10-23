@@ -25,10 +25,6 @@ for name, value in (("marker", marker), ("out", out)):
         sys.exit(f"graph.py: {name} must be an absolute path, got {value!r}")
 
 
-def mac(value):
-    return base64.b64encode(bytes(int(part, 16) for part in value.split(":"))).decode()
-
-
 def ipv4(value):
     return base64.b64encode(socket.inet_aton(value)).decode()
 
@@ -64,7 +60,7 @@ ports = f'''ports:
 new = replace_once(text, r"^ports:\n.*?(?=^modules:)", ports,
                    "ports block", re.MULTILINE | re.DOTALL)
 
-# The Vifs and resolver interfaces name the local address/MAC. Neighbor MACs
+# The Vifs and Router interfaces name the local address/MAC. Neighbor MACs
 # are learned by the Router from ARP, not injected into tunnel entries.
 new = replace_once(
     new,
@@ -78,23 +74,23 @@ new = replace_once(
     "N6 Vif identity")
 new = replace_once(
     new,
-    r'^        - \{id: 1, egress_gate: 0, mac: "[^"]*", ipv4: "[^"]*"\}$',
-    f'        - {{id: 1, egress_gate: 0, mac: "{mac(n6_mac)}", ipv4: "{dn_gw}"}}',
-    "N6 Router resolver interface")
+    r'^        - \{id: 1, egress_gate: 0, mac_addr: "02:00:00:00:06:01", addresses: \["192\.0\.2\.2(/\d+)"\]\}$',
+    rf'        - {{id: 1, egress_gate: 0, mac_addr: "{n6_mac}", addresses: ["{dn_gw}\1"]}}',
+    "N6 Router interface")
 new = replace_once(
     new,
-    r'^        - \{next_hop_id: 1, interface_id: 1, ipv4: "[^"]*"\}$',
-    f'        - {{next_hop_id: 1, interface_id: 1, ipv4: "{dn_ip}"}}',
+    r'^  rt/neighbors:\n    - key: \{id: 1\}\n      value: \{interface_id: 1, ipv4: "[^"]*"\}$',
+    f'  rt/neighbors:\n    - key: {{id: 1}}\n      value: {{interface_id: 1, ipv4: "{dn_ip}"}}',
     "N6 Router neighbor binding")
 new = replace_once(
     new,
-    r'^        - \{id: 1, egress_gate: 0, mac: "[^"]*", ipv4: "[^"]*", ipv6: "[^"]*"\}$',
-    f'        - {{id: 1, egress_gate: 0, mac: "{mac(n3_mac)}", ipv4: "{n3_ip}", ipv6: "2001:db8:1::1"}}',
-    "N3 transport resolver interface")
+    r'^        - \{id: 1, egress_gate: 0, mac_addr: "02:00:00:00:03:01", addresses: \["192\.0\.2\.1(/\d+)", ("[^"]*")\]\}$',
+    rf'        - {{id: 1, egress_gate: 0, mac_addr: "{n3_mac}", addresses: ["{n3_ip}\1", \2]}}',
+    "N3 transport Router interface")
 new = replace_once(
     new,
-    r'^        - \{next_hop_id: 1, interface_id: 1, ipv4: "192\.0\.2\.2"\}$',
-    f'        - {{next_hop_id: 1, interface_id: 1, ipv4: "{gnb_ip}"}}',
+    r'^  rt_transport/neighbors:\n    - key: \{id: 1\}\n      value: \{interface_id: 1, ipv4: "192\.0\.2\.2"\}$',
+    f'  rt_transport/neighbors:\n    - key: {{id: 1}}\n      value: {{interface_id: 1, ipv4: "{gnb_ip}"}}',
     "N3 transport neighbor binding")
 new = replace_once(
     new,

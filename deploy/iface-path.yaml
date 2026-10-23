@@ -78,7 +78,6 @@ modules:
         - {name: endpoint_id, size: 4, value_int: 1}
         - {name: route_domain, size: 4, value_int: 0}
         - {name: transport_route_domain, size: 4, value_int: 1}
-        - {name: neighbor_interface_id, size: 4, value_int: 1}
   # -- the uplink streams ------------------------------------------------------
   - name: src_up
     mclass: Source
@@ -159,7 +158,6 @@ modules:
   # -- the router and the exits ------------------------------------------------
   - name: rt
     mclass: Router
-    arg: {max_domains: 3}
   - name: enc
     mclass: GtpuEncap
     arg: {max_tunnels: 65536}

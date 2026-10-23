@@ -160,7 +160,10 @@
   {
    "id": "status-3",
    "scope": "status",
-   "evidence": ["TestACHOOSEForIPv6RequiresConfiguredEndpoint", "TestCHOOSEV6AndDualStackCreatedFTEIDFlags"],
+   "evidence": [
+    "TestACHOOSEForIPv6RequiresConfiguredEndpoint",
+    "TestCHOOSEV6AndDualStackCreatedFTEIDFlags"
+   ],
    "result": {
     "state": "ok",
     "evidence": {
@@ -830,7 +833,6 @@
     }
    },
    "clause": "5.2.1A",
-   "title": "uplink SDF filters are oriented to the packet direction before WildcardMatch rule generation (`matchValue`)",
    "title": "uplink SDF filters are oriented to the packet direction before rule generation (`matchValue`, `firewallRule`)",
    "declared": "",
    "spec": "TS 29.244",
@@ -1837,7 +1839,9 @@
   {
    "id": "status-37",
    "scope": "status",
-   "evidence": ["TestTwoInstancesRouteIndependently"],
+   "evidence": [
+    "TestTwoInstancesRouteIndependently"
+   ],
    "result": {
     "state": "ok",
     "evidence": {
@@ -2327,21 +2331,27 @@
     "TestANonIPv4PDIIsRefusedNotWidened",
     "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly",
     "TestCHOOSEV6AndDualStackCreatedFTEIDFlags",
-    "GtpuAdmission.BuildsCompleteEndpointScopedKeysAndDirectionGates",
-    "GtpuOuterWriter.BuildsIpv6LengthsChecksumHopQfiAndPreservesInner",
-    "RouterTest.DestinationModeForwardsIpv4AndIpv6Routes",
+    "datapath/gtpu_datapath_test.cc",
     "ci/smoke-gtpu.sh"
    ],
    "result": {
     "state": "ok",
     "evidence": {
-     "TestANonIPv4PDIIsRefusedNotWidened": {"state": "ok"},
-     "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {"state": "ok"},
-     "TestCHOOSEV6AndDualStackCreatedFTEIDFlags": {"state": "ok"},
-     "GtpuAdmission.BuildsCompleteEndpointScopedKeysAndDirectionGates": {"state": "ok"},
-     "GtpuOuterWriter.BuildsIpv6LengthsChecksumHopQfiAndPreservesInner": {"state": "ok"},
-     "RouterTest.DestinationModeForwardsIpv4AndIpv6Routes": {"state": "ok"},
-     "ci/smoke-gtpu.sh": {"state": "ok"}
+     "TestANonIPv4PDIIsRefusedNotWidened": {
+      "state": "ok"
+     },
+     "TestAnIPv6SDFPrefixCompilesOnTheFirewallPathOnly": {
+      "state": "ok"
+     },
+     "TestCHOOSEV6AndDualStackCreatedFTEIDFlags": {
+      "state": "ok"
+     },
+     "datapath/gtpu_datapath_test.cc": {
+      "state": "ok"
+     },
+     "ci/smoke-gtpu.sh": {
+      "state": "ok"
+     }
     }
    },
    "clause": null,
@@ -2585,10 +2595,16 @@
   {
    "id": "status-39",
    "scope": "status",
-   "evidence": ["ci/veth-layouts.sh"],
+   "evidence": [
+    "ci/veth-layouts.sh"
+   ],
    "result": {
-    "state": "not run",
-    "evidence": {}
+    "state": "ok",
+    "evidence": {
+     "ci/veth-layouts.sh": {
+      "state": "ok"
+     }
+    }
    },
    "clause": "8.2.3",
    "part": "ies",

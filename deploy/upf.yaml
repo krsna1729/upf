@@ -81,7 +81,6 @@ modules:
     mclass: Vif
     arg:
       default_gate: 0
-      vif_id_attr: neighbor_interface_id
       interfaces:
         - {id: 1, vlan: 0, mac_addr: "02:00:00:00:03:01", ip_addr: "192.0.2.1", ipv6_addr: "2001:db8:1::1", route_domain: 0, gate: 1}
         - {id: 2, vlan: 0, mac_addr: "02:00:00:00:09:01", ip_addr: "192.0.2.3", ipv6_addr: "2001:db8:9::1", route_domain: 0, gate: 2}
@@ -104,8 +103,9 @@ modules:
   - name: n6_in
     mclass: PortInc
     arg: {port: n6}
-  # The N6 ingress tag, before the ARP split. neighbor_interface_id names the
-  # Router resolver interface ARP/ND replies arrive on. A plain N6 packet
+  # The N6 ingress tag, before the ARP split. vif_id names the Router
+  # interface ARP/ND replies arrive on (the Router's default ingress attribute,
+  # the one Vif writes on its own branches). A plain N6 packet
   # carries no tunnel: fteid_context 0 and qfi 0xff (no PDU Session Container)
   # match the N6 rules, which wildcard both, and never an F-TEID rule. Domain 0
   # is vif_n6's own (the Vif rewrites it on the IP branch). action_id and
@@ -116,7 +116,7 @@ modules:
     mclass: SetMetadata
     arg:
       attrs:
-        - {name: neighbor_interface_id, size: 4, value_int: 1}
+        - {name: vif_id, size: 4, value_int: 1}
         - {name: route_domain, size: 4, value_int: 0}
         - {name: fteid_context, size: 4, value_int: 0}
         - {name: qfi, size: 1, value_int: 255}
@@ -161,7 +161,6 @@ modules:
     mclass: Vif
     arg:
       default_gate: 0
-      vif_id_attr: neighbor_interface_id
       interfaces:
         # The N6 identity: hop 1's source MAC, the pool gateway, and domain 0.
         - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", ipv6_addr: "2001:db8:6::1", route_domain: 0, gate: 1}
@@ -230,20 +229,20 @@ modules:
         - {offset: 30, num_bytes: 8}
       default_gate: 1
 
-  # End Markers carry their transport domain and the resolver interface of
-  # that domain (rt_transport reads both on every input path).
+  # End Markers carry their transport domain and the Router interface of that
+  # domain (rt_transport reads both on every input path).
   - name: set_marker_domain_n3
     mclass: SetMetadata
     arg:
       attrs:
         - {name: transport_route_domain, size: 4, value_int: 1}
-        - {name: neighbor_interface_id, size: 4, value_int: 1}
+        - {name: vif_id, size: 4, value_int: 1}
   - name: set_marker_domain_n9
     mclass: SetMetadata
     arg:
       attrs:
         - {name: transport_route_domain, size: 4, value_int: 2}
-        - {name: neighbor_interface_id, size: 4, value_int: 2}
+        - {name: vif_id, size: 4, value_int: 2}
   - name: cp_in_n3
     mclass: PortInc
     arg: {port: cp_marker_n3}
@@ -347,32 +346,24 @@ modules:
   - name: rt
     mclass: Router
     arg:
-      resolver_interfaces:
-        - {id: 1, egress_gate: 0, mac: "AgAAAAYB", ipv4: "192.0.2.2"}
-      neighbor_bindings:
-        - {next_hop_id: 1, interface_id: 1, ipv4: "192.0.2.1"}
+      interfaces:
+        - {id: 1, egress_gate: 0, mac_addr: "02:00:00:00:06:01", addresses: ["192.0.2.2/24"]}
   - name: enc
     mclass: GtpuEncap
     arg: {max_tunnels: 65536}
-  # Outer headers from both logical reference points use destination routing.
-  # A destination-mode Router reads no next hop; its next-hop attribute is
-  # renamed apart from rt's so the ARP/ND, echo and End Marker inputs (no
-  # next-hop writer) do not make rt's next_hop_id unreadable.
+  # Outer headers from both logical reference points use destination routing,
+  # dual-stack in each transport domain.
   - name: rt_transport
     mclass: Router
     arg:
       mode: ROUTE_MODE_DESTINATION
       max_domains: 3
+      max_ipv4_routes: 64
+      max_ipv6_routes: 64
       domain_attr: transport_route_domain
-      next_hop_attr: transport_next_hop_id
-      resolver_interfaces:
-        - {id: 1, egress_gate: 0, mac: "AgAAAAMB", ipv4: "192.0.2.1", ipv6: "2001:db8:1::1"}
-        - {id: 2, egress_gate: 1, mac: "AgAAAAkB", ipv4: "192.0.2.3", ipv6: "2001:db8:9::1"}
-      neighbor_bindings:
-        - {next_hop_id: 1, interface_id: 1, ipv4: "192.0.2.2"}
-        - {next_hop_id: 2, interface_id: 1, ipv6: "2001:db8:1::2"}
-        - {next_hop_id: 3, interface_id: 2, ipv4: "192.0.2.4"}
-        - {next_hop_id: 4, interface_id: 2, ipv6: "2001:db8:9::2"}
+      interfaces:
+        - {id: 1, egress_gate: 0, mac_addr: "02:00:00:00:03:01", addresses: ["192.0.2.1/24", "2001:db8:1::1/64"]}
+        - {id: 2, egress_gate: 1, mac_addr: "02:00:00:00:09:01", addresses: ["192.0.2.3/24", "2001:db8:9::1/64"]}
 
   # -- egress ------------------------------------------------------------------
   - name: n6_out
@@ -450,8 +441,8 @@ connections:
   - {upstream: set_marker_domain_n9, downstream: rt_transport}
 
 resources:
-  # Hop 1 is the resolver-owned N6 next hop. The Router seeds it from the
-  # interface/binding configuration; only non-neighbor egress ids are listed.
+  # Hop 1 is the resolver-owned N6 next hop (rt/neighbors below); only static
+  # egress ids are listed here.
   rt/next_hops:
     - key: {id: 2}
       value: {egress_gate: 1}
@@ -459,6 +450,19 @@ resources:
       value: {egress_gate: 2}
     - key: {id: 5}
       value: {egress_gate: 4}
+  rt/neighbors:
+    - key: {id: 1}
+      value: {interface_id: 1, ipv4: "192.0.2.1"}
+  # rt_transport's next hops are all resolved: N3 and N9 gateways per family.
+  rt_transport/neighbors:
+    - key: {id: 1}
+      value: {interface_id: 1, ipv4: "192.0.2.2"}
+    - key: {id: 2}
+      value: {interface_id: 1, ipv6: "2001:db8:1::2"}
+    - key: {id: 3}
+      value: {interface_id: 2, ipv4: "192.0.2.4"}
+    - key: {id: 4}
+      value: {interface_id: 2, ipv6: "2001:db8:9::2"}
   # Each transport domain has an independent dual-stack default route. The
   # resolver-owned next hops select the N3 or N9 attachment and its gateway.
   rt_transport/routes:

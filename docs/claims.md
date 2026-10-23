@@ -5,7 +5,7 @@ requirement, the evidence it cites and the last run's verdict are one record.
 Edit the JSON and re-run; never this file. Named tests and the narrative sit in
 the JSON, not here.
 
-**50 claims · 47 ok · 1 gap · 2 skip · 0 fail**
+**51 claims · 48 ok · 1 gap · 2 skip · 0 fail**
 
 `ok` proved by the evidence named · `gap` a documented missing capability ·
 `skip` needs an environment this run lacks · `FAIL` a regression.
@@ -42,7 +42,7 @@ The code is not in question.
 ### Session Establishment · TS 29.244 V16.9.1 §7.5.2 · 10 claims (10 ok)
 
 - **status-25** · TS 29.244 V16.9.1 §5.2.1 — the uplink lookup names the tunnel the packet arrived on · lane ×2 · graph
-- **status-37** · TS 29.244 V16.9.1 §5.2.1 — the downlink selector is keyed byte-for-byte as the engine keys it · test · lane
+- **status-37** · TS 29.244 V16.9.1 §5.2.1 — downlink PDR keys include route domain for overlapping network instances · test
 - **status-16** · TS 29.244 V16.9.1 §7.5.2.2 — several SDF Filter IEs are a list; a packet matches any · test
 - **status-17** · TS 29.244 V16.9.1 §7.5.2.2 — several QFI IEs are a list; a packet matches any · test
 - **status-20** · TS 29.244 V16.9.1 §7.5.2.2 — several QERs on one PDR: a closed gate in any of them stops the rule · test ×6 · live test · lane
@@ -54,7 +54,7 @@ The code is not in question.
 
 ### Session Modification · TS 29.244 V16.9.1 §7.5.4 · 5 claims (1 gap, 4 ok)
 
-- **status-15** · TS 29.244 V16.9.1 §5.2.1A — an uplink SDF filter is left as provisioned, not swapped · test ×2
+- **status-15** · TS 29.244 V16.9.1 §5.2.1A — an uplink SDF filter is left as provisioned, not swapped · test
 - **status-18** · TS 29.244 V16.9.1 §5.2.1A — an SDF Filter IE with no Flow Description is refused (cause 64) · test ×2
 - **status-36** · TS 29.244 V16.9.1 §5.4.15 — Packet Rate: a QER capping packets per time unit, and its queryable status · **gap**
 - **status-33** · TS 29.244 V16.9.1 §7.5.4 — Remove QER is applied; rule IDs may number from 0 · test ×2
@@ -71,17 +71,18 @@ The code is not in question.
 - **status-27** · TS 29.244 V16.9.1 §8.2.26 — NOCP decides the Downlink Data Report; BUFF alone buffers silently · test
 - **status-30** · TS 29.244 V16.9.1 §8.2.41 — the Usage Report Trigger is octets 5-7 of its IE · test
 
-### Shared information elements · TS 29.244 V16.9.1 §8.2 · 9 claims (9 ok)
+### Shared information elements · TS 29.244 V16.9.1 §8.2 · 10 claims (10 ok)
 
 - **status-1** · TS 29.244 V16.9.1 §8.2.3 — an F-TEID with the CH flag (no TEID) is assigned one · test ×3 · lane
 - **status-2** · TS 29.244 V16.9.1 §8.2.3 — PDIs sharing a CHOOSE ID share one F-TEID · test ×5 · live test · lane
-- **status-3** · TS 29.244 V16.9.1 §8.2.3 — a CHOOSE for an address family the UP has no address for is refused · test
+- **status-3** · TS 29.244 V16.9.1 §8.2.3 — the UPF refuses unconfigured F-TEID families and reports configured IPv6 families · test ×2
+- **status-39** · TS 29.244 V16.9.1 §8.2.3 — endpoint-scoped F-TEID admission works across all 1-3 PMD attachment partitions · lane
 - **status-19** · TS 29.244 V16.9.1 §8.2.5 — a match field the parser does not handle is refused, never ignored · test
 - **status-6** · TS 29.244 V16.9.1 §8.2.5 — a port range in an SDF filter matches as a range · test ×2
-- **status-7** · TS 29.244 V16.9.1 §8.2.5 — a non-IPv4 address, or a prefix with host bits, is refused · test ×4
+- **status-7** · TS 29.244 V16.9.1 §8.2.5 — non-IPv4 UE addresses are refused by the IPv4 PDR key; SDF prefix host bits are canonicalized · test ×4
 - **status-23** · TS 29.244 V16.9.1 §8.2.62 — the UE IP S/D bit places the address on the right side of the key · test ×5
 - **status-9** · TS 29.244 V16.9.1 §8.2.62 — a PDI with no UE IP IE matches by its F-TEID · test
-- **status-29** · TS 38.415 V16.6.0 §5.5.3.3 — QFI 0 is legal; here it means 'no container' · test · lane
+- **status-29** · TS 38.415 V16.6.0 §5.5.3.3 — QFI 0 is valid; absence of a QFI is represented separately and omits the PDU Session Container · test · lane
 
 ### Cross-cutting (no message) · 7 claims (7 ok)
 
@@ -110,11 +111,11 @@ run lacks.
 | **6** URR: volume, time, thresholds, quota + enforcement, linked (5) | **100** | 60 | 60 | 60 | 100 | 0 | 0 | test ×3 |
 | **7** BAR + DDN: buffering, DDN, duration, drop-buffered (4) | **100** | 75 | 75 | 25 | 0 | 0 | 25 | test · lane |
 | **8** GTP-U: decap, encap, echo, end marker, DSCP copy (5) | **100** | 40 | 80 | 40 | 40 | 40 | 80 | lane ×2 |
-| **9** IPv6: PFCP UE IP, inner + outer, N9 (3) | 0 | 0 | 0 | 0 | 33 | 0 | 0 | test ×2 |
+| **9** IPv6: PFCP UE IP, inner PDR matching, and outer N9 transport (3) | **33** | 0 | 0 | 0 | 33 | 0 | 0 | test ×3 · lane · other |
 | **10** MAR / ATSSS-LL (2) | **50** | 50 | 0 | 0 | 50 | 0 | 0 | test ×2 · lane |
 | **11** ULCL / N9 route domains (2) | **50** | 0 | 0 | 0 | 0 | 0 | 50 | lane ×2 |
 | **12** real-SMF interop (1) · skip | **100** | 0 | 100 | 0 | 0 | 0 | 0 | lane |
-| **mean (12 blocks)** | **82** | **56** | **65** | **43** | **46** | **31** | **42** | |
+| **mean (12 blocks)** | **84** | **56** | **65** | **43** | **46** | **31** | **42** | |
 
 ### Field notes
 
@@ -147,7 +148,7 @@ run lacks.
 
 Audited 2026-10-20 against each project's checkout; cells are lower bounds (silence counts as absent). OAI's precedence credit is the simple-switch path -- its XDP array follows PFCP order; free5GC's three credits are in the gtp5g kernel module, its userspace tree has no matcher; open5gs' NI is a setup-time choice of the DNN's GTP-U resource and needs an external SMF to be exercised.
 
-**block 9** — the three IPv6 capabilities are the three places an IPv6 deployment would carry the address: the PFCP UE IP address (8.2.62, an IPv6 prefix with IPv6D/IP6PL lengths), the inner packet the PDR matches, and the N9 transport (GTP-U over IPv6). This tree refuses the first two rather than match them loosely -- the WildcardMatch key is four bytes, so an IPv6 UE address or F-TEID is cause 73 (status-7) and a non-IPv4 PDI is never widened to IPv4 -- while an IPv6 SDF prefix compiles only on the opt-in firewall path, whose rule carries a CIDR string (status-8). The inner/outer IPv6 datapath and the N9 IPv6 tunnel are not built: no graph has an IPv6 address, and the encap writes IPv4. The score is 0; UPG-VPP's 33 is one of the three.
+**block 9** — IPv6 has three capabilities here: PFCP UE IPv6 address assignment, inner PDR matching, and N9 transport over IPv6. The endpoint-scoped GTP-U path supports IPv6 outer transport, including configured N9 endpoints, while the compiler refuses IPv6 UE-address PDRs rather than widen the four-byte WildcardMatch key. GtpuDecap accepts IPv6 inner packets, but no IPv6 UE PDR matches them. This earns 33 for outer/N9 transport only; UPG-VPP also scores 33.
 
 **block 12** — free5GC v4.3.0 SMF drove upfd through establishment, modification and deletion unshimmed (docs/interop.md, run fixes-ccf667c; ci/interop/run.sh). open5gs 100: its UPF is the field's production interop.
 

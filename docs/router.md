@@ -37,18 +37,28 @@ session compiler writes PDR results and tunnel records, not FIB routes. Route
 policy remains deployment configuration; `upfd` does not install routes from
 PFCP Network Instance names.
 
-The configured `neighbor_bindings` seed incomplete next hops and assign their
-IDs to the resolver. Routes can name those IDs, but a static
-`<router>/next_hops` record must not overwrite a resolver-owned ID. The other
-inner next hops in `deploy/upf.yaml` are static gate mappings.
+Resolved next hops are bindings in `<router>/neighbors`, keyed by next-hop id;
+each names a Router interface and a neighbor IPv4 or IPv6 address. Routes name
+those ids like any other next hop. An id is either static
+(`<router>/next_hops`) or bound, never both. The other inner next hops in
+`deploy/upf.yaml` are static gate mappings.
+
+## Address families and sizing
+
+A destination-mode Router enables a family only when its FIB is sized:
+`rt_transport` in `deploy/upf.yaml` sets `max_ipv4_routes` and
+`max_ipv6_routes` (dual-stack outer transport); `deploy/veth-port.yaml` sets
+only `max_ipv4_routes`, so its outer IPv6 frames are dropped and counted. A
+next-hop-mode Router (`rt`) has no FIB and forwards both families by id.
 
 ## ARP and Neighbor Discovery
 
-Both Router instances have `resolver_interfaces` and `neighbor_bindings`.
-`Vif.vif_id_attr` writes `neighbor_interface_id`; Router uses that interface ID
-to associate incoming ARP or IPv6 Neighbor Discovery frames with the correct
-resolver interface. This metadata is separate from `route_domain`,
-`transport_route_domain`, endpoint IDs and queue IDs.
+Each Router lists its own `interfaces` (id, egress gate, MAC, CIDR
+addresses). Router reads the ingress interface from the `vif_id` attribute,
+which Vif writes and the End Marker and N6 tags set, to associate incoming ARP
+or IPv6 Neighbor Discovery frames with the right interface. This metadata is
+separate from `route_domain`, `transport_route_domain`, endpoint IDs and queue
+IDs.
 
 Router sends received neighbor frames from workers to a bounded control-side
 ring. Its maintenance path validates ARP replies and IPv6 Neighbor

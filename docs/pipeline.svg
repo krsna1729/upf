@@ -76,7 +76,7 @@
     <rect x="170" y="178" width="150" height="58" class="box"/>
     <text x="245" y="197" text-anchor="middle" class="label">vif_n6</text>
     <text x="245" y="213" text-anchor="middle" class="meta">route_domain</text>
-    <text x="245" y="227" text-anchor="middle" class="meta">neighbor_interface_id</text>
+    <text x="245" y="227" text-anchor="middle" class="meta">vif_id</text>
     <path d="M 140 207 L 170 207" class="flow"/>
     <path d="M 320 207 L 595 207 L 595 154 L 620 154" class="flow-meta"/>
     <text x="365" y="199" class="gate">plain N6 path</text>
