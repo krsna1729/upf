@@ -138,7 +138,7 @@ func TestLiveSessionCarriesPacketsWithAnSDFPrefix(t *testing.T) {
 
 // TestLiveSessionCarriesPacketsWithAPortRange: the downlink filter names a
 // port range around the frames' destination port (53) instead of the port, so
-// the rule is a WildcardMatch range on that field (BESS D-185) and the packets
+// the rule is a WildcardMatch range on that field (BESS D-186) and the packets
 // must still cross.
 func TestLiveSessionCarriesPacketsWithAPortRange(t *testing.T) {
 	carriesPackets(t, pathEstablishmentWithSDF(0x3334, "10.45.0.2",

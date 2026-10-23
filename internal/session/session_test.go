@@ -2610,7 +2610,7 @@ func TestDropFARNeedsNoActionRecord(t *testing.T) {
 	}
 }
 
-// An SDF port range is a WildcardMatch range on its field (BESS D-185), with
+// An SDF port range is a WildcardMatch range on its field (BESS D-186), with
 // the field masked out: never a widened mask, never a refusal. A range over the
 // whole port domain constrains nothing, the form BESS reads back.
 func TestAPortRangeIsARangeOnItsField(t *testing.T) {

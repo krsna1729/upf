@@ -3071,7 +3071,7 @@ func rulePriority(precedence uint32) int64 {
 // carry. A field the PDI does not name is masked out, which is what lets one
 // table hold PDRs of different shapes. A field the PDI constrains to a range
 // (an SDF filter's ports) is masked out too and named in the key's ranges
-// (BESS D-185: a ranged field's mask is zero, so the range costs no tuple).
+// (BESS D-186: a ranged field's mask is zero, so the range costs no tuple).
 //
 // The value must be canonical (value & ^mask == 0), and the key is the
 // concatenation of mask then value per field, then the ranges.
@@ -3183,7 +3183,7 @@ func ones(n int) []byte {
 // portMatch is an SDF filter's port constraint (8.2.5's "port" or
 // "port-port"): one port is a masked value, a range is a WildcardMatch range,
 // and the whole domain constrains nothing -- the form BESS reads back, since it
-// drops a range over a field's whole domain (D-185).
+// drops a range over a field's whole domain (D-186).
 func portMatch(lo, hi uint16) (match, bool, error) {
 	switch {
 	case lo == hi:

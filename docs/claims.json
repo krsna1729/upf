@@ -2625,9 +2625,9 @@
     "Session Establishment"
    ],
    "message": "Session Establishment",
-   "statement": "a local F-TEID is the local transport address plus TEID; the UPF must deliver a G-PDU to the PDR context for the endpoint that received it",
-   "detail": "`ci/veth-transport.sh` runs upfd and bessd on a real veth whose peer is a Linux namespace. Neither gateway has a configured MAC: rt_transport resolves the IPv4 one by ARP and the IPv6 one by Neighbor Discovery. G-PDUs and End Markers toward an IPv4 and an IPv6 gNB leave with the resolved MAC, the outer TTL/hop limit decremented once and the inner TTL untouched. When the peer's MAC changes, both gateways re-resolve and later frames carry the new MAC. When the IPv4 gateway stops answering, no IPv4 tunnel frame reaches the wire with any MAC and the Router's unresolved gate counts them, while IPv6 keeps flowing.",
-   "effect": "dynamic neighbors only on the transport side; the inner FAR router's hops are configured",
+   "statement": "the UPF sends the encapsulated G-PDU over the transport network toward the F-TEID in Outer Header Creation; the outer IPv4 or IPv6 header addresses that peer and is forwarded by the transport network's next hop",
+   "detail": "`ci/veth-transport.sh` runs upfd and bessd on a real veth whose peer is a Linux namespace. Neither gateway has a configured MAC: rt_transport resolves the IPv4 one by ARP and the IPv6 one by Neighbor Discovery. G-PDUs and End Markers toward an IPv4 and an IPv6 gNB leave with the resolved MAC, the outer TTL/hop limit decremented once, and the inner TTL decremented once by the inner hop (rt) and not again by rt_transport. When the peer's MAC changes, both gateways re-resolve and later frames carry the new MAC. When the IPv4 gateway stops answering, no IPv4 tunnel frame reaches the wire with any MAC and the Router's unresolved gate counts them, while IPv6 keeps flowing.",
+   "effect": "every G-PDU and End Marker toward a peer leaves with the resolved next-hop MAC, or not at all; rt_transport decrements only the outer hop count",
    "extra": [
     {
      "name": "evidence",

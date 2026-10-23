@@ -115,7 +115,7 @@ Run the lane that proves the path you touched:
 | `ci/buffer-path.sh` | BAR buffering, DDN, and the duration's expiry |
 | `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names; a ULCL session's two uplink PDRs take the data network's hop and an N9 tunnel, and its remote PSA's downlink arrives on N9; Modes 1, 2, 3 and 5 live together with every stream at once, each session's bytes at its own exit |
 | `ci/veth-port.sh` | one PMD port split into N3/N6/N9; the post-encap Router resolves its outer next hop on the veth (needs root) |
-| `ci/veth-transport.sh` | the outer transport Router on a veth, byte-checked on the peer: ARP and ND resolution, outer TTL/hop limit decremented once with the inner TTL untouched (IPv4 and IPv6 tunnels), routed End Markers, a neighbor MAC change followed, an unreachable gateway failing closed (needs root) |
+| `ci/veth-transport.sh` | the outer transport Router on a veth, byte-checked on the peer: ARP and ND resolution, outer TTL/hop limit decremented once and the inner TTL only by the inner hop (IPv4 and IPv6 tunnels), routed End Markers, a neighbor MAC change followed, an unreachable gateway failing closed (needs root) |
 | `ci/veth-layouts.sh` | nine real-veth layouts: all five 1–3-PMD partitions, MAC/VLAN demux, direct per-port tags, four-port fan-in; each the production-shaped graph with Modes 1, 2, 3, 5 and 6 established together and driven on every attachment, same N3/N9 local IPv4+TEID, and unknown-TEID handling (needs root) |
 | `ci/session-instances.sh` | one subscriber address served by two network instances, each with its own F-TEID and exit |
 | `ci/atsss-steer.sh` | a MAR's two accesses, the health table, policy update and erase; every window byte-checked |
