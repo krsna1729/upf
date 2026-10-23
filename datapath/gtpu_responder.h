@@ -7,19 +7,18 @@
 #include <cstddef>
 #include <memory>
 
+#include "end_marker_log.h"
 #include "module.h"
 #include "upf_datapath.pb.h"
 
-// Answers the two GTP-U messages a UPF is handed on a TEID that names no
-// session, and drops everything else it is given (TS 29.281 7.2 and 7.3.1).
+// Handles GTP-U control and unadmitted G-PDU traffic sent to GtpuDecap gate 2
+// (TS 29.281 7.2 and 7.3.1).
 //
-// The graph hands it whatever the rule table in front of it routes to the
-// default gate. A G-PDU's TEID is a session's rule; two messages reach a UPF
-// outside one: an Echo Request, always on TEID 0, whose reply the peer's path
-// management needs -- a peer that gets none reads the N3 path as down, with no
-// packet loss to point at -- and a G-PDU whose TEID no session names, which
-// 7.3.1 answers with an Error Indication so the peer learns the tunnel is
-// gone instead of sending into it.
+// GtpuDecap sends Echo Requests, peer Error Indications and valid G-PDUs whose
+// endpoint-scoped F-TEID is not admitted. This module answers Echo Requests,
+// returns an Error Indication for an unadmitted G-PDU, counts peer Error
+// Indications for Session Report generation, and records End Markers as events
+// for End Marker Reception Reports. Other control types are dropped.
 //
 // Both replies are the request with its Ethernet, IPv4 and UDP addresses
 // swapped, the type replaced, and the lengths recomputed. An Echo Response
@@ -31,7 +30,7 @@
 // copy nothing but their tail, allocate nothing, and read no session state.
 class GtpuResponder final : public Module {
  public:
-  static const gate_idx_t kNumOGates = 1;
+  static const gate_idx_t kNumOGates = MAX_GATES;
 
   // No resource table: an echo belongs to the path, not to a session.
   static const ResourceTables resource_tables;
@@ -53,6 +52,11 @@ class GtpuResponder final : public Module {
   CommandResponse CommandGetErrors(
       const upf::pb::GtpuResponderCommandGetErrorsArg &arg);
 
+  // The End Markers recorded since the previous drain (TS 29.281 7.3.2), each
+  // returned once, with the count lost to a full ring.
+  CommandResponse CommandDrainEndMarkers(
+      const upf::pb::GtpuResponderCommandDrainEndMarkersArg &arg);
+
  private:
   // One entry: 0 is empty (an Error Indication never names TEID 0 -- that is
   // the echo path), and the count only grows.
@@ -69,8 +73,11 @@ class GtpuResponder final : public Module {
 
   uint16_t port_ = 0;  // the UDP port the messages must arrive on
   uint32_t stamp_ = 0; // seconds from 1900 to this entity's start (8.7)
+  int reply_gate_attr_ = -1;  // optional ingress BE32 output gate
   std::unique_ptr<ErrorSlot[]> errors_;
   std::atomic<uint64_t> untracked_{0};
+  int endpoint_attr_ = -1;  // "endpoint_id", read when End Markers are tracked
+  std::unique_ptr<upf::datapath::EndMarkerLog> end_markers_;
 };
 
 #endif  // UPF_DATAPATH_GTPU_ECHO_H_

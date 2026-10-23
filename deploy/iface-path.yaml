@@ -6,14 +6,17 @@
 # compiler is the deployment's own (-instances' egress table), one session per
 # case.
 #
-#   uplink    src_up  -> rewrite_up  -> teid -> decap0 -> mt_md -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt
+#   uplink    src_up  -> rewrite_up  -> tag_n3 -> decap0 -> mt_md -> pdr_ul -> mt_ul -> cnt_ul -> rt
 #             src_up2 -> rewrite_up2 -/                                                            rt -> dump_n6      (ogate 0, N6)
 #             src_up3 -> rewrite_up3 -/
 #             src_ulcl_n6, src_ulcl_n9 -> rewrite_ulcl_* -/                                       (one session, two PDRs)
 #                                                                                                 rt -> enc -> dump_n3 (ogates 1, 2)
 #             src_vn  -> rewrite_vn  -/                                                            rt -> dump_lan     (ogate 3, the service LAN)
 #                                                                                                 rt -> pdr_dl       (ogate 4, the 5G VN re-injection)
-#   downlink  src_dn -> rewrite_dn -> l2_sort -> vif_n6 -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> rt
+#   N9        src_n9  -> rewrite_n9  -> tag_n9 -> decap0 (Mode 3's uplink: ogate 0, pdr_ul)
+#             src_ulcl_dn9 -> rewrite_ulcl_dn9 -/      (Mode 2's remote-PSA downlink: ogate 1, pdr_dl)
+#   downlink  src_dn -> rewrite_dn -> l2_sort -> tag_n6 -> vif_n6 -> pdr_dl -> mt_dl -> cnt_dl -> atsss -> rt
+#             src_dn1 -> rewrite_dn1 -/ (Mode 1's downlink)
 #             src_arp -> rewrite_arp -> l2_sort -> arp_n6 -> dump_arp -> merge_n6 -> dump_n6 -> sink_n6
 #             (src_arp2 -> rewrite_arp2, the pair of addresses one session holds)
 #
@@ -48,20 +51,21 @@
 #   rewrite_ulcl_n9  the same TEID and source, to 10.46.0.2:53 (the N9 branch)
 #   rewrite_vn   a G-PDU to TEID 0x11223347 holding 10.45.0.5:5000 -> 10.45.0.6:5000
 #                (the 5G VN case: one UE's packet to another UE of the same VN)
+#   rewrite_n9   a G-PDU to 192.0.2.9 (the N9 endpoint) and TEID 0x11223344 -- S1's
+#                TEID, on the other endpoint -- holding 10.45.0.9:5000 -> 8.8.8.8:53
+#                (Mode 3: S9's uplink, arriving over N9 from an I-UPF)
+#   rewrite_ulcl_dn9  a G-PDU to 192.0.2.9 and TEID 0x1122334c holding
+#                10.46.0.2:53 -> 10.45.0.8:5000 (Mode 2: the remote PSA's downlink)
 #   rewrite_dn   the data network's answer 8.8.8.8:5000 -> 10.45.0.7:53, to the
 #                interface's MAC (02:00:00:00:06:01 from 02:00:00:00:06:02)
+#   rewrite_dn1  the same answer to S1's UE, 8.8.8.8:5000 -> 10.45.0.2:53 (Mode 1's
+#                downlink)
 #   rewrite_arp  an ARP request for 10.45.0.2 from 192.0.2.2
 #   rewrite_arp2 the same for 10.44.0.2 (the sibling of 10.46.0.2: one
 #                session's two addresses, one transaction, one probe slot)
 #
-# Metadata attributes are laid out in module registration order, so the module
-# that declares "upf_teid" is listed first and the reader that makes it real (a
-# write-only attribute no module reads gets no offset) follows it, as in
-# deploy/smoke-gtpu.yaml. The Vif writes "route_domain" only where a module
-# reads it; this lane's downlink key is the 5-tuple (deploy/upf.yaml's), so
-# nothing here does, and the interface's domain is inert -- a deployment whose
-# key carries the domain adds that reader, and (to classify a re-injected
-# packet) a SetMetadata on the re-injection connection.
+# Metadata attributes are laid out in module registration order: the reader makes
+# decap and endpoint metadata real before the PDR tables consume them.
 
 ports:
   # No NIC: the streams are Sources and the exits are Dumps. The port exists so
@@ -76,8 +80,23 @@ modules:
   - name: mt_md
     mclass: MetadataTest
     arg:
-      read: {upf_teid: 4}
-
+      read: {endpoint_id: 4, fteid_context: 4, qfi: 1}
+  - name: tag_n3
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+        - {name: route_domain, size: 4, value_int: 0}
+        - {name: transport_route_domain, size: 4, value_int: 1}
+  # The N9 endpoint's tag: endpoint 2 is what admits a G-PDU on an N9 F-TEID
+  # and refuses it on an N3 one, whatever the TEID.
+  - name: tag_n9
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 2}
+        - {name: route_domain, size: 4, value_int: 0}
+        - {name: transport_route_domain, size: 4, value_int: 2}
   # -- the uplink streams ------------------------------------------------------
   - name: src_up
     mclass: Source
@@ -86,7 +105,7 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAACAgAAAAABCABFAABJEjQAAEAR5GzAAAIBwAACAghoCGgANQAAMP8AJREiM0RFAAAlEjQAAEARTlYKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM0RFAAAlEjQAAEARTlYKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm"
   - name: src_up2
     mclass: Source
     arg: {pkt_size: 87, burst: 32}
@@ -94,7 +113,7 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAACAgAAAAABCABFAABJEjQAAEAR5GzAAAIBwAACAghoCGgANQAAMP8AJREiM0VFAAAlEjQAAEARTlUKLQADCAgICBOIADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM0VFAAAlEjQAAEARTlUKLQADCAgICBOIADUAEQAAaGVsbG8tdXBm"
   - name: src_up3
     mclass: Source
     arg: {pkt_size: 87, burst: 32}
@@ -102,7 +121,7 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAACAgAAAAABCABFAABJEjQAAEAR5GzAAAIBwAACAghoCGgANQAAMP8AJREiM0ZFAAAlEjQAAEARTlQKLQAECAgICBOIADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM0ZFAAAlEjQAAEARTlQKLQAECAgICBOIADUAEQAAaGVsbG8tdXBm"
   # One session, two destinations, one tunnel: the ULCL branch. Both frames
   # carry the same TEID; the PDRs differ only in the destination they select.
   - name: src_ulcl_n6
@@ -112,7 +131,7 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAACAgAAAAABCABFAABJEjQAAEAR5GzAAAIBwAACAghoCGgANQAAMP8AJREiM0tFAAAlEjQAAEARTlAKLQAICAgICBOIADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM0tFAAAlEjQAAEARTlAKLQAICAgICBOIADUAEQAAaGVsbG8tdXBm"
   - name: src_ulcl_n9
     mclass: Source
     arg: {pkt_size: 87, burst: 32}
@@ -120,7 +139,7 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAACAgAAAAABCABFAABJEjQAAEAR5GzAAAIBwAACAghoCGgANQAAMP8AJREiM0tFAAAlEjQAAEARVDAKLQAICi4AAhOIADUAEQAAaGVsbG8tdXBm"
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM0tFAAAlEjQAAEARVDAKLQAICi4AAhOIADUAEQAAaGVsbG8tdXBm"
   - name: src_vn
     mclass: Source
     arg: {pkt_size: 87, burst: 32}
@@ -128,15 +147,25 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAACAgAAAAABCABFAABJEjQAAEAR5GzAAAIBwAACAghoCGgANQAAMP8AJREiM0dFAAAlEjQAAEARVDAKLQAFCi0ABhOIE4gAEQAAaGVsbG8tdXBm"
-  - name: teid
-    mclass: WildcardMatch
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM0dFAAAlEjQAAEARVDAKLQAFCi0ABhOIE4gAEQAAaGVsbG8tdXBm"
+  # The N9 arrivals: Mode 3's uplink and Mode 2's remote-PSA downlink.
+  - name: src_n9
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_n9
+    mclass: Rewrite
     arg:
-      fields:
-        # The G-PDU's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's
-        # flags, type and length (4). One rule per session; a TEID no rule
-        # names is dropped by the default gate.
-        - {offset: 46, num_bytes: 4}
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM0RFAAAlEjQAAEARTk8KLQAJCAgICBOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_ulcl_dn9
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_ulcl_dn9
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM0xFAAAlEjQAAEARVDAKLgACCi0ACAA1E4gAEQAAaGVsbG8tdXBm"
+
   - name: pdr_ul
     mclass: WildcardMatch
     arg:
@@ -146,25 +175,31 @@ modules:
         - {offset: 23, num_bytes: 1}  # protocol
         - {offset: 34, num_bytes: 2}  # source port
         - {offset: 36, num_bytes: 2}  # destination port
+        - {attr_name: fteid_context, num_bytes: 4}
         - {attr_name: qfi, num_bytes: 1}
+      # Distinct masks in use at once: a session's shapes are its filters', and
+      # each is one hash lookup per batch (the QFI field doubles them).
       max_tuples: 16
-      action_resource: at_ul/actions
-  - name: at_ul
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_ul/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 16, num_bytes: 4}
   - name: mt_ul
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
   # -- the router and the exits ------------------------------------------------
   - name: rt
     mclass: Router
-    arg: {max_domains: 3}
   - name: enc
     mclass: GtpuEncap
-    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
+    arg: {max_tunnels: 65536}
+  - name: mt_transport
+    mclass: MetadataTest
+    arg: {read: {transport_route_domain: 4}}
   - name: dump_n6
     mclass: Dump
     arg: {interval: 1}
@@ -190,6 +225,26 @@ modules:
     arg:
       templates:
         - "AgAAAAYBAgAAAAYCCABFuAAlEjQAAEARTZkICAgICi0ABxOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_dn1
+    mclass: Source
+    arg: {pkt_size: 51, burst: 32}
+  - name: rewrite_dn1
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAYBAgAAAAYCCABFuAAlEjQAAEARTZ4ICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
+  # The plain N6 ingress tag, on l2_sort's IP gate (the ARP streams share
+  # l2_sort, and the tag must cover every path into pdr_dl). pdr_dl keys on the
+  # tunnel context and QFI, which only the decap writes; a plain N6 frame
+  # carries no tunnel, and context 0 with QFI 0xff (no PDU Session Container)
+  # say so: it matches the N6 rules, which wildcard both, and never an F-TEID
+  # rule, which names a nonzero context. (vif_n6 writes the route domain.)
+  - name: tag_n6
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: fteid_context, size: 4, value_int: 0}
+        - {name: qfi, size: 1, value_int: 255}
   # The ARP request: "who has 10.45.0.2? tell 192.0.2.2", from the interface the
   # data network resolves (02:00:00:00:06:02), addressed to the broadcast MAC.
   - name: src_arp
@@ -224,7 +279,7 @@ modules:
   - name: merge_n6
     mclass: Merge
   - name: l2_sort
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         - {offset: 12, num_bytes: 2}  # the frame's EtherType (Eth)
@@ -234,9 +289,10 @@ modules:
     arg:
       default_gate: 0
       interfaces:
-        # The deployment's N6 identity, as deploy/upf.yaml writes it. Its
-        # route domain is inert in this lane (the downlink key is the 5-tuple).
+        # The N6 identity's route domain is the PDI's network instance and is
+        # part of the downlink table key, keeping overlapping instances apart.
         - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 1, gate: 1}
+  # A frame no interface's MAC names.
   - name: sink_other
     mclass: Sink
   - name: pdr_dl
@@ -248,35 +304,48 @@ modules:
         - {offset: 23, num_bytes: 1}
         - {offset: 34, num_bytes: 2}
         - {offset: 36, num_bytes: 2}
+        - {attr_name: route_domain, num_bytes: 4}
+        - {attr_name: fteid_context, num_bytes: 4}
+        - {attr_name: qfi, num_bytes: 1}
       max_tuples: 8
-      action_resource: at_dl/actions
-  - name: at_dl
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_dl/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 16, num_bytes: 4}
+        - {attr_name: steering_policy_id, value_offset: 20, num_bytes: 4}
   - name: mt_dl
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
+  - name: atsss
+    mclass: AtsssSteer
+    arg: {policy_attr: steering_policy_id, next_hop_attr: next_hop_id}
 connections:
   - {upstream: src_up, downstream: rewrite_up}
-  - {upstream: rewrite_up, downstream: teid}
+  - {upstream: rewrite_up, downstream: tag_n3}
   - {upstream: src_up2, downstream: rewrite_up2}
-  - {upstream: rewrite_up2, downstream: teid}
+  - {upstream: rewrite_up2, downstream: tag_n3}
   - {upstream: src_up3, downstream: rewrite_up3}
-  - {upstream: rewrite_up3, downstream: teid}
+  - {upstream: rewrite_up3, downstream: tag_n3}
   - {upstream: src_ulcl_n6, downstream: rewrite_ulcl_n6}
-  - {upstream: rewrite_ulcl_n6, downstream: teid}
+  - {upstream: rewrite_ulcl_n6, downstream: tag_n3}
   - {upstream: src_ulcl_n9, downstream: rewrite_ulcl_n9}
-  - {upstream: rewrite_ulcl_n9, downstream: teid}
+  - {upstream: rewrite_ulcl_n9, downstream: tag_n3}
   - {upstream: src_vn, downstream: rewrite_vn}
-  - {upstream: rewrite_vn, downstream: teid}
-  - {upstream: teid, downstream: decap0}
-  - {upstream: decap0, downstream: mt_md}
+  - {upstream: rewrite_vn, downstream: tag_n3}
+  - {upstream: tag_n3, downstream: decap0}
+  - {upstream: src_n9, downstream: rewrite_n9}
+  - {upstream: rewrite_n9, downstream: tag_n9}
+  - {upstream: src_ulcl_dn9, downstream: rewrite_ulcl_dn9}
+  - {upstream: rewrite_ulcl_dn9, downstream: tag_n9}
+  - {upstream: tag_n9, downstream: decap0}
+  - {upstream: decap0, downstream: mt_md, ogate: 0}
+  - {upstream: decap0, downstream: pdr_dl, ogate: 1}
   - {upstream: mt_md, downstream: pdr_ul}
-  - {upstream: pdr_ul, downstream: at_ul}
-  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
   # changes when that band should be marked or shed rather than passed.
@@ -292,11 +361,14 @@ connections:
   - {upstream: rt, downstream: dump_lan, ogate: 3}
   - {upstream: dump_lan, downstream: sink_lan}
   - {upstream: rt, downstream: pdr_dl, ogate: 4}
-  - {upstream: enc, downstream: dump_n3}
+  - {upstream: enc, downstream: mt_transport}
+  - {upstream: mt_transport, downstream: dump_n3}
   - {upstream: dump_n3, downstream: sink_n3}
 
   - {upstream: src_dn, downstream: rewrite_dn}
   - {upstream: rewrite_dn, downstream: l2_sort}
+  - {upstream: src_dn1, downstream: rewrite_dn1}
+  - {upstream: rewrite_dn1, downstream: l2_sort}
   - {upstream: src_arp, downstream: rewrite_arp}
   - {upstream: rewrite_arp, downstream: l2_sort}
   - {upstream: src_arp2, downstream: rewrite_arp2}
@@ -306,17 +378,18 @@ connections:
   - {upstream: l2_sort, downstream: arp_n6}
   - {upstream: arp_n6, downstream: dump_arp}
   - {upstream: dump_arp, downstream: merge_n6}
-  - {upstream: l2_sort, downstream: vif_n6, ogate: 1}
+  - {upstream: l2_sort, downstream: tag_n6, ogate: 1}
+  - {upstream: tag_n6, downstream: vif_n6}
   - {upstream: vif_n6, downstream: pdr_dl, ogate: 1}
   - {upstream: vif_n6, downstream: sink_other}
   - {upstream: merge_n6, downstream: dump_n6}
   - {upstream: dump_n6, downstream: sink_n6}
 
-  - {upstream: pdr_dl, downstream: at_dl}
-  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: pdr_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
-  - {upstream: cnt_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: atsss}
+  - {upstream: atsss, downstream: rt}
 
 workers:
   - {wid: 0, core: 0}
@@ -343,10 +416,8 @@ resources:
 
   # l2_sort's one rule: ARP (0x0806) is the responder's.
   l2_sort/rules:
-    - key:
-        values: [{value_bin: "CAY="}]
-        masks: [{value_bin: "//8="}]
-      value: {priority: 100, gate: 0}
+    - key: {fields: [{value_bin: "CAY="}]}
+      value: {gate: 0}
 
   # The interface's own ARP entry. The sessions' entries are the driver's: one
   # per session per UE address, claimed and erased with the session.

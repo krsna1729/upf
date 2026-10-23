@@ -9,7 +9,6 @@
 package session
 
 import (
-	"net"
 	"net/netip"
 	"strings"
 	"testing"
@@ -35,7 +34,7 @@ func arpConfig(t *testing.T) Config {
 	}
 	cfg := testConfig()
 	cfg.Instances = d
-	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI}
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, FTEIDContext, QFI}
 	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain}
 	return cfg
 }
@@ -53,7 +52,7 @@ func arpEstablishment(cpSEID uint64, ueIP string, fteid uint32, sdf string) *mes
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewNetworkInstance("internet"),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),
@@ -69,7 +68,7 @@ func arpEstablishment(cpSEID uint64, ueIP string, fteid uint32, sdf string) *mes
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewNetworkInstance("internet"),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter(sdf, "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -136,7 +135,7 @@ func TestTheARPEntryGoesWhenTheSessionDoes(t *testing.T) {
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewNetworkInstance("internet"),
-				ie.NewUEIPAddress(0x02, "10.45.0.5", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.5", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
 			),
 			ie.NewFARID(2),

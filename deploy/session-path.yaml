@@ -4,19 +4,18 @@
 # as deploy/session-live.yaml (the module names internal/session's Config
 # names) plus what it takes to put packets through it and see them.
 #
-# uplink    src_up -> rewrite_up -> teid -> decap0 -> pdr_ul -> at_ul -> mt_ul -> cnt_ul -> rt -> merge_n6 -> dump_n6 -> sink_n6
-#   downlink  src_dn -> rewrite_dn -> vif_n6 -> l2_sort -> pdr_dl -> at_dl -> mt_dl -> cnt_dl -> rt -> enc -> dump_d -> sink_n3
+# uplink    src_up -> rewrite_up -> endpoint tag -> decap0/fteids -> pdr_ul -> mt_ul -> cnt_ul -> rt -> N6
+# downlink  src_dn -> rewrite_dn -> tag_n6 -> Vif -> pdr_dl -> mt_dl -> cnt_dl -> rt -> enc -> mt_transport -> dump/sink
 #
-# A third, idle path is the control plane's own: the unix_port cp_marker (the
-# port `upfd -end-marker` writes to) delivers an End Marker packet
-# (TS 29.244 5.3.2) to a sink, where ci/session-path.sh reads it out of the
-# daemon's log. Nothing of a session's traffic passes through it.
+# A third, idle path is the control plane's own: the unix_port cp_marker uses
+# the `upfd -end-marker` base path plus `.1` for transport route domain 1. It
+# delivers an End Marker packet (TS 29.244 5.3.2) to a sink, where
+# ci/session-path.sh reads it from the daemon's log.
 #
-# Nothing here is a session: the Go controller writes every rule, action,
-# meter, counter, tunnel and TEID rule, and `ci/session-path.sh` proves a session
-# programmed over the control plane carries packets both ways -- the uplink's
-# count needs the TEID rule, the decap and the PDR rule; the downlink's needs
-# the PDR rule, its action, its meter and the tunnel record the encap reads.
+# Nothing here is a session: the Go controller writes each session's F-TEID
+# admission entry, PDR rule, action, meter, counter and tunnel record in one
+# transaction. `ci/session-path.sh` proves the programmed session carries
+# packets both ways and that End Markers use the old transport route domain.
 #
 # The two Sources send continuously from the moment the graph is applied, so a
 # sink's counter is zero exactly when no session selects those packets: that is
@@ -44,7 +43,7 @@
 # UpdateTTL module.
 #
 # Metadata attributes are laid out in module registration order, so the module
-# that declares "upf_teid" is listed first and the reader that makes it real
+# that declares "fteid_context" is listed first and the reader that makes it real
 # (a write-only attribute no module reads gets no offset) follows it, as in
 # deploy/smoke-gtpu.yaml.
 
@@ -54,18 +53,19 @@ ports:
   # binds, so a run that died leaves nothing behind for the next one.
   - name: cp_marker
     driver: UnixSocketPort
-    arg: {path: /tmp/upf-end-marker.sock}
+    arg: {path: /tmp/upf-end-marker.sock.1}
 
 modules:
-  # The peer's GTP-U Error Indication (TS 29.281 7.3.1): type 26, header TEID
-  # 0, and the TEID IE naming the tunnel it cannot reach -- the one this
-  # session's downlink FAR sends with (0x55667788, pathDownTEID in the live
-  # test). It takes the rule table's default gate, the responder behind it
-  # records the count (its track_errors argument), and the SMF hears about it
-  # as an Error Indication Report (TS 29.244 5.10).
+  # The peer's GTP-U Error Indication (TS 29.281 7.3.1): type 26, header TEID 0,
+  # and a TEID IE naming the tunnel the peer cannot reach. The endpoint-tagged
+  # frame misses `decap0/fteids`, reaches gate 2, and `echo_err` records it for
+  # the SMF's Error Indication Report (TS 29.244 5.10). The old I-UPF's End
+  # Marker (7.3.2): type 254 on this UPF's own uplink F-TEID (0x11223344 at
+  # 192.0.2.1, endpoint 1); `echo_err` records it with its endpoint for the End
+  # Marker Reception Report (TS 29.244 8.2.19 REEMR, 8.2.41 EMRRE).
   - name: echo_err
     mclass: GtpuResponder
-    arg: {track_errors: true}
+    arg: {track_errors: true, track_end_markers: true}
   - name: src_err
     mclass: Source
     arg: {pkt_size: 55, burst: 1}
@@ -74,13 +74,21 @@ modules:
     arg:
       templates:
         - "AgAAAAABAgAAAAACCABFAAApAAAAAEARKpoKFB4CChQeAQhoCGgAFQAAMBoABQAAAAAQVWZ3iA=="
+  - name: src_em
+    mclass: Source
+    arg: {pkt_size: 50, burst: 1}
+  - name: rewrite_em
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAAAkAAFAAEARULEKFB4CwAACAQhoCGgAEAAAMP4AABEiM0Q="
 
   - name: decap0
     mclass: GtpuDecap
   - name: mt_md
     mclass: MetadataTest
     arg:
-      read: {upf_teid: 4}
+      read: {endpoint_id: 4, fteid_context: 4, qfi: 1}
   - name: dump_u
     mclass: Dump
     arg: {interval: 1}
@@ -92,17 +100,13 @@ modules:
     arg:
       templates:
         - "AgAAAAACAgAAAAABCABFAABJAAFAAEARUIwKFB4CwAACAQhoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARIIkKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm"
-  - name: teid
-    mclass: WildcardMatch
+  - name: set_n3_endpoint
+    mclass: SetMetadata
     arg:
-      fields:
-        # The G-PDU's TEID: Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's
-        # flags, type and length (4). One rule per session; a TEID no rule
-        # names takes the default gate, whose responder answers a G-PDU for a
-        # tunnel this node does not have with an Error Indication (7.3.1) and
-        # records the Error Indications the peer sends (5.10).
-        - {offset: 46, num_bytes: 4}
-      default_gate: 1
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+        - {name: route_domain, size: 4, value_int: 0}
+        - {name: transport_route_domain, size: 4, value_int: 1}
   - name: pdr_ul
     mclass: WildcardMatch
     arg:
@@ -112,10 +116,10 @@ modules:
         - {offset: 23, num_bytes: 1}  # protocol
         - {offset: 34, num_bytes: 2}  # source port
         - {offset: 36, num_bytes: 2}  # destination port
-        # The QoS flow the packet belongs to, as the decap read it out of the
-        # G-PDU's PDU Session Container (TS 29.244 8.2.89): what tells a
-        # session's several uplink PDRs for one F-TEID apart. It is last, so the
-        # fields before it keep the positions they had.
+        # The decap's exact admission entry supplies a context id that stands
+        # for the complete endpoint/family/address/TEID, so another tunnel
+        # cannot use this rule.
+        - {attr_name: fteid_context, num_bytes: 4}
         - {attr_name: qfi, num_bytes: 1}
       # Distinct masks in use at once: a session's shapes are its filters' --
       # exact addresses, prefixes, ports, and the QFI either named or left open
@@ -124,13 +128,14 @@ modules:
       # session's rules take (one variant per existing shape), so the number the
       # five-field list was sized for no longer covers a table with it.
       max_tuples: 16
-      action_resource: at_ul/actions
-  - name: at_ul
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_ul/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 16, num_bytes: 4}
   - name: mt_ul
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
@@ -167,9 +172,9 @@ modules:
     arg:
       default_gate: 0
       interfaces:
-        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 1, gate: 1}
+        - {id: 1, vlan: 0, mac_addr: "02:00:00:00:06:01", ip_addr: "192.0.2.2", route_domain: 0, gate: 1}
   - name: l2_sort
-    mclass: WildcardMatch
+    mclass: ExactMatch
     arg:
       fields:
         - {offset: 12, num_bytes: 2}  # the frame's EtherType (Eth)
@@ -185,23 +190,34 @@ modules:
         - {offset: 23, num_bytes: 1}
         - {offset: 34, num_bytes: 2}
         - {offset: 36, num_bytes: 2}
+        - {attr_name: route_domain, num_bytes: 4}
+        - {attr_name: fteid_context, num_bytes: 4}
+        - {attr_name: qfi, num_bytes: 1}
       # Distinct masks in use at once: a session's shapes are its filters' --
       # exact addresses, prefixes, ports -- and each is one hash lookup per
       # batch. Declared rather than defaulted: it is a UPF decision.
       max_tuples: 8
-      action_resource: at_dl/actions
-  - name: at_dl
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_dl/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 16, num_bytes: 4}
+        - {attr_name: steering_policy_id, value_offset: 20, num_bytes: 4}
   - name: mt_dl
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
+  - name: atsss
+    mclass: AtsssSteer
+    arg: {policy_attr: steering_policy_id, next_hop_attr: next_hop_id}
   - name: enc
     mclass: GtpuEncap
-    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
+    arg: {max_tunnels: 65536}
+  - name: mt_transport
+    mclass: MetadataTest
+    arg: {read: {transport_route_domain: 4}}
   - name: dump_d
     mclass: Dump
     arg: {interval: 1}
@@ -220,18 +236,32 @@ modules:
   - name: sink_m
     mclass: Sink
 
+  # The N6 ingress tag. pdr_dl keys on the tunnel context and QFI, which only
+  # the decap writes; a plain N6 frame carries no tunnel, and context 0 with
+  # QFI 0xff (no PDU Session Container) say so: it matches the N6 rules, which
+  # wildcard both, and never an F-TEID rule, which names a nonzero context.
+  # Listed last so the metadata layout of the modules above is unchanged.
+  - name: tag_n6
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: fteid_context, size: 4, value_int: 0}
+        - {name: qfi, size: 1, value_int: 255}
+
 connections:
   - {upstream: src_up, downstream: rewrite_up}
-  - {upstream: rewrite_up, downstream: teid}
-  - {upstream: teid, downstream: decap0}
-  - {upstream: teid, downstream: echo_err, ogate: 1}
+  - {upstream: rewrite_up, downstream: set_n3_endpoint}
   - {upstream: src_err, downstream: rewrite_err}
-  - {upstream: rewrite_err, downstream: teid}
+  - {upstream: rewrite_err, downstream: set_n3_endpoint}
+  - {upstream: src_em, downstream: rewrite_em}
+  - {upstream: rewrite_em, downstream: set_n3_endpoint}
+  - {upstream: set_n3_endpoint, downstream: decap0}
   - {upstream: decap0, downstream: mt_md}
+  - {upstream: decap0, downstream: pdr_dl, ogate: 1}
+  - {upstream: decap0, downstream: echo_err, ogate: 2}
   - {upstream: mt_md, downstream: dump_u}
   - {upstream: dump_u, downstream: pdr_ul}
-  - {upstream: pdr_ul, downstream: at_ul}
-  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
   # changes when that band should be marked or shed rather than passed.
@@ -245,18 +275,20 @@ connections:
   - {upstream: src_dn, downstream: rewrite_dn}
   # The interface's gate: its IP frames enter the downlink table, and its own
   # answer (l2_sort's rule) joins the port.
-  - {upstream: rewrite_dn, downstream: vif_n6}
+  - {upstream: rewrite_dn, downstream: tag_n6}
+  - {upstream: tag_n6, downstream: vif_n6}
   - {upstream: vif_n6, downstream: l2_sort, ogate: 1}
   - {upstream: l2_sort, downstream: pdr_dl, ogate: 1}
   - {upstream: l2_sort, downstream: merge_n6}
   - {upstream: vif_n6, downstream: sink_other}
-  - {upstream: pdr_dl, downstream: at_dl}
-  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: pdr_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
-  - {upstream: cnt_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: atsss}
+  - {upstream: atsss, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
-  - {upstream: enc, downstream: dump_d}
+  - {upstream: enc, downstream: mt_transport}
+  - {upstream: mt_transport, downstream: dump_d}
   - {upstream: dump_d, downstream: sink_n3}
 
   # The control plane's markers: the port's packets go straight to the dump,
@@ -269,7 +301,7 @@ workers:
 
 resources:
   # The actions' next hops: the deployment's, not a session's (a session's
-  # action names them by id). Every chain with an ActionTable routes on the id
+  # action names them by id). Every chain's result writes the next hop
   # it writes -- the module fails closed when the attribute has no reader -- so
   # both directions have one: the uplink's leaves by gate 0 toward N6, the
   # downlink's by gate 1 toward the encap. A `Router`'s `routes` table is not on
@@ -289,7 +321,5 @@ resources:
   # by the port instead of entering the chain. Everything else takes the
   # default gate, into the downlink table.
   l2_sort/rules:
-    - key:
-        values: [{value_bin: "CAY="}]
-        masks: [{value_bin: "//8="}]
-      value: {priority: 100, gate: 0}
+    - key: {fields: [{value_bin: "CAY="}]}
+      value: {gate: 0}

@@ -1,23 +1,18 @@
 #!/bin/bash
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Two QERs on one PDR, enforced, with one meter_id attribute: the composition
-# finding 6 needs, proven on this stage with no BESS change.
+# Two QERs on one PDR, enforced through one classifier result and one Meter
+# with two levels: the meter stack the compiler uses for every PDR.
 #
 #   ci/meter-compose.sh                    # default stage: the installed one
 #   STAGE=/some/prefix ci/meter-compose.sh # any installed bess-dev prefix
 #
-# The claim: an ActionTable rewrites `meter_id` without consuming the action id,
-# so a chain -- classifier -> at1 -> m1 -> at2 -> m2 -- gives each Meter its own
-# id and its own rate policy. The graph is deploy/meter-compose.yaml; what each
-# check means is in its header.
+# The claim: the classifier's result carries two meter ids, and one Meter with
+# `levels: 2` polices them in order. The graph is deploy/meter-compose.yaml;
+# what each check means is in its header.
 #
-# The load-bearing check is the second meter's red gate: m2's table holds only
-# id 2, so a run in which at2's rewrite did not take effect finds no entry for
-# the id m1 was given, drops fail-closed, and counts nothing on gate 2.
-#
-# The plugin must be built first (see README.md): the graph needs this repo's
-# BESS build, whose stage carries the Meter/ActionTable resources it declares.
+# The load-bearing check is the second level's red gate: a run that read only
+# the first id would count nothing on gate 2.
 
 set -euo pipefail
 
@@ -77,36 +72,22 @@ positive() { # positive <description> <value>
   fi
 }
 
-M1_GREEN=$(gate_count m1 out 0)
-M1_RED=$(gate_count m1 out 2)
-AT2_OUT=$(gate_count at2 out 0)
-M2_RED=$(gate_count m2 out 2)
+M_GREEN=$(gate_count mt out 0)
+M_YELLOW=$(gate_count mt out 1)
+M_RED=$(gate_count mt out 2)
 
-positive "the classifier's traffic is metered by the first table's id (m1 gate 0)" "$M1_GREEN"
-check "the generous first meter drops nothing (m1 gate 2)" "$M1_RED" 0
-positive "the second ActionTable ran on the surviving packets" "$AT2_OUT"
-positive "the second meter policed with its own id (m2 gate 2), not the first's" "$M2_RED"
-# In-gate counters are not produced (a Track hook is installed on the upstream
-# module's ogate), so the second meter's intake is read from the gates it emits
-# on, in the one snapshot: red alone is enough, and it cannot exceed what the
-# second table passed.
-# The counters are read one module after another while workers run, so a few
-# packets of skew are expected; a gross disagreement (say a stage dropping
-# everything and a later counter not noticing) is what this catches.
-SLACK=$(( AT2_OUT / 100 + 4096 ))
-if [ "$M2_RED" -gt "$(( AT2_OUT + SLACK ))" ]; then
-  echo "FAIL: the second meter emitted more than the second table passed ($M2_RED > $AT2_OUT + $SLACK skew)" >&2
-  FAIL=1
-fi
-if grep -E "unreadable" "$LOG" | grep -Eq "'(at1|at2|m1|m2)'"; then
-  echo "FAIL: a stage reported an unreadable attribute (a write with no downstream reader)" >&2
-  grep -E "unreadable" "$LOG" | grep -E "'(at1|at2|m1|m2)'" | head -3 >&2
+check "the second level's red gate is the only exit (mt gate 0)" "$M_GREEN" 0
+positive "the first level passed the packets for the second to police (mt gate 2)" "$M_RED"
+check "neither level emitted yellow (mt gate 1)" "$M_YELLOW" 0
+if grep -E "unreadable" "$LOG" | grep -Eq "Meter"; then
+  echo "FAIL: the meter reported an unreadable attribute" >&2
+  grep -E "unreadable" "$LOG" | head -3 >&2
   FAIL=1
 fi
 
 check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
-  echo "meter-compose: ok (one meter_id attribute, two meters, two policies)"
+  echo "meter-compose: ok (two meter levels, one Meter, two policies)"
 else
   echo "meter-compose: log kept at $LOG" >&2
   exit 1

@@ -21,24 +21,19 @@ modules:
     arg:
       templates:
         - "AgAAAAABAgAAAAACCABFuAAlAAFAAEARH9EICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm"
-  - name: set_session
+  - name: set_policy
     mclass: SetMetadata
     arg:
       attrs:
-        # The session key, in network order (the decap writes be32_t on N3);
-        # value_int would write host order and the matcher would look up
-        # 0x01000000.
-        - {name: upf_teid, size: 4, value_bin: "AAAAAQ=="}
-  - name: pdr_match
-    mclass: PdrMatch
-    arg:
-      key_attr: upf_teid
-      steering_attr: steering_policy_id
+        # The steering policy id (in network order), as a rule result carries
+        # it in the session graphs; the driver flips the policy's health
+        # between windows and the module's selection follows.
+        - {name: steering_policy_id, size: 4, value_bin: "AAAAAQ=="}
   - name: set_hop
     mclass: SetMetadata
     arg:
       attrs:
-        # The action table's next hop in a real graph. AtsssSteer writes the
+        # The next hop in a real graph. AtsssSteer writes the
         # same attribute afterwards; this proves the two writers compose.
         - {name: next_hop_id, size: 4, value_bin: "AAAAAQ=="}
   - name: atsss
@@ -61,9 +56,8 @@ modules:
 
 connections:
   - {upstream: src, downstream: rewrite}
-  - {upstream: rewrite, downstream: set_session}
-  - {upstream: set_session, downstream: pdr_match}
-  - {upstream: pdr_match, downstream: set_hop}
+  - {upstream: rewrite, downstream: set_policy}
+  - {upstream: set_policy, downstream: set_hop}
   - {upstream: set_hop, downstream: atsss}
   - {upstream: atsss, downstream: rt}
   - {upstream: rt, downstream: dump_a, ogate: 0}
@@ -77,14 +71,6 @@ resources:
       value: {egress_gate: 0}
     - key: {id: 2}
       value: {egress_gate: 1}
-  pdr_match/rules:
-    - key: {session: 1}
-      value:
-        rules:
-          # The rule carries the MAR id; the matcher writes it into
-          # steering_policy_id. action_id 0 is "no action table", which this
-          # graph does not have.
-          - {steering_policy_id: 1}
   atsss/health:
     - key: {health_id: 1}
       value: {available: true}

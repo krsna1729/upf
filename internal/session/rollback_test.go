@@ -74,8 +74,8 @@ func TestARefusedModificationGivesBackTheMetersAndTEIDsItTook(t *testing.T) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.byTEID[0x4242] != nil {
-		t.Error("the refused request's pinned F-TEID 0x4242 is still mapped to the session")
+	if len(c.fteidTEIDKeys[0x4242]) != 0 {
+		t.Error("the refused request's exact F-TEID key was not released")
 	}
 	if got := len(c.meters.released) - metersBefore; got != 2 {
 		t.Errorf("%d meters were given back, want the refused QER's uplink and downlink pair", got)

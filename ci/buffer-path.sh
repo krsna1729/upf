@@ -37,16 +37,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-# PROFILE=custom runs the same lane with the keyed per-session matcher on the
-# uplink (deploy/pdrmatch-buffer-path.yaml): the buffering branch is in the same
-# place in both graphs (TS 29.244 5.2.4.2), and the lane shows it hold, report
-# and release the same way.
-PROFILE=${PROFILE:-generic}
-case "$PROFILE" in
-  generic) GRAPH=${GRAPH:-$ROOT/deploy/buffer-path.yaml}; PROFILE_ARGS=() ;;
-  custom)  GRAPH=${GRAPH:-$ROOT/deploy/pdrmatch-buffer-path.yaml}; PROFILE_ARGS=(-profile custom) ;;
-  *) echo "buffer-path: PROFILE is generic or custom, not $PROFILE" >&2; exit 2 ;;
-esac
+GRAPH=${GRAPH:-$ROOT/deploy/buffer-path.yaml}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
 TICK=${TICK:-1s}
@@ -103,18 +94,10 @@ bessd_apply "$GRAPH" || {
   tail -20 "$LOG" >&2
   exit 1
 }
-# A run that fell back to the generic graph would pass everything below.
-if [ "$PROFILE" = custom ]; then
-  "$BESSCTL" -s "127.0.0.1:$BESS_PORT" get >"$WORK/pipeline.txt" 2>&1; grep -qi "pdr_\?match_ul" "$WORK/pipeline.txt" || {
-    echo "buffer-path: PROFILE=custom but the active graph has no PdrMatch module" >&2
-    exit 1
-  }
-  echo "ok: the uplink matcher is the custom PdrMatch (pdr_match_ul)"
-fi
 
 (cd "$ROOT" && $GO build -o "$WORK/upfd" ./cmd/upfd)
-"$WORK/upfd" "${PROFILE_ARGS[@]}" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-  -n3-addr 192.0.2.1 -urr-interval "$TICK" \
+"$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
+  -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.1" -gtpu-decap decap0 -urr-interval "$TICK" \
   -buffer-store buf -buffer-counter cnt_buf -buffer-gate 1 -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do
@@ -142,7 +125,7 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_N4_TARGET=127.0.0.1:$N4_PORT \
 # the numbers in those lines are this arm's own proof, so they are left on this
 # script's stdout rather than only in the file. The tests build their own
 # controller (New(cfg, client, log)), so upfd is not the one releasing.
-MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=127.0.0.1:$BESS_PORT UPF_PROFILE=$PROFILE \
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=127.0.0.1:$BESS_PORT \
   $GO test "$ROOT/internal/session/" -count=1 -v \
   -run 'TestLiveSession(BuffersAndReleasesTheHeldPackets|HoldsNothingAfterTheBufferingDurationPasses)' \
   2>&1 | tee "$WORK/session-test.log" || {
@@ -180,6 +163,6 @@ check "the store freed the flow at the BAR's own duration" "forwarded after the 
 
 check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then
-  echo "buffer-path: ok (a BUFF FAR's packets were held, reported to the SMF over N4, released when the SMF moved the path, and freed by the store's own timeout when the BAR's duration ran out; profile $PROFILE)"
+  echo "buffer-path: ok (a BUFF FAR's packets were held, reported to the SMF over N4, released when the SMF moved the path, and freed by the store's own timeout when the BAR's duration ran out)"
 fi
 exit "$FAIL"

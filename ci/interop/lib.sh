@@ -44,7 +44,7 @@ PLMN=${PLMN:-20893}
 # addresses, MACs -- so a run is the same run every time, and every piece is a
 # namespace or a container this environment creates and removes:
 #
-#   gNB container  10.77.88.140 (MAC fixed)  --docker bridge-->  veth upfi-n3b | upfi-n3 = bessd's N3 port
+#   gNB container  10.77.88.20 (MAC fixed)  --docker bridge-->  veth upfi-n3b | upfi-n3 = bessd's N3 port
 #   bessd (host)   N3 10.77.88.2, N6 port upfi-n6  <--veth-->  eth0 in netns upf-interop-dn = the data network 10.99.0.1
 #
 # The UPF's N3 address is not the bridge's (.1: that is the host's, and N4's):

@@ -16,13 +16,14 @@
 # The reference points are data, not code: an interface is an address, a MAC, a
 # route domain and an output gate, and the deployment's three of them live in
 # this file. The rule keys the compiler writes into the PDR tables below are
-# the other half (docs/design.md, "N3, N6, N9: one port, three interfaces").
+# the other half (docs/design.md, "N3, N6, N9: all PMD partitions").
 ports:
   - name: upf_port
     driver: PMDPort
     num_rx_queues: 4
     num_tx_queues: 4
-    arg: {vdev: "net_af_packet0,iface=upfv0,qpairs=4,fanout_mode=hash"}
+    # ci/veth-port.sh substitutes its run-isolated veth name here.
+    arg: {vdev: "net_af_packet0,iface=__VETH_IFACE__,qpairs=4,fanout_mode=hash"}
 
 modules:
   # One QueueInc per qid: the port's four queues, each its own task, all reading
@@ -43,7 +44,7 @@ modules:
     arg: {port: upf_port, qid: 3}
 
   # The port split into the three reference points (docs/design.md, "N3, N6,
-  # N9: one port, three interfaces"): one interface per reference point, each
+  # N9: all PMD partitions"): one interface per reference point, each
   # with its own MAC, its own address (so the Vif answers ARP on its behalf),
   # its own route domain, and its own output gate. Untagged (vlan: 0): nothing
   # here needs them tagged apart. Gate 0 is the default: a frame whose
@@ -61,39 +62,70 @@ modules:
         - {id: 3, vlan: 0, mac_addr: "02:00:00:00:03:03", ip_addr: "192.0.2.103", route_domain: 3, gate: 3}
   - name: sink_other
     mclass: Sink
+  - name: n3_eth_sort
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 12, num_bytes: 2}
+      default_gate: 1
+  - name: n9_eth_sort
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 12, num_bytes: 2}
+      default_gate: 1
+  - name: n3_arp_opcode
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 20, num_bytes: 2}
+      default_gate: 0
+  - name: n3_arp_sender_sort
+    mclass: ExactMatch
+    arg:
+      fields:
+        - {offset: 28, num_bytes: 4}
+      default_gate: 1
 
-  # The reader that makes the Vif's writes real: a write-only metadata
-  # attribute no module reads gets no offset at all (core/metadata.cc,
-  # FillOffsetArrays), and the Vif writes `route_domain` only when both its
-  # attributes have one (vif.cc's write_metadata guard). It reads `vif_id` and
-  # `route_domain`, declares nothing of its own, and passes packets through.
+  # The reader that makes Vif and decap metadata offsets available.
   - name: mt_vif
     mclass: MetadataTest
     arg: {read: {vif_id: 4, route_domain: 4}}
 
-  # -- the N3/N9 ingress: GTP-U -----------------------------------------------
-  # The F-TEID match, one rule per session, written by the controller. A TEID no
-  # rule names is dropped: this graph has no echo module (upf.yaml's has).
-  - name: teid
-    mclass: WildcardMatch
+  # -- the N6 ingress: plain IP ------------------------------------------------
+  # pdr_dl keys on the tunnel context and QFI, which only the decap writes. A
+  # plain N6 packet carries no tunnel: context 0 and QFI 0xff (no PDU Session
+  # Container) name exactly that, so it matches the N6 rules, which wildcard
+  # both, and never an F-TEID rule, which names a nonzero context.
+  - name: tag_n6
+    mclass: SetMetadata
     arg:
-      fields:
-        # Eth (14) + IPv4 (20) + UDP (8) + the GTP-U header's flags/type/length
-        # (4).
-        - {offset: 46, num_bytes: 4}
+      attrs:
+        - {name: fteid_context, size: 4, value_int: 0}
+        - {name: qfi, size: 1, value_int: 255}
+
+  # -- the N3/N9 ingress: GTP-U -----------------------------------------------
+  # Tagged before the EtherType split, so the ARP branch toward rt_transport
+  # carries the transport route domain too.
+  - name: tag_n3
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 1}
+        - {name: transport_route_domain, size: 4, value_int: 1}
+  - name: tag_n9
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: endpoint_id, size: 4, value_int: 2}
+        - {name: transport_route_domain, size: 4, value_int: 2}
   - name: decap0
     mclass: GtpuDecap
   - name: mt_md
     mclass: MetadataTest
     arg:
-      # The reader that makes the decap's writes real: `upf_teid`, the tunnel
-      # the G-PDU arrived on, and `qfi`.
-      read: {upf_teid: 4, qfi: 1}
-
+      read: {endpoint_id: 4, fteid_context: 4, qfi: 1}
   # -- the PDR tables the compiler writes into --------------------------------
-  # The uplink table keys on the inner 5-tuple, the tunnel the packet arrived on
-  # and its QoS flow: the shape deploy/session-instances.yaml declares, and the
-  # one `upfd -pdr-fields-ul src,dst,proto,sport,dport,teid,qfi` names.
   - name: pdr_ul
     mclass: WildcardMatch
     arg:
@@ -103,21 +135,18 @@ modules:
         - {offset: 23, num_bytes: 1}  # protocol
         - {offset: 34, num_bytes: 2}  # source port
         - {offset: 36, num_bytes: 2}  # destination port
-        - {attr_name: upf_teid, num_bytes: 4}
+        - {attr_name: fteid_context, num_bytes: 4}
         - {attr_name: qfi, num_bytes: 1}
       # Distinct masks in use at once: a session's shapes are its filters', and
       # each is one hash lookup per batch. Declared rather than defaulted: it is
       # a UPF decision (D-141).
       max_tuples: 16
-      action_resource: at_ul/actions
-  # The downlink table keys on the same 5-tuple and on the route domain the Vif
-  # wrote: this is the rule key that makes two network instances serving one
-  # subscriber prefix two rules rather than a collision, and it is the field
-  # `upfd -pdr-fields-dl src,dst,proto,sport,dport,domain` names -- the shape
-  # internal/session's instancedConfig mirrors. No module reads the domain
-  # before this table, which is why a *downlink* key is what the Vif completes:
-  # on the uplink the tunnel the G-PDU arrived on is the writer that exists
-  # without a port.
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_ul/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 16, num_bytes: 4}
+  # The downlink table retains the Vif's route domain in addition to endpoint metadata.
   - name: pdr_dl
     mclass: WildcardMatch
     arg:
@@ -128,50 +157,58 @@ modules:
         - {offset: 34, num_bytes: 2}
         - {offset: 36, num_bytes: 2}
         - {attr_name: route_domain, num_bytes: 4}
-      max_tuples: 8
-      action_resource: at_dl/actions
+        - {attr_name: fteid_context, num_bytes: 4}
+        - {attr_name: qfi, num_bytes: 1}
+      result_fields:
+        - {attr_name: action_id, value_offset: 0, num_bytes: 4}
+        - {attr_name: meter_id, value_offset: 4, num_bytes: 8, reference: mt_dl/meters, reference_key: BE32, reference_count: 2}
+        - {attr_name: next_hop_id, value_offset: 12, num_bytes: 4, reference: rt/next_hops, reference_key: BE32}
+        - {attr_name: route_domain, value_offset: 16, num_bytes: 4}
+        - {attr_name: steering_policy_id, value_offset: 20, num_bytes: 4}
 
   # -- the two chains the compiler writes into --------------------------------
-  - name: at_ul
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_ul/meters, next_hops: rt/next_hops}
   - name: mt_ul
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_ul
     mclass: UrrCount
     arg: {capacity: 65536}
-  # The uplink is domain 0 by definition, and it has to be written: BESS gives
-  # an attribute a read offset only if every path to the reader writes it, and
-  # `pdr_dl` below reads `route_domain` on the downlink, where the Vif writes
-  # it. Without this writer the shared attribute is unreadable and the
-  # classifier's domain field is not matched.
-  - name: set_domain
-    mclass: SetMetadata
-    arg:
-      attrs:
-        - {name: route_domain, size: 4, value_int: 0}
-  - name: at_dl
-    mclass: ActionTable
-    arg: {capacity: 65536, meters: mt_dl/meters, next_hops: rt/next_hops}
+  # The PDR result writes the inner Network Instance's route_domain after the
+  # match. The N6 Vif writes the attachment's domain before downlink matching.
   - name: mt_dl
     mclass: Meter
-    arg: {capacity: 65536}
+    arg: {capacity: 65536, levels: 2}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
+  - name: atsss
+    mclass: AtsssSteer
+    arg: {policy_attr: steering_policy_id, next_hop_attr: next_hop_id}
 
-  # A route domain per reference point, and the router bound to hold them. The
-  # bound is 4 and the domains are 1..3 because the Router creates every
-  # domain's FIB eagerly (router.cc's CreateDomain loop): a `max_domains` in the
-  # tens fails to build on this box, which is a fact about that module, not
-  # about the port. upfd's own `-max-domains` must agree with this number.
+  # A route domain per reference point (1..3); upfd's own `-max-domains` must
+  # agree with this bound. rt forwards by next-hop id and holds no FIB.
   - name: rt
     mclass: Router
-    arg: {max_domains: 4}
   - name: enc
     mclass: GtpuEncap
-    arg: {src_ip: "192.0.2.1", max_tunnels: 65536}
+    arg: {max_tunnels: 65536}
+  # Outer tunnels resolve their peer after encap, in the tunnel's route domain.
+  # The IPv4 FIB is sized for one default route per domain; IPv6 is off.
+  - name: rt_transport
+    mclass: Router
+    arg:
+      mode: ROUTE_MODE_DESTINATION
+      max_domains: 4
+      max_ipv4_routes: 16
+      domain_attr: transport_route_domain
+      interfaces:
+        - {id: 1, egress_gate: 0, mac_addr: "02:00:00:00:01:01", addresses: ["192.0.2.101/24"]}
+        - {id: 2, egress_gate: 1, mac_addr: "02:00:00:00:02:02", addresses: ["192.0.2.102/24"]}
+  - name: merge_n3
+    mclass: Merge
+  - name: dump_n3
+    mclass: Dump
+    arg: {interval: 1}
   # The port's transmit side: one queue per direction, as the receive side has
   # one per qid.
   - name: n6_out
@@ -188,46 +225,58 @@ connections:
   - {upstream: inc3, downstream: vif}
   # The Vif's default gate: a frame no interface's MAC names.
   - {upstream: vif, downstream: sink_other}
-  # N3 and N9 are both GTP-U: they reach the same TEID table, and what tells
-  # two instances' sessions apart on the uplink is the tunnel (or, with the
-  # domain in the key, the interface's domain).
-  - {upstream: vif, downstream: teid, ogate: 1}
-  - {upstream: vif, downstream: teid, ogate: 2}
-  # N6 is plain IP: it reaches the downlink table directly, carrying the domain
-  # the Vif wrote. mt_vif sits here so the Vif's writes have a reader on the
-  # path, not only in the PDR key.
-  - {upstream: vif, downstream: mt_vif, ogate: 3}
+  # Peer ARP replies go to the transport resolver; local Vif replies go out the
+  # port. N3/N9 frames are endpoint-tagged first; IPv4 then reaches F-TEID
+  # admission.
+  - {upstream: vif, downstream: tag_n3, ogate: 1}
+  - {upstream: vif, downstream: tag_n9, ogate: 2}
+  - {upstream: tag_n3, downstream: n3_eth_sort}
+  - {upstream: tag_n9, downstream: n9_eth_sort}
+  - {upstream: n3_eth_sort, downstream: n3_arp_opcode, ogate: 0}
+  - {upstream: n3_eth_sort, downstream: decap0, ogate: 1}
+  - {upstream: n9_eth_sort, downstream: n3_arp_opcode, ogate: 0}
+  - {upstream: n9_eth_sort, downstream: decap0, ogate: 1}
+  - {upstream: n3_arp_opcode, downstream: sink_other, ogate: 0}
+  - {upstream: n3_arp_opcode, downstream: n3_arp_sender_sort, ogate: 1}
+  - {upstream: n3_arp_sender_sort, downstream: merge_n3, ogate: 0}
+  - {upstream: n3_arp_sender_sort, downstream: rt_transport, ogate: 1}
+  - {upstream: vif, downstream: tag_n6, ogate: 3}
+  - {upstream: tag_n6, downstream: mt_vif}
   - {upstream: mt_vif, downstream: pdr_dl}
 
-  - {upstream: teid, downstream: decap0}
-  - {upstream: decap0, downstream: mt_md}
+  # Tunneled downlink (decap gate 1) carries the Vif's N3/N9 route_domain:
+  # F-TEID rules wildcard it and their result rewrites it.
+  - {upstream: decap0, downstream: mt_md, ogate: 0}
+  - {upstream: decap0, downstream: pdr_dl, ogate: 1}
   - {upstream: mt_md, downstream: pdr_ul}
-  - {upstream: pdr_ul, downstream: at_ul}
-  - {upstream: at_ul, downstream: mt_ul}
+  - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
   # changes when that band should be marked or shed rather than passed.
   - {upstream: mt_ul, downstream: cnt_ul}
   - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
-  - {upstream: cnt_ul, downstream: set_domain}
-  - {upstream: set_domain, downstream: rt}
+  - {upstream: cnt_ul, downstream: rt}
 
-  - {upstream: pdr_dl, downstream: at_dl}
-  - {upstream: at_dl, downstream: mt_dl}
+  - {upstream: pdr_dl, downstream: mt_dl}
   - {upstream: mt_dl, downstream: cnt_dl}
   - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
-  - {upstream: cnt_dl, downstream: rt}
+  - {upstream: cnt_dl, downstream: atsss}
+  - {upstream: atsss, downstream: rt}
 
   - {upstream: rt, downstream: n6_out}
   - {upstream: rt, downstream: enc, ogate: 1}
-  - {upstream: enc, downstream: n3_out}
+  - {upstream: enc, downstream: rt_transport}
+  - {upstream: rt_transport, downstream: merge_n3, ogate: 0}
+  - {upstream: rt_transport, downstream: merge_n3, ogate: 1}
+  - {upstream: merge_n3, downstream: dump_n3}
+  - {upstream: dump_n3, downstream: n3_out}
 
 workers:
   - {wid: 0, core: 0}
 
 resources:
   # The actions' next hops: the deployment's, not a session's (a session's
-  # action names them by id). Every chain with an ActionTable routes on the id
+  # action names them by id). Every chain's result writes the next hop
   # it writes -- the module fails closed when the attribute has no reader -- so
   # both directions have one: the uplink's leaves by gate 0 toward N6, the
   # downlink's by gate 1 toward the encap.
@@ -236,3 +285,30 @@ resources:
       value: {egress_gate: 0}
     - key: {id: 2}
       value: {egress_gate: 1}
+  # Each transport route names a resolved next hop, bound below.
+  rt_transport/neighbors:
+    - key: {id: 1}
+      value: {interface_id: 1, ipv4: "192.0.2.2"}
+    - key: {id: 2}
+      value: {interface_id: 2, ipv4: "192.0.2.2"}
+  rt_transport/routes:
+    - key: {ipv4: "0.0.0.0", prefix_length: 0, domain: 1}
+      value: {next_hop_id: 1}
+    - key: {ipv4: "0.0.0.0", prefix_length: 0, domain: 2}
+      value: {next_hop_id: 2}
+  n3_eth_sort/rules:
+    - key: {fields: [{value_bin: "CAY="}]}
+      value: {gate: 0}
+  n9_eth_sort/rules:
+    - key: {fields: [{value_bin: "CAY="}]}
+      value: {gate: 0}
+  n3_arp_opcode/rules:
+    - key: {fields: [{value_bin: "AAE="}]}
+      value: {gate: 0}
+    - key: {fields: [{value_bin: "AAI="}]}
+      value: {gate: 1}
+  n3_arp_sender_sort/rules:
+    - key: {fields: [{value_bin: "wAACZQ=="}]}
+      value: {gate: 0}
+    - key: {fields: [{value_bin: "wAACZg=="}]}
+      value: {gate: 0}

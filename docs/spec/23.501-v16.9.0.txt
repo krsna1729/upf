@@ -1,0 +1,98 @@
+3GPP TS 23.501 V16.9.0 (2021-06), Release 16
+System architecture for the 5G System (5GS)
+
+Official archive: https://www.3gpp.org/ftp/Specs/archive/23_series/23.501/23501-g90.zip
+Archive member: 23501-g90.docx
+Converted to UTF-8 text with LibreOffice (`--convert-to 'txt:Text (encoded):UTF8'`). The excerpts below retain clause headings and selected clause text; page numbers and the table of contents are omitted.
+
+5.6.4 Single PDU Session with multiple PDU Session Anchors
+In order to support selective traffic routing to the DN or to support SSC mode 3 as defined in clause 5.6.9.2.3, the SMF may control the data path of a PDU Session so that the PDU Session may simultaneously correspond to multiple N6 interfaces. The UPF that terminates each of these interfaces is said to support PDU Session Anchor functionality. Each PDU Session Anchor supporting a PDU Session provides a different access to the same DN. Further, the PDU Session Anchor assigned at PDU Session Establishment is associated with the SSC mode of the PDU Session and the additional PDU Session Anchor(s) assigned within the same PDU Session e.g. for selective traffic routing to the DN are independent of the SSC mode of the PDU Session. When a PCC rule including the AF influenced Traffic Steering Enforcement Control information defined in clause 6.3.1 of TS 23.503 [45] is provided to the SMF, the SMF can decide whether to apply traffic routing (by using UL Classifier functionality or IPv6 multi-homing) based on DNAI(s) included in the PCC rule.
+
+5.6.4.2 Usage of an UL Classifier for a PDU Session
+In the case of PDU Sessions of type IPv4 or IPv6 or IPv4v6 or Ethernet, the SMF may decide to insert in the data path of a PDU Session an "UL CL" (Uplink classifier). The UL CL is a functionality supported by an UPF that aims at diverting (locally) some traffic matching traffic filters provided by the SMF. The insertion and removal of an UL CL is decided by the SMF and controlled by the SMF using generic N4 and UPF capabilities. The SMF may decide to insert in the data path of a PDU Session a UPF supporting the UL CL functionality during or after the PDU Session Establishment, or to remove from the data path of a PDU Session a UPF supporting the UL CL functionality after the PDU Session Establishment. The SMF may include more than one UPF supporting the UL CL functionality in the data path of a PDU Session.
+The UE is unaware of the traffic diversion by the UL CL, and does not involve in both the insertion and the removal of UL CL. In the case of a PDU Session of IPv4 or IPv6 or IPv4v6 type, the UE associates the PDU Session with either a single IPv4 address or a single IPv6 Prefix or both of them allocated by the network.
+When an UL CL functionality has been inserted in the data path of a PDU Session, there are multiple PDU Session Anchors for this PDU Session. These PDU Session Anchors provide different access to the same DN. In the case of PDU Sessions of IPv4 or IPv6 or IPv4v6 type, only one IPv4 address and/or IPv6 prefix is provided to the UE. The SMF may be configured with local policies for some (DNN, S-NSSAI) combinations to release the PDU Session when there is a PSA associated with the IPv4 address allocated to the UE and this PSA has been removed.
+NOTE 0: The use of only one IPv4 address and/or IPv6 prefix with multiple PDU Session Anchors assumes that when needed, appropriate mechanisms are in place to correctly forward packets on the N6 reference point. The mechanisms for packet forwarding on the N6 reference point between the PDU Session Anchor providing local access and the DN are outside the scope of this specification.
+The UL CL provides forwarding of UL traffic towards different PDU Session Anchors and merge of DL traffic to the UE i.e. merging the traffic from the different PDU Session Anchors on the link towards the UE. This is based on traffic detection and traffic forwarding rules provided by the SMF.
+The UL CL applies filtering rules (e.g. to examine the destination IP address/Prefix of UL IP packets sent by the UE) and determines how the packet should be routed. The UPF supporting an UL CL may also be controlled by the SMF to support traffic measurement for charging, traffic replication for LI and bit rate enforcement (Session-AMBR per PDU Session).
+NOTE 1: When N9 forwarding tunnel exists between source ULCL and target ULCL, the Session-AMBR per PDU Session can be enforced by the source UL CL UPF.
+NOTE 2: The UPF supporting an UL CL may also support a PDU Session Anchor for connectivity to the local access to the data network (including e.g. support of tunnelling or NAT on N6). This is controlled by the SMF.
+Additional UL CLs (and thus additional PDU Session Anchors) can be inserted in the data path of a PDU Session to create new data paths for the same PDU Session. The way to organize the data path of all UL CLs in a PDU Session is up to operator configuration and SMF logic and there is only one UPF supporting UL CL connecting to the (R)AN via N3 interface, except when session continuity upon UL CL relocation is used.
+NOTE 3: It is possible for a given UPF to support both the UL CL and the PDU Session Anchor functionalities.
+Due to UE mobility the network may need to relocate the UPF acting as UL CL and establish a new PSA for access to the local DN. To support session continuity during UL CL relocation the network may establish a temporary N9 forwarding tunnel between the source UL CL and target UL CL.
+The N9 forwarding tunnel is maintained until all active traffic flowing on it ceases to exist for a configurable period of time or until the AF informs the SMF that it can release the source PSA providing access to the source local DN.
+During the existence of the N9 forwarding tunnel the UPF acting as target UL CL is configured with packet filters that:
+- force uplink traffic from existing data sessions between UE and the application in the source local DN into the N9 forwarding tunnel towards the source UL CL.
+- force any traffic related to the application in the target local DN to go to the new local DN via the target PSA.
+
+5.6.4.3 Usage of IPv6 multi-homing for a PDU Session
+A PDU Session may be associated with multiple IPv6 prefixes. This is referred to as multi-homed PDU Session. The multi-homed PDU Session provides access to the Data Network via more than one PDU Session Anchor. The different user plane paths leading to the different PDU Session Anchors branch out at a "common" UPF referred to as a UPF supporting "Branching Point" functionality. The Branching Point provides forwarding of UL traffic towards the different PDU Session Anchors and merge of DL traffic to the UE i.e. merging the traffic from the different PDU Session Anchors on the link towards the UE.
+The UPF supporting a Branching Point functionality may also be controlled by the SMF to support traffic measurement for charging, traffic replication for LI and bit rate enforcement (Session-AMBR per PDU Session). The insertion and removal of a UPF supporting Branching Point is decided by the SMF and controlled by the SMF using generic N4 and UPF capabilities. The SMF may decide to insert in the data path of a PDU Session a UPF supporting the Branching Point functionality during or after the PDU Session Establishment, or to remove from the data path of a PDU Session a UPF supporting the Branching Point functionality after the PDU Session Establishment.
+Multi homing of a PDU Session applies only for PDU Sessions of IPv6 type. When the UE requests a PDU Session of type "IPv4v6" or "IPv6" the UE also provides an indication to the network whether it supports a Multi-homed IPv6 PDU Session.
+The use of multiple IPv6 prefixes in a PDU Session is characterised by the following:
+- The UPF supporting a Branching Point functionality is configured by the SMF to spread UL traffic between the PDU Session Anchors based on the Source Prefix of the PDU (which may be selected by the UE based on routing information and preferences received from the network).
+- IETF RFC 4191 [8] is used to configure routing information and preferences into the UE to influence the selection of the source Prefix.
+
+5.8.2.13 Support for 5G VN group communication
+5.8.2.13.0 General
+The SMF may configure the UPF(s) to apply different traffic forwarding methods to route traffic between PDU Sessions for a single 5G VN group. For example, depending on the destination address, some packet flows may be forwarded locally, while other packet flows are forwarded via N19 and other packet flows are forwarded to N6.
+The UPF local switching, N6-based forwarding and N19-based forwarding methods require that a common SMF is controlling the PSA UPFs for the 5G VN group.
+Traffic forwarding within the 5G VN group is realized by using a UPF internal interface ("5G VN internal") and a two-step detection and forwarding process. In the first step, the packets received from any 5G VN group member (via it's PDU Session, via N6 or via N19) are forwarded to the UPF internal interface (i.e. Destination Interface set to "5G VN internal"). In the second step, PDRs installed at the UPF internal interface (i.e. Source Interface set to "5G VN internal") detect the packet and forward it to the respective 5G VN group member (via it's PDU Session, via N6 or via N19). The details of the PDR and FAR configuration are described in the following clauses.
+For UEs belonging to the same 5G VN group and having PDU Sessions that correspond to N4 Sessions in the same PSA UPF, the following applies for traffic that is sent from one of these UEs to another one of these UEs using local switching: The incoming traffic for one PDU Session will match the corresponding N4 Session's PDR(s) of the source PDU Session (based on GTP-U header information). The traffic is then sent back to classification in that UPF (via the internal interface) and will match another N4 Session corresponding to the destination PDU Session (based on destination address in the PDU). The PDU is then forwarded to the target UE.
+If 5G VN group members' PDU Sessions are served by different PSA UPFs and N19-based forwarding is applied, the SMF creates a group-level N4 Session with each involved UPF to enable N19-based forwarding and N6-based forwarding. When the traffic is then sent back to classification in that UPF (via the internal interface) it may match group-level N4 Session corresponding to the 5G VN group (based on destination address in the PDU or a default PDR rule with match-all packet filter). The PDU is then forwarded to N6 or to the UPF indicated in the group-level N4 Session via corresponding N19 tunnel. This enables the PDU to be sent to the target group member in the other UPF or to the device in the DN.
+In the case of N19-based forwarding is not applied for a 5G VN group, group level N4 session is not required.
+
+5.8.2.13.1 Support for unicast traffic forwarding of a 5G VN
+To enable unicast traffic forwarding in a UPF, the following applies:
+- The SMF provides for each 5G VN group member's N4 Session (i.e. N4 Session corresponding to PDU Session) the following N4 rules that enable the processing of packets received from this UE.
+- in order to detect the traffic, a PDR containing Source Interface set to "access side", and CN Tunnel Information set to PDU Session tunnel header (i.e. N3 or N9 GTP-U F-TEID); and
+- in order to forward the traffic, a FAR containing Destination Interface set to "5G VN internal".
+- The SMF provides for each 5G VN group member's N4 Session (i.e. N4 session corresponding to PDU Session) the following N4 rules that enable the processing of packets towards this UE.
+- in order to detect the traffic, a PDR containing Source Interface set to "5G VN internal", and Destination Address set to the IP/MAC address (es) of this 5G VN group member; and
+- in order to forward the traffic, a FAR containing Outer Header Creation indicating the N3/N9 tunnel information, and Destination Interface set "access side".
+- If N19-based forwarding is applied, the SMF configures the group-level N4 Session for processing packets received from a N19 tunnel with the following N4 rules for each N19 tunnel.
+- in order to detect the traffic, a PDR containing Source Interface set to "core side", and CN Tunnel Information set to N19 tunnel header (i.e. N19 GTP-U F-TEID); and
+- in order to forward the traffic, a FAR containing Destination Interface set to "5G VN internal".
+- If N19-based forwarding is applied, the SMF configures the group-level N4 Session for processing packets towards 5G VN group members anchored at other UPFs with the following N4 rules for each N19 tunnel.
+- in order to detect the traffic, a PDR containing Source Interface set to "5G VN internal", and Destination Address set to the IP/MAC address (es) of UEs anchored at the peer UPF of this N19 tunnel; and
+- in order to forward the traffic to a 5G VN group member anchored at another UPF via the N19 tunnel, a FAR containing Outer Header Creation indicating the N19 tunnel information, Destination Interface set to "core side".
+
+5.29.4 User Plane handling
+User Plane management as defined for 5GS in clause 5.8 is applicable to 5G LAN-type services with the following clarifications:
+- There are three types of traffic forwarding methods allowed for 5G VN communication:
+- N6-based, where the UL/DL traffic for the 5G VN communication is forwarded to/from the DN;
+- N19-based, where the UL/DL traffic for the 5G VN group communication is forwarded between PSA UPFs of different PDU sessions via N19. N19 is based on a shared User Plane tunnel connecting PSA UPFs of a single 5G VN group.
+- Local switch, where traffic is locally forwarded by a single UPF if this UPF is the common PSA UPF of different PDU Sessions for the same 5G VN group.
+- The SMF handles the user plane paths of the 5G VN group, including:
+- The SMF may prefer to select a single PSA UPF for as many PDU sessions (targeting the same 5G VN group) as possible, in order to implement local switch on the UPF.
+- (if needed) Establishing N19 tunnels between PSA UPFs to support N19-based traffic forwarding.
+N19 tunnel(s) can be established between a new UPF and other UPF(s) that belongs to a 5G VN group when the new UPF is selected for the 5G VN group during PDU session establishment. The N19 tunnel(s) to a UPF can be released during or after PDU session release when there is no more PDU sessions for a 5G VN group in that UPF. Establishment or release of the N19 tunnels at the UPF is performed within a group-level N4 Session.
+
+6.2.3 UPF
+The User plane function (UPF) includes the following functionality. Some or all of the UPF functionalities may be supported in a single instance of a UPF:
+- Anchor point for Intra-/Inter-RAT mobility (when applicable).
+- Allocation of UE IP address/prefix (if supported) in response to SMF request.
+- External PDU Session point of interconnect to Data Network.
+- Packet routing & forwarding (e.g. support of Uplink classifier to route traffic flows to an instance of a data network, support of Branching point to support multi-homed PDU Session, support of traffic forwarding within a 5G VN group (UPF local switching, via N6, via N19)).
+- Packet inspection (e.g. Application detection based on service data flow template and the optional PFDs received from the SMF in addition).
+- User Plane part of policy rule enforcement, e.g. Gating, Redirection, Traffic steering).
+- Lawful intercept (UP collection).
+- Traffic usage reporting.
+- QoS handling for user plane, e.g. UL/DL rate enforcement, Reflective QoS marking in DL.
+- Uplink Traffic verification (SDF to QoS Flow mapping).
+- Transport level packet marking in the uplink and downlink.
+- Downlink packet buffering and downlink data notification triggering.
+- Sending and forwarding of one or more "end marker" to the source NG-RAN node.
+- Functionality to respond to Address Resolution Protocol (ARP) requests and / or IPv6 Neighbour Solicitation requests based on local cache information for the Ethernet PDUs. The UPF responds to the ARP and / or the IPv6 Neighbour Solicitation Request by providing the MAC address corresponding to the IP address sent in the request.
+
+5.8.2.3.1 General
+CN Tunnel Info is the Core Network address of a N3/N9 tunnel corresponding to the PDU Session. It comprises the TEID and the IP address which is used by the UPF on the N3/N9 tunnel for the PDU Session.
+The CN Tunnel Info allocation and release is performed by the UPF. The SMF shall indicate to the UPF when the UPF is required to allocate/release CN Tunnel Info.
+
+5.8.2.3.3 Management of CN Tunnel Info in the UPF
+The UPF shall manage the CN Tunnel Info space. When a new CN Tunnel Info is needed, the SMF shall request over N4 the UPF to allocate CN Tunnel Info for the applicable N3/N9 reference point. In response, the UPF provides CN Tunnel Info to the SMF. In the case of PDU Session Release or a UPF is removed from the user plane path of an existing PDU Session, the SMF shall request UPF to release CN Tunnel Info for the PDU Session. If the corresponding N4 Session is released the UPF releases the associated CN Tunnel Info.
+
+5.8.2.10 UP Tunnel Management
+5GC shall support per PDU Session tunnelling on N3 between (R)AN and UPF and N9 between UPFs. If there exist more than one UPF involved for the PDU Session, any tunnel(s) between UPFs (e.g. in the case of two UPFs, between the UPF that is an N3 terminating point and the UPF for PDU Session Anchor) remains established when a UE enters CM-IDLE state. In the case of downlink data buffering by UPF, when mobile terminated (MT) traffic arrives at the PDU Session Anchor UPF, it is forwarded to the UPF which buffer the data packet via N9 tunnel. See clause 5.8.3 for more details on UPF buffering. In the case of Home Routed roaming, the SMF in HPLMN is not aware of the UP activation state of a PDU Session.
+When the UP connection of the PDU Session is deactivated, the SMF may release the UPF of N3 terminating point. In that case the UPF (e.g. the Branching Point/UL CL or PDU Session Anchor) connecting to the released UPF of N3 terminating point will buffer the DL packets. Otherwise, when the UPF with the N3 connection is not released, this UPF will buffer the DL packets.
+When the UP connection of the PDU Session is activated due to a down-link data arrived and a new UPF is allocated to terminate the N3 connection, a data forwarding tunnel between the UPF that has buffered packets and the newly allocated UPF is established, so that the buffered data packets are transferred from the old UPF that has buffered packets to the newly allocated UPF via the data forwarding tunnel.

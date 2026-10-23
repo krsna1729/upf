@@ -24,13 +24,11 @@
 #
 #   ci/veth-port.sh
 #   STAGE=/some/prefix ci/veth-port.sh
-#
-# bessd binds the port through the af_packet PMD, which opens a raw socket, so
-# this script starts it under sudo (passwordless on this host). It creates the
-# veth if it is not there and DELETES IT AT THE END -- including a pair it found
-# already present, which is the same furniture and this script's only user -- so
-# nothing of the port is left behind; the daemon is stopped the way
-# ci/buffer-path.sh stops its own, and its log is kept when the run fails.
+# BESS binds the port through the af_packet PMD, which opens a raw socket, so
+# this script starts it under sudo. It creates a fresh veth pair and deletes
+# only that pair after stopping the daemon. Existing interface names are a hard
+# error: the harness never reuses or removes a caller's veth. The daemon's log
+# is kept when the run fails.
 #
 # The plugin must be built first (see README.md); the script uses
 # datapath/build/libupf_datapath.so unless PLUG says otherwise.
@@ -45,8 +43,8 @@ PLUG=${PLUG:-$ROOT/datapath/build}
 GRAPH=${GRAPH:-$ROOT/deploy/veth-port.yaml}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
-VETH=${VETH:-upfv0}
-VETH_PEER=${VETH_PEER:-upfv1}
+VETH=${VETH:-upfv$BASHPID}
+VETH_PEER=${VETH_PEER:-upfp$BASHPID}
 QUEUES=${QUEUES:-4}
 # What the manifest says, so this script knows where to send and what to look
 # for. A graph is data and a script is code; every arm repeats the values its
@@ -64,7 +62,7 @@ N6_DOMAIN=${N6_DOMAIN:-3}
 # assigned 53"). ci/n4-path.sh's values are the same, because it is the same
 # compiler writing the same shape.
 UE=${UE:-10.45.0.2}
-N3_ADDR=${N3_ADDR:-192.0.2.1}
+N3_ADDR=${N3_ADDR:-$N3_IP}
 FTEID=${FTEID:-0x11223344}
 GNB=${GNB:-10.20.30.2}
 # The per-queue spread's flows: this many distinct destinations.
@@ -78,10 +76,14 @@ BESSCTL=$STAGE/bin/bessctl
 WORK=$(mktemp -d /tmp/upf-veth-port-XXXXXX)
 LOG=$WORK/bessd.log
 UPFD_LOG=$WORK/upfd.log
+GRAPH_RUN=$WORK/veth-port.yaml
 BESSD_PID=
 UPFD_PID=
+BESSD_STARTED=0
+VETH_CREATED=0
 
 bc() { "$BESSCTL" -s "127.0.0.1:$BESS_PORT" "$@"; }
+. "$ROOT/ci/dumphex.sh"
 
 # stop_bessd ends the daemon this script started, and only then is the run
 # over: the RPC is what stops it (it runs as root under this script, so the pid
@@ -89,6 +91,7 @@ bc() { "$BESSCTL" -s "127.0.0.1:$BESS_PORT" "$@"; }
 # a daemon that outlived that, and SIGKILL is the last resort. A daemon left
 # behind holds the port and the veth the next run wants.
 stop_bessd() {
+  [ "$BESSD_STARTED" = 1 ] || return
   if bc status >/dev/null 2>&1; then
     bc shutdown >/dev/null 2>&1 || true
   fi
@@ -110,12 +113,11 @@ cleanup() {
   local status=$?
   [ -n "$UPFD_PID" ] && kill "$UPFD_PID" 2>/dev/null || true
   stop_bessd
-  # The veth pair goes with the run: the port's side is what bessd binds, the
-  # peer is where this script sends from, and the addresses, routes and
-  # neighbours this script put on them leave with the interfaces. A pair that
-  # was already here is deleted too -- leaving either half would be the state
-  # this arm exists to avoid.
-  sudo ip link del "$VETH" 2>/dev/null || true
+  # Delete only the pair created by this run. Names supplied by the caller are
+  # still protected by the collision check before creation.
+  if [ "$VETH_CREATED" = 1 ]; then
+    sudo ip link del "$VETH" 2>/dev/null || true
+  fi
   if [ "$status" = 0 ]; then
     rm -rf "$WORK"
   else
@@ -136,16 +138,16 @@ trap cleanup EXIT
   exit 1
 }
 
-# The veth, before the daemon: the PMD probes iface=upfv0 at apply time, so the
-# interface must exist and be up. Its queues are the kernel's; the PMD's are
-# `qpairs=` in the manifest, which is why the two are checked separately below.
-if ip link show "$VETH" >/dev/null 2>&1; then
-  echo "veth-port: using the $VETH/$VETH_PEER pair already here"
-else
-  echo "veth-port: creating the $VETH/$VETH_PEER pair ($QUEUES queues each)"
-  sudo ip link add "$VETH" type veth peer name "$VETH_PEER" \
-    numrxqueues "$QUEUES" numtxqueues "$QUEUES"
+# The port uses the run's unique veth name. Its queue count is the kernel's;
+# the PMD's is `qpairs=` in the manifest, which the checks compare separately.
+if ip link show "$VETH" >/dev/null 2>&1 || ip link show "$VETH_PEER" >/dev/null 2>&1; then
+  echo "veth-port: refusing to reuse existing interfaces $VETH/$VETH_PEER" >&2
+  exit 1
 fi
+echo "veth-port: creating the isolated $VETH/$VETH_PEER pair ($QUEUES queues each)"
+sudo ip link add "$VETH" type veth peer name "$VETH_PEER" \
+  numrxqueues "$QUEUES" numtxqueues "$QUEUES"
+VETH_CREATED=1
 # The host's own IPv6 chatter on the pair -- duplicate address detection and
 # router solicitations for the two ends' link-local addresses -- is not this
 # arm's traffic, and being multicast it lands on the Vif's default gate, where
@@ -170,6 +172,7 @@ export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 sudo -E env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
   "$BESSD" -m 0 -p "$BESS_PORT" -i "$WORK/bessd.pid" -modules="$PLUG" -f >"$LOG" 2>&1 &
 BESSD_PID=$!
+BESSD_STARTED=1
 
 for _ in $(seq 1 60); do bc status >/dev/null 2>&1 && break; sleep 0.5; done
 if ! bc status >/dev/null 2>&1; then
@@ -178,8 +181,12 @@ if ! bc status >/dev/null 2>&1; then
   exit 1
 fi
 
-bc validate "$GRAPH" >/dev/null
-bc apply "$GRAPH" >/dev/null
+[ -f "$GRAPH" ] || { echo "veth-port: no graph at $GRAPH" >&2; exit 1; }
+while IFS= read -r line || [ -n "$line" ]; do
+  printf '%s\n' "${line//__VETH_IFACE__/$VETH}"
+done <"$GRAPH" >"$GRAPH_RUN"
+bc validate "$GRAPH_RUN" >/dev/null
+bc apply "$GRAPH_RUN" >/dev/null
 # A pipeline's workers start paused, and a paused worker counts nothing: until
 # this runs, the port's rx stays 0 while the veth's own counters climb.
 bc resume >/dev/null
@@ -260,6 +267,13 @@ check "the downlink PDR key declares the route domain" '"attr_name": "route_doma
 # the Vif classifies). Nothing replies -- the graph has no rules yet, so the
 # frames die at the PDR table's default gate -- and that is the point: what
 # moves is the Vif's own gate.
+PORT_MAC=$(cat "/sys/class/net/$VETH/address" | tr '[:upper:]' '[:lower:]')
+for vif_mac in "$N3_MAC" "$N9_MAC" "$N6_MAC"; do
+  if [ "$PORT_MAC" = "$vif_mac" ]; then
+    echo "FAIL: the Vif destination MAC $vif_mac equals the PMD port MAC; promiscuous receive is not being proved" >&2
+    FAIL=1
+  fi
+done
 send_to() { # send_to <address> <mac> <pings>
   sudo ip neigh replace "$1" lladdr "$2" dev "$VETH_PEER" nud permanent
   ping -c "$3" -W 0.2 -I "$VETH_PEER" "$1" >/dev/null 2>&1 || true
@@ -268,11 +282,13 @@ send_to "$N3_IP" "$N3_MAC" "$PINGS"
 send_to "$N9_IP" "$N9_MAC" "$PINGS"
 send_to "$N6_IP" "$N6_MAC" "$PINGS"
 
-# The counts are exact, not positive: every frame this script addressed to an
-# interface went to that interface's gate, and no frame went to two gates. The
-# default gate is not compared: the host's own multicast on the address the
-# peer holds (mDNS from 192.0.2.2:5353 to 224.0.0.251, seen in this graph)
-# names no interface's MAC and belongs there.
+# N6's count is exact: every frame this script addressed to that interface went
+# to its gate, and no frame went to two gates. N3 and N9 also carry the peer's
+# ARP replies to rt_transport's resolver solicitations (expected traffic: the
+# resolver owns those interfaces' next hops), so their gates must hold at least
+# the probes. The default gate is not compared: the host's own multicast on the
+# address the peer holds (mDNS from 192.0.2.2:5353 to 224.0.0.251, seen in this
+# graph) names no interface's MAC and belongs there.
 check_count() { # check_count <description> <count> <want>
   if [ "${2:-0}" = "$3" ]; then
     echo "ok: $1 ($2)"
@@ -281,15 +297,22 @@ check_count() { # check_count <description> <count> <want>
     FAIL=1
   fi
 }
-check_count "N3's interface took the frames addressed to it (Vif gate 1)" "$(wait_gate vif 1 "$PINGS")" "$PINGS"
-check_count "N9's interface took the frames addressed to it (Vif gate 2)" "$(wait_gate vif 2 "$PINGS")" "$PINGS"
+check_at_least() { # check_at_least <description> <count> <want>
+  if [ "${2:-0}" -ge "$3" ] 2>/dev/null; then
+    echo "ok: $1 ($2)"
+  else
+    echo "FAIL: $1 (counted ${2:-0}, want at least $3)" >&2
+    FAIL=1
+  fi
+}
+check_at_least "N3's interface took the frames addressed to it (Vif gate 1)" "$(wait_gate vif 1 "$PINGS")" "$PINGS"
+check_at_least "N9's interface took the frames addressed to it (Vif gate 2)" "$(wait_gate vif 2 "$PINGS")" "$PINGS"
 check_count "N6's interface took the frames addressed to it (Vif gate 3)" "$(wait_gate vif 3 "$PINGS")" "$PINGS"
 
 # The spread: many distinct flows, one destination each, addressed to the port
 # itself (so the Vif sends them to its default gate and the QueueIncs are what
 # is being read). af_packet's fanout_mode=hash puts one flow on one queue, so
 # four queues that all move is the per-queue spread the port offers here.
-PORT_MAC=$(cat "/sys/class/net/$VETH/address")
 before0=$(gate_packets inc0 0); before1=$(gate_packets inc1 0)
 before2=$(gate_packets inc2 0); before3=$(gate_packets inc3 0)
 before0=${before0:-0}; before1=${before1:-0}; before2=${before2:-0}; before3=${before3:-0}
@@ -330,10 +353,12 @@ fi
 # ci/n4-path.sh builds them.
 (cd "$ROOT" && $GO build -o "$WORK/upfd" ./cmd/upfd && $GO build -o "$WORK/n4bench" ./cmd/n4bench)
 "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-  -n3-addr "$N3_ADDR" -max-domains 4 \
+  -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,instance=n6,ipv4=$N3_ADDR" \
+  -fteid-address "endpoint=2,reference=n9,transport-domain=2,source=core,instance=n6,ipv4=$N9_IP" \
+  -gtpu-decap decap0 -max-domains 4 \
   -instances "name=n6,domain=$N6_DOMAIN,next-hop=1,pool=$UE/32" \
-  -pdr-fields-ul src,dst,proto,sport,dport,teid,qfi \
-  -pdr-fields-dl src,dst,proto,sport,dport,domain \
+  -pdr-fields-ul src,dst,proto,sport,dport,fteid,qfi \
+  -pdr-fields-dl src,dst,proto,sport,dport,domain,fteid,qfi \
   -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 40); do
@@ -367,12 +392,40 @@ check "the rule's key carries the N6 interface's route domain ($N6_DOMAIN)" \
 
 # And the frame is selected: the same datagram that was dropped a moment ago
 # now matches by the domain the Vif wrote, and crosses the downlink chain to
-# the encap.
+# the encap. rt_transport holds no packet for a neighbor it has not resolved --
+# it drops and counts it (BESS D-183) -- so the measured frame is sent only
+# once every binding the routes name is resolved.
+resolved=
+for _ in $(seq 1 100); do
+  resolved=$(bc action rt_transport get_neighbors 2>/dev/null | python3 -c '
+import json, sys
+ns = json.load(sys.stdin).get("neighbors", [])
+print("yes" if ns and all(n.get("state") == "ROUTER_NEIGHBOR_STATE_RESOLVED" for n in ns) else "no")
+' 2>/dev/null || echo no)
+  [ "$resolved" = yes ] && break
+  sleep 0.1
+done
+if [ "$resolved" = yes ]; then
+  echo "ok: rt_transport resolved the veth peer for every binding"
+else
+  echo "FAIL: rt_transport did not resolve the veth peer: $(bc action rt_transport get_neighbors 2>/dev/null | tr -d '\n ')" >&2
+  FAIL=1
+fi
 before_dl=$(gate_packets cnt_dl 0); before_dl=${before_dl:-0}
 send_downlink
 crossed=$(( $(wait_gate cnt_dl 0 "$(( before_dl + 1 ))") - before_dl ))
 nonzero "the Vif's route domain selected the compiler's rule (cnt_dl moved)" "$crossed"
 nonzero "the selected frame crossed the chain to the encap" "$(gate_packets enc 0)"
+N3_HEX=$(dump_hex dump_n3 "$LOG" | tr '[:upper:]' '[:lower:]')
+printf '%s\n' "$N3_HEX" >"$WORK/n3.hex"
+PEER_MAC_HEX=$(tr ':' ' ' <"/sys/class/net/$VETH_PEER/address")
+check "the transport Router resolves the veth peer and fills the outer L2 header" \
+  "$PEER_MAC_HEX 02 00 00 00 01 01 08 00 45" "$WORK/n3.hex"
+# n4bench's first session asks the gNB for TEID 0x100000 + 0 on the downlink
+# (internal/n4sim: the FAR's Outer Header Creation), so the G-PDU header is
+# flags 0x30, type 0xff, then that TEID after the 2-byte length.
+check "the routed outer tunnel carries the FAR's TEID" \
+  "00 10 00 00" "$WORK/n3.hex"
 
 # The compiler's own test for what "per domain" means here: two instances that
 # serve one prefix are two rules for one filter, each keyed on its own domain.

@@ -2,7 +2,7 @@
 package session
 
 import (
-	"net"
+	"strings"
 	"testing"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -18,13 +18,13 @@ func twoLevelEstablishment(cpSEID uint64, ueIP string, fteid uint32) *message.Se
 		ie.NewFSEID(cpSEID, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any 1000 to any", "", "", "", 0)),
 			ie.NewFARID(1), ie.NewQERID(1), ie.NewQERID(9)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any 2000 to any", "", "", "", 0)),
 			ie.NewFARID(1), ie.NewQERID(2), ie.NewQERID(9)),
@@ -39,15 +39,12 @@ func twoLevelEstablishment(cpSEID uint64, ueIP string, fteid uint32) *message.Se
 	)
 }
 
-// TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions: with two levels the
-// action names the PDR's own rate-bearing QER first and the session's shared
-// one after it, so the Meter stops a red packet at the flow's bucket before
-// the session's is charged. The second slot is one id across both PDRs (the
-// shared QER) and the first differs (each PDR's flow), which is the order the
-// design asks for seen from the resources alone.
+// TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions: each PDR result lists
+// its selected flow QER first, then the session's shared QER. A red first level
+// does not charge the session bucket. Both PDRs share the second meter ID; each
+// carries its own first ID. This is the order the session compiler emits.
 func TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions(t *testing.T) {
 	cfg := testConfig()
-	cfg.Up.MeterLevels = 2
 	rec := &recorder{}
 	c := New(cfg, rec, quietLogger())
 	resp := c.Establish(twoLevelEstablishment(0x7777, "10.45.0.9", 0x44444444)).(*message.SessionEstablishmentResponse)
@@ -56,26 +53,22 @@ func TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions(t *testing.T) {
 	}
 
 	var flows, shared []uint32
-	for _, ch := range rec.last() {
-		if ch.Resource != actionsRes(cfg.Up) {
+	for _, r := range rules(rec.last()) {
+		if !strings.HasPrefix(r.change.Resource, rulesRes(cfg.Up)) {
 			continue
 		}
-		v := ch.Value
-		if _, ok := v["meter_id"]; ok {
-			t.Fatalf("a two-level action carries a single meter_id: %v", v)
+		ids := r.meterIDs()
+		if ids[0] == 0 {
+			t.Errorf("the rule carries no flow meter: %v", ids)
 		}
-		ids, ok := v["meter_ids"].([]uint32)
-		if !ok || len(ids) != 2 {
-			t.Fatalf("the action's meters are %v, want two ids", v["meter_ids"])
-		}
-		if v["next_hop_id"] == nil {
-			t.Errorf("the action's next hop went missing: %v", v)
+		if r.nextHop() == 0 {
+			t.Errorf("the rule's next hop went missing: %v", r.change.Value)
 		}
 		flows = append(flows, ids[0])
 		shared = append(shared, ids[1])
 	}
 	if len(flows) != 2 {
-		t.Fatalf("the session wrote %d actions, want one per PDR", len(flows))
+		t.Fatalf("the session wrote %d rules, want one per PDR", len(flows))
 	}
 	if flows[0] == 0 || flows[1] == 0 || flows[0] == flows[1] {
 		t.Errorf("the flows' meters are %v, want two different non-zero ids", flows)
@@ -85,34 +78,5 @@ func TestTheTwoLevelActionNamesTheFlowsMeterThenTheSessions(t *testing.T) {
 	}
 	if flows[0] == shared[0] || flows[1] == shared[1] {
 		t.Errorf("a PDR's flow meter (%v) is its session's (%v)", flows, shared)
-	}
-}
-
-// TestTheOneLevelActionIsTheHistoricalRecord: without levels the action is the
-// single `meter_id` record every deployed graph already reads.
-func TestTheOneLevelActionIsTheHistoricalRecord(t *testing.T) {
-	cfg := testConfig()
-	rec := &recorder{}
-	c := New(cfg, rec, quietLogger())
-	resp := c.Establish(twoLevelEstablishment(0x7778, "10.45.0.10", 0x55555555)).(*message.SessionEstablishmentResponse)
-	if got := cause(t, resp); got != ie.CauseRequestAccepted {
-		t.Fatalf("the establishment answered cause %d", got)
-	}
-	actions := 0
-	for _, ch := range rec.last() {
-		if ch.Resource != actionsRes(cfg.Up) {
-			continue
-		}
-		actions++
-		v := ch.Value
-		if _, ok := v["meter_ids"]; ok {
-			t.Errorf("a one-level action carries a list: %v", v)
-		}
-		if id, _ := v["meter_id"].(uint32); id == 0 {
-			t.Errorf("the action's meter_id is %v, want the PDR's meter", v["meter_id"])
-		}
-	}
-	if actions != 2 {
-		t.Errorf("the session wrote %d actions, want one per PDR", actions)
 	}
 }

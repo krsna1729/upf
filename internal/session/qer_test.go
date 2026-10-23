@@ -16,7 +16,7 @@ import (
 // resource without it would pin an entry and not the enforcement.
 func meterOf(t *testing.T, changes []bess.Change, r rule, dir Direction) map[string]any {
 	t.Helper()
-	meterID, _ := find(t, changes, actionsRes(dir), "id", r.actionID()).Value["meter_id"].(uint32)
+	meterID, _ := actionFields(t, changes, dir, r.actionID())["meter_id"].(uint32)
 	if meterID == 0 {
 		t.Fatalf("rule %v names no meter", r.change.Key)
 	}
@@ -159,7 +159,7 @@ func TestAPDRWithSeveralRateBearingQERsEnforcesTheSharedOne(t *testing.T) {
 	}
 	up := testConfig().Up
 	meterID := func(r rule) uint32 {
-		v, _ := find(t, rec.last(), actionsRes(up), "id", r.actionID()).Value["meter_id"].(uint32)
+		v, _ := actionFields(t, rec.last(), up, r.actionID())["meter_id"].(uint32)
 		return v
 	}
 	peak := func(id uint32) uint64 {
@@ -175,10 +175,16 @@ func TestAPDRWithSeveralRateBearingQERsEnforcesTheSharedOne(t *testing.T) {
 	if got, want := peak(first), uint64(1000*1000/8); got != want {
 		t.Errorf("the shared meter's peak is %d, want QER 1's MBR (%d)", got, want)
 	}
-	// The flow that named both is policed by the session's meter, not by the
-	// flow QER listed after it.
-	if third := meterID(uplinkRule(t, rec.last(), 9)); third != first {
-		t.Errorf("the flow naming both QERs names meter %d, want the shared one (%d)", third, first)
+	// The flow that named both is policed by both: its own QER first, then the
+	// session's shared one. The shared slot is the same id as the one the
+	// session's other flows carry.
+	both := uplinkRule(t, rec.last(), 9)
+	ids := both.meterIDs()
+	if ids[1] != first {
+		t.Errorf("the flow naming both QERs names shared meter %d, want the session's (%d)", ids[1], first)
+	}
+	if ids[0] == 0 || ids[0] == first {
+		t.Errorf("the flow naming both QERs names own meter %d, want its flow QER's", ids[0])
 	}
 }
 
@@ -238,7 +244,7 @@ func TestAPDRNamingNoQERTheSessionSharesKeepsItsOwn(t *testing.T) {
 	// The flow naming only QER 2 keeps QER 2's meter: the 3000 MBR's meter, not
 	// the session's 1000 and not none.
 	meterID := func(r rule) uint32 {
-		v, _ := find(t, rec.last(), actionsRes(up), "id", r.actionID()).Value["meter_id"].(uint32)
+		v, _ := actionFields(t, rec.last(), up, r.actionID())["meter_id"].(uint32)
 		return v
 	}
 	peak := func(id uint32) uint64 {
@@ -281,17 +287,17 @@ func TestADuplicateQERReferenceCountsOnce(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	up := testConfig().Up
-	meterID := func(r rule) uint32 {
-		v, _ := find(t, rec.last(), actionsRes(up), "id", r.actionID()).Value["meter_id"].(uint32)
-		return v
-	}
 	peak := func(id uint32) uint64 {
 		trtcm, _ := find(t, rec.last(), metersRes(up), "id", id).Value["tr_tcm"].(map[string]any)
 		v, _ := trtcm["peak_rate"].(uint64)
 		return v
 	}
-	got := peak(meterID(uplinkRule(t, rec.last(), 0)))
-	if want := uint64(1000 * 1000 / 8); got != want {
+	r := uplinkRule(t, rec.last(), 0)
+	ids := r.meterIDs()
+	if got, want := peak(ids[1]), uint64(1000*1000/8); got != want {
 		t.Errorf("the session is policed at %d, want the QER the PDRs share even once each (%d)", got, want)
+	}
+	if ids[0] == 0 {
+		t.Error("the PDR's duplicated QER did not become its own meter")
 	}
 }

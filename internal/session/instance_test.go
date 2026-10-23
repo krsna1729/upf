@@ -38,7 +38,7 @@ func instancedConfig(t *testing.T) Config {
 	t.Helper()
 	cfg := testConfig()
 	cfg.Instances = twoInstances(t)
-	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI}
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, FTEIDContext, QFI}
 	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain}
 	return cfg
 }
@@ -58,7 +58,7 @@ func threeInstanceConfig(t *testing.T) Config {
 		t.Fatalf("the three-instance deployment was refused: %v", err)
 	}
 	cfg.Instances = d
-	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI}
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, FTEIDContext, QFI}
 	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain}
 	return cfg
 }
@@ -74,7 +74,7 @@ func instancedEstablishment(cpSEID uint64, ueIP string, fteid uint32, instance s
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewNetworkInstance(instance),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),
@@ -86,7 +86,7 @@ func instancedEstablishment(cpSEID uint64, ueIP string, fteid uint32, instance s
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewNetworkInstance(instance),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -107,15 +107,39 @@ func ruleIn(t *testing.T, changes []bess.Change, table string) rule {
 	return rule{}
 }
 
-// nextHop is the Router next hop an action record names.
-func nextHop(t *testing.T, changes []bess.Change, resource string, actionID uint32) uint32 {
+// nextHop is the Router next hop the rule carrying actionID writes into its
+// result. The rule is found by its result, not by a separate action resource:
+// the classifier writes the next hop itself.
+func nextHop(t *testing.T, changes []bess.Change, actionID uint32) uint32 {
 	t.Helper()
-	c := find(t, changes, resource, "id", actionID)
-	hop, ok := c.Value["next_hop_id"].(uint32)
-	if !ok {
-		t.Fatalf("the action in %s names no next hop: %v", resource, c.Value)
+	for _, r := range rules(changes) {
+		if r.actionID() == actionID && len(r.result()) >= 16 {
+			return r.nextHop()
+		}
 	}
-	return hop
+	t.Fatalf("no rule carries action %d, so no result names a next hop", actionID)
+	return 0
+}
+
+// actionFields reads the result fields carried directly by a matching PDR rule.
+func actionFields(t *testing.T, changes []bess.Change, dir Direction, actionID uint32) map[string]any {
+	t.Helper()
+	for _, r := range rules(changes) {
+		if !strings.HasPrefix(r.change.Resource, rulesRes(dir)) {
+			continue
+		}
+		if r.actionID() != actionID {
+			continue
+		}
+		ids := r.meterIDs()
+		return map[string]any{
+			"meter_id":    ids[0],
+			"meter_ids":   []uint32{ids[0], ids[1]},
+			"next_hop_id": r.nextHop(),
+		}
+	}
+	t.Fatalf("no rule in %s carries action %d", rulesRes(dir), actionID)
+	return nil
 }
 
 // TestTwoInstancesRouteIndependently is docs/design.md's milestone 4: two
@@ -147,16 +171,16 @@ func TestTwoInstancesRouteIndependently(t *testing.T) {
 		t.Fatalf("the second establishment wrote %d transactions in all, want two", len(rec.txns))
 	}
 
-	// The uplink: the tunnel is the session's own identity, and it is in the
-	// key -- without it the two rules would be one key, and the second session
-	// would silently take the first one's rule.
+	// The uplink: the tunnel's admission context is the session's own
+	// identity, and it is in the key -- without it the two rules would be one
+	// key, and the second session would silently take the first one's rule.
 	ulInternet := ruleIn(t, internet, "pdr_ul")
 	ulIMS := ruleIn(t, ims, "pdr_ul")
-	if got := binary.BigEndian.Uint32(ulInternet.value(5)); got != 0x11223344 {
-		t.Errorf("the uplink key's tunnel field is %#x, want the internet session's 0x11223344", got)
+	if got, want := binary.BigEndian.Uint32(ulInternet.value(5)), fteidContextOf(t, internet, 0x11223344); got != want {
+		t.Errorf("the uplink key's tunnel field is %#x, want the internet session's context %#x", got, want)
 	}
-	if got := binary.BigEndian.Uint32(ulIMS.value(5)); got != 0x11223345 {
-		t.Errorf("the uplink key's tunnel field is %#x, want the ims session's 0x11223345", got)
+	if got, want := binary.BigEndian.Uint32(ulIMS.value(5)), fteidContextOf(t, ims, 0x11223345); got != want {
+		t.Errorf("the uplink key's tunnel field is %#x, want the ims session's context %#x", got, want)
 	}
 	if !bytes.Equal(ulInternet.mask(5), []byte{0xff, 0xff, 0xff, 0xff}) {
 		t.Errorf("the uplink key's tunnel mask is %x, want every byte constrained", ulInternet.mask(5))
@@ -175,18 +199,18 @@ func TestTwoInstancesRouteIndependently(t *testing.T) {
 	}
 
 	// And the forwards leave by each instance's own egress.
-	if got := nextHop(t, internet, "at_ul/actions", ulInternet.actionID()); got != 1 {
+	if got := nextHop(t, internet, ulInternet.actionID()); got != 1 {
 		t.Errorf("the internet session's uplink forward takes next hop %d, want its instance's 1", got)
 	}
-	if got := nextHop(t, ims, "at_ul/actions", ulIMS.actionID()); got != 3 {
+	if got := nextHop(t, ims, ulIMS.actionID()); got != 3 {
 		t.Errorf("the ims session's uplink forward takes next hop %d, want its instance's 3", got)
 	}
 	// The downlink keeps the access side's hop: a forward toward the UE leaves
 	// through the encap whatever instance the PDI named.
-	if got := nextHop(t, internet, "at_dl/actions", dlInternet.actionID()); got != 2 {
+	if got := nextHop(t, internet, dlInternet.actionID()); got != 2 {
 		t.Errorf("the internet session's downlink forward takes next hop %d, want the access side's 2", got)
 	}
-	if got := nextHop(t, ims, "at_dl/actions", dlIMS.actionID()); got != 2 {
+	if got := nextHop(t, ims, dlIMS.actionID()); got != 2 {
 		t.Errorf("the ims session's downlink forward takes next hop %d, want the access side's 2", got)
 	}
 }
@@ -222,7 +246,7 @@ func TestAPDIWithoutAnInstanceTakesTheDefault(t *testing.T) {
 	if got := binary.BigEndian.Uint32(dl.value(5)); got != 0 {
 		t.Errorf("the default interface's domain is %d, want the first configured one's (0)", got)
 	}
-	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 1 {
+	if got := nextHop(t, changes, ul.actionID()); got != 1 {
 		t.Errorf("the default interface's uplink forward takes next hop %d, want its own (1)", got)
 	}
 }
@@ -237,24 +261,6 @@ func TestAnAddressOutsideTheInstancesPoolIsRefused(t *testing.T) {
 	resp := c.Establish(instancedEstablishment(1, "10.46.0.2", 0x11223344, "internet"))
 	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("an address outside the instance's pool answered cause %d, want a rule failure", got)
-	}
-	if len(rec.txns) != 0 {
-		t.Error("a refused session wrote to the dataplane")
-	}
-}
-
-// TestTheTunnelFieldNeedsATunnel: a table that classifies by the tunnel cannot
-// key a PDR whose PDI names no F-TEID -- TEID 0 would be claimed by every such
-// session at once.
-func TestTheTunnelFieldNeedsATunnel(t *testing.T) {
-	cfg := instancedConfig(t)
-	cfg.Down.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID}
-	rec := &recorder{}
-	c := New(cfg, rec, quietLogger())
-	// A downlink PDR has no F-TEID: the field has nothing to key.
-	resp := c.Establish(instancedEstablishment(1, "10.45.0.2", 0x11223344, "internet"))
-	if got := cause(t, resp); got != ie.CauseRuleCreationModificationFailure {
-		t.Errorf("a PDR with no tunnel in a tunnel-keyed table answered cause %d, want a rule failure", got)
 	}
 	if len(rec.txns) != 0 {
 		t.Error("a refused session wrote to the dataplane")
@@ -296,10 +302,10 @@ func TestTheForwardsNetworkInstanceChoosesTheEgress(t *testing.T) {
 	}
 	changes := rec.last()
 	ul := ruleIn(t, changes, "pdr_ul")
-	if got := binary.BigEndian.Uint32(ul.value(5)); got != 0x11223344 {
-		t.Errorf("the rule's tunnel field is %#x, want the session's own TEID", got)
+	if got, want := binary.BigEndian.Uint32(ul.value(5)), fteidContextOf(t, changes, 0x11223344); got != want {
+		t.Errorf("the rule's tunnel field is %#x, want the session's own context %#x", got, want)
 	}
-	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 3 {
+	if got := nextHop(t, changes, ul.actionID()); got != 3 {
 		t.Errorf("the forward takes next hop %d, want the FAR's instance's 3", got)
 	}
 
@@ -400,7 +406,7 @@ func TestAnUpdateFARKeepsWhatItDoesNotCarry(t *testing.T) {
 		}
 		changes := rec.last()
 		ul := ruleIn(t, changes, "pdr_ul")
-		return nextHop(t, changes, "at_ul/actions", ul.actionID())
+		return nextHop(t, changes, ul.actionID())
 	}
 
 	// The Apply Action, with the forwarding parameters a forwarding FAR must
@@ -467,16 +473,17 @@ func TestAOneInstanceDeploymentIsUnchanged(t *testing.T) {
 	changes := rec.last()
 	ul := ruleIn(t, changes, "pdr_ul")
 	dl := ruleIn(t, changes, "pdr_dl")
-	// The uplink table carries the QFI field and the downlink's does not: the
-	// rules take exactly the fields each graph declares.
-	if len(ul.values) != 6 || len(dl.values) != 5 {
-		t.Errorf("the rules carry %d and %d fields, want the tables' own six and five",
-			len(ul.values), len(dl.values))
+	// Each rule takes exactly the fields its graph declares: inner tuple and
+	// endpoint metadata in both tables, route domain downlink only.
+	cfg := testConfig()
+	if len(ul.values) != len(cfg.Up.PDRFields) || len(dl.values) != len(cfg.Down.PDRFields) {
+		t.Errorf("the rules carry %d and %d fields, want the tables' own %d and %d",
+			len(ul.values), len(dl.values), len(cfg.Up.PDRFields), len(cfg.Down.PDRFields))
 	}
-	if got := nextHop(t, changes, "at_ul/actions", ul.actionID()); got != 1 {
+	if got := nextHop(t, changes, ul.actionID()); got != 1 {
 		t.Errorf("the uplink forward takes next hop %d, want -n6-next-hop's 1", got)
 	}
-	if got := nextHop(t, changes, "at_dl/actions", dl.actionID()); got != 2 {
+	if got := nextHop(t, changes, dl.actionID()); got != 2 {
 		t.Errorf("the downlink forward takes next hop %d, want -n3-next-hop's 2", got)
 	}
 }
@@ -539,7 +546,7 @@ func TestAPDIsDestinationAddressGoesInTheDestinationField(t *testing.T) {
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewNetworkInstance("internet"),
-				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.2", "", 0, 0),
 				ie.NewSDFFilter("permit out ip from any to assigned", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),

@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// The Error Indication Report (TS 29.244 5.10): what the SMF is told when the
-// peer's GTP-U says it cannot reach a tunnel this UPF sends into. The
-// indication arrives on N3 and is counted by the responder behind the TEID
-// table's default gate (datapath/gtpu_responder.cc, "get_errors"); this side
-// reads that table once per tick (Config.GTPUErrors) and reports every count it
-// has not reported before, as the remote F-TEID the FAR sends with.
+// The indication arrives on N3/N9 and is counted by the GTP-U responder on
+// `GtpuDecap` gate 2 (datapath/gtpu_responder.cc, "get_errors"). This side reads
+// that table once per tick (Config.GTPUErrors) and reports every new count as
+// the remote F-TEID the FAR sends with.
 package session
 
 import (

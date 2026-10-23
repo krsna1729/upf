@@ -125,22 +125,25 @@ func (l *logCapture) contains(s string) bool {
 // needs.
 func reportConfig() session.Config {
 	return session.Config{
-		TEIDTable: "teid",
+		GTPUDecap: "decap",
+		FTEIDEndpoints: []session.FTEIDEndpoint{{
+			ID: 1, ReferencePoint: "n3", TransportRouteDomain: 1,
+			SourceInterface: ie.SrcInterfaceAccess,
+			IPv4:            netip.MustParseAddr("192.0.2.1"),
+		}},
 		Up: session.Direction{
-			PDRTable: "pdr_ul", Actions: "at_ul", Meters: "mt_ul", Counters: "cnt_ul",
+			PDRTable: "pdr_ul", Meters: "mt_ul", Counters: "cnt_ul",
 			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto,
-				session.SrcPort, session.DstPort, session.QFI},
+				session.SrcPort, session.DstPort, session.FTEIDContext, session.QFI},
 			NextHop: 1,
 		},
 		Down: session.Direction{
-			PDRTable: "pdr_dl", Actions: "at_dl", Meters: "mt_dl", Counters: "cnt_dl",
+			PDRTable: "pdr_dl", Meters: "mt_dl", Counters: "cnt_dl",
 			PDRFields: []session.Field{session.SrcIP, session.DstIP, session.Proto,
-				session.SrcPort, session.DstPort},
+				session.SrcPort, session.DstPort, session.RouteDomain, session.FTEIDContext,
+				session.QFI},
 			NextHop: 2, Tunnels: "enc",
 		},
-		N3Addr:  netip.MustParseAddr("192.0.2.1"),
-		N3MAC:   [6]byte{2, 0, 0, 0, 0, 1},
-		PeerMAC: [6]byte{2, 0, 0, 0, 0, 2},
 	}
 }
 
@@ -161,7 +164,7 @@ func reportLoopEstablishment(seq uint32, cpSEID uint64) *message.SessionEstablis
 			ie.NewFARID(1), ie.NewURRID(7)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.2", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
 			ie.NewFARID(2)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(forw),
@@ -291,7 +294,7 @@ func withUE(est *message.SessionEstablishmentRequest, ue string, teid uint32) *m
 		case 2:
 			est.CreatePDR[i] = ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-					ie.NewUEIPAddress(0x02, ue, "", 0, 0),
+					ie.NewUEIPAddress(0x06, ue, "", 0, 0),
 					ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
 				ie.NewFARID(2))
 		}
@@ -463,7 +466,7 @@ func TestATickStopsDrainingAfterATransportFailure(t *testing.T) {
 		periodicEstablishment(1, 0x9001, time.Second),
 		// A second session is its own UE address and F-TEID: two sessions for
 		// one UE are refused (their PDRs would be ambiguous) and two sessions on
-		// one TEID rule are one session's.
+		// one complete F-TEID admission key belongs to one session.
 		withUE(periodicEstablishment(2, 0x9002, time.Second), "10.45.0.9", 0x0a0a0a0a))
 	logs := &logCapture{}
 	ctx, cancel := context.WithCancel(context.Background())

@@ -5,10 +5,11 @@
 // downstream F-TEID and the SNDEM flag asks this node to construct and send an
 // End Marker on the tunnel it is leaving, after the last G-PDU on that tunnel.
 //
-// The frame is built here and written to the graph's unix_port, whose PortInc
-// carries it to the N3 output port: a marker is not a packet that arrives, so
-// nothing in the datapath can produce it, and a message this node sends is not
-// session state a transaction can hold. It leaves through the same outer
+// The frame is built here and written to the selected transport's unix_port,
+// whose PortInc carries it to that transport's output port. A marker is not a
+// packet that arrives, so nothing in the datapath can produce it. A message
+// this node sends is not session state a transaction can hold. It leaves through
+// the same outer
 // headers the encap would write for that tunnel -- the old TEID and the old
 // peer -- so the peer reads it as the end of the stream (7.3.2.1: "a G-PDU that
 // arrives after an End Marker message on this tunnel may be silently
@@ -21,9 +22,10 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"time"
 
 	"github.com/wmnsk/go-pfcp/ie"
+
+	"github.com/krsna1729/upf/internal/routing"
 )
 
 // The GTP-U message type (TS 29.281 table 6.1-1) and the port a marker is sent
@@ -34,39 +36,61 @@ const (
 	gtpuPort      = 2152
 )
 
-// endMarkerFrame is one End Marker: the Ethernet minimum, an outer
-// Eth/IPv4/UDP/GTP-U header with an empty payload, the header's lengths and
-// checksum filled in. The TEID is the OLD F-TEID and the destination the OLD
-// peer, while the source is this UPF's N3 address -- 5.3.2's rule for the
-// markers the CP function would otherwise construct.
-func endMarkerFrame(teid uint32, peer netip.Addr, src netip.Addr, srcMAC, dstMAC [6]byte) []byte {
-	frame := make([]byte, 60) // the Ethernet minimum: a 42-byte message is padded to it
-	copy(frame[0:6], dstMAC[:])
-	copy(frame[6:12], srcMAC[:])
-	binary.BigEndian.PutUint16(frame[12:14], 0x0800)
-
-	ip := frame[14:34]
-	ip[0] = 0x45 // version 4, 5 words of header
-	binary.BigEndian.PutUint16(ip[2:4], 20+8+8)
-	ip[6], ip[7] = 0x40, 0x00 // DF: an end marker is never fragmented
-	ip[8] = 64                // TTL
-	ip[9] = 17                // UDP
-	src4, dst4 := src.As4(), peer.As4()
-	copy(ip[12:16], src4[:])
-	copy(ip[16:20], dst4[:])
-	binary.BigEndian.PutUint16(ip[10:12], ipv4Checksum(ip))
-
-	udp := frame[34:42]
+// endMarkerFrame builds an untagged Ethernet End Marker with zero MAC
+// addresses. The routed transport Router selects the neighbor and rewrites
+// L2; the outer IP family follows the old tunnel's source and peer.
+func endMarkerFrame(teid uint32, peer, src netip.Addr) ([]byte, error) {
+	if !peer.IsValid() || !src.IsValid() || peer.Is4In6() || src.Is4In6() ||
+		peer.Is4() != src.Is4() {
+		return nil, fmt.Errorf("end-marker source and peer must use the same IPv4 or IPv6 family: %s, %s",
+			src, peer)
+	}
+	const (
+		ethernetLength = 14
+		udpLength      = 8
+		gtpuLength     = 8
+	)
+	ipLength := 40
+	etherType := uint16(0x86dd)
+	if src.Is4() {
+		ipLength = 20
+		etherType = 0x0800
+	}
+	packetLength := ethernetLength + ipLength + udpLength + gtpuLength
+	frameLength := max(packetLength, 60)
+	frame := make([]byte, frameLength)
+	binary.BigEndian.PutUint16(frame[12:14], etherType)
+	ip := frame[ethernetLength : ethernetLength+ipLength]
+	if src.Is4() {
+		ip[0] = 0x45
+		binary.BigEndian.PutUint16(ip[2:4], uint16(ipLength+udpLength+gtpuLength))
+		binary.BigEndian.PutUint16(ip[6:8], 0x4000)
+		ip[8], ip[9] = 64, 17
+		src4, dst4 := src.As4(), peer.As4()
+		copy(ip[12:16], src4[:])
+		copy(ip[16:20], dst4[:])
+		binary.BigEndian.PutUint16(ip[10:12], ipv4Checksum(ip))
+	} else {
+		ip[0] = 0x60
+		binary.BigEndian.PutUint16(ip[4:6], udpLength+gtpuLength)
+		ip[6], ip[7] = 17, 64
+		src6, dst6 := src.As16(), peer.As16()
+		copy(ip[8:24], src6[:])
+		copy(ip[24:40], dst6[:])
+	}
+	udpOffset := ethernetLength + ipLength
+	udp := frame[udpOffset : udpOffset+udpLength]
 	binary.BigEndian.PutUint16(udp[0:2], gtpuPort)
 	binary.BigEndian.PutUint16(udp[2:4], gtpuPort)
-	binary.BigEndian.PutUint16(udp[4:6], 8+8)
-	// The UDP checksum stays 0: legal over IPv4, and what the encap writes too.
-
-	gtp := frame[42:50]
-	gtp[0] = 0x30 // version 1, PT 1, S/E/PN clear (5.1: an End Marker carries no optional field)
-	gtp[1] = endMarkerType
+	binary.BigEndian.PutUint16(udp[4:6], udpLength+gtpuLength)
+	gtp := frame[udpOffset+udpLength : udpOffset+udpLength+gtpuLength]
+	gtp[0], gtp[1] = 0x30, endMarkerType
 	binary.BigEndian.PutUint32(gtp[4:8], teid)
-	return frame
+	if src.Is6() {
+		datagram := frame[udpOffset : udpOffset+udpLength+gtpuLength]
+		binary.BigEndian.PutUint16(udp[6:8], ipv6UDPChecksum(src, peer, datagram))
+	}
+	return frame, nil
 }
 
 // ipv4Checksum is the header's checksum over a 20-byte IPv4 header whose
@@ -82,6 +106,38 @@ func ipv4Checksum(header []byte) uint16 {
 	return ^uint16(sum)
 }
 
+// ipv6UDPChecksum computes the mandatory IPv6 UDP checksum over the IPv6
+// pseudo-header and the complete UDP datagram.
+func ipv6UDPChecksum(src, dst netip.Addr, udp []byte) uint16 {
+	src6, dst6 := src.As16(), dst.As16()
+	var sum uint32
+	sum = checksumWords(sum, src6[:])
+	sum = checksumWords(sum, dst6[:])
+	var pseudo [8]byte
+	binary.BigEndian.PutUint32(pseudo[:4], uint32(len(udp)))
+	pseudo[7] = 17
+	sum = checksumWords(sum, pseudo[:])
+	sum = checksumWords(sum, udp)
+	for sum>>16 != 0 {
+		sum = sum&0xffff + sum>>16
+	}
+	checksum := ^uint16(sum)
+	if checksum == 0 {
+		return 0xffff
+	}
+	return checksum
+}
+
+func checksumWords(sum uint32, bytes []byte) uint32 {
+	for i := 0; i+1 < len(bytes); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(bytes[i : i+2]))
+	}
+	if len(bytes)%2 != 0 {
+		sum += uint32(bytes[len(bytes)-1]) << 8
+	}
+	return sum
+}
+
 // dialEndMarker opens the graph's unix_port (SOCK_SEQPACKET, so one write is
 // one packet) for this run's markers.
 func dialEndMarker(path string) (*net.UnixConn, error) {
@@ -93,28 +149,30 @@ func dialEndMarker(path string) (*net.UnixConn, error) {
 	return conn, nil
 }
 
-// sendEndMarker writes one frame to the graph's unix_port. A failure is the
-// caller's to log and count, never a reason to refuse the modification that
-// asked for the marker: the switch has already landed, and the packet a peer
-// would have read as the end of the stream simply is not sent.
-func (c *Compiler) sendEndMarker(frame []byte) error {
-	if c.cfg.EndMarker == "" {
-		return errors.New("no end-marker port is configured (-end-marker)")
+// sendEndMarkerAt writes one frame to the selected graph unix_port. A failure
+// is the caller's to log and count, never a reason to refuse the modification:
+// the switch has already landed, and the marker simply is not sent.
+func (c *Compiler) sendEndMarkerAt(path string, frame []byte) error {
+	if path == "" {
+		return errors.New("no end-marker port is configured for the tunnel transport")
 	}
 	c.mu.Lock()
-	conn := c.endMarkerConn
+	conn := c.endMarkerConns[path]
 	if conn == nil {
 		c.mu.Unlock()
-		opened, err := dialEndMarker(c.cfg.EndMarker)
+		opened, err := dialEndMarker(path)
 		if err != nil {
 			return err
 		}
 		c.mu.Lock()
-		if c.endMarkerConn == nil {
-			c.endMarkerConn = opened
+		if c.endMarkerConns == nil {
+			c.endMarkerConns = make(map[string]*net.UnixConn)
+		}
+		if c.endMarkerConns[path] == nil {
+			c.endMarkerConns[path] = opened
 			conn = opened
 		} else {
-			conn = c.endMarkerConn
+			conn = c.endMarkerConns[path]
 			opened.Close()
 		}
 	}
@@ -125,8 +183,8 @@ func (c *Compiler) sendEndMarker(frame []byte) error {
 		// run's -- another send may have redialled already, and closing that
 		// one would take its connection down with it.
 		c.mu.Lock()
-		if c.endMarkerConn == conn {
-			c.endMarkerConn = nil
+		if c.endMarkerConns[path] == conn {
+			delete(c.endMarkerConns, path)
 			conn.Close()
 		}
 		c.mu.Unlock()
@@ -190,29 +248,91 @@ func smReqFlagsDepth(ies []*ie.IE, depth int, has func(*ie.IE) bool) bool {
 	return false
 }
 
-// leavingTunnels is the set of tunnels a modification moves away from: for
-// every FAR the message updates to a different outer header creation, the
-// tunnel the session holds now (TS 29.244 5.3.2: "the destination IP address
-// and TEID set according to the old F-TEID value"). It must be read before the
-// merge folds the new one in.
-func (s *Session) leavingTunnels(fars []farReq) []far {
-	var out []far
+// tunnelEndMarker retains the old routed endpoint as well as the old F-TEID:
+// a modification may change the FAR's egress or remote tunnel.
+type tunnelEndMarker struct {
+	far
+	localAddress         netip.Addr
+	transportRouteDomain uint32
+}
+
+func (c *Compiler) sendTunnelEndMarker(tunnel tunnelEndMarker) error {
+	if tunnel.transportRouteDomain == 0 {
+		return fmt.Errorf("the old tunnel has no transport route domain")
+	}
+	frame, err := endMarkerFrame(tunnel.teid, tunnel.peer, tunnel.localAddress)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("%s.%d", c.cfg.EndMarker, tunnel.transportRouteDomain)
+	return c.sendEndMarkerAt(path, frame)
+}
+
+// leavingTunnels snapshots the tunnels a modification moves away from before
+// merge changes their FARs, PDRs or MARs. A shared FAR can have more than one
+// resolved routed endpoint; each distinct old endpoint receives a marker.
+func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
+	var out []tunnelEndMarker
 	for _, f := range fars {
 		old := s.FARs[f.id]
 		if old == nil || !old.hasOuter || old.teid == 0 {
 			continue
 		}
-		if !f.hasOuter {
-			continue // the message did not carry a new tunnel
+		tunnelChanged := f.hasOuter && (f.teid != old.teid || f.peer != old.peer)
+		egressChanged := (f.hasDestIfc && f.destIfc != old.destIfc) ||
+			(f.hasInstance && f.instance != old.instance)
+		if !tunnelChanged && !egressChanged {
+			continue
 		}
-		if f.teid != old.teid || f.peer != old.peer {
-			out = append(out, *old)
+		updated := *old
+		if f.hasDestIfc {
+			updated.destIfc = f.destIfc
+		}
+		if f.hasInstance {
+			updated.instance = f.instance
+		}
+		start := len(out)
+		add := func(local netip.Addr, domain uint32, ifc routing.Interface) {
+			if !local.IsValid() || domain == 0 {
+				return
+			}
+			if !tunnelChanged {
+				endpoint, nextLocal, err := c.tunnelEndpoint(&updated, ifc)
+				if err == nil && nextLocal == local && endpoint.TransportRouteDomain == domain {
+					return
+				}
+			}
+			for _, marker := range out[start:] {
+				if marker.localAddress == local && marker.transportRouteDomain == domain {
+					return
+				}
+			}
+			out = append(out, tunnelEndMarker{
+				far: *old, localAddress: local, transportRouteDomain: domain,
+			})
+		}
+		for _, p := range pdrsInOrder(s) {
+			if p.hasMAR || p.farID != old.id || !p.tunnelLocalAddress.IsValid() {
+				continue
+			}
+			ifc, err := c.interfaceFor(p)
+			if err == nil {
+				add(p.tunnelLocalAddress, p.transportRouteDomain, ifc)
+			}
+		}
+		for _, m := range s.MARs {
+			ifc, err := c.marInterface(s, m.id)
+			if err != nil {
+				continue
+			}
+			for which, access := range m.accesses {
+				if !access.hasFarID || access.farID != old.id ||
+					m.tunnelIDs[which] == 0 || !m.tunnelLocalAddresses[which].IsValid() {
+					continue
+				}
+				add(m.tunnelLocalAddresses[which], m.transportRouteDomains[which], ifc)
+			}
 		}
 	}
 	return out
 }
-
-// markerRetryInterval is how long a failed dial is remembered before the next
-// marker tries again: a daemon restart (or a graph that has no end-marker port
-// yet) must not turn into a dial per modification.
-const markerRetryInterval = 5 * time.Second

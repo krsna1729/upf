@@ -21,13 +21,27 @@
 # ARP while the session lives, and not after it is deleted. One session's two
 # uplink PDRs -- a general port-53 filter and a specific destination -- send
 # their frames out of two different exits (ULCL: the data network's hop and an
-# N9 tunnel) on the session's one TEID.
+# N9 tunnel) on the session's one TEID, and the remote PSA's downlink arrives on
+# that session's N9 F-TEID and leaves toward the gNB.
+# The `forward` and `forward_cleanup` windows exercise that temporary FAR
+# lifecycle with a local timer standing in for the SMF timer. They do not run
+# N2 signaling or the complete 5GC/NG-RAN handover procedure.
+# The `concurrent` window adds Mode 3 (a PSA receiving N9: the uplink arrives on
+# an N9 F-TEID carrying the same TEID S1 holds on N3, and leaves by N6) and then
+# holds every Release 16 scenario this UP serves -- Modes 1, 2, 3 and 5 live
+# together, Mode 6's leg having been S1's -- with every stream running at once:
+# each session's own bytes must leave by its own exit and by no other. Mode 4
+# is not established by any cited procedure and is not driven
+# (docs/compliance.md).
 #
 # Why windows rather than one run: every frame in this graph opens with the same
 # MACs, so each window injects exactly the streams its case is about and the
 # log is sliced between windows -- every check is the extracted bytes of exactly
-# one Dump in exactly one window (ci/dumphex.sh's warning). The refusals are
-# control-plane only, and the driver's own lines carry their causes.
+# one Dump in exactly one window (ci/dumphex.sh's warning). The concurrent window
+# is the exception by design: its streams share the Dumps, each Dump prints one
+# packet a second, and so the window stays open until every session's bytes
+# have been printed. The refusals are control-plane only, and the driver's own
+# lines carry their causes.
 #
 # One driver process runs every arm, because a controller is long-lived and its
 # id spaces are the deployment's: two processes would hand out SEID 1, action 1
@@ -102,6 +116,14 @@ slice() { # slice <file>: the log written since the last slice
   tail -c +$((OFFSET + 1)) "$LOG" >"$1"
   OFFSET=$(wc -c <"$LOG")
 }
+slice_more() { # slice_more <file>: append the log written since the last slice
+  # The concurrent window slices while the Dumps write: the size is read first,
+  # so a line written after it is the next slice's rather than nobody's.
+  local size
+  size=$(wc -c <"$LOG")
+  head -c "$size" "$LOG" | tail -c +$((OFFSET + 1)) >>"$1"
+  OFFSET=$size
+}
 
 (
   cd "$ROOT"
@@ -118,12 +140,61 @@ window() {
   : >"$WORK/$1.go"
 }
 
+. "$ROOT/ci/dumphex.sh"
+
+# Each concurrent session's own bytes, by the Dump its exit feeds: the data
+# network's (dump_n6) for Mode 1's uplink, Mode 2's local branch, Mode 3's N9
+# arrival and S6's subscriber-side forward; the encap's (dump_n3) for Mode 1's
+# downlink, Mode 2's N9 branch and its remote PSA's downlink, and Mode 5's
+# re-injected packet. Each holds the inner source and destination.
+CONCURRENT_N6=(
+  "0a 2d 00 02 08 08 08 08" # Mode 1 uplink (S1)
+  "0a 2d 00 08 08 08 08 08" # Mode 2 local PSA branch (S8)
+  "0a 2d 00 09 08 08 08 08" # Mode 3 N9 arrival (S9)
+  "08 08 08 08 0a 2d 00 07" # S6, the service LAN's interface to Core
+)
+CONCURRENT_N3=(
+  "08 08 08 08 0a 2d 00 02" # Mode 1 downlink (S1)
+  "0a 2d 00 08 0a 2e 00 02" # Mode 2 N9 branch (S8)
+  "0a 2e 00 02 0a 2d 00 08" # Mode 2 remote PSA's downlink (S8)
+  "0a 2d 00 05 0a 2d 00 06" # Mode 5, S4's UE to S5's (S5's tunnel)
+)
+concurrent_seen() { # every concurrent signature is in the window's slice so far
+  local n6 n3 sig
+  n6=$(dump_hex dump_n6 "$WORK/concurrent.log")
+  n3=$(dump_hex dump_n3 "$WORK/concurrent.log")
+  for sig in "${CONCURRENT_N6[@]}"; do [ "${n6#*"$sig"}" != "$n6" ] || return 1; done
+  for sig in "${CONCURRENT_N3[@]}"; do [ "${n3#*"$sig"}" != "$n3" ] || return 1; done
+}
+# The concurrent window: the streams run until each session's bytes have been
+# printed, bounded below the driver's own 60-second wait for the go file. Then
+# the driver stops them and the Dumps' last lines join the same slice, so the
+# next window starts quiet.
+concurrent_window() {
+  await concurrent.done
+  : >"$WORK/concurrent.log"
+  for _ in $(seq 1 45); do
+    sleep 1
+    slice_more "$WORK/concurrent.log"
+    concurrent_seen && break
+  done
+  : >"$WORK/concurrent.go"
+  await concurrent_stop.done
+  sleep 2
+  slice_more "$WORK/concurrent.log"
+  : >"$WORK/concurrent_stop.go"
+}
+
 window control
 window egress
 window ulcl
+window ulcl_n9_down
 window down
+window mode1_down
 window forward
+window forward_cleanup
 window vn
+concurrent_window
 window refuse
 window arp
 window gone
@@ -134,7 +205,6 @@ if ! wait "$DRIVER"; then
   exit 1
 fi
 
-. "$ROOT/ci/dumphex.sh"
 FAIL=0
 
 contains() { # contains <description> <string> <fixed substring it must hold>
@@ -171,12 +241,22 @@ EG_N3=$(dump_hex dump_n3 "$WORK/egress.log")
 EG_LAN=$(dump_hex dump_lan "$WORK/egress.log")
 UL_N6=$(dump_hex dump_n6 "$WORK/ulcl.log")
 UL_N3=$(dump_hex dump_n3 "$WORK/ulcl.log")
+UD9_N6=$(dump_hex dump_n6 "$WORK/ulcl_n9_down.log")
+UD9_N3=$(dump_hex dump_n3 "$WORK/ulcl_n9_down.log")
 DN_N6=$(dump_hex dump_n6 "$WORK/down.log")
 DN_N3=$(dump_hex dump_n3 "$WORK/down.log")
+M1D_N6=$(dump_hex dump_n6 "$WORK/mode1_down.log")
+M1D_N3=$(dump_hex dump_n3 "$WORK/mode1_down.log")
 FW_N6=$(dump_hex dump_n6 "$WORK/forward.log")
 FW_N3=$(dump_hex dump_n3 "$WORK/forward.log")
+FC_N6=$(dump_hex dump_n6 "$WORK/forward_cleanup.log")
+FC_N3=$(dump_hex dump_n3 "$WORK/forward_cleanup.log")
 VN_N6=$(dump_hex dump_n6 "$WORK/vn.log")
 VN_N3=$(dump_hex dump_n3 "$WORK/vn.log")
+CC_N6=$(dump_hex dump_n6 "$WORK/concurrent.log")
+CC_N3=$(dump_hex dump_n3 "$WORK/concurrent.log")
+CC_LAN=$(dump_hex dump_lan "$WORK/concurrent.log")
+CC_ARP=$(dump_hex dump_arp "$WORK/concurrent.log")
 REF_N6=$(dump_hex dump_n6 "$WORK/refuse.log")
 ARP_N6=$(dump_hex dump_n6 "$WORK/arp.log")
 ARP_ARP=$(dump_hex dump_arp "$WORK/arp.log")
@@ -208,6 +288,14 @@ contains "ulcl: the specific destination left by the N9 tunnel" \
       "$UL_N3" "0a 2d 00 08 0a 2e 00 02"
 contains "ulcl: the N9 tunnel carries the branch's own TEID" \
       "$UL_N3" "55 66 77 88"
+# Mode 2's other direction: the remote PSA's downlink arrives on S8's N9 F-TEID
+# (endpoint 2) and leaves through the encap toward the gNB, with S8's own
+# downlink TEID, and nothing of it leaves by the data network's exit.
+contains "ulcl_n9_down: the remote PSA's downlink left toward the gNB" \
+      "$UD9_N3" "0a 2e 00 02 0a 2d 00 08"
+contains "ulcl_n9_down: it carries S8's downlink TEID" \
+      "$UD9_N3" "55 66 77 88"
+empty "ulcl_n9_down: nothing left by the data network's exit" "$UD9_N6"
 # Destination Interface Core with an outer header: a tunnel out of the instance
 # (N9), through the encap, carrying the FAR's own TEID.
 contains "egress: a tunnel out of the instance left through the encap" \
@@ -236,6 +324,13 @@ contains "down: the data network's frame left by the data network's exit" \
 contains "down: it carries that exit's L2 pair" \
       "$DN_N6" "02 00 00 00 06 02 02 00 00 00 06 01"
 empty "down: a plain forward added no outer header" "$DN_N3"
+# Mode 1's downlink: the data network's answer to S1's UE leaves through the
+# encap with S1's own downlink TEID.
+contains "mode1_down: the answer to S1's UE left toward its gNB" \
+      "$M1D_N3" "08 08 08 08 0a 2d 00 02"
+contains "mode1_down: it carries S1's downlink TEID" \
+      "$M1D_N3" "55 66 77 81"
+empty "mode1_down: nothing left by the data network's exit" "$M1D_N6"
 
 # --- an uplink forward toward the access side (indirect forwarding) ---------
 contains "forward: the indirect forward left through the encap" \
@@ -243,6 +338,16 @@ contains "forward: the indirect forward left through the encap" \
 contains "forward: it carries the session's own packet" \
       "$FW_N3" "0a 2d 00 02 08 08 08 08"
 empty "forward: it did not leave by the data network's exit" "$FW_N6"
+
+# --- Mode 6 temporary N3 forwarding FAR, then SMF-timer cleanup -------------
+# The driver starts a bounded timer on the accepted N4 update. This fixture
+# simulates its expiry and the SMF's cleanup update; it is not a full 5GC/NG-RAN
+# Mode 6 procedure.
+contains "forward_cleanup: the live session returned to the N6 egress" \
+      "$FC_N6" "0a 2d 00 02 08 08 08 08"
+contains "forward_cleanup: the restored N6 route carries its L2 pair" \
+      "$FC_N6" "02 00 00 00 06 02 02 00 00 00 06 01"
+empty "forward_cleanup: the temporary N3 tunnel is gone" "$FC_N3"
 
 # --- 5G VN Internal, both steps ---------------------------------------------
 # S4's uplink packet is re-injected into the subscriber-side table, where S5
@@ -252,6 +357,30 @@ contains "vn: the re-injected packet left toward the target UE's gNB" \
 contains "vn: the frame is the one S4's UE sent to S5's UE" \
       "$VN_N3" "0a 2d 00 05 0a 2d 00 06"
 empty "vn: the re-injection did not leave by the data network's exit" "$VN_N6"
+
+# --- every scenario at once -------------------------------------------------
+# Modes 1, 2, 3 and 5 (and S6) are established together and every stream runs
+# at once. The driver required each scenario exit's Router gate to move and the
+# service LAN's and the responder's not to; here each session's own bytes must
+# be in the Dump its exit feeds and in no other.
+contains "concurrent: every scenario's Router exit moved with all sessions live" \
+      "$DRIVER" "concurrent: every scenario's exit moved with all sessions live"
+for sig in "${CONCURRENT_N6[@]}"; do
+  contains "concurrent: $sig left by the data network's exit" "$CC_N6" "$sig"
+  absent "concurrent: $sig did not leave through the encap" "$CC_N3" "$sig"
+done
+for sig in "${CONCURRENT_N3[@]}"; do
+  contains "concurrent: $sig left through the encap" "$CC_N3" "$sig"
+  absent "concurrent: $sig did not leave by the data network's exit" "$CC_N6" "$sig"
+done
+# Mode 3's arrival rode S1's TEID on the other endpoint: S9 took it, and so
+# did S1 on N3 (its uplink bytes above), each by its own admission key.
+contains "concurrent: Mode 3's N9 F-TEID is S1's TEID on endpoint 2" \
+      "$DRIVER" "established: S9: PSA receiving N9, forwarding to N6"
+for teid in "55 66 77 81" "55 66 77 88" "55 66 77 89"; do
+  contains "concurrent: the encap carried downlink TEID $teid" "$CC_N3" "$teid"
+done
+empty "concurrent: nothing left by the service LAN's exit or the responder" "$CC_LAN$CC_ARP"
 
 # --- the refusals -----------------------------------------------------------
 # Each is the cause the SMF reads, named by the driver; the controller's own

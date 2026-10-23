@@ -12,17 +12,35 @@ syntax = "proto3";
 
 package upf.pb;
 
-// GtpuDecapArg configures decapsulation on the N3 side.
+// GtpuDecapArg configures endpoint-scoped GTP-U admission.
 message GtpuDecapArg {
-  // How many sessions the TEID table held. The table is gone: a session's
-  // TEID is a rule of the classifier in front of the decap, so the field is
-  // reserved rather than reused.
-  reserved 2;
-  reserved "max_sessions";
-
-  // The UDP port a G-PDU must arrive on. 0 means the standard GTP-U port
-  // 2152 (TS 29.281); the codec compares the field exactly.
+  // UDP port; 0 selects standard GTP-U port 2152.
   uint32 port = 1;
+  // Live F-TEID cap (not table slots); 0 defaults to 65536. The exact index
+  // reserves extra slots for RCU deletion headroom.
+  uint32 max_fteids = 2;
+}
+
+// FteidKey keys one local GTP-U endpoint and TEID in "<module>/fteids".
+message FteidKey {
+  // Nonzero endpoint ID set on ingress before fan-in.
+  uint32 endpoint_id = 1;
+  // 4 for IPv4, 6 for IPv6.
+  uint32 address_family = 2;
+  // Exact local destination address: 4 bytes for IPv4, 16 for IPv6.
+  bytes local_address = 3;
+  uint32 teid = 4;
+}
+
+// Direction assigned by the matched PDR: 0 UL, 1 DL. context_id is the
+// nonzero admission context the controller allocated for this F-TEID; the decap
+// writes it to the `fteid_context` metadata attribute, so the PDR tables key one
+// 4-byte id instead of endpoint, family, local address and TEID. Every key of
+// one tunnel (its IPv4 and IPv6 address) carries the same id; a TEID repeated on
+// another endpoint or by another session carries a different one.
+message FteidEntry {
+  uint32 direction = 1;
+  uint32 context_id = 2;
 }
 
 // UpfArpResponderArg configures the ARP responder for the subscriber
@@ -70,6 +88,13 @@ message GtpuResponderArg {
   // like any other message the module does not answer -- which is what a
   // deployment whose controller does not report them wants.
   bool track_errors = 3;
+  // Read a BE32 gate from ingress metadata; empty always replies on gate 0.
+  string reply_gate_attr = 4;
+  // Record the End Markers that arrive (TS 29.281 7.3.2) as (endpoint_id,
+  // TEID) events for drain_end_markers. The endpoint is the "endpoint_id"
+  // metadata GtpuDecap reads, so the responder must sit behind decap gate 2.
+  // Off, an End Marker is dropped like any message the module does not answer.
+  bool track_end_markers = 5;
 }
 
 // GtpuResponderCommandGetErrorsArg selects the TEIDs to read.
@@ -94,30 +119,29 @@ message GtpuResponderCommandGetErrorsResponse {
   uint64 untracked = 2;
 }
 
-// GtpuEncapArg configures encapsulation toward the N3 side.
+// GtpuResponderCommandDrainEndMarkersArg takes nothing: a drain returns every
+// End Marker recorded since the previous one.
+message GtpuResponderCommandDrainEndMarkersArg {}
+
+// GtpuResponderCommandDrainEndMarkersResponse is the End Markers recorded since
+// the previous drain, each delivered once.
+message GtpuResponderCommandDrainEndMarkersResponse {
+  message EndMarker {
+    uint32 endpoint_id = 1;  // the logical endpoint it arrived on
+    uint32 teid = 2;         // this UPF's local TEID the header names
+  }
+  repeated EndMarker end_markers = 1;
+  // Events lost to a full per-worker ring since the module started.
+  uint64 dropped = 2;
+}
+
+// GtpuEncapArg configures encapsulation; addresses are supplied per tunnel.
 message GtpuEncapArg {
-  // The outer IPv4 source address, dotted. Required: it is the UPF's N3
-  // address, a property of the graph, not of a session.
-  string src_ip = 1;
-
-  // The outer UDP source port. 0 means a hash of the inner flow (RFC 6864
-  // entropy, as VXLANEncap does).
+  reserved 1;
+  reserved "src_ip";
   uint32 src_port = 2;
-
-  // The outer UDP destination port. 0 means 2152 (TS 29.281).
   uint32 dst_port = 3;
-
-  // How many tunnels the table holds. 0 means 65536. One record per session,
-  // written in the same transaction as the rules that select it.
   uint32 max_tunnels = 4;
-
-  // The metadata attribute the tunnel's key is read from, 4 bytes, network
-  // order. Empty reads "action_id", the ActionTable's attribute, which is
-  // what every graph without ATSSS steering uses. A graph with an
-  // AtsssSteer module sets this to the attribute AtsssSteer writes
-  // ("tunnel_id"): a MAR's two accesses each have a tunnel record of their
-  // own, and the selected access names it. A packet whose tunnel id is 0
-  // (not steered) falls back to "action_id".
   string tunnel_attr = 5;
 }
 
@@ -198,16 +222,13 @@ message AtsssAccessHealth {
 
 // -- resources ---------------------------------------------------------------
 //
-// Two of the modules register one transactional resource each (control_v2,
-// D-129): GtpuEncap's "tunnels" and UrrCount's "counters" (one UrrCount
-// instance per direction, plus one on the buffering branch). The controller
-// writes them as part of the session's single transaction, in the order
-// docs/design.md gives (resources, then the action record, then the rule that
-// names it). Neither resource references another, so a session change is one
-// flat transaction. GtpuDecap and GtpuResponder own no resource: a session's TEID is
-// a rule of the classifier in front of the decap, and an echo belongs to the
-// path. The packet store's per-flow resource is BESS's own module, not this
-// plugin's, and is documented there.
+// Plugin-owned resources: GtpuDecap's "<module>/fteids" is the endpoint-
+// scoped F-TEID admission table; GtpuEncap's "<module>/tunnels" stores routed
+// outer tunnel parameters; UrrCount's "<module>/counters" holds usage records
+// (one counter module per direction and on the buffering branch). Session
+// transactions write these resources before the action record and matching
+// rule. GtpuResponder has no session resource. Packet-store resources belong
+// to BESS modules.
 
 // UrrCountArg configures the per-rule usage counters (TS 29.244 7.5.2.4: the
 // data half of a URR's measurement).
@@ -273,151 +294,25 @@ message UrrCountCommandGetCountsResponse {
   uint64 read_wall_unix_ns = 3;
 }
 
-// TunnelKey is the key of the encap module's "<module>/tunnels" table: the
-// ActionId the PDR rule named, which the classifier wrote into the packet's
-// "action_id" metadata (BESS D-141). Keying the tunnel by the same id is what
-// lets one lookup resolve the whole session: the action record names the meter
-// and the next hop, the tunnel record names the N3 peer and the TEID.
+// TunnelKey selects a per-action GtpuEncap tunnel record.
 message TunnelKey {
-  // 0 means "no action", i.e. no session: never a key.
   uint32 action_id = 1;
 }
 
-// TunnelEntry is the per-session half of a FAR's Outer Header Creation
-// (TS 29.244 8.2.56): how this session's downlink packets leave on N3. The
-// controller resolves the FAR once, at programming time; the packet path does
-// one indexed load and chases no control-plane relation.
 message TunnelEntry {
-  // The gNB's F-TEID for this session: the TEID the gNB expects on downlink.
   uint32 teid = 1;
-
-  // The gNB's outer IPv4 address, dotted.
-  string gnb_ip = 2;
-
-  // The outer Ethernet source (the N3 port's address), 6 bytes.
-  bytes ether_src = 3;
-
-  // The outer Ethernet destination (the peer's address), 6 bytes.
-  bytes ether_dst = 4;
-
-  // The QoS Flow Identifier (TS 29.244 8.2.89) this session's downlink G-PDUs
-  // carry in their PDU Session Container: the GTP-U extension header of type
-  // 0x85 (TS 29.281 5.2.2.7, content TS 38.415 5.5.2). 0 means write no
-  // container, so the G-PDU is the 8-octet header and the T-PDU and nothing
-  // else.
+  // Local source and peer destination, both 4 bytes (IPv4) or both 16 (IPv6).
+  bytes local_address = 2;
+  bytes peer_address = 3;
+  reserved 4, 9, 10;
+  reserved "gnb_ip", "ether_src", "ether_dst", "gate", "src_ip";
+  // QFI is 0..63 when present; qfi_present distinguishes valid QFI 0 from
+  // an absent QFI, for which qfi must be 0.
   uint32 qfi = 5;
-
-  // The SMF's Transport Level Marking (TS 29.244 8.2.12, in a FAR's forwarding
-  // parameters) for this session's outer headers: the IE's two octets as an
-  // OctetString, the DSCP in the high octet and the mask in the low one. The
-  // encap applies it over the inner packet's own ToS/Traffic Class -- the mask
-  // names the bits the inner header keeps, the ECN bits with the spec's 0xFC
-  // (the NOTE under 8.2.12) -- and 0 means the SMF asked for no marking, so the
-  // encap copies the inner TOS as it always did. A record that predates the
-  // field reads as 0 and loads with the copy behaviour.
+  // Transport Level Marking IE value (DSCP/mask).
   uint32 marking = 6;
+  // Route domain consumed by the post-encap transport Router.
+  uint32 transport_route_domain = 7;
+  bool qfi_present = 8;
 }
 
-// -- the per-session matcher ------------------------------------------------
-//
-// PdrMatch holds one key per session -- "<module>/rules", a map resource whose
-// value is *that session's rule list* -- so a session change is one upsert of
-// O(that session's rules) rather than a rewrite of a table every session shares
-// (docs/design.md, "the keyed write"). The session is the id the packet path
-// reads from the module's key attribute: on the uplink the F-TEID the decap
-// wrote, which is what identifies a session on N3. The downlink's selector --
-// longest-prefix match on the UE address for an N6 packet that carries no
-// tunnel -- is the next step and is not this; the module's key attribute names
-// what its graph writes today.
-
-// PdrMatchArg configures the per-session matcher.
-message PdrMatchArg {
-  // The metadata attribute the session key is read from: 4 bytes, network
-  // order, the id "<module>/rules" is keyed by. Required, and it must be an
-  // attribute some module in the graph writes (the decap writes "upf_teid").
-  string key_attr = 1;
-
-  // How many sessions the map holds. 0 means 65536. The map is allocated once,
-  // at creation, and is not resized: a session that does not fit is refused at
-  // programming time rather than silently dropped by the packet path.
-  uint32 max_sessions = 2;
-
-  // The metadata attribute a matched rule's global policy id is written to, 4 bytes,
-  // network order. Empty writes none. A graph with an AtsssSteer module sets
-  // this to the attribute AtsssSteerArg.policy_attr names; a rule without a
-  // MAR writes 0, which steers nothing.
-  string steering_attr = 3;
-}
-
-// PdrMatchSettings is the module's own settings, beside the map: the singleton
-// "<module>/settings". The map is the sessions; this is the module.
-message PdrMatchSettings {
-  // The attribute the session key is read from, as PdrMatchArg's field of the
-  // same meaning. Changing it re-points the packet path at another attribute,
-  // which is a wiring change an operator may make without recreating the
-  // module; the sessions already written keep their keys.
-  string key_attr = 1;
-}
-
-// PdrMatchKey is one key of "<module>/rules": the session, as the packet path
-// reads it. 0 names no session and is refused.
-message PdrMatchKey {
-  uint32 session = 1;
-}
-
-// PdrMatchRule is one PDR of the session, as the rule it compiles to: the
-// 5-tuple the packet carries, with prefixes and port ranges, and the action
-// the packet leaves with. It is BESS's FirewallArg.Rule's shape (the fields
-// the firewall path writes, protobuf/module_msg.proto) with the ordering the
-// list gives it: a session's rules are in the SMF's precedence order, and the
-// first rule that matches the packet wins.
-message PdrMatchRule {
-  // Source and destination prefixes, CIDR, the length mandatory: "" is any
-  // address of the rule's family, and a filter whose address carries host bits
-  // means its network ("10.10.1.5/16" is "10.10.0.0/16").
-  string src_ip = 1;
-  string dst_ip = 2;
-
-  // IP protocol number, 0 for any.
-  uint32 proto = 3;
-
-  // Inclusive port ranges. An absent high bound is the full range, which is why
-  // they are `optional`: a plain 0 default would mean "port 0 only".
-  uint32 src_port_low = 4;
-  optional uint32 src_port_high = 5;
-  uint32 dst_port_low = 6;
-  optional uint32 dst_port_high = 7;
-
-  // Drop matching packets instead of forwarding them. A rule that drops cannot
-  // name an action.
-  bool drop = 8;
-
-  // The ActionId a matching packet carries, 0 for none: the module writes it
-  // into the packet's "action_id" metadata, so an ActionTable downstream
-  // selects the action this rule names (BESS D-141), exactly as the
-  // WildcardMatch path's rules do.
-  uint32 action_id = 9;
-
-  // The QoS flow the rule is about (TS 29.244 8.2.89): the rule matches only a
-  // packet whose PDU Session Container carried this QFI, which the decap
-  // writes as the "qfi" metadata attribute (0 when no container was carried).
-  // Absent, the rule matches a packet of any QFI. 0..63; it is `optional` so
-  // that "no QFI named" is not "QFI 0". The order is still the list's: the
-  // first rule that matches the packet's tuple *and* its QFI wins.
-  optional uint32 qfi = 10;
-
-  // The global policy id the compiler allocated for this PDR's MAR (TS 29.244
-  // 8.2.34), 0 for none. The module
-  // writes it into the graph's steering attribute, where AtsssSteer selects
-  // the access. A rule that drops cannot carry one.
-  uint32 steering_policy_id = 11;
-}
-
-// PdrMatchEntry is one session's rule list, in the session's precedence order:
-// the first rule that matches wins. The order is the list's, not a field's --
-// the WildcardMatch path inverts the Precedence into the classifier's priority
-// because its rules are separate keys, and this one keeps the SMF's own order
-// because they are not.
-message PdrMatchEntry {
-  repeated PdrMatchRule rules = 1;
-}

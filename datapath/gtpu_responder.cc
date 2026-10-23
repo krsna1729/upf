@@ -19,6 +19,7 @@
 #include "utils/checksum.h"
 #include "utils/endian.h"
 #include "utils/ether.h"
+#include "gtpu_wire.h"
 #include "utils/ip.h"
 
 using bess::utils::be16_t;
@@ -28,6 +29,7 @@ using bess::utils::be32_t;
 constexpr uint8_t kEchoRequest = 1;
 constexpr uint8_t kEchoResponse = 2;
 constexpr uint8_t kErrorIndication = 26;
+constexpr uint8_t kEndMarker = 254;
 constexpr uint8_t kGtpdu = 255;
 
 // An Echo Response's information elements (TS 29.281 7.2.2): the
@@ -60,6 +62,9 @@ const Commands GtpuResponder::cmds = {
     {"get_errors", "upf.pb.GtpuResponderCommandGetErrorsArg",
      MODULE_CMD_FUNC(&GtpuResponder::CommandGetErrors), Command::THREAD_SAFE,
      "upf.pb.GtpuResponderCommandGetErrorsResponse"},
+    {"drain_end_markers", "upf.pb.GtpuResponderCommandDrainEndMarkersArg",
+     MODULE_CMD_FUNC(&GtpuResponder::CommandDrainEndMarkers), Command::THREAD_SAFE,
+     "upf.pb.GtpuResponderCommandDrainEndMarkersResponse"},
 };
 
 namespace {
@@ -108,6 +113,22 @@ CommandResponse GtpuResponder::Init(const upf::pb::GtpuResponderArg &arg) {
   if (arg.track_errors()) {
     errors_ = std::make_unique<ErrorSlot[]>(kErrorSlots);
   }
+  if (arg.track_end_markers()) {
+    endpoint_attr_ = AddMetadataAttr("endpoint_id", sizeof(be32_t),
+                                     bess::metadata::Attribute::AccessMode::kRead);
+    if (endpoint_attr_ < 0) {
+      return CommandFailure(-endpoint_attr_, "add_metadata_attr() failed");
+    }
+    end_markers_ = std::make_unique<upf::datapath::EndMarkerLog>(Worker::kMaxWorkers);
+  }
+  if (!arg.reply_gate_attr().empty()) {
+    reply_gate_attr_ = AddMetadataAttr(
+        arg.reply_gate_attr(), sizeof(be32_t),
+        bess::metadata::Attribute::AccessMode::kRead);
+    if (reply_gate_attr_ < 0) {
+      return CommandFailure(-reply_gate_attr_, "add_metadata_attr() failed");
+    }
+  }
   return CommandSuccess();
 }
 
@@ -140,6 +161,9 @@ void GtpuResponder::RecordError(uint32_t teid) {
 CommandResponse GtpuResponder::CommandGetErrors(
     const upf::pb::GtpuResponderCommandGetErrorsArg &arg) {
   upf::pb::GtpuResponderCommandGetErrorsResponse response;
+  if (errors_ == nullptr) {
+    return CommandSuccess(response);
+  }
   auto report = [&](size_t i) {
     const uint32_t teid = errors_[i].teid.load(std::memory_order_acquire);
     if (teid == 0) {
@@ -167,13 +191,38 @@ CommandResponse GtpuResponder::CommandGetErrors(
   return CommandSuccess(response);
 }
 
+CommandResponse GtpuResponder::CommandDrainEndMarkers(
+    const upf::pb::GtpuResponderCommandDrainEndMarkersArg &) {
+  upf::pb::GtpuResponderCommandDrainEndMarkersResponse response;
+  if (end_markers_ == nullptr) {
+    return CommandSuccess(response);
+  }
+  for (const auto &event : end_markers_->Drain()) {
+    auto *entry = response.add_end_markers();
+    entry->set_endpoint_id(event.endpoint_id);
+    entry->set_teid(event.teid);
+  }
+  response.set_dropped(end_markers_->Dropped());
+  return CommandSuccess(response);
+}
+
 void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
+  const auto reply_offset =
+      reply_gate_attr_ >= 0 ? attr_offset(reply_gate_attr_) : -1;
+  const auto endpoint_offset =
+      endpoint_attr_ >= 0 ? attr_offset(endpoint_attr_) : -1;
 
   for (size_t i = 0; i < cnt; i++) {
     bess::PacketRef pkt = batch->packet(i);
     ogates[i] = DROP_GATE;
+    uint32_t reply_gate = 0;
+    if (reply_gate_attr_ >= 0) {
+      if (!bess::metadata::IsValidOffset(reply_offset)) continue;
+      reply_gate = get_attr_with_offset<be32_t>(reply_offset, pkt).value();
+      if (reply_gate >= MAX_GATES) continue;
+    }
 
     // The reply is written in place over one segment, so a chained packet is
     // not something this module can answer.
@@ -182,39 +231,41 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     }
 
     bess::conntrack::ParsedFlowPacket outer;
-    const auto status = bess::conntrack::ParseFrame(
-        std::span<const uint8_t>(pkt.head_data<const uint8_t *>(), pkt.head_len()), outer,
-        pkt.total_len());
-    if (status != bess::conntrack::ParseStatus::kOk || outer.first_fragment) [[unlikely]] {
+    bess::tunnel::GtpuInfo info{};
+    const auto status = bess::tunnel::DecapGtpu(
+        std::span<const uint8_t>(pkt.head_data<const uint8_t *>(), pkt.head_len()),
+        outer, info, port_, pkt.total_len());
+    if (status != bess::tunnel::DecapError::kOk &&
+        status != bess::tunnel::DecapError::kNotTunnel) [[unlikely]] {
       continue;
     }
     if (outer.l4 != bess::conntrack::L4Kind::kUdp || outer.dst_port != port_) [[unlikely]] {
       continue;
     }
 
-    // The GTP-U header. Version 1, PT 1; the E and PN flags are not something
-    // an echo carries, and the S flag is compulsory for one (5.1) -- accepted
-    // either way, because the cost of answering a peer that left it out is a
-    // reply, and the cost of ignoring it is a path that reads as down. Bits 3,
-    // 2 and 1 of octet 1 are E, S and PN (figure 5.1-1; bit 4 is a spare the
-    // receiver shall not evaluate). The declared length must fit the packet:
-    // a reply to a truncated request would answer a message the peer did not
-    // send.
+    // The core tunnel codec has checked lengths, optional fields and extension
+    // chains. A valid unknown G-PDU may carry a PDU Session Container too.
     const size_t gtp = size_t{outer.l4_offset} + bess::tunnel::kUdpBytes;
     if (pkt.head_len() < gtp + bess::tunnel::kGtpuBaseBytes) [[unlikely]] {
       continue;
     }
     uint8_t *g = pkt.head_data<uint8_t *>() + gtp;
-    if ((g[0] >> 5) != 1 || (g[0] & 0x10) == 0 || (g[0] & 0x05) != 0) [[unlikely]] {
+    if (g[1] != kGtpdu && (g[0] & 0x05) != 0) [[unlikely]] {
       continue;
     }
-    // Two messages reach this module through the TEID table's default gate: an
-    // Echo Request (7.1, TEID 0) and a G-PDU whose TEID no session names
-    // (7.3.1). The second is answered with an Error Indication when its TEID is
-    // not 0 -- TEID 0 is the echo path, and no G-PDU carries it.
-    // An Error Indication (7.3.1): the peer could not reach the TEID it names,
-    // which is the TEID this UPF sent to. Record it for the controller's
-    // report; there is no reply to send.
+    // GtpuDecap gate 2 receives Echo Requests (7.1), peer Error Indications
+    // and valid G-PDUs without an admitted endpoint-scoped F-TEID (7.3.1).
+    // The G-PDU is answered when its TEID is nonzero: TEID 0 is the echo path,
+    // and no G-PDU carries it.
+    // Validate before inspecting Error Indication IEs, even without ingress.
+    if (gtp + bess::tunnel::kGtpuBaseBytes + Get16(g + 2) >
+            size_t{outer.l4_offset} + outer.l4_length ||
+        Get16(pkt.head_data<const uint8_t *>() + outer.l4_offset + 4) !=
+            outer.l4_length ||
+        ((g[0] & 0x02) != 0 && Get16(g + 2) < 4)) {
+      continue;
+    }
+    // The peer could not reach a TEID this UPF sent to; record, never reply.
     if (g[1] == kErrorIndication) {
       if (errors_ != nullptr) {
         // Offsets are from g, which is the GTP-U header: the tail follows the
@@ -236,6 +287,20 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
         }
       }
       continue;  // no reply: ogates[i] stays DROP_GATE
+    }
+    // The peer ends the stream on this UPF's own tunnel (7.3.2): the header's
+    // TEID is the local one. Record it with the endpoint it came in on, never
+    // reply.
+    if (g[1] == kEndMarker) {
+      if (end_markers_ != nullptr && bess::metadata::IsValidOffset(endpoint_offset)) {
+        const uint32_t endpoint =
+            get_attr_with_offset<be32_t>(endpoint_offset, pkt).value();
+        const uint32_t teid = Get32(g + 4);
+        if (endpoint != 0 && teid != 0) {
+          end_markers_->Record(ctx->wid.value(), {endpoint, teid});
+        }
+      }
+      continue;
     }
     const bool echo = g[1] == kEchoRequest;
     if (!echo && g[1] != kGtpdu) [[unlikely]] {
@@ -264,31 +329,52 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       sequence = Get16(g + 8);
     }
 
-    // The outer IPv4 header, rewritten in place: the two addresses swapped,
-    // the length cut to the reply's, the checksum recomputed. An IPv4 header
-    // with options is not one `CalculateIpv4NoOptChecksum` covers, so it is
-    // not one this module replies to.
-    auto *ip = reinterpret_cast<bess::utils::Ipv4 *>(pkt.head_data<uint8_t *>() +
-                                                     outer.l3_offset);
-    if (ip->version != 4 || ip->header_length != 5) [[unlikely]] {
+    // Rewrite IPv4 or IPv6 endpoints and lengths before appending the reply
+    // tail. IPv4 options are unsupported by the no-options checksum helper.
+    const size_t udp_length = bess::tunnel::kUdpBytes +
+                              bess::tunnel::kGtpuBaseBytes + tailLen;
+    if (outer.l3 == bess::conntrack::L3Kind::kIpv4) {
+      auto *ip = reinterpret_cast<bess::utils::Ipv4 *>(
+          pkt.head_data<uint8_t *>() + outer.l3_offset);
+      if (ip->version != 4 || ip->header_length != 5) [[unlikely]] {
+        continue;
+      }
+      std::swap(ip->src, ip->dst);
+      ip->length = be16_t(static_cast<uint16_t>(
+          bess::tunnel::kIpv4Bytes + udp_length));
+      ip->checksum = bess::utils::CalculateIpv4NoOptChecksum(*ip);
+    } else if (outer.l3 == bess::conntrack::L3Kind::kIpv6) {
+      if (outer.l4_offset < outer.l3_offset + 40) [[unlikely]] continue;
+      uint8_t *ip6 = pkt.head_data<uint8_t *>() + outer.l3_offset;
+      if ((ip6[0] >> 4) != 6) [[unlikely]] continue;
+      for (size_t octet = 0; octet < 16; ++octet)
+        std::swap(ip6[8 + octet], ip6[24 + octet]);
+      const size_t extension_length =
+          outer.l4_offset - (outer.l3_offset + 40);
+      const size_t payload_length = extension_length + udp_length;
+      if (payload_length > 65535) [[unlikely]] continue;
+      Put16(ip6 + 4, static_cast<uint16_t>(payload_length));
+    } else {
       continue;
     }
-    std::swap(ip->src, ip->dst);
-    ip->length = be16_t(static_cast<uint16_t>(bess::tunnel::kIpv4Bytes +
-                                              bess::tunnel::kUdpBytes +
-                                              bess::tunnel::kGtpuBaseBytes + tailLen));
-    ip->checksum = bess::utils::CalculateIpv4NoOptChecksum(*ip);
 
-    // The UDP header: the ports swapped -- so the reply leaves for the port
-    // the request came from -- the length cut, checksum 0 (legal over IPv4,
-    // and what the encap writes on the way out too).
+    // Swap the UDP ports, cut its length, and zero its checksum. IPv4 permits
+    // zero; IPv6's mandatory checksum is recomputed after the reply tail exists.
     uint8_t *udp = pkt.head_data<uint8_t *>() + outer.l4_offset;
     const uint16_t src_port = Get16(udp);
     Put16(udp, Get16(udp + 2));
     Put16(udp + 2, src_port);
-    Put16(udp + 4, static_cast<uint16_t>(bess::tunnel::kUdpBytes +
-                                         bess::tunnel::kGtpuBaseBytes + tailLen));
+    Put16(udp + 4, static_cast<uint16_t>(udp_length));
     Put16(udp + 6, 0);
+    auto finish_ipv6_checksum = [&] {
+      if (outer.l3 != bess::conntrack::L3Kind::kIpv6) return;
+      uint8_t *frame = pkt.head_data<uint8_t *>();
+      const uint8_t *ip6 = frame + outer.l3_offset;
+      uint8_t *reply_udp = frame + outer.l4_offset;
+      Put16(reply_udp + 6,
+            upf::datapath::Ipv6UdpChecksum(ip6 + 8, ip6 + 24, reply_udp,
+                                           udp_length));
+    };
 
     // The GTP-U header. An Echo Response carries the S-flag field and TEID 0
     // (7.1); an Error Indication carries S clear and TEID 0 too -- the peer
@@ -319,7 +405,8 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     if (!echo) {
       tail[0] = kTeidIe;
       Put32(tail + 1, unknownTeid);
-      ogates[i] = 0;
+      finish_ipv6_checksum();
+      ogates[i] = static_cast<gate_idx_t>(reply_gate);
       continue;
     }
     Put16(tail, sequence);
@@ -336,7 +423,8 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     tail[12] = static_cast<uint8_t>(stamp_);
     std::memset(tail + 13, 0, 4);  // the 32-bit fraction
 
-    ogates[i] = 0;
+    ogates[i] = static_cast<gate_idx_t>(reply_gate);
+    finish_ipv6_checksum();
   }
 
   EmitBatch(ctx, batch, ogates);
@@ -345,5 +433,5 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
 std::string GtpuResponder::GetDesc() const { return std::format("port {}", port_); }
 
 ADD_MODULE(GtpuResponder, "gtpu_responder",
-           "answers GTP-U Echo Requests (type 1) with the reply (type 2): the "
-           "graph routes TEID-0 messages here, and everything else is dropped")
+           "answers GTP-U Echo Requests and unknown G-PDUs on IPv4/IPv6; "
+           "tracks peer Error Indications when enabled; drops other messages")

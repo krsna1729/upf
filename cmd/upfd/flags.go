@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -14,6 +15,131 @@ import (
 	"github.com/krsna1729/upf/internal/session"
 )
 
+// entryList keeps repeatable flags in the same scalar, semicolon-separated
+// representation used by config files and environment variables.
+type entryList []string
+
+func (v *entryList) String() string { return strings.Join(*v, ";") }
+
+func (v *entryList) Set(value string) error {
+	for _, entry := range strings.Split(value, ";") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			*v = append(*v, entry)
+		}
+	}
+	return nil
+}
+
+func parseFTEIDAddresses(entries entryList, multiInstance bool) ([]session.FTEIDEndpoint, error) {
+	endpoints := make([]session.FTEIDEndpoint, 0, len(entries))
+	ids := make(map[uint32]bool, len(entries))
+	for _, entry := range entries {
+		var ep session.FTEIDEndpoint
+		seen := map[string]bool{}
+		for _, field := range strings.Split(entry, ",") {
+			key, value, ok := strings.Cut(strings.TrimSpace(field), "=")
+			if !ok || seen[key] {
+				return nil, fmt.Errorf("%q: expected distinct key=value fields", entry)
+			}
+			seen[key] = true
+			var err error
+			switch key {
+			case "endpoint":
+				var id uint64
+				id, err = strconv.ParseUint(value, 10, 32)
+				if err == nil && id == 0 {
+					err = fmt.Errorf("must be nonzero")
+				}
+				ep.ID = uint32(id)
+			case "reference":
+				if value != "n3" && value != "n9" {
+					err = fmt.Errorf("must be n3 or n9")
+				}
+				ep.ReferencePoint = value
+			case "transport-domain":
+				var domain uint64
+				domain, err = strconv.ParseUint(value, 10, 32)
+				if err == nil && domain == 0 {
+					err = fmt.Errorf("must be nonzero")
+				}
+				ep.TransportRouteDomain = uint32(domain)
+			case "source":
+				switch value {
+				case "access":
+					ep.SourceInterface = ie.SrcInterfaceAccess
+				case "core":
+					ep.SourceInterface = ie.SrcInterfaceCore
+				default:
+					err = fmt.Errorf("must be access or core")
+				}
+			case "instance":
+				if value == "" {
+					err = fmt.Errorf("must not be empty")
+				}
+				ep.Instance = value
+			case "ipv4", "ipv6":
+				var addr netip.Addr
+				addr, err = netip.ParseAddr(value)
+				if err == nil && (addr.Zone() != "" || addr.IsUnspecified() || addr.IsMulticast() ||
+					addr.IsLinkLocalUnicast() || addr.IsLoopback() ||
+					addr == netip.AddrFrom4([4]byte{255, 255, 255, 255}) ||
+					(key == "ipv4" && !addr.Is4()) ||
+					(key == "ipv6" && (!addr.Is6() || addr.Is4In6()))) {
+					err = fmt.Errorf("%q is not a usable local IPv%s unicast address",
+						value, map[bool]string{true: "4", false: "6"}[key == "ipv4"])
+				}
+				if err == nil {
+					if key == "ipv4" {
+						ep.IPv4 = addr
+					} else {
+						ep.IPv6 = addr
+					}
+				}
+			default:
+				return nil, fmt.Errorf("%q: unknown F-TEID field %q", entry, key)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("%q: %s: %w", entry, key, err)
+			}
+		}
+		if !seen["endpoint"] || !seen["reference"] || !seen["transport-domain"] ||
+			!seen["source"] || (!ep.IPv4.IsValid() && !ep.IPv6.IsValid()) ||
+			(multiInstance && (!seen["instance"] || ep.Instance == "")) ||
+			(!multiInstance && seen["instance"]) {
+			return nil, fmt.Errorf(
+				"%q: endpoint, reference, transport-domain, source and at least one address are required; instance is required only with -instances",
+				entry)
+		}
+		if (ep.ReferencePoint == "n3" && ep.SourceInterface != ie.SrcInterfaceAccess) ||
+			(ep.ReferencePoint == "n9" && ep.SourceInterface != ie.SrcInterfaceCore) {
+			return nil, fmt.Errorf("%q: n3 requires source=access and n9 requires source=core", entry)
+		}
+		if ids[ep.ID] {
+			return nil, fmt.Errorf("duplicate F-TEID endpoint ID %d", ep.ID)
+		}
+		ids[ep.ID] = true
+		endpoints = append(endpoints, ep)
+	}
+	return endpoints, nil
+}
+
+func hasEndMarker(cfg session.Config) bool {
+	return cfg.EndMarker != ""
+}
+
+func parseMAC(value string) ([6]byte, error) {
+	var out [6]byte
+	hw, err := net.ParseMAC(value)
+	if err != nil {
+		return out, err
+	}
+	if len(hw) != len(out) {
+		return out, fmt.Errorf("%q is not a 6-byte address", value)
+	}
+	copy(out[:], hw)
+	return out, nil
+}
+
 // parsePDRFields reads a -pdr-fields-* flag: the PDR table's key, in the order
 // the graph declares its fields. A name that is not one of the graph's fields
 // is refused here, where the operator can fix it, rather than keying every
@@ -22,7 +148,7 @@ func parsePDRFields(spec string) ([]session.Field, error) {
 	names := map[string]session.Field{}
 	for _, f := range []session.Field{
 		session.SrcIP, session.DstIP, session.Proto, session.SrcPort,
-		session.DstPort, session.RouteDomain, session.UpfTEID, session.QFI,
+		session.DstPort, session.RouteDomain, session.FTEIDContext, session.QFI,
 	} {
 		names[f.FlagName()] = f
 	}
@@ -34,7 +160,7 @@ func parsePDRFields(spec string) ([]session.Field, error) {
 		}
 		f, ok := names[name]
 		if !ok {
-			return nil, fmt.Errorf("field %q is not one of src, dst, proto, sport, dport, domain, teid, qfi", name)
+			return nil, fmt.Errorf("field %q is not one of src, dst, proto, sport, dport, domain, fteid, qfi", name)
 		}
 		fields = append(fields, f)
 	}
@@ -48,17 +174,17 @@ func parsePDRFields(spec string) ([]session.Field, error) {
 // (TS 29.244 8.2.4), ';'-separated, each a comma-separated list of
 //
 //	name=<instance>,domain=<route domain>[,next-hop=<id>][,tunnel-next-hop=<id>]
-//	[,sgi-lan-next-hop=<id>][,vn-next-hop=<id>][,pool=<prefix>][,arp=<module>]
-//	[,arp-mac=<xx:xx:xx:xx:xx:xx>]
+//	[,access-next-hop=<id>][,sgi-lan-next-hop=<id>][,vn-next-hop=<id>]
+//	[,pool=<prefix>][,arp=<module>][,arp-mac=<xx:xx:xx:xx:xx:xx>]
 //
 // Each *-next-hop key is one egress of the instance: the Router next hop
 // (the graph's next_hops resource id) a forward out of it leaves by, per the
 // FAR's Destination Interface value (TS 29.244 8.2.24) and whether the FAR
 // adds an outer header -- next-hop is a plain forward toward the data network
-// (N6), tunnel-next-hop one in a tunnel (N9, or indirect data forwarding),
-// sgi-lan-next-hop one toward the service LAN (2) and vn-next-hop one that
-// re-enters the subscriber-side chain (5). At least one of the four is
-// required: an instance with no egress at all serves nothing. next-hop is
+// (N6), tunnel-next-hop one in a tunnel toward Core (N9), access-next-hop a
+// tunnel toward Access (N3 or N9), sgi-lan-next-hop one toward the service LAN
+// (2) and vn-next-hop one that re-enters the subscriber-side chain (5). At least
+// one egress is required: an instance with no egress at all serves nothing. next-hop is
 // where a plain forward out of the instance goes, so an instance that serves
 // one needs it (a forward it cannot place is refused with cause 73).
 //
@@ -126,6 +252,15 @@ func parseInstances(spec string, maxDomains uint32, routeMode session.RouteMode)
 				}
 				ifc.Hops[routing.Egress{DestIfc: ie.DstInterfaceCore, Tunnel: true}] = n
 				hasEgress = true
+			case "access-next-hop":
+				if n, err = hop(key, value); err != nil {
+					return nil, err
+				}
+				if ifc.Hops == nil {
+					ifc.Hops = map[routing.Egress]uint32{}
+				}
+				ifc.Hops[routing.Egress{DestIfc: ie.DstInterfaceAccess, Tunnel: true}] = n
+				hasEgress = true
 			case "sgi-lan-next-hop":
 				if n, err = hop(key, value); err != nil {
 					return nil, err
@@ -160,7 +295,7 @@ func parseInstances(spec string, maxDomains uint32, routeMode session.RouteMode)
 				hasARPMAC, arpMACText = true, value
 			default:
 				return nil, fmt.Errorf(
-					"%q: %q is not name, domain, next-hop, tunnel-next-hop, sgi-lan-next-hop, vn-next-hop, pool, arp or arp-mac",
+					"%q: %q is not name, domain, next-hop, tunnel-next-hop, access-next-hop, sgi-lan-next-hop, vn-next-hop, pool, arp or arp-mac",
 					entry, key)
 			}
 		}
@@ -188,67 +323,9 @@ func parseInstances(spec string, maxDomains uint32, routeMode session.RouteMode)
 			// and one whose forwards all tunnel (tunnel-next-hop) needs no
 			// plain hop. In destination mode the Router's routes are the
 			// egress table, so none of these keys is required.
-			return nil, fmt.Errorf("%q: an interface needs an egress: next-hop=, tunnel-next-hop=, sgi-lan-next-hop= or vn-next-hop= (or -route-mode=destination)", entry)
+			return nil, fmt.Errorf("%q: an interface needs an egress: next-hop=, tunnel-next-hop=, access-next-hop=, sgi-lan-next-hop= or vn-next-hop= (or -route-mode=destination)", entry)
 		}
 		ifaces = append(ifaces, ifc)
 	}
 	return routing.New(ifaces, maxDomains)
-}
-
-// profileArgs applies a profile's strategy to the flags' own defaults: the
-// profile is what a module flag that names nothing resolves to, and every flag
-// the operator *did* name wins over it -- the flag is the override and the
-// profile is the default, so a deployment can run a profile with its own module
-// names without a second profile. A flag the operator did not name is its
-// declared default, and the profile overrides that: that is the whole point (a
-// profile that could not clear -pdr-table-ul's "pdr_ul" could not move the
-// uplink's rules out of that table).
-//
-// Only the rule home is a profile's: the tables, meters, counters and next hops
-// are the deployment's, and the profile leaves them as the flags gave them.
-func profileArgs(p session.Profile, given map[string]bool, a graphArgs) graphArgs {
-	if !given["pdr-table-ul"] {
-		a.pdrTableUL = p.Up.Table
-	}
-	if !given["firewall-ul"] {
-		a.firewallUL = p.Up.Firewall
-	}
-	if !given["pdr-match-ul"] {
-		a.pdrMatchUL = p.Up.PdrMatch
-	}
-	if !given["pdr-table-dl"] {
-		a.pdrTableDL = p.Down.Table
-	}
-	if !given["firewall-dl"] {
-		a.firewallDL = p.Down.Firewall
-	}
-	if !given["pdr-match-dl"] {
-		a.pdrMatchDL = p.Down.PdrMatch
-	}
-	if !given["select-dl"] {
-		a.selectDL = p.Down.Selector
-	}
-	if !given["select-actions-dl"] {
-		a.selectActionsDL = p.Down.SelectorActions
-	}
-	if !given["select-fields-dl"] {
-		a.selectFieldsDL = fieldList(p.Down.SelectorFields, a.selectFieldsDL)
-	}
-	return a
-}
-
-// fieldList spells a strategy's selector fields as the flag's own syntax, so a
-// profile's key is the default of the flag that declares it: the graph the
-// profile names is what declares the selector's field list, and a deployment
-// that runs that graph without naming the flag must not fall back to another
-// key.
-func fieldList(fields []session.Field, fallback string) string {
-	if len(fields) == 0 {
-		return fallback
-	}
-	names := make([]string, 0, len(fields))
-	for _, f := range fields {
-		names = append(names, f.FlagName())
-	}
-	return strings.Join(names, ",")
 }

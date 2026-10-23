@@ -13,11 +13,10 @@ import (
 
 // ContentReader reads and empties the dataplane's session tables: what a
 // restarted controller has to do before it can serve PFCP. *bess.Client
-// implements it (Contents, ResourcePages, ResetResources).
+// implements it (ResourcePages, ResetResources).
 type ContentReader interface {
-	Contents(ctx context.Context, names ...string) (map[string][]bess.Entry, error)
-	// ResourcePages reads one resource in bounded pages, for a table too large
-	// for one Contents response (the ARP tables' selective sweep).
+	// ResourcePages reads one resource in bounded pages (the ARP tables'
+	// selective sweep).
 	ResourcePages(ctx context.Context, name string, visit func(bess.Entry) error) error
 	// ResetResources empties map resources in the daemon without sending their
 	// keys to the client, returning the entries it removed.
@@ -25,7 +24,7 @@ type ContentReader interface {
 }
 
 // sweepBatch bounds one selective erase transaction (the ARP entries the pool
-// filter keeps, and a firewall's empty policy). Whole session maps are reset
+// filter keeps). Whole session maps are reset
 // inside the daemon, whose ApplyBatched splits them; this bound remains for
 // the reads whose keys the sweep must name. 1000 changes stays below the
 // engine's per-transaction retirement budget (2048 objects) even if every
@@ -55,20 +54,6 @@ func (c *Compiler) resources() []string {
 	for _, d := range []Direction{c.cfg.Up, c.cfg.Down} {
 		if d.PDRTable != "" {
 			add(rulesRes(d))
-		}
-		if d.Firewall != "" {
-			add(firewallRes(d))
-		}
-		if d.PdrMatch != "" {
-			// The opt-in map is the session layer's like the rest: an earlier
-			// run's key is a session this process does not know, and the sweep
-			// erases exactly the keys it read back (the resource is a map, so
-			// this is the generic path below, not the firewall's whole-policy
-			// one).
-			add(pdrMatchRes(d))
-		}
-		if d.Actions != "" {
-			add(actionsRes(d))
 		}
 		if d.Meters != "" {
 			add(metersRes(d))
@@ -154,10 +139,9 @@ func (c *Compiler) arpSweeps() []arpSweep {
 // The maps are emptied in the daemon, not key by key: ResetResources converges
 // each named resource to no entries and applies the erases in batches, so the
 // controller never reads a session key only to send it back, and the daemon's
-// 64 MiB response limit no longer bounds the largest table. Two resources are
-// not whole-table clears: a firewall is a singleton (its policy is one value,
-// replaced by an empty one), and an ARP responder table holds the deployment's
-// own entry beside the subscribers' (it is read with ReadResource's pages and
+// 64 MiB response limit no longer bounds the largest table. One resource is
+// not a whole-table clear: an ARP responder table holds the deployment's own
+// entry beside the subscribers' (it is read with ReadResource's pages and
 // filtered by the interface's pool). The store is cleared by its module's own
 // command.
 //
@@ -193,52 +177,17 @@ func (c *Compiler) Sweep(ctx context.Context) error {
 	// The ARP responder tables are not in names: they are cleared selectively
 	// (arpSweep), because the deployment's own entry shares them.
 	arps := c.arpSweeps()
-	// A firewall is a singleton ("<module>/rules" holds the whole policy,
-	// D-147): it has no key to erase, and the write is the whole policy. An
-	// earlier run's policy matches packets this process has no session for --
-	// and *passes* them, a rule's verdict being pass or drop -- so it is
-	// replaced by an empty one, which no rule matches.
-	firewalls := map[string]bool{}
-	for _, d := range []Direction{c.cfg.Up, c.cfg.Down} {
-		if d.Firewall != "" {
-			firewalls[firewallRes(d)] = true
-		}
-	}
 	// Everything else is a map the compiler owns: empty it in the daemon. An
 	// empty list is not a request the daemon accepts.
-	resettable := make([]string, 0, len(names))
-	for _, name := range names {
-		if !firewalls[name] {
-			resettable = append(resettable, name)
-		}
-	}
 	removed := uint64(0)
-	if len(resettable) > 0 {
-		n, err := c.contents.ResetResources(ctx, resettable...)
+	if len(names) > 0 {
+		n, err := c.contents.ResetResources(ctx, names...)
 		if err != nil {
 			return fmt.Errorf("emptying the session tables: %w", err)
 		}
 		removed = n
 	}
-	changes := make([]bess.Change, 0, len(firewalls)+len(arps))
-	// A firewall's contents are one value, not a table: read it and replace a
-	// non-empty policy. An empty policy is left alone, because it is what this
-	// process would write anyway and a transaction that changes nothing is not
-	// one the daemon needs.
-	for name := range firewalls {
-		read, err := c.contents.Contents(ctx, name)
-		if err != nil {
-			return fmt.Errorf("reading the firewall policy %s: %w", name, err)
-		}
-		for _, e := range read[name] {
-			if rules, _ := e.Value["rules"].([]any); len(rules) > 0 {
-				changes = append(changes, bess.Change{
-					Resource: name,
-					Value:    map[string]any{"rules": []map[string]any{}},
-				})
-			}
-		}
-	}
+	changes := make([]bess.Change, 0, len(arps))
 	// The ARP tables are filtered by the interface's pool: a subscriber
 	// address is in it by construction, the deployment's own need not be.
 	for _, a := range arps {

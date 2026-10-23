@@ -38,7 +38,7 @@ type Interface struct {
 
 	// NextHop is the Router next hop (the graph's next_hops resource id) a
 	// forward out of this interface leaves by. 0 is a graph whose chain has no
-	// Router next hop at all -- a deployment without an ActionTable -- and is
+	// Router next hop at all -- a deployment whose rules name no next hop -- and is
 	// only correct there.
 	NextHop uint32
 
@@ -166,12 +166,6 @@ func New(ifaces []Interface, maxDomains uint32) (*Domains, error) {
 				// spare value is an egress no FAR can name.
 				return nil, fmt.Errorf("network instance %q: a next hop is declared for destination interface %d, above the values the spec defines",
 					i.Instance, e.DestIfc)
-			case e.DestIfc == 0:
-				// Destination Interface Access is the deployment's own exit
-				// (the -access-next-hop flag), not an instance's: an instance's
-				// service LAN and 5G VN are what it declares hops for.
-				return nil, fmt.Errorf("network instance %q: a next hop is declared for destination interface 0 (access), which is the deployment's and not an instance's",
-					i.Instance)
 			case hop == 0:
 				return nil, fmt.Errorf("network instance %q: the next hop for destination interface %d is 0, which is no next hop",
 					i.Instance, e.DestIfc)

@@ -82,15 +82,19 @@ check_next() { # check_next <description> <fixed string> <fixed string in the ne
   fi
 }
 
-# refute_metadata is refute within the metadata blocks only: a packet's own
-# hexdump can carry the same bytes (the QFI frame's packet does), so a
-# whole-log refute would fail for the wrong reason.
-refute_metadata() { # refute_metadata <description> <fixed string>
-  if grep -A 5 "Metadata buffer" "$LOG" | grep -q -- "$2"; then
-    echo "smoke: FAIL  $1 ('$2' is in a metadata block of $LOG)" >&2
-    FAIL=1
-  else
+# check_block greps the metadata blocks one Dump printed. The allocator picks
+# attribute offsets per graph, so the checks name byte values that only one
+# attribute of that chain can hold rather than positions.
+dump_block() { # dump_block <dump module>
+  awk -v d="$1: packet dump" '$0 == d { p = 1; next } /: packet dump$/ { p = 0 }
+    p && /^000000[0-9a-f]0: /' "$LOG"
+}
+check_block() { # check_block <description> <dump module> <fixed string>
+  if dump_block "$2" | grep -q -- "$3"; then
     echo "smoke: ok    $1"
+  else
+    echo "smoke: FAIL  $1 (no '$3' in a metadata block of $2 in $LOG)" >&2
+    FAIL=1
   fi
 }
 
@@ -104,45 +108,34 @@ refute() { # refute <description> <fixed string the log must not contain>
 }
 
 # Uplink: the plugin stripped IP/UDP/GTP-U and left the inner packet in a
-# frame (the outer frame's own Ethernet header + the 37-byte inner IPv4 packet
+# frame (the outer frame's Ethernet header + the 37-byte inner IPv4 packet
 # 10.0.0.1 -> 8.8.8.8, UDP 1234 -> 53, "hello-upf").
 check "decap left the inner packet in a frame" \
       "02 00 00 00 00 01 02 00 00 00 00 02 08 00 45 00"
-# and wrote the TEID into metadata (the mt_md reader makes that attribute a
-# real one; the padding after it is another attribute's, so only the TEID is
-# checked here).
-check_metadata "decap wrote upf_teid into metadata" "11 22 33 44"
-# The uplink frame carries a PDU Session Container (TS 38.415, extension header
-# 0x85) with QFI 5, so the decap must have read it: the metadata dump's first
-# line is the TEID it wrote followed by the QFI, in the layout mt_md declares
-# (upf_teid 4 bytes, then qfi 1). A graph that stopped reading `qfi` would make
-# the write inert (core/metadata.cc) and this line would be `11 22 33 44 00`.
-check "decap read the PDU Session Container's QFI into metadata" \
-      "00000000: 11 22 33 44 05"
+# dump_up's metadata holds endpoint_id 1, the fteid_context 0x0C0FFEE1 that
+# decap0's fteids row carries, and qfi 5. No other attribute of the chain can
+# hold 0C 0F FE E1 or 05.
+check_block "decap wrote the admission entry's fteid_context" dump_up "0C 0F FE E1"
+check_block "decap read the container's QFI into metadata" dump_up " 05 "
 
-# The frame with no PDU Session Container at all (src_nocont's, E flag clear,
-# TEID 0x11223345, its own decap and Dump) must leave 255 in the QFI byte: 0 is
-# a real QFI (TS 38.415 5.5.3.3's range is 0..63, and TS 29.244 8.2.89's IE
-# takes it), so a rule a PDI keys on QFI 0 has to be able to tell that packet
-# from this one. A writer that wrote 0 for "no container" would make the two
-# the same packet to the rule table.
-check_metadata "a G-PDU with no container leaves qfi at 255, not 0" \
-      "11 22 33 45 FF"
-refute_metadata "no packet leaves 0 in the QFI byte of a container-less G-PDU" \
-      "11 22 33 45 00"
+# The second admitted F-TEID has no PDU Session Container. Its one qfi byte is
+# 255, not 0 (QFI 0 is valid); no other attribute of the chain holds FF.
+check_block "the container-less F-TEID was admitted" dump_nocont "0C 0F FE E2"
+check_block "a G-PDU with no container leaves qfi at 255, not 0" dump_nocont " FF "
 
-# The session table is what makes a TEID ours: the second uplink chain's frame
-# carries TEID 0x55667788, which no rule names, so the table's default gate
-# answered it (the Error Indication below) -- its inner source address
-# (10.0.0.2) must not appear anywhere in the log: the payload goes nowhere.
+# The F-TEID table is what makes a TEID ours: TEID 0x55667788 has no admission
+# entry, so GtpuDecap sends it to gate 2 and the responder returns an Error
+# Indication. The inner source address (10.0.0.2) must not appear in the log.
 refute "an unknown TEID's payload goes nowhere" "0a 00 00 02"
 
-# Downlink: the plugin resolved the ActionId the packet carried against
-# encap0/tunnels and built the outer headers: Eth (the record's addresses),
-# IPv4 src 10.20.30.1 -> dst 10.20.30.2 (the record's peer) with a correct
-# header checksum (ea 79), UDP -> 2152, GTP-U type 255 (G-PDU), length 37, TEID
-# 0x11223344, then the inner packet byte for byte.
-# (The Dump hexdump is 16 bytes to a line, so each check stays inside one.)
+# Downlink: the plugin resolved the ActionId against encap0/tunnels and built
+# routed outer headers. Ethernet resolution remains the Router's job, so the
+# output MAC addresses are zero. The outer IPv4 source is 10.20.30.1, peer is
+# 10.20.30.2, and the header checksum is ea79.
+check "encap defers Ethernet resolution to Router" \
+      "00 00 00 00 00 00 00 00 00 00 00 00 08 00"
+# UDP -> 2152, GTP-U type 255 (G-PDU), length 37, TEID 0x11223344, then the
+# inner packet byte for byte. Each check stays inside one 16-byte dump line.
 check "encap built a well-formed outer IPv4 header" \
       "00 49 00 00 40 00 40 11 ea 79 0a 14 1e 01 0a 14"
 check "encap wrote UDP/GTP-U toward 2152 with the session TEID" \
@@ -176,16 +169,13 @@ check "the session's marking won over the inner DSCP" \
 check "the marked outer header's checksum is over the marking" \
       "40 11 e9 bf 0a 14 1e 01"
 
-# Echo: TEID 0 is no session's rule, so the request took the table's default
-# gate -- the plugin's echo module -- which answered it in place. The request
-# was a conformant one (flags 0x32: S set, as 5.1 requires of an echo; sequence
-# 0x1234; a Recovery Time Stamp IE of its own), and the reply is that message
-# with its Ethernet and IPv4 addresses swapped, its type set to 2 and its
-# payload replaced: 36 bytes of outer IPv4 (0x24 -> 0x35: 20 + UDP 33) with the
-# checksum that header recomputes to, UDP 2152 -> 2152 with length 33 and
-# checksum 0, and a GTP-U message whose length is 17 -- the S-flag field with
-# the request's sequence number, the Recovery IE (14 00: the restart counter is
-# zero, 8.2) and a Recovery Time Stamp of this node's own (231, 8 octets).
+# Echo: control messages bypass F-TEID lookup and leave decap gate 2 for the
+# responder. The request is conformant (flags 0x32: S set, as 5.1 requires of
+# an echo; sequence 0x1234; a Recovery Time Stamp IE of its own), and the reply
+# is that message with Ethernet and IPv4 addresses swapped, type set to 2, and
+# payload replaced. The outer IPv4 packet is 20 + UDP 33 bytes with its checksum
+# recomputed; GTP-U length is 17 with the sequence, Recovery IE and this node's
+# Recovery Time Stamp.
 check_next "echo swapped the addresses and rewrote the IPv4 header in place" \
       "02 00 00 00 00 02 02 00 00 00 00 01 08 00 45 00" \
       "00 35 00 00 40 00 40 11 ea 8d 0a 14 1e 01 0a 14"
@@ -199,19 +189,31 @@ check "echo carried the request's sequence, the Recovery IE, and its own stamp" 
 # bytes would come from the reply, because the request itself is never dumped.
 refute "echo replaced the request's stamp instead of echoing it" "de ad be ef"
 
-# The frame whose TEID no rule names (src_drop's, 0x55667788) reaches the
-# table's default gate, and the responder answers it with an Error Indication
-# (TS 29.281 7.3.1): type 26, S clear, its length 5 (the TEID IE alone), TEID 0
-# in the header and the peer's TEID in the IE. A node that only dropped it
-# would leave the peer sending into a tunnel that no longer exists.
+# The G-PDU with unknown TEID 0x55667788 misses F-TEID admission and reaches
+# gate 2. The responder answers with an Error Indication (TS 29.281 7.3.1):
+# type 26, S clear, length 5 (the TEID IE alone), TEID 0 in the header, and the
+# peer's TEID in the IE.
 check "an unnamed TEID is answered with an Error Indication" "30 1a 00 05 00 00"
 check "the Error Indication names the TEID the peer used" "10 55 66 77 88"
 
-# The peer's own Error Indication (type 26 into the table's default gate) is
-# recorded, not answered: the count is what the controller's ERIR report reads.
-# 0x55667788 is 1432778632.
+# The IPv6 unknown G-PDU has no admission row. The Error Indication must swap
+# the outer endpoints and carry a valid, nonzero IPv6 UDP checksum (0x6391).
+check "IPv6 unknown G-PDU receives a checksummed Error Indication" \
+      "08 68 08 68 00 15 63 91 30 1a"
+check "the IPv6 Error Indication names the peer's TEID" "10 55 66 77 89"
+
+# The IPv6 Echo response keeps its IPv6 outer header and rewrites the payload
+# length for the longer reply tail; the first GTP-U octets name Echo Response.
+check_next "IPv6 Echo response has the rebuilt IPv6 payload length" \
+      "86 dd 60 00" "00 00 00 21 11 40"
+check_next "IPv6 Echo request receives a type-2 response" \
+      "32 02" "00 11 00 00"
+
+# The peer's own Error Indication is control traffic on gate 2. The responder
+# records it without a reply; the count is what the controller's ERIR report
+# reads. 0x55667788 is 1432778632.
 ERRORS=$(mktemp /tmp/upf-smoke-errors-XXXXXX.txt)
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" action echo0 get_errors '{}' >"$ERRORS" 2>&1 || true
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" action resp_err get_errors '{}' >"$ERRORS" 2>&1 || true
 check_file "the responder counted the peer's Error Indication" "$ERRORS" "1432778632"
 
 check_clean_shutdown "$BESSD_PID" || FAIL=1

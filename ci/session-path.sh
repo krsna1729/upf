@@ -27,25 +27,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-# PROFILE=custom runs the same lane on the keyed per-session matcher
-# (deploy/pdrmatch-path.yaml is this graph with the uplink's table replaced by
-# it): the counters, the quota, the frames and the End Marker, through the
-# module.
-PROFILE=${PROFILE:-generic}
-# FIREWALL=1 (generic only) runs it on BESS's own `firewall` module, the generic
-# profile's other matching strategy, in both directions
-# (deploy/firewall-path.yaml).
-FIREWALL=${FIREWALL:-0}
-case "$PROFILE" in
-  generic)
-    if [ "$FIREWALL" = 1 ]; then
-      GRAPH=${GRAPH:-$ROOT/deploy/firewall-path.yaml}
-    else
-      GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
-    fi ;;
-  custom)  GRAPH=${GRAPH:-$ROOT/deploy/pdrmatch-path.yaml} ;;
-  *) echo "path: PROFILE is generic or custom, not $PROFILE" >&2; exit 2 ;;
-esac
+GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 SECONDS_RUN=${SECONDS_RUN:-3}
 
@@ -79,8 +61,8 @@ bessd_apply "$RENDERED"
 # The Go half: the control arm (counters zero), the session, then the counters
 # again. Run from the repository root so the module and its workspace resolve.
 cd "$ROOT"
-MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_PROFILE=$PROFILE UPF_FIREWALL=$FIREWALL UPF_ROUTE_MODE=${ROUTE_MODE:-hop} \
-  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveSessionSendsTheEndMarkerOnSNDEM|TestLiveErrorIndicationBecomesAnERIRReport|TestLiveGBRSplitsTheMeter' -count=1 -v
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_ROUTE_MODE=${ROUTE_MODE:-hop} \
+  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCarriesNothingOutsideAPortRange|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveSessionSendsTheEndMarkerOnSNDEM|TestLiveErrorIndicationBecomesAnERIRReport|TestLiveEndMarkerBecomesAnEMRRReport|TestLiveGBRSplitsTheMeter' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log, per dump (the helper
 # is shared with ci/n4-path.sh; see its header for why a dump is scoped).

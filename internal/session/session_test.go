@@ -5,6 +5,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +40,9 @@ type recorder struct {
 	// errorCounts is the fake dataplane's GTP-U responders, by module name:
 	// what ErrorCounts answers (finding 15).
 	errorCounts map[string][]bess.ErrorCount
+	// endMarkers is the fake responders' End Marker logs, by module name: what
+	// DrainEndMarkers answers once and then forgets, as the module does.
+	endMarkers map[string][]bess.EndMarker
 	// calls is every counter reading the compiler made, in order: what the
 	// usage-report tick's cost is measured by (one read per module rather than
 	// one per session, report_test.go).
@@ -196,6 +201,17 @@ func (r *recorder) ErrorCounts(_ context.Context, module string, teids ...uint32
 	return out, nil
 }
 
+// DrainEndMarkers answers a GtpuResponder's End Marker log (EndMarkerReader):
+// the events the test seeded, each returned once, as drain_end_markers does.
+func (r *recorder) DrainEndMarkers(_ context.Context, module string) ([]bess.EndMarker, uint64, error) {
+	if r.readFail != nil {
+		return nil, 0, r.readFail
+	}
+	out := r.endMarkers[module]
+	delete(r.endMarkers, module)
+	return out, 0, nil
+}
+
 // PeekRuleCounts is RuleCounts without the window restart (WindowReader): the
 // DDN path's reading, which the fake answers from the same table.
 func (r *recorder) PeekRuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
@@ -248,6 +264,17 @@ func rules(changes []bess.Change) []rule {
 	return out
 }
 
+// changesFor is every change of a transaction naming one resource.
+func changesFor(changes []bess.Change, resource string) []bess.Change {
+	var out []bess.Change
+	for _, ch := range changes {
+		if ch.Resource == resource {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
 type rule struct {
 	change bess.Change
 	values []map[string]any
@@ -260,8 +287,51 @@ func (r rule) mask(i int) []byte { b, _ := r.masks[i]["value_bin"].([]byte); ret
 // value is the value of the rule's field at index i.
 func (r rule) value(i int) []byte { b, _ := r.values[i]["value_bin"].([]byte); return b }
 
-// actionID is the ActionId the rule delivers.
-func (r rule) actionID() uint32 { v, _ := r.change.Value["action_id"].(uint32); return v }
+// result is the classifier's result record: what a matching packet carries
+// into the downstream modules (action id, two meter levels, next hop, and --
+// on the downlink -- the steering policy id).
+func (r rule) result() []byte { b, _ := r.change.Value["result"].([]byte); return b }
+
+// actionID is the ActionId the rule's result carries.
+func (r rule) actionID() uint32 {
+	b := r.result()
+	if len(b) < 4 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b)
+}
+
+// meterIDs are the two meter levels the rule's result carries, in policing
+// order.
+func (r rule) meterIDs() [2]uint32 {
+	var ids [2]uint32
+	b := r.result()
+	if len(b) < 12 {
+		return ids
+	}
+	ids[0] = binary.BigEndian.Uint32(b[4:])
+	ids[1] = binary.BigEndian.Uint32(b[8:])
+	return ids
+}
+
+// nextHop is the Router next hop the rule's result carries.
+func (r rule) nextHop() uint32 {
+	b := r.result()
+	if len(b) < 16 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b[12:])
+}
+
+// steeringID is the MAR steering policy id a downlink rule's result carries
+// (0 without a MAR).
+func (r rule) steeringID() uint32 {
+	b := r.result()
+	if len(b) < 24 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b[20:])
+}
 
 // gate is the gate the rule delivers.
 func (r rule) gate() uint64 { v, _ := r.change.Value["gate"].(uint64); return v }
@@ -270,18 +340,6 @@ func (r rule) gate() uint64 { v, _ := r.change.Value["gate"].(uint64); return v 
 // PDR's Precedence (8.2.11, inverted by rulePriority), which is what decides
 // between two rules of the table that both match a packet.
 func (r rule) priority() int64 { v, _ := r.change.Value["priority"].(int64); return v }
-
-// actionsErased is the action records a transaction takes out: a change with no
-// value, which is what an erase is.
-func actionsErased(changes []bess.Change) []bess.Change {
-	var out []bess.Change
-	for _, ch := range changes {
-		if ch.Value == nil && strings.HasSuffix(ch.Resource, "/actions") {
-			out = append(out, ch)
-		}
-	}
-	return out
-}
 
 // metersErased is actionsErased for meters.
 func metersErased(changes []bess.Change) []bess.Change {
@@ -324,23 +382,29 @@ func onlyErases(changes []bess.Change) []bess.Change {
 	return out
 }
 
-// teidRule is the change carrying a session's TEID rule, or false: the rule's
-// key holds the TEID in one field, values and masks in two lists.
+// teidRule is the change carrying the requested composite-key admission.
 func teidRule(changes []bess.Change, resource string, teid uint32) (bess.Change, bool) {
-	want := []byte{byte(teid >> 24), byte(teid >> 16), byte(teid >> 8), byte(teid)}
 	for _, c := range changes {
-		if c.Resource != resource {
-			continue
-		}
-		values, _ := c.Key["values"].([]map[string]any)
-		if len(values) != 1 {
-			continue
-		}
-		if b, _ := values[0]["value_bin"].([]byte); bytes.Equal(b, want) {
+		if c.Resource == resource && c.Key["teid"] == teid {
 			return c, true
 		}
 	}
 	return bess.Change{}, false
+}
+
+// fteidContextOf is the admission context the transaction's F-TEID entry for
+// teid carries: the value the decap writes and the PDR key must match.
+func fteidContextOf(t *testing.T, changes []bess.Change, teid uint32) uint32 {
+	t.Helper()
+	ch, ok := teidRule(changes, testConfig().GTPUDecap+"/fteids", teid)
+	if !ok {
+		t.Fatalf("no F-TEID admission entry for %#x", teid)
+	}
+	id, _ := ch.Value["context_id"].(uint32)
+	if id == 0 {
+		t.Fatalf("the admission entry for %#x carries no context: %v", teid, ch.Value)
+	}
+	return id
 }
 
 // ruleCarrying finds the rule whose field i carries `want` exactly.
@@ -363,16 +427,11 @@ const (
 
 func testConfig() Config {
 	return Config{
-		// Both tables match the inner IPv4 packet, as deploy/session-live.yaml
-		// declares them: one table per direction, because a rule names an
-		// ActionId and a table declares one actions resource. The uplink table
-		// carries the decap's `qfi` attribute last (8.2.89), the downlink none:
-		// the QFI of a downlink packet is the encap's to write, not a field to
-		// match on.
+		// Both tables match the inner IPv4 packet, the admission context the
+		// decap wrote and the QFI it read; the downlink also keys the route domain.
 		Up: Direction{
 			PDRTable:  "pdr_ul",
-			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, QFI},
-			Actions:   "at_ul",
+			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, FTEIDContext, QFI},
 			Meters:    "mt_ul",
 			Counters:  "cnt_ul",
 			NextHop:   1,
@@ -382,25 +441,24 @@ func testConfig() Config {
 			Tunnels: "enc",
 		},
 		Down: Direction{
-			PDRTable:  "pdr_dl",
-			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort},
-			Actions:   "at_dl",
-			Meters:    "mt_dl",
-			// The access-side route: the downlink's chain holds an ActionTable
-			// too, and a chain whose action names no next hop is a chain the
-			// module fails closed on (deploy/session-path.yaml routes it to the
-			// encap through this hop).
+			PDRTable: "pdr_dl",
+			PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain,
+				FTEIDContext, QFI},
+			Meters: "mt_dl",
+			// The downlink PDR result writes the next-hop ID the Router reads.
+			// A missing `next_hop_id` fails closed; this test uses hop 2, whose
+			// connection in `deploy/session-path.yaml` leads to the encap module.
+			// The tunnel record is selected by the PDR result's ActionId.
 			NextHop:  2,
 			Tunnels:  "enc",
 			Counters: "cnt_dl",
 		},
-		// The F-TEID match, as deploy/smoke-gtpu.yaml wires it: the rule table
-		// in front of the decap, one rule per TEID.
-		TEIDTable: "teid",
-		TEIDGate:  0,
-		N3Addr:    netip.MustParseAddr("192.0.2.1"),
-		N3MAC:     [6]byte{2, 0, 0, 0, 0, 1},
-		PeerMAC:   [6]byte{2, 0, 0, 0, 0, 2},
+		// The configured local F-TEID endpoint.
+		GTPUDecap: "decap",
+		FTEIDEndpoints: []FTEIDEndpoint{{
+			ID: 1, ReferencePoint: "n3", TransportRouteDomain: 1,
+			SourceInterface: ie.SrcInterfaceAccess, IPv4: netip.MustParseAddr("192.0.2.1"),
+		}},
 	}
 }
 
@@ -416,8 +474,7 @@ func establishment(cpSEID uint64, ueIP string) *message.SessionEstablishmentRequ
 }
 
 // establishmentWithFTEID is establishment with the uplink F-TEID spelled out: 0
-// leaves the choice to the UPF (what a conformant SMF does while FTUP is not
-// advertised), and a value pins it.
+// sends CHOOSE (the UPF allocates), and a value pins it.
 func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.SessionEstablishmentRequest {
 	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
 		ie.NewNodeID("", "", "smf"),
@@ -427,7 +484,7 @@ func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.S
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 			),
 			ie.NewFARID(1),
@@ -438,7 +495,7 @@ func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.S
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -462,6 +519,16 @@ func establishmentWithFTEID(cpSEID uint64, ueIP string, fteid uint32) *message.S
 			ie.NewMBR(1000, 2000),
 		),
 	)
+}
+
+// testFTEID is an Access PDI's F-TEID: 0 asks the UPF to choose an IPv4
+// F-TEID (TS 29.244 8.2.3 CH), and any other value pins that TEID on the
+// configured N3 address.
+func testFTEID(teid uint32) *ie.IE {
+	if teid == 0 {
+		return ie.NewFTEID(0x05, 0, nil, nil, 0)
+	}
+	return ie.NewFTEID(0x01, teid, net.ParseIP("192.0.2.1"), nil, 0)
 }
 
 // TestABuffOnlyFARIsADrop pins what this UPF does with the one Apply Action it
@@ -490,10 +557,9 @@ func TestABuffOnlyFARIsADrop(t *testing.T) {
 	if got := r.gate(); got != dropGate {
 		t.Errorf("a BUFF-only FAR gates %d, want the drop gate %d", got, dropGate)
 	}
-	actions := actionsRes(c.cfg.Down)
 	for _, ch := range rec.last() {
-		if ch.Resource == actions {
-			t.Errorf("a BUFF-only FAR wrote an action record in %s", actions)
+		if strings.HasSuffix(ch.Resource, "/actions") {
+			t.Errorf("a BUFF-only FAR wrote an action record in %s", ch.Resource)
 		}
 		if ch.Resource == c.cfg.Down.Tunnels {
 			t.Errorf("a BUFF-only FAR wrote a tunnel record in %s", ch.Resource)
@@ -523,20 +589,20 @@ func TestADeletionErasesEachSharedRecordOnce(t *testing.T) {
 	if got := cause(t, del); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
-	meters, teidRules := 0, 0
+	meters, fteidEntries := 0, 0
 	for _, ch := range rec.last() {
 		if strings.HasSuffix(ch.Resource, "/meters") {
 			meters++
 		}
-		if ch.Resource == testConfig().TEIDTable+"/rules" {
-			teidRules++
+		if ch.Resource == testConfig().GTPUDecap+"/fteids" {
+			fteidEntries++
 		}
 	}
 	if meters != 2 {
 		t.Errorf("the deletion erases %d meter records, want the QER's two (one per policed direction)", meters)
 	}
-	if teidRules != 1 {
-		t.Errorf("the deletion erases %d TEID rules, want one (two uplink PDRs share the F-TEID)", teidRules)
+	if fteidEntries != 1 {
+		t.Errorf("the deletion erases %d F-TEID admission entries, want one (two uplink PDRs share the F-TEID)", fteidEntries)
 	}
 }
 
@@ -549,13 +615,13 @@ func sharedFTEIDEstablishment(cpSEID uint64, ueIP string, fteid uint32) *message
 		ie.NewFSEID(cpSEID, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any 1000 to any", "", "", "", 0)),
 			ie.NewFARID(1), ie.NewQERID(1)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(fteid),
 				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any 2000 to any", "", "", "", 0)),
 			ie.NewFARID(1), ie.NewQERID(1)),
@@ -567,9 +633,8 @@ func sharedFTEIDEstablishment(cpSEID uint64, ueIP string, fteid uint32) *message
 	)
 }
 
-// A closed gate is not a slow path: the compiler writes the rule's own gate as
-// the drop gate and gives it no action, so the packet is dropped where the
-// session's state says it must be, without a lookup into the action table.
+// A closed gate is compiled as the PDR rule's gate with no forwarding result;
+// the packet drops at the classifier before it reaches Meter or Router.
 func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	// A Modify that removes a PDR must erase what that PDR programmed, in the
 	// same transaction as the rest of the change: a rule that keeps selecting
@@ -584,7 +649,7 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	}
 
 	// PDR 1 is the session's only uplink PDR, so its rule, its action, the
-	// session's TEID rule and the uplink meter it is policed by are all its.
+	// session's F-TEID admission entry and its uplink meter are all its.
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewRemovePDR(ie.NewPDRID(1)),
 	)
@@ -596,11 +661,8 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	if r.change.Value != nil {
 		t.Error("the removed PDR's rule was rewritten rather than erased")
 	}
-	if _, ok := teidRule(onlyErases(erases), testConfig().TEIDTable+"/rules", 0x22222222); !ok {
-		t.Error("the removed PDR's TEID rule is still programmed")
-	}
-	if n := len(actionsErased(erases)); n != 1 {
-		t.Errorf("%d action records erased, want the removed PDR's one", n)
+	if _, ok := teidRule(onlyErases(erases), testConfig().GTPUDecap+"/fteids", 0x22222222); !ok {
+		t.Error("the removed PDR's F-TEID admission entry is still programmed")
 	}
 	// The QER outlives the PDR, and compile writes a meter for every QER the
 	// session still holds: erasing that meter here would name one key twice in
@@ -612,7 +674,7 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 
 	// And the records it left behind go when the session does: the removed PDR
 	// is out of the model, so a deletion that walked only the model would leave
-	// its meter, and any TEID rule no one else used, programmed for good.
+	// its meter and any F-TEID admission entry no one else used programmed.
 	del := c.Delete(message.NewSessionDeletionRequest(0, 0, upFSEID(t, resp), 3, 0)).(*message.SessionDeletionResponse)
 	if got := cause(t, del); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
@@ -633,9 +695,8 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	}
 
 	// Now the shared case: two uplink PDRs on one F-TEID and one QER, one of
-	// them removed. Its own records go; the TEID rule and the meter belong to
-	// the PDR that stays, and erasing them would leave that PDR unpoliced and
-	// its packets dropped at the decap's default gate.
+	// them removed. The shared admission entry and meter remain for the PDR that
+	// stays; erasing either would bypass decapsulation or policing.
 	rec = &recorder{}
 	c = New(testConfig(), rec, quietLogger())
 	resp = c.Establish(sharedFTEIDEstablishment(0x7771, "10.45.0.7", 0x33333333)).(*message.SessionEstablishmentResponse)
@@ -649,14 +710,11 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 		t.Fatalf("the modification answered cause %d", got)
 	}
 	erases = rec.last()
-	if _, ok := teidRule(onlyErases(erases), testConfig().TEIDTable+"/rules", 0x33333333); ok {
-		t.Error("the removal erased a TEID rule the surviving PDR still needs")
+	if _, ok := teidRule(onlyErases(erases), testConfig().GTPUDecap+"/fteids", 0x33333333); ok {
+		t.Error("the removal erased an F-TEID admission entry the surviving PDR still needs")
 	}
 	if n := len(metersErased(erases)); n != 0 {
 		t.Errorf("%d meter records erased, want none: the surviving PDR uses the meter", n)
-	}
-	if n := len(actionsErased(erases)); n != 1 {
-		t.Errorf("%d action records erased, want the removed PDR's one", n)
 	}
 }
 
@@ -744,7 +802,7 @@ func TestAnUpdateThatChangesTheKeyErasesTheOldRule(t *testing.T) {
 		ie.NewFSEID(0x8880, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -755,15 +813,15 @@ func TestAnUpdateThatChangesTheKeyErasesTheOldRule(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	old := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0})
-	actionID := old.change.Value["action_id"]
-	if actionID == nil || actionID == uint32(0) {
+	actionID := old.actionID()
+	if actionID == 0 {
 		t.Fatalf("the establishment gave the PDR no action (%v)", actionID)
 	}
 
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.20.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(1)),
 	)
@@ -778,7 +836,7 @@ func TestAnUpdateThatChangesTheKeyErasesTheOldRule(t *testing.T) {
 	if written.change.Value == nil {
 		t.Fatal("the new key was not written")
 	}
-	if got := written.change.Value["action_id"]; got != actionID {
+	if got := written.actionID(); got != actionID {
 		t.Errorf("the update gave the PDR action %v, want the one it had (%v)", got, actionID)
 	}
 	assertNoRepeat(t, txn)
@@ -797,7 +855,7 @@ func TestADeletionErasesTheOldKeyOfARefusedUpdate(t *testing.T) {
 		ie.NewFSEID(0x8890, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -812,7 +870,7 @@ func TestADeletionErasesTheOldKeyOfARefusedUpdate(t *testing.T) {
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.20.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(1)),
 	)
@@ -844,7 +902,7 @@ func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
 		ie.NewFSEID(0x8891, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -854,12 +912,12 @@ func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	actionID := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0}).change.Value["action_id"]
+	actionID := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0}).actionID()
 
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
 			ie.NewFARID(2)),
 		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
@@ -876,7 +934,7 @@ func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
 	if written.change.Value == nil {
 		t.Fatal("the update did not write the rule")
 	}
-	if got := written.change.Value["action_id"]; got != actionID {
+	if got := written.actionID(); got != actionID {
 		t.Errorf("the update gave the PDR action %v, want the one it had (%v)", got, actionID)
 	}
 }
@@ -919,10 +977,73 @@ func TestACHRequestIsAllocatedWhateverItsFamilyFlag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading the Created PDR's F-TEID: %v", err)
 		}
+		if !fields.HasIPv4() || fields.HasIPv6() ||
+			!net.IP(fields.IPv4Address).Equal(net.ParseIP("192.0.2.1")) {
+			t.Errorf("Created PDR family/address flags are V4=%v V6=%v IPv4=%v",
+				fields.HasIPv4(), fields.HasIPv6(), fields.IPv4Address)
+		}
 		teid = fields.TEID
 	}
 	if teid == 0 {
 		t.Error("the answer carries no allocated TEID")
+	}
+}
+func TestCHOOSEV6AndDualStackCreatedFTEIDFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		flags        uint8
+		want4, want6 bool
+	}{
+		{"IPv6", 0x06, false, true},
+		{"dual stack", 0x07, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.FTEIDEndpoints = []FTEIDEndpoint{{
+				ID: 1, ReferencePoint: "n3", TransportRouteDomain: 1,
+				SourceInterface: ie.SrcInterfaceAccess,
+				IPv4:            netip.MustParseAddr("192.0.2.1"),
+				IPv6:            netip.MustParseAddr("2001:4860::1"),
+			}}
+			c := New(cfg, &recorder{}, quietLogger())
+			cpSEID := uint64(0x9991)
+			req := message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+				ie.NewFSEID(cpSEID, nil, nil),
+				ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+					ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+						ie.NewFTEID(tc.flags, 0, nil, nil, 0),
+						ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+					ie.NewFARID(1)),
+				ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+					ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+			)
+			resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+			if got := cause(t, resp); got != ie.CauseRequestAccepted {
+				t.Fatalf("CH request answered cause %d", got)
+			}
+			children, err := resp.CreatedPDR[0].CreatedPDR()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, child := range children {
+				if child.Type != ie.FTEID {
+					continue
+				}
+				fields, err := child.FTEID()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fields.HasIPv4() != tc.want4 || fields.HasIPv6() != tc.want6 {
+					t.Errorf("flags V4=%v V6=%v, want %v/%v", fields.HasIPv4(), fields.HasIPv6(), tc.want4, tc.want6)
+				}
+				if tc.want4 && !net.IP(fields.IPv4Address).Equal(net.ParseIP("192.0.2.1")) {
+					t.Errorf("IPv4 address %v is incorrect", fields.IPv4Address)
+				}
+				if tc.want6 && !net.IP(fields.IPv6Address).Equal(net.ParseIP("2001:4860::1")) {
+					t.Errorf("IPv6 address %v is incorrect", fields.IPv6Address)
+				}
+			}
+		})
 	}
 }
 
@@ -1016,7 +1137,8 @@ func TestARefusedModificationKeepsTheCHIDItAllocated(t *testing.T) {
 		t.Fatalf("the dataplane refused the modification and the SMF was told cause %d", got)
 	}
 	c.mu.Lock()
-	held, has := c.sessions[upFSEID(t, resp)].chids[9]
+	chosen, has := c.sessions[upFSEID(t, resp)].chids[9]
+	held := chosen.TEID
 	queued := len(c.teids.freed)
 	c.mu.Unlock()
 	if !has {
@@ -1043,7 +1165,7 @@ func TestARefusedModificationKeepsTheCHIDItAllocated(t *testing.T) {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
 	c.mu.Lock()
-	_, mapped := c.byTEID[held]
+	_, mapped := c.fteidTEIDKeys[held]
 	queued = len(c.teids.freed)
 	c.mu.Unlock()
 	if mapped {
@@ -1060,8 +1182,8 @@ func TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID(t *testing.T) {
 	// CHOOSE ID value". Two uplink PDIs that are two filters on one tunnel are
 	// the shape that asks for it, and without the CHOOSE ID each would get a
 	// TEID of its own: the answer names one TEID in both Created PDRs, and the
-	// transaction writes one TEID rule -- which is also what the engine takes,
-	// since it rejects a second operation on one (resource, key).
+	// transaction writes one composite F-TEID admission entry for the group.
+	// The transaction engine accepts one operation per (resource, key).
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(chidEstablishment(0x9992, "10.45.0.6", 5, 5)).(*message.SessionEstablishmentResponse)
@@ -1077,17 +1199,17 @@ func TestUplinkPDIsWithOneCHOOSEIDShareOneFTEID(t *testing.T) {
 	}
 	changes := rec.last()
 	assertNoRepeat(t, changes)
-	teids := 0
+	entries := 0
 	for _, ch := range changes {
-		if ch.Resource == testConfig().TEIDTable+"/rules" {
-			teids++
+		if ch.Resource == testConfig().GTPUDecap+"/fteids" {
+			entries++
 		}
 	}
-	if teids != 1 {
-		t.Errorf("the transaction writes %d TEID rules, want one for the group", teids)
+	if entries != 1 {
+		t.Errorf("the transaction writes %d F-TEID admission entries, want one for the group", entries)
 	}
-	if _, ok := teidRule(changes, testConfig().TEIDTable+"/rules", one); !ok {
-		t.Errorf("the transaction writes no TEID rule for %#x, the TEID it answered with", one)
+	if _, ok := teidRule(changes, testConfig().GTPUDecap+"/fteids", one); !ok {
+		t.Errorf("the transaction writes no F-TEID admission entry for %#x", one)
 	}
 	// The group is the tunnel, not the filter: each PDI still has its own rule.
 	if n := len(rules(changes)); n != 2 {
@@ -1116,9 +1238,109 @@ func TestTwoCHOOSEIDsGetTwoFTEIDs(t *testing.T) {
 	changes := rec.last()
 	assertNoRepeat(t, changes)
 	for _, teid := range []uint32{one, two} {
-		if _, ok := teidRule(changes, testConfig().TEIDTable+"/rules", teid); !ok {
-			t.Errorf("the transaction writes no TEID rule for %#x", teid)
+		if _, ok := teidRule(changes, testConfig().GTPUDecap+"/fteids", teid); !ok {
+			t.Errorf("the transaction writes no F-TEID admission entry for %#x", teid)
 		}
+	}
+}
+
+func TestCHOOSEIDStateIsScopedToPFCPSession(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	first := c.Establish(chidEstablishment(0x99a1, "10.45.0.21", 5, 5)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, first); got != ie.CauseRequestAccepted {
+		t.Fatalf("the first session answered cause %d", got)
+	}
+	firstTEID := createdTEID(t, first.CreatedPDR, 1)
+	if firstTEID == 0 || createdTEID(t, first.CreatedPDR, 2) != firstTEID {
+		t.Fatal("the first session did not receive one shared F-TEID for CHOOSE ID 5")
+	}
+
+	second := c.Establish(chidEstablishment(0x99a2, "10.45.0.22", 5, 5)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, second); got != ie.CauseRequestAccepted {
+		t.Fatalf("a separate session reusing CHOOSE ID 5 answered cause %d", got)
+	}
+	secondTEID := createdTEID(t, second.CreatedPDR, 1)
+	if secondTEID == 0 || createdTEID(t, second.CreatedPDR, 2) != secondTEID {
+		t.Fatal("the second session did not receive one shared F-TEID for CHOOSE ID 5")
+	}
+	if secondTEID == firstTEID {
+		t.Fatalf("separate PFCP sessions share F-TEID %#x for the same CHOOSE ID", secondTEID)
+	}
+
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upFSEID(t, first), 3, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("deleting the first session answered cause %d", got)
+	}
+	reuse := c.Establish(establishmentWithFTEID(0x99a3, "10.45.0.23", firstTEID))
+	if got := cause(t, reuse); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deleted session's F-TEID %#x was not released: cause %d", firstTEID, got)
+	}
+
+	writes := len(rec.txns)
+	collision := c.Establish(establishmentWithFTEID(0x99a4, "10.45.0.24", secondTEID))
+	if got := cause(t, collision); got != ie.CauseNoResourcesAvailable {
+		t.Fatalf("a third session claimed the live second session's F-TEID %#x with cause %d, want 75",
+			secondTEID, got)
+	}
+	if len(rec.txns) != writes {
+		t.Fatal("the refused cross-session F-TEID claim reached the dataplane")
+	}
+}
+
+func TestSharedCHIDMustKeepTheSameEndpointFamilySet(t *testing.T) {
+	cfg := testConfig()
+	cfg.FTEIDEndpoints[0].IPv6 = netip.MustParseAddr("2001:4860::1")
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	cpSEID := uint64(0x9998)
+	req := message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+		ie.NewFSEID(cpSEID, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x0d, 0, nil, nil, 5),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x0e, 0, nil, nil, 5),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	resp := c.Establish(req)
+	if got := cause(t, resp); got == ie.CauseRequestAccepted {
+		t.Fatal("shared CHID accepted different requested family sets")
+	}
+	if len(rec.txns) != 0 {
+		t.Fatal("family-set mismatch reached Apply")
+	}
+	c.mu.Lock()
+	owners, reserved := len(c.byFTEID), len(c.fteidTEIDKeys)
+	c.mu.Unlock()
+	if owners != 0 || reserved != 0 {
+		t.Fatalf("failed shared CHID left ownership behind: owners=%d TEID refs=%d", owners, reserved)
+	}
+}
+func TestZeroTEIDRequiresChooseFlag(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	cpSEID := uint64(0x9999)
+	req := message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,
+		ie.NewFSEID(cpSEID, nil, nil),
+		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewFTEID(0x01, 0, nil, nil, 0),
+				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
+			ie.NewFARID(1)),
+		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+	)
+	if got := cause(t, c.Establish(req)); got == ie.CauseRequestAccepted {
+		t.Fatal("TEID 0 without CHOOSE was accepted")
+	}
+	if len(rec.txns) != 0 {
+		t.Fatal("invalid TEID 0 reached Apply")
 	}
 }
 
@@ -1184,11 +1406,10 @@ func TestAModificationThatAsksForNoFTEIDIsAnsweredWithNone(t *testing.T) {
 
 func TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI(t *testing.T) {
 	// The session holds an F-TEID per group while a PDR of that group is live.
-	// Once the last one is gone the TEID is back in the pool, and a PDI created
-	// later with the same CHOOSE ID must not be handed it from a stale
-	// grouping: the pool may have given the value to another session by then,
-	// and two sessions naming one TEID rule is two sessions' uplink landing in
-	// whichever wrote it last.
+	// Once the last PDR is gone the TEID returns to the pool. A later PDR with
+	// the same CHOOSE ID must not reuse it from a stale group: another session
+	// may own the value by then, causing a cross-session full-key conflict that
+	// the compiler must reject.
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(chidEstablishment(0x9995, "10.45.0.9", 9, 9)).(*message.SessionEstablishmentResponse)
@@ -1220,14 +1441,10 @@ func TestACHOOSEIDsFTEIDIsLetGoWithItsLastPDI(t *testing.T) {
 	}
 }
 
-func TestACHOOSEForIPv6IsRefused(t *testing.T) {
-	// 8.2.3: with the CH bit set, "the UP function shall assign an F-TEID with
-	// an IP4 or an IPv6 address if the V4 or V6 bit is set respectively". A
-	// request with V6 alone is therefore for an IPv6 F-TEID, and this UP's N3
-	// address is IPv4: answering with an IPv4 one would hand the SMF a family
-	// it did not ask for. IPv6 has no form anywhere else in this tree either
-	// (docs/claims.md), so it is refused, with a rule failure the SMF can
-	// act on -- not an accepted session it cannot use.
+// testConfig configures N3 with IPv4 only. A V6-only CHOOSE request cannot be
+// answered with that endpoint's IPv4 address; the compiler must refuse it.
+// TestCHOOSEV6AndDualStackCreatedFTEIDFlags covers configured IPv6 endpoints.
+func TestACHOOSEForIPv6RequiresConfiguredEndpoint(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	req := message.NewSessionEstablishmentRequest(0, 0, 0x9996, 1, 0,
@@ -1248,33 +1465,44 @@ func TestACHOOSEForIPv6IsRefused(t *testing.T) {
 	}
 }
 
-func TestACHOOSEForBothFamiliesGetsTheIPv4FTEID(t *testing.T) {
-	// The other shapes 8.2.3 allows, and the one it does not: V4 alone is what
-	// an SMF sends, V4|V6 asks for an address of either family ("if the V4 or
-	// V6 bit is set"), and a CH bit with no family at all names none -- a shape
-	// the section forbids and no SMF sends, kept lenient because nothing about
-	// it asks for an address this UP does not have. All three are answered with
-	// the IPv4 N3 address the UPF has.
-	for _, flags := range []uint8{0x05, 0x07, 0x04} {
+func TestCHOOSEFamiliesMustExistOnTheEndpoint(t *testing.T) {
+	// TS 29.244 8.2.3 asks the UP to assign an IPv4 or IPv6 F-TEID address
+	// when the V4 or V6 bit is set respectively. testConfig's N3 endpoint is
+	// IPv4-only: V4 is served, a family-less CH is read as IPv4, and V4|V6 is
+	// refused because the endpoint cannot supply the IPv6 half.
+	for _, tc := range []struct {
+		flags uint8
+		want  uint8
+	}{
+		{0x05, ie.CauseRequestAccepted},
+		{0x04, ie.CauseRequestAccepted},
+		{0x07, ie.CauseRuleCreationModificationFailure},
+	} {
 		rec := &recorder{}
 		c := New(testConfig(), rec, quietLogger())
 		req := message.NewSessionEstablishmentRequest(0, 0, 0x9997, 1, 0,
 			ie.NewFSEID(0x9997, nil, nil),
 			ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-					ie.NewFTEID(flags, 0, nil, nil, 0),
+					ie.NewFTEID(tc.flags, 0, nil, nil, 0),
 					ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
 				ie.NewFARID(1)),
 			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
 				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 		)
 		resp := c.Establish(req).(*message.SessionEstablishmentResponse)
-		if got := cause(t, resp); got != ie.CauseRequestAccepted {
-			t.Errorf("a CHOOSE request with flags %#x answered cause %d", flags, got)
+		if got := cause(t, resp); got != tc.want {
+			t.Errorf("a CHOOSE request with flags %#x answered cause %d, want %d", tc.flags, got, tc.want)
+			continue
+		}
+		if tc.want != ie.CauseRequestAccepted {
+			if len(rec.txns) != 0 {
+				t.Errorf("a refused CHOOSE request with flags %#x wrote to the dataplane", tc.flags)
+			}
 			continue
 		}
 		if teid := createdTEID(t, resp.CreatedPDR, 1); teid == 0 {
-			t.Errorf("a CHOOSE request with flags %#x carries no allocated TEID", flags)
+			t.Errorf("a CHOOSE request with flags %#x carries no allocated TEID", tc.flags)
 		}
 	}
 }
@@ -1362,7 +1590,7 @@ func TestARefusedMoveKeepsTheKeysRule(t *testing.T) {
 		return message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 			ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-					ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
+					ie.NewUEIPAddress(0x06, "10.45.0.7", "", 0, 0),
 					ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
 				ie.NewFARID(2)),
 		)
@@ -1385,7 +1613,7 @@ func TestARefusedMoveKeepsTheKeysRule(t *testing.T) {
 				ie.NewFARID(1)),
 			ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
 				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-					ie.NewUEIPAddress(0x02, "10.45.0.5", "", 0, 0),
+					ie.NewUEIPAddress(0x06, "10.45.0.5", "", 0, 0),
 					ie.NewSDFFilter("permit out udp from any to 10.45.0.2/32 53", "", "", "", 0)),
 				ie.NewFARID(2)),
 			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -1503,14 +1731,13 @@ func qfiField(t *testing.T) int {
 }
 
 // uplinkPDR is a Create PDR for the session's uplink: the PDI's source
-// interface, the F-TEID the SMF pinned (0 leaves the choice to us, as a
-// conformant SMF does), the UE address, the SDF filter it names (empty when the
-// PDI constrains nothing but the address) and -- when qfi is not 0 -- the QoS
-// flow the PDI names (TS 29.244 8.2.89).
+// interface, pinned F-TEID (0 leaves the choice to us), UE address and SDF
+// filter. This test helper uses a nonzero qfi argument to add a QFI IE; tests
+// for valid QFI 0 construct `ie.NewQFI(0)` directly.
 func uplinkPDR(id uint16, precedence uint32, ueIP string, fteid uint32, sdf string, qfi uint8) *ie.IE {
 	pdi := []*ie.IE{
 		ie.NewSourceInterface(ie.SrcInterfaceAccess),
-		ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+		testFTEID(fteid),
 		ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 	}
 	if sdf != "" {
@@ -1563,8 +1790,8 @@ func TestAPDINamingAQFIKeysTheRuleOnIt(t *testing.T) {
 	if got := r.actionID(); got == 0 {
 		t.Fatal("the rule names no action")
 	}
-	action := find(t, rec.last(), testConfig().Up.Actions+"/actions", "id", r.actionID())
-	if got := action.Value["next_hop_id"]; got != uint32(1) {
+	action := actionFields(t, rec.last(), testConfig().Up, r.actionID())
+	if got := action["next_hop_id"]; got != uint32(1) {
 		t.Errorf("the rule's action takes next hop %v, want the uplink's", got)
 	}
 }
@@ -1636,12 +1863,12 @@ func TestTwoUplinkPDRsToldApartByQFIAreTwoRules(t *testing.T) {
 	}
 }
 
-// flowPDR is uplinkPDR with the QER the flow names: the per-flow case, where
-// two PDRs of one session differ only by QFI and by their own QER.
+// flowPDR is uplinkPDR with the QER the flow names. As a test helper, qfi=0
+// means no QFI IE; tests for the valid QFI 0 use an explicit IE.
 func flowPDR(id uint16, precedence uint32, ueIP string, fteid uint32, qfi uint8, qerID uint32) *ie.IE {
 	pdi := []*ie.IE{
 		ie.NewSourceInterface(ie.SrcInterfaceAccess),
-		ie.NewFTEID(0x01, fteid, net.ParseIP("192.0.2.1"), nil, 0),
+		testFTEID(fteid),
 		ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
 	}
 	if qfi != 0 {
@@ -1692,9 +1919,8 @@ func TestTwoQFIKeyedPDRsGetTheirOwnMeters(t *testing.T) {
 	if specific.actionID() == general.actionID() {
 		t.Fatal("the two flows share one action, so one QER would serve both")
 	}
-	up := testConfig().Up.Actions + "/actions"
 	meter := func(r rule) any {
-		return find(t, rec.last(), up, "id", r.actionID()).Value["meter_id"]
+		return actionFields(t, rec.last(), testConfig().Up, r.actionID())["meter_id"]
 	}
 	first, second := meter(specific), meter(general)
 	if first == uint32(0) || second == uint32(0) {
@@ -1705,73 +1931,6 @@ func TestTwoQFIKeyedPDRsGetTheirOwnMeters(t *testing.T) {
 	}
 }
 
-// assertActionRecords holds the daemon's own invariant: a rule's action_id is a
-// *reference* (D-021; transaction_engine.cc checks it on the transaction's end
-// state), so every rule naming an id must be joined by an upsert of that id in
-// the same transaction. The buffering path broke it -- it allocated the flow's
-// store key as an ActionId and wrote no record -- and only the live arm showed
-// it, because nothing in the unit tests walked the transaction looking for the
-// reference.
-func assertActionRecords(t *testing.T, cfg Config, changes []bess.Change) {
-	t.Helper()
-	for _, dir := range []struct{ rules, actions string }{
-		{rulesRes(cfg.Up), actionsRes(cfg.Up)},
-		{rulesRes(cfg.Down), actionsRes(cfg.Down)},
-	} {
-		written := map[uint32]bool{}
-		for _, ch := range changes {
-			if ch.Resource == dir.actions {
-				if id, ok := ch.Key["id"].(uint32); ok {
-					written[id] = true
-				}
-			}
-		}
-		for _, ch := range changes {
-			if ch.Resource != dir.rules {
-				continue
-			}
-			id, _ := ch.Value["action_id"].(uint32)
-			if id != 0 && !written[id] {
-				t.Errorf("a rule in %s names action %d, and no upsert in %s writes it: the daemon refuses the transaction",
-					dir.rules, id, dir.actions)
-			}
-		}
-	}
-}
-
-// TestEveryRulesActionIdHasAnActionRecord runs the invariant over a fresh
-// establishment of each kind -- forwarding and buffering -- because that is the
-// shape the live arm failed on.
-func TestEveryRulesActionIdHasAnActionRecord(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		cfg  Config
-		req  *message.SessionEstablishmentRequest
-	}{
-		{"a forwarding session", testConfig(), establishment(0x9201, "10.45.0.9")},
-		{"a buffering session", bufferingConfig(), buffEstablishment(0x9202, "10.45.0.9")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := &recorder{}
-			c := New(tc.cfg, rec, quietLogger())
-			if got := cause(t, c.Establish(tc.req)); got != ie.CauseRequestAccepted {
-				t.Fatalf("the establishment answered cause %d", got)
-			}
-			assertActionRecords(t, tc.cfg, rec.last())
-		})
-	}
-}
-
-// TestThePrecedenceIsInvertedIntoTheClassifiersPriority: PFCP orders PDRs one
-// way and the classifier the other. 8.2.11: "the lower precedence values
-// indicate higher precedence of the PDR, and the higher precedence values
-// indicate lower precedence of the PDR when matching a packet"; WildcardMatch:
-// "the rule with higher priority will be applied" (module_msg.proto:347). A
-// compiler that copied the Precedence into the priority would therefore invert
-// the SMF's ordering -- of two overlapping PDRs (an SDF-specific rule the SMF
-// gave 10 beside a catch-all it gave 20) the catch-all would take the flow's
-// traffic. Every rule carries the inversion: the PDR rules and the TEID rule in
-// front of the decap.
 func TestThePrecedenceIsInvertedIntoTheClassifiersPriority(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
@@ -1808,19 +1967,18 @@ func TestThePrecedenceIsInvertedIntoTheClassifiersPriority(t *testing.T) {
 		t.Errorf("the SMF's higher-precedence PDR carries priority %d, not above the other's %d: the ordering is inverted",
 			flow.priority(), general.priority())
 	}
-	if action := find(t, rec.last(), actionsRes(testConfig().Up), "id", flow.actionID()); action.Value["next_hop_id"] != uint32(1) {
-		t.Errorf("the winning rule's action is not its PDR's: %v", action.Value)
+	if action := actionFields(t, rec.last(), testConfig().Up, flow.actionID()); action["next_hop_id"] != uint32(1) {
+		t.Errorf("the winning rule's result is not its PDR's: %v", action)
 	}
-	// The TEID rule in front of the decap is inverted the same way: it is
-	// written once for the session, from the first PDR's Precedence (PDR 1's
-	// 10 here), and a G-PDU matches at most one TEID rule, so the value only
-	// has to be the same mapping every other rule uses.
-	teid, ok := teidRule(rec.last(), testConfig().TEIDTable+"/rules", 0x11223344)
+	// F-TEID admission is an exact composite-key lookup, not a precedence
+	// classifier. Its entry carries the direction for this endpoint key; PDR
+	// precedence remains in the inner classifier.
+	teid, ok := teidRule(rec.last(), testConfig().GTPUDecap+"/fteids", 0x11223344)
 	if !ok {
-		t.Fatal("no TEID rule for the pinned F-TEID")
+		t.Fatal("no F-TEID admission entry for the pinned endpoint")
 	}
-	if want := int64(math.MaxUint32) - 10; teid.Value["priority"] != want {
-		t.Errorf("the TEID rule's priority is %v, want Precedence 10's %d", teid.Value["priority"], want)
+	if got, _ := teid.Value["direction"].(uint32); got != 0 {
+		t.Errorf("the admission direction is %v, want UL (0)", got)
 	}
 }
 
@@ -1892,7 +2050,7 @@ func downlinkPDRWithQER(id uint16, ueIP string, qerID uint32) *ie.IE {
 		ie.NewPrecedence(100),
 		ie.NewPDI(
 			ie.NewSourceInterface(ie.SrcInterfaceCore),
-			ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+			ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 			ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
 		),
 		ie.NewFARID(2),
@@ -1903,9 +2061,8 @@ func downlinkPDRWithQER(id uint16, ueIP string, qerID uint32) *ie.IE {
 // TestAQERsQFIReachesTheTunnelRecord: the QFI a downlink packet must carry in
 // its PDU Session Container (8.2.89) is the QER's, and the graph's encap reads
 // it from the tunnel record the FAR's outer header creation writes -- keyed, as
-// the record is, by the ActionId the PDR's rule carries. A QER that names no
-// flow leaves the field out of the record: 0 is not a QFI, and the encap then
-// writes no container.
+// the record is, by the ActionId the PDR's rule carries. `qfi_present` keeps a
+// valid QFI 0 distinct from a QER that names no QFI (TS 38.415 5.5.3.3).
 func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 	tunnelOf := func(t *testing.T, rec *recorder, ue string) bess.Change {
 		t.Helper()
@@ -1928,9 +2085,12 @@ func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 	if got := tunnelOf(t, rec, "10.45.0.2").Value["qfi"]; got != uint32(5) {
 		t.Errorf("the tunnel record carries QFI %v (%T), want the QER's 5", got, got)
 	}
+	if got := tunnelOf(t, rec, "10.45.0.2").Value["qfi_present"]; got != true {
+		t.Errorf("the tunnel record qfi_present is %v, want true", got)
+	}
 
-	// A second session, whose QER names no flow: the field is absent from its
-	// record rather than zero, since 0 means "write no container".
+	// A second session, whose QER names no flow: neither QFI field is present
+	// in the resource, so the encap omits the PDU Session Container.
 	noFlow := establishment(0x9105, "10.45.0.3")
 	noFlow.CreatePDR[1] = downlinkPDRWithQER(2, "10.45.0.3", 1)
 	if got := cause(t, c.Establish(noFlow)); got != ie.CauseRequestAccepted {
@@ -1939,11 +2099,12 @@ func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 	if got, ok := tunnelOf(t, rec, "10.45.0.3").Value["qfi"]; ok {
 		t.Errorf("the tunnel record of a QER with no QFI carries %v, want no field", got)
 	}
+	if got, ok := tunnelOf(t, rec, "10.45.0.3").Value["qfi_present"]; ok {
+		t.Errorf("the tunnel record of a QER with no QFI carries qfi_present=%v, want no field", got)
+	}
 
-	// A third, whose QER names QFI 0 -- in the spec's range, and what OMEC's
-	// pfcpsim sends unless told otherwise: it marks nothing, the same record
-	// as a QER with no QFI. It used to be refused, and with it every session
-	// of that simulator.
+	// A third, whose QER names QFI 0: it is a valid QFI, not absence. The
+	// tunnel record must therefore request a PDU Session Container carrying 0.
 	zero := establishment(0x9106, "10.45.0.4")
 	zero.CreatePDR[1] = downlinkPDRWithQER(2, "10.45.0.4", 1)
 	zero.CreateQER[0] = ie.NewCreateQER(
@@ -1954,8 +2115,11 @@ func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 	if got := cause(t, c.Establish(zero)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a QER naming QFI 0 answered cause %d, want accepted", got)
 	}
-	if got, ok := tunnelOf(t, rec, "10.45.0.4").Value["qfi"]; ok {
-		t.Errorf("the tunnel record of a QER naming QFI 0 carries %v, want no field", got)
+	if got, ok := tunnelOf(t, rec, "10.45.0.4").Value["qfi"]; !ok || got != uint32(0) {
+		t.Errorf("the tunnel record of a QER naming QFI 0 carries %v, present=%t; want present zero", got, ok)
+	}
+	if got := tunnelOf(t, rec, "10.45.0.4").Value["qfi_present"]; got != true {
+		t.Errorf("the tunnel record qfi_present is %v, want true for QFI 0", got)
 	}
 }
 
@@ -2109,17 +2273,13 @@ func TestAClosedGateDropsWithoutAnAction(t *testing.T) {
 	if got := r.gate(); got != dropGate {
 		t.Errorf("a closed gate's rule gates %d, want the drop gate %d", got, dropGate)
 	}
-	// The action_id the compiler writes for a drop is a uint32 zero; a check
-	// against a value of another type would pass whatever the field held.
-	if got, ok := r.change.Value["action_id"].(uint32); !ok || got != 0 {
-		t.Errorf("a closed gate's rule names action %v (%T), want none", got, r.change.Value["action_id"])
+	// A drop's result is all zero: no action id, no meter and no next hop.
+	if got := r.actionID(); got != 0 {
+		t.Errorf("a closed gate's rule names action %d, want none", got)
 	}
-	// The resource is the compiler's own name for the uplink's actions: a
-	// literal here would keep passing if the config named the table otherwise.
-	actions := actionsRes(c.cfg.Up)
 	for _, ch := range rec.last() {
-		if ch.Resource == actions {
-			t.Errorf("a closed gate wrote an action record in %s", actions)
+		if strings.HasSuffix(ch.Resource, "/actions") {
+			t.Errorf("a closed gate wrote an action record in %s", ch.Resource)
 		}
 	}
 }
@@ -2164,8 +2324,8 @@ func TestAQuotaExhaustedURRDropsItsPDRs(t *testing.T) {
 	if got := enforced.gate(); got != dropGate {
 		t.Errorf("with the URR's quota used up the rule gates %d, want the drop gate %d", got, dropGate)
 	}
-	if got, ok := enforced.change.Value["action_id"].(uint32); !ok || got != 0 {
-		t.Errorf("the dropped rule names action %v (%T), want none", got, enforced.change.Value["action_id"])
+	if got := enforced.actionID(); got != 0 {
+		t.Errorf("the dropped rule names action %d, want none", got)
 	}
 
 	// A new quota is the SMF's own lever for re-opening the traffic
@@ -2253,19 +2413,22 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 		t.Errorf("the Created PDR's address is %s, want the UPF's N3 address", got)
 	}
 
-	// The TEID is what makes an uplink G-PDU ours: a rule of the table in
-	// front of the decap, holding the TEID itself.
-	rule, ok := teidRule(changes, testConfig().TEIDTable+"/rules", fteid.TEID)
+	// This uplink G-PDU is admitted only by its endpoint-scoped F-TEID key:
+	// endpoint, family, local address and TEID.
+	rule, ok := teidRule(changes, testConfig().GTPUDecap+"/fteids", fteid.TEID)
 	if !ok {
-		t.Fatalf("no TEID rule for %#x among %d changes", fteid.TEID, len(changes))
+		t.Fatalf("no F-TEID admission entry for %#x among %d changes", fteid.TEID, len(changes))
 	}
-	if got := rule.Value["gate"]; got != uint64(testConfig().TEIDGate) {
-		t.Errorf("the TEID rule delivers on gate %v, want the decap's", got)
+	if got := rule.Value["direction"]; got != uint32(0) {
+		t.Errorf("the admission direction is %v, want UL (0)", got)
 	}
-	masks, _ := rule.Key["masks"].([]map[string]any)
-	mask, _ := masks[0]["value_bin"].([]byte)
-	if !bytes.Equal(mask, []byte{0xff, 0xff, 0xff, 0xff}) {
-		t.Errorf("the TEID rule's mask is %v, want all ones", mask)
+	if rule.Key["endpoint_id"] != uint32(1) || rule.Key["address_family"] != uint32(4) ||
+		rule.Key["teid"] != fteid.TEID {
+		t.Errorf("the admission key is not endpoint-scoped: %v", rule.Key)
+	}
+	local, _ := rule.Key["local_address"].([]byte)
+	if len(local) != 4 || !bytes.Equal(local, netip.MustParseAddr("192.0.2.1").AsSlice()) {
+		t.Errorf("the admission local address is %v, want 192.0.2.1", local)
 	}
 
 	// One rule per PDR: the uplink matches the UE as the source, the downlink
@@ -2297,15 +2460,15 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 	}
 
 	// The action resolves the FAR and the QER.
-	ulAction := find(t, changes, testConfig().Up.Actions+"/actions", "id", ul.actionID())
-	if got := ulAction.Value["next_hop_id"]; got != uint32(1) {
+	ulAction := actionFields(t, changes, testConfig().Up, ul.actionID())
+	if got := ulAction["next_hop_id"]; got != uint32(1) {
 		t.Errorf("the uplink action's next hop is %v, want the N6 next hop", got)
 	}
-	if got := ulAction.Value["meter_id"]; got == uint32(0) {
+	if got := ulAction["meter_id"]; got == uint32(0) {
 		t.Error("a PDR whose QER has an MBR must name its meter")
 	}
-	dlAction := find(t, changes, testConfig().Down.Actions+"/actions", "id", dl.actionID())
-	if got := dlAction.Value["next_hop_id"]; got != uint32(2) {
+	dlAction := actionFields(t, changes, testConfig().Down, dl.actionID())
+	if got := dlAction["next_hop_id"]; got != uint32(2) {
 		t.Errorf("the downlink action's next hop is %v, want the access side's (2)", got)
 	}
 
@@ -2314,8 +2477,14 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 	if got := tunnel.Value["teid"]; got != uint32(0x11223344) {
 		t.Errorf("the tunnel's TEID is %v, want the FAR's", got)
 	}
-	if got := tunnel.Value["gnb_ip"]; got != "10.20.30.2" {
-		t.Errorf("the tunnel's peer is %v, want the FAR's", got)
+	if got := tunnel.Value["local_address"]; !bytes.Equal(got.([]byte), netip.MustParseAddr("192.0.2.1").AsSlice()) {
+		t.Errorf("the tunnel's local source is %v, want 192.0.2.1", got)
+	}
+	if got := tunnel.Value["peer_address"]; !bytes.Equal(got.([]byte), netip.MustParseAddr("10.20.30.2").AsSlice()) {
+		t.Errorf("the tunnel's peer is %v, want 10.20.30.2", got)
+	}
+	if got := tunnel.Value["transport_route_domain"]; got != uint32(1) {
+		t.Errorf("the tunnel transport route domain is %v, want 1", got)
 	}
 	if _, ok := find0(changes, testConfig().Down.Tunnels+"/tunnels", "action_id", ul.actionID()); ok {
 		t.Error("an uplink PDR has no tunnel record")
@@ -2380,33 +2549,20 @@ func TestDeleteRemovesWhatTheSessionProgrammed(t *testing.T) {
 	}
 	// The ids are the compiler's to choose (its pool walks the space), so the
 	// reading is what the establishment wrote: a deletion that leaves any of
-	// them behind is state the dataplane keeps for a session that is gone.
+	// the session's records behind is state the dataplane keeps for a session
+	// that is gone. PDR rules, meters, tunnels and F-TEID admission entries are
+	// those records; the action id lives in a PDR rule's result, not a resource.
 	est := rec.txns[0]
-	for _, resource := range []string{testConfig().Up.Actions + "/actions",
-		testConfig().Down.Actions + "/actions"} {
-		for _, ch := range est {
-			if ch.Resource != resource {
-				continue
-			}
-			if _, ok := find0(rec.last(), resource, "id", ch.Key["id"]); !ok {
-				t.Errorf("the deletion leaves %s id %v behind", resource, ch.Key["id"])
-			}
-		}
-	}
 	for _, ch := range est {
-		if ch.Resource != testConfig().TEIDTable+"/rules" {
+		if ch.Resource != testConfig().GTPUDecap+"/fteids" {
 			continue
 		}
-		masks, _ := ch.Key["masks"].([]map[string]any)
-		mask, _ := masks[0]["value_bin"].([]byte)
-		values, _ := ch.Key["values"].([]map[string]any)
-		value, _ := values[0]["value_bin"].([]byte)
-		if len(mask) != 4 || len(value) != 4 {
-			t.Fatalf("the TEID rule's key is not four bytes: %v / %v", value, mask)
+		teid, ok := ch.Key["teid"].(uint32)
+		if !ok || teid == 0 {
+			t.Fatalf("the FTEIDKey has no TEID: %v", ch.Key)
 		}
-		teid := uint32(value[0])<<24 | uint32(value[1])<<16 | uint32(value[2])<<8 | uint32(value[3])
-		if _, ok := teidRule(rec.last(), testConfig().TEIDTable+"/rules", teid); !ok {
-			t.Errorf("the deletion leaves the TEID rule for %#x behind", teid)
+		if _, ok := teidRule(rec.last(), testConfig().GTPUDecap+"/fteids", teid); !ok {
+			t.Errorf("the deletion leaves the FTEIDKey for %#x behind", teid)
 		}
 	}
 	if len(rules(rec.last())) != 2 {
@@ -2430,7 +2586,7 @@ func TestDropFARNeedsNoActionRecord(t *testing.T) {
 		ie.NewFSEID(0x4444, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.5", "", 0, 0)),
+				ie.NewUEIPAddress(0x06, "10.45.0.5", "", 0, 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyDrop)),
 	)
@@ -2447,29 +2603,99 @@ func TestDropFARNeedsNoActionRecord(t *testing.T) {
 	if got := ul[0].actionID(); got != 0 {
 		t.Errorf("a DROP FAR needs no action record, but the rule names %v", got)
 	}
-	if _, ok := find0(rec.last(), testConfig().Down.Actions+"/actions", "id", uint32(1)); ok {
-		t.Error("a DROP FAR wrote an action record")
+	for _, ch := range rec.last() {
+		if strings.HasSuffix(ch.Resource, "/actions") {
+			t.Error("a DROP FAR wrote an action record")
+		}
 	}
 }
 
-func TestPortRangeIsRefusedNotMatchedTooWidely(t *testing.T) {
-	rec := &recorder{}
-	c := New(testConfig(), rec, quietLogger())
-	req := message.NewSessionEstablishmentRequest(0, 0, 0x5555, 1, 0,
-		ie.NewFSEID(0x5555, nil, nil),
-		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
-			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
-				ie.NewSDFFilter("permit out udp from any to assigned 1000-2000", "", "", "", 0)),
-			ie.NewFARID(1)),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
-			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
-	)
-	if got := cause(t, c.Establish(req)); got != ie.CauseRuleCreationModificationFailure {
-		t.Errorf("a port range answered cause %d, want a rule failure", got)
+// An SDF port range is a WildcardMatch range on its field (BESS D-186), with
+// the field masked out: never a widened mask, never a refusal. A range over the
+// whole port domain constrains nothing, the form BESS reads back.
+func TestAPortRangeIsARangeOnItsField(t *testing.T) {
+	const dstPort = 4 // testConfig's downlink fields: SrcIP DstIP Proto SrcPort DstPort ...
+	for _, tc := range []struct {
+		filter string
+		ranges []map[string]any
+	}{
+		{"permit out udp from any to assigned 1000-2000",
+			[]map[string]any{{"field": uint32(dstPort), "low": uint64(1000), "high": uint64(2000)}}},
+		{"permit out udp from any to assigned 0-65535", nil},
+	} {
+		rec := &recorder{}
+		c := New(testConfig(), rec, quietLogger())
+		req := message.NewSessionEstablishmentRequest(0, 0, 0x5555, 1, 0,
+			ie.NewFSEID(0x5555, nil, nil),
+			ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
+					ie.NewSDFFilter(tc.filter, "", "", "", 0)),
+				ie.NewFARID(1)),
+			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess))),
+		)
+		if got := cause(t, c.Establish(req)); got != ie.CauseRequestAccepted {
+			t.Fatalf("%q answered cause %d", tc.filter, got)
+		}
+		rs := rules(rec.last())
+		if len(rs) != 1 {
+			t.Fatalf("%q wrote %d rules, want 1", tc.filter, len(rs))
+		}
+		if m := rs[0].mask(dstPort); !bytes.Equal(m, []byte{0, 0}) {
+			t.Errorf("%q: the destination port's mask is %x, want it masked out", tc.filter, m)
+		}
+		got, _ := rs[0].change.Key["ranges"].([]map[string]any)
+		if !reflect.DeepEqual(got, tc.ranges) {
+			t.Errorf("%q: the key's ranges are %v, want %v", tc.filter, got, tc.ranges)
+		}
 	}
-	if len(rec.txns) != 0 {
-		t.Error("a refused session wrote to the dataplane")
+}
+
+// An Outer Header Creation toward an IPv6 peer (description 0x0200) is a tunnel
+// whose outer header is IPv6 end to end: the peer as named, and the local
+// address the N3 endpoint's IPv6 one. An IPv4-mapped address in the IPv6 field
+// names no IPv6 peer and is refused.
+func TestAnIPv6OuterHeaderCreationIsAnIPv6Tunnel(t *testing.T) {
+	for _, tc := range []struct {
+		peer   string
+		accept bool
+	}{
+		{"2001:db8:3::2", true},
+		{"::ffff:10.20.30.2", false},
+	} {
+		cfg := testConfig()
+		cfg.FTEIDEndpoints[0].IPv6 = netip.MustParseAddr("2001:db8:3::1")
+		rec := &recorder{}
+		c := New(cfg, rec, quietLogger())
+		req := message.NewSessionEstablishmentRequest(0, 0, 0x5557, 1, 0,
+			ie.NewFSEID(0x5557, nil, nil),
+			ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0)),
+				ie.NewFARID(1)),
+			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess),
+					ie.NewOuterHeaderCreation(0x0200, 0x11223344, "", tc.peer, 0, 0, 0))),
+		)
+		got := cause(t, c.Establish(req))
+		if !tc.accept {
+			if got == ie.CauseRequestAccepted {
+				t.Errorf("an IPv4-mapped OHC peer %s was accepted", tc.peer)
+			}
+			continue
+		}
+		if got != ie.CauseRequestAccepted {
+			t.Fatalf("an IPv6 OHC peer answered cause %d", got)
+		}
+		dl := rules(rec.last())[0]
+		tunnel := find(t, rec.last(), cfg.Down.Tunnels+"/tunnels", "action_id", dl.actionID())
+		if p := tunnel.Value["peer_address"]; !bytes.Equal(p.([]byte), netip.MustParseAddr(tc.peer).AsSlice()) {
+			t.Errorf("the tunnel's peer is %x, want %s", p, tc.peer)
+		}
+		if l := tunnel.Value["local_address"]; !bytes.Equal(l.([]byte), netip.MustParseAddr("2001:db8:3::1").AsSlice()) {
+			t.Errorf("the tunnel's local address is %x, want the endpoint's IPv6 2001:db8:3::1", l)
+		}
 	}
 }
 
@@ -2480,7 +2706,7 @@ func TestAnSDFPrefixIsAPrefixNotAnAddress(t *testing.T) {
 		ie.NewFSEID(0x5556, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -2510,7 +2736,7 @@ func TestAnSDFPrefixIsAPrefixNotAnAddress(t *testing.T) {
 		ie.NewFSEID(0x5557, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.11.1.5/16", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -2545,7 +2771,7 @@ func TestAUEIPAllocationRequestIsRefused(t *testing.T) {
 		ie.NewFSEID(0x5559, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0)),
+				ie.NewUEIPAddress(0x06, "10.45.0.7", "", 0, 0)),
 			ie.NewFARID(1)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
@@ -2640,7 +2866,7 @@ func TestANonIPv4PDIIsRefusedNotWidened(t *testing.T) {
 		ie.NewFSEID(0x5558, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 2001:db8::/32 53", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -2777,10 +3003,9 @@ func TestAPinnedFTEIDIsReservedAndOneCollisionIsRefused(t *testing.T) {
 		t.Fatalf("the pinned establishment answered cause %d", got)
 	}
 
-	// Session 2 leaves the choice to the UPF, and must not be handed the
-	// pinned value: two sessions sharing a TEID rule send each other's packets.
-	// Each is another subscriber's -- one UE address in one graph is one rule
-	// key, and two sessions may not hold it (compile refuses the second).
+	// Session 2 leaves the choice to the UPF and must not get the pinned TEID.
+	// Admission keys use endpoint, family, local address and TEID, not the UE
+	// address; sharing one key across sessions is refused.
 	for i := 0; i < 6; i++ {
 		resp := c.Establish(establishment(0x9300+uint64(i), "10.45.0."+strconv.Itoa(20+i))).(*message.SessionEstablishmentResponse)
 		if got := cause(t, resp); got != ie.CauseRequestAccepted {
@@ -2791,8 +3016,8 @@ func TestAPinnedFTEIDIsReservedAndOneCollisionIsRefused(t *testing.T) {
 		}
 	}
 
-	// A second session pinning what the first pinioned is refused: the SMF is
-	// told the resource is not available, not given a shared rule.
+	// A second session claiming the same endpoint-scoped F-TEID key is refused:
+	// the SMF gets No Resources Available, not a shared admission entry.
 	dup := c.Establish(establishmentWithFTEID(0x9401, "10.45.0.21", pinned)).(*message.SessionEstablishmentResponse)
 	if got := cause(t, dup); got != ie.CauseNoResourcesAvailable {
 		t.Errorf("a colliding F-TEID answered cause %d, want no-resources", got)
@@ -2818,7 +3043,7 @@ func TestTheUplinkRuleIsKeyedOnTheSessionsUEAddress(t *testing.T) {
 			ie.NewFARID(1)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
 			ie.NewFARID(2)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -2867,7 +3092,7 @@ func TestTheUplinkRuleIsKeyedOnTheSessionsUEAddress(t *testing.T) {
 			ie.NewFARID(1)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -2891,21 +3116,20 @@ func TestARefusedEstablishmentReleasesItsIDs(t *testing.T) {
 	rec := &recorder{}
 	c := New(cfg, rec, quietLogger())
 
-	// PDR 1 is fine and takes the id (its PDI is an access one with an F-TEID
-	// of zero: the UPF chooses, which is where the allocator runs); PDR 2's SDF
-	// names an IPv6 prefix, which the table cannot carry, so the whole session
-	// is refused.
+	// PDR 1 is fine and takes the id (its PDI asks the UPF to choose an
+	// F-TEID, which is where the allocator runs); PDR 2's SDF names an IPv6
+	// prefix, which the table cannot carry, so the whole session is refused.
 	bad := message.NewSessionEstablishmentRequest(0, 0, 0x5562, 1, 0,
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(0x5562, nil, nil),
 		ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
-				ie.NewFTEID(0x01, 0, net.ParseIP("192.0.2.1"), nil, 0),
+				testFTEID(0),
 				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0)),
 			ie.NewFARID(1)),
 		ie.NewCreatePDR(ie.NewPDRID(2), ie.NewPrecedence(20),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, "10.45.0.6", "", 0, 0),
+				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 2001:db8::/32 53", "", "", "", 0)),
 			ie.NewFARID(1)),
 		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
@@ -3029,41 +3253,64 @@ func TestAnUnknownOutcomeKeepsTheIDs(t *testing.T) {
 	}
 }
 
-// releaseSession frees a session's ids, and the TEID mapping only if it names
-// this session -- the property a refused session's rollback rests on. The
-// mapping is written in merge, under merge's lock, so the state below cannot be
-// reached today; it is built here directly to pin the contract, because the
-// release is what a refusal and a deletion share.
-func TestReleasingARefusedSessionLeavesAnotherHoldersTEIDAlone(t *testing.T) {
-	rec := &recorder{}
-	c := New(testConfig(), rec, quietLogger())
+// One TEID can be reserved by several endpoint-scoped keys. Each owner gets its
+// own admission context, so the PDR key cannot cross-match the two tunnels, and
+// releasing one key must not return the TEID to the allocator while another
+// endpoint still uses it.
+func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
+	c := New(testConfig(), &recorder{}, quietLogger())
+	firstAddr := netip.MustParseAddr("192.0.2.1")
+	secondAddr := netip.MustParseAddr("192.0.2.2")
+	makePDR := func(id uint16, endpoint uint32, addr netip.Addr) *pdr {
+		return &pdr{id: id, srcIfc: ie.SrcInterfaceAccess, teid: 0x77,
+			endpointID: endpoint, endpointFamily: 4, endpointIPv4: addr,
+			endpointFamilies: []uint8{4}}
+	}
+	first := &Session{LocalSEID: 1, PDRs: map[uint16]*pdr{}}
+	firstPDR := makePDR(1, 1, firstAddr)
+	first.PDRs[1] = firstPDR
+	second := &Session{LocalSEID: 2, PDRs: map[uint16]*pdr{}}
+	secondPDR := makePDR(1, 2, secondAddr)
+	second.PDRs[1] = secondPDR
 
-	holder := &Session{LocalSEID: 1, CPSEID: 2, PDRs: map[uint16]*pdr{}}
-	holder.PDRs[1] = &pdr{id: 1, srcIfc: ie.SrcInterfaceAccess, teid: 0x77}
 	c.mu.Lock()
-	c.sessions[holder.LocalSEID] = holder
-	c.byTEID[0x77] = holder
+	if err := c.claimFTEID(first, firstPDR); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.claimFTEID(second, secondPDR); err != nil {
+		t.Fatal(err)
+	}
+	conflict := makePDR(2, 2, secondAddr)
+	conflict.down = true
+	if err := c.claimFTEID(&Session{LocalSEID: 3}, conflict); err == nil {
+		t.Fatal("the same exact endpoint key was claimed for the opposite direction")
+	}
 	c.mu.Unlock()
-
-	// A request that pinned the same value and was refused: its PDR still
-	// carries the value, and its release must not disturb the holder.
-	refused := &Session{LocalSEID: 3, CPSEID: 4, PDRs: map[uint16]*pdr{}}
-	refused.PDRs[1] = &pdr{id: 1, srcIfc: ie.SrcInterfaceAccess, teid: 0x77}
-	c.mu.Lock()
-	c.releaseSession(refused)
-	still := c.byTEID[0x77]
-	c.mu.Unlock()
-	if still != holder {
-		t.Errorf("the refused request's release erased the holder's TEID mapping (now %p)", still)
+	if firstPDR.fteidContext == 0 || firstPDR.fteidContext == secondPDR.fteidContext {
+		t.Fatalf("TEID 0x77 on two endpoints shares context %d/%d: their PDR rules would cross-match",
+			firstPDR.fteidContext, secondPDR.fteidContext)
 	}
 
-	// And its own mapping is freed as usual.
+	if len(fteidKeysOf(firstPDR)) != 1 || len(fteidKeysOf(secondPDR)) != 1 ||
+		fmt.Sprint(fteidKeysOf(firstPDR)[0]) == fmt.Sprint(fteidKeysOf(secondPDR)[0]) {
+		t.Fatal("distinct endpoint keys collapsed despite sharing TEID 0x77")
+	}
 	c.mu.Lock()
-	c.releaseSession(holder)
-	_, held := c.byTEID[0x77]
+	c.releaseSession(first)
+	remaining := len(c.fteidTEIDKeys[0x77])
+	_, secondStillOwned := c.byFTEID[fmt.Sprint(fteidKeysOf(secondPDR)[0])]
+	freed := len(c.teids.freed)
 	c.mu.Unlock()
-	if held {
-		t.Error("releasing the holder left its TEID mapping behind")
+	if remaining != 1 || !secondStillOwned || freed != 0 {
+		t.Fatalf("releasing one endpoint prematurely freed the shared TEID: refs=%d owner=%v freed=%d", remaining, secondStillOwned, freed)
+	}
+	c.mu.Lock()
+	c.releaseSession(second)
+	remaining, freed = len(c.fteidTEIDKeys[0x77]), len(c.teids.freed)
+	contexts := len(c.fteidContexts)
+	c.mu.Unlock()
+	if remaining != 0 || freed != 1 || contexts != 0 {
+		t.Fatalf("last endpoint did not release TEID exactly once: refs=%d freed=%d contexts=%d", remaining, freed, contexts)
 	}
 }
 
@@ -3141,12 +3388,8 @@ func (g *gatedApply) Apply(ctx context.Context, changes ...bess.Change) error {
 	return g.inner.Apply(ctx, changes...)
 }
 
-// The collision check is only as good as when the mapping is written. byTEID is
-// filled after a session's Apply, so if the mapping went in there, two
-// establishments that pin one value -- the second while the first is in flight
-// -- would both pass, and the second Apply would overwrite the first's TEID
-// rule. The mapping goes in during merge, under merge's lock; this test holds
-// the first Apply open and requires the second establishment to be refused.
+// Exact composite-key ownership is claimed during merge, before Apply. Holding
+// the first Apply open therefore cannot let a concurrent identical pin pass.
 func TestAPinArrivingDuringAnApplyIsRefused(t *testing.T) {
 	cfg := testConfig()
 	cfg.MaxTEIDs = 0x100
@@ -3260,9 +3503,8 @@ func TestClosingAGateDropsThePacketsOfALivePDR(t *testing.T) {
 	if got := r.gate(); got != dropGate {
 		t.Errorf("a closed gate's rule gates %d, want the drop gate %d", got, dropGate)
 	}
-	if got, ok := r.change.Value["action_id"].(uint32); !ok || got != 0 {
-		t.Errorf("a closed gate's rule names action %v (%T), want none",
-			r.change.Value["action_id"], r.change.Value["action_id"])
+	if got := r.actionID(); got != 0 {
+		t.Errorf("a closed gate's rule names action %d, want none", got)
 	}
 }
 
@@ -4409,7 +4651,7 @@ func TestAPDRNamingAnUnknownQERIsRefused(t *testing.T) {
 		ie.NewPrecedence(100),
 		ie.NewPDI(
 			ie.NewSourceInterface(ie.SrcInterfaceAccess),
-			ie.NewFTEID(0x01, 0, net.ParseIP("192.0.2.1"), nil, 0),
+			testFTEID(0),
 			ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
 		),
 		ie.NewFARID(1),
@@ -4439,7 +4681,7 @@ func TestZeroIsALegalRuleID(t *testing.T) {
 		ie.NewPrecedence(100),
 		ie.NewPDI(
 			ie.NewSourceInterface(ie.SrcInterfaceAccess),
-			ie.NewFTEID(0x01, 0, net.ParseIP("192.0.2.1"), nil, 0),
+			testFTEID(0),
 			ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
 		),
 		ie.NewFARID(0),
@@ -4484,7 +4726,7 @@ func TestZeroIsALegalRuleID(t *testing.T) {
 		ie.NewPrecedence(100),
 		ie.NewPDI(
 			ie.NewSourceInterface(ie.SrcInterfaceAccess),
-			ie.NewFTEID(0x01, 0, net.ParseIP("192.0.2.1"), nil, 0),
+			testFTEID(0),
 			ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
 		),
 		ie.NewQERID(0),
@@ -4864,5 +5106,30 @@ func TestAFARThatAsksToDuplicateIsRefused(t *testing.T) {
 	}
 	if len(rec.txns) != 0 {
 		t.Error("a refused session wrote to the dataplane")
+	}
+}
+
+// A dual-stack F-TEID is two admission keys but one tunnel: both keys carry the
+// PDR's one context id, so its rules multiply by SDF and QFI only.
+func TestDualStackFTEIDIsOneContextNotTwoRuleSets(t *testing.T) {
+	p := &pdr{
+		teid: 0x77, fteidContext: 5,
+		endpointID: 17, endpointIPv4: netip.MustParseAddr("192.0.2.17"),
+		endpointIPv6:     netip.MustParseAddr("2001:4860::17"),
+		endpointFamilies: []uint8{4, 6}, qfis: []uint8{1, 9},
+		sdfs: []*sdfFilter{{proto: 17, protoOK: true}, {proto: 6, protoOK: true}},
+	}
+	keys, err := p.ruleKeys([]Field{FTEIDContext, Proto, QFI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 4 {
+		t.Fatalf("compiled %d keys, want 2 SDFs × 2 QFIs", len(keys))
+	}
+	for _, key := range keys {
+		values, _ := key["values"].([]map[string]any)
+		if got := values[0]["value_bin"].([]byte); !bytes.Equal(got, []byte{0, 0, 0, 5}) {
+			t.Errorf("rule keys context %v, want the PDR's context 5", got)
+		}
 	}
 }

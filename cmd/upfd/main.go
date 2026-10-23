@@ -43,30 +43,18 @@ func run() error {
 	n4Addr := flag.String("n4", "0.0.0.0:8805", "PFCP (N4) UDP listen address")
 	nodeID := flag.String("node-id", "", "Node ID this UP function advertises (IP address or FQDN); default: the -n4 address")
 	level := flag.String("log-level", "info", "log level: debug, info, warn, error")
-	profile := flag.String("profile", session.GenericProfile,
-		"the deployment's dataplane strategy, by name (docs/design.md, \"Profiles\"): "+
-			strings.Join(session.ProfileNames(), " or ")+". It resolves once, at startup, to "+
-			"where each direction's PDR rules live, the graph carrying that composition and the "+
-			"module list the daemon must have loaded -- all logged with the session layer's "+
-			"readiness, and printed alone by -print-profile. The module-name flags below stay as "+
-			"overrides: the profile is their default and not a replacement, so -pdr-table-ul, "+
-			"-firewall-ul/-dl and -pdr-match-ul name one structure's module while the profile "+
-			"picks which structure a direction uses")
-	printProfile := flag.Bool("print-profile", false,
-		"print the resolved profile -- the graph to apply, the module list the daemon must have "+
-			"loaded, and each direction's rule home -- and exit, without dialing anything")
 
 	bessAddr := flag.String("bess", "", "bessd's control_v2 gRPC address (host:port); empty: no datapath, sessions are refused")
-	n3Addr := flag.String("n3-addr", "", "the UPF's N3 IPv4 address, advertised as the uplink F-TEID; required with -bess")
-	n3MAC := flag.String("n3-mac", "02:00:00:00:00:01", "the N3 port's Ethernet address, for the outer header of a downlink packet")
-	peerMAC := flag.String("peer-mac", "02:00:00:00:00:02", "the N3 peer's Ethernet address (the transport next hop)")
+	var fteidAddresses entryList
+	flag.Var(&fteidAddresses, "fteid-address",
+		"repeatable endpoint=<id>,reference=<n3|n9>,transport-domain=<id>,source=<access|core>,instance=<name>,ipv4=<addr>,ipv6=<addr>; config/environment entries are ';'-separated")
 	capacity := flag.Uint("capacity", 1<<16,
 		"the id spaces the session compiler keeps: the capacity of the graph's "+
-			"Meter, ActionTable and GtpuEncap tables, which refuse an id beyond it")
+			"Meter and GtpuEncap tables, which refuse an id beyond it")
 	n6NextHop := flag.Uint("n6-next-hop", 1, "the Router next hop an uplink forward leaves by")
 	n3NextHop := flag.Uint("n3-next-hop", 2,
 		"the Router next hop a downlink forward leaves by: the encap's gate "+
-			"(a chain with an ActionTable fails closed when its action names none)")
+			"(the classifier's result names it)")
 	atsss := flag.String("atsss", "",
 		"the AtsssSteer module whose policies a MAR-steered PDR uses (TS 29.244 7.5.2.8): "+
 			"its \"<name>/policies\" resource is written with the MAR's two access actions, and the "+
@@ -87,79 +75,27 @@ func run() error {
 	instances := flag.String("instances", "",
 		"the deployment's network instances (TS 29.244 8.2.4), ';'-separated, each "+
 			"\"name=<instance>,domain=<route domain>[,next-hop=<id>][,tunnel-next-hop=<id>]\"+"+
-			"\"[,sgi-lan-next-hop=<id>][,vn-next-hop=<id>][,pool=<prefix>][,arp=<module>]\"+"+
+			"\"[,access-next-hop=<id>][,sgi-lan-next-hop=<id>][,vn-next-hop=<id>][,pool=<prefix>][,arp=<module>]\"+"+
 			"\"[,arp-mac=<xx:xx:xx:xx:xx:xx>]\"; the *-next-hop keys are the instance's "+
 			"egresses, one per FAR Destination Interface value (8.2.24) and per outer header "+
-			"creation: a plain forward toward the data network, a tunneled one (N9, indirect "+
-			"forwarding), one toward the service LAN and one that re-enters the subscriber "+
-			"side. With -route-mode=destination the *-next-hop keys are unnecessary (the Router's "+
+			"creation: a plain forward toward Core, a tunnel toward Core, a tunnel toward Access "+
+			"(N3 or N9), one toward the service LAN and one that re-enters the subscriber side. "+
+			"With -route-mode=destination the *-next-hop keys are unnecessary (the Router's "+
 			"routes are the egress table) and an instance line may name no egress. empty: the "+
 			"one-instance deployment, where no PDI's Network Instance is read")
 	maxDomains := flag.Uint("max-domains", 1,
-		"the graph's Router max_domains: every -instances domain must be below it, "+
-			"and a packet classified in one the router does not have resolves to no table")
-	pdrFieldsUL := flag.String("pdr-fields-ul", "src,dst,proto,sport,dport,qfi",
-		"the uplink PDR table's fields, in the graph's order: src, dst, proto, sport, "+
-			"dport, qfi (the decap's per-packet QoS flow), domain (the vif's route_domain), "+
-			"teid (the decap's upf_teid)")
-	pdrFieldsDL := flag.String("pdr-fields-dl", "src,dst,proto,sport,dport",
+		"the bound on route-domain ids: every -instances domain must be below it. With "+
+			"-route-mode=destination it must equal the inner Router's max_domains, or a packet "+
+			"classified in a domain the router does not have resolves to no table")
+	pdrFieldsUL := flag.String("pdr-fields-ul", "src,dst,proto,sport,dport,fteid,qfi",
+		"the uplink PDR table's fields, in the graph's order")
+	pdrFieldsDL := flag.String("pdr-fields-dl", "src,dst,proto,sport,dport,domain,fteid,qfi",
 		"the downlink PDR table's fields, in the graph's order")
+	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
 	pdrTableUL := flag.String("pdr-table-ul", "pdr_ul",
 		"the WildcardMatch module holding the uplink PDR rules")
 	pdrTableDL := flag.String("pdr-table-dl", "pdr_dl",
 		"the WildcardMatch module holding the downlink PDR rules")
-	firewallUL := flag.String("firewall-ul", "",
-		"the uplink firewall module whose \"<name>/rules\" policy holds the uplink PDRs "+
-			"instead of -pdr-table-ul: BESS's `firewall` table, whose rules carry CIDR "+
-			"prefixes of either family, a protocol and port *ranges*. Empty (the default): "+
-			"the WildcardMatch path, where a port range and an IPv6 prefix are refused. No "+
-			"deployed graph carries that module yet, so naming one points at a module the "+
-			"daemon does not have (docs/claims.md)")
-	firewallDL := flag.String("firewall-dl", "",
-		"the downlink firewall module, as -firewall-ul is the uplink one")
-	pdrMatchUL := flag.String("pdr-match-ul", "",
-		"the uplink keyed per-session matcher module whose \"<name>/rules\" *map* holds the uplink "+
-			"PDRs instead of -pdr-table-ul: one key per session, keyed by the F-TEID the decap "+
-			"wrote (its \"upf_teid\" metadata), whose value is that session's rules in the SMF's "+
-			"precedence order, so a session change is one upsert of O(that session's rules). The "+
-			"rules carry the 5-tuple with prefixes and port *ranges*, and a PDI naming a QFI is "+
-			"refused rather than matched more widely. Empty (the default): the WildcardMatch path. "+
-			"There is no downlink counterpart here: a downlink packet carries no tunnel to name its "+
-			"session with, so the downlink's own selector is what names it (-select-dl)")
-	pdrMatchDL := flag.String("pdr-match-dl", "",
-		"the downlink keyed per-session matcher module, as -pdr-match-ul is the uplink one: its map "+
-			"holds one key per session, keyed by the session id -select-dl writes into the packet's "+
-			"\"action_id\" metadata. It needs -select-dl: a downlink packet carries no tunnel, so "+
-			"nothing else could name its session")
-	selectDL := flag.String("select-dl", "",
-		"the downlink session selector: an ExactMatch module whose \"<name>/rules\" map holds one "+
-			"rule per (route domain, UE address) a session's downlink PDRs name, whose value is the "+
-			"session id it writes into the packet's \"action_id\" metadata -- the key "+
-			"-pdr-match-dl reads. It is what names a session for a packet that carries no tunnel "+
-			"(TS 29.244 5.2.1), and it needs -select-actions-dl and -pdr-match-dl")
-	selectActionsDL := flag.String("select-actions-dl", "",
-		"the ActionTable whose \"<name>/actions\" resource the selector's rules reference: BESS "+
-			"validates a rule's action id as a reference into that table, so every session id "+
-			"-select-dl writes needs a record there. It must be a table of its own, and it is never "+
-			"in the packet path: the selector's gate goes to the matcher")
-	selectFieldsDL := flag.String("select-fields-dl", "dst_ip",
-		"the selector's key, in the graph's order, from the same field names -pdr-fields-dl takes. "+
-			"Only a field of the session can be in it: dst_ip (the UE address the packet is "+
-			"addressed to) and, in a deployment with more than one network instance, route_domain "+
-			"(the interface the packet arrived on classified it). A field of one PDR (proto, "+
-			"sport, dport) is refused")
-	actionsUL := flag.String("actions-ul", "at_ul", "the uplink ActionTable module")
-	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
-	meterLevelsUL := flag.Uint("meter-levels-ul", 0,
-		"how many meter ids one uplink action carries: 0 and 1 are the historical single `meter_id` "+
-			"record (the default); 2 names the flow's own rate-bearing QER first and the session's "+
-			"shared QER after it, so the Meter stops a red packet before the session's bucket is "+
-			"charged. It needs the graph's Meter and ActionTable to be built with levels: 2 (the "+
-			"multi-level meter, the meter-stack fork), and an action table refuses a longer list than "+
-			"its own levels")
-	meterLevelsDL := flag.Uint("meter-levels-dl", 0,
-		"the downlink's level count, as -meter-levels-ul is the uplink's")
-	actionsDL := flag.String("actions-dl", "at_dl", "the downlink ActionTable module")
 	metersDL := flag.String("meters-dl", "mt_dl", "the downlink Meter module")
 	countersUL := flag.String("counters-ul", "cnt_ul",
 		"the uplink UrrCount module (per-rule usage counters); empty: the graph charges nothing")
@@ -184,17 +120,19 @@ func run() error {
 			"Report's trigger), read once per -urr-interval tick")
 	bufferGate := flag.Uint("buffer-gate", 0,
 		"the PDR table gate that delivers on the buffering branch")
-	teidTable := flag.String("teid-table", "teid",
-		"the WildcardMatch module whose rules are the F-TEID match")
-	teidGate := flag.Uint("teid-gate", 0,
-		"the gate a TEID rule delivers on: the decap's output gate")
+	gtpuDecap := flag.String("gtpu-decap", "decap", "the GtpuDecap module whose /fteids resource admits endpoint-scoped F-TEIDs")
 	gtpuErrors := flag.String("gtpu-errors", "",
 		"the GtpuResponder module whose error table is read once per -urr-interval "+
-			"tick: the responder behind the TEID table's default gate, which is where "+
-			"the peer's GTP-U Error Indications arrive (TS 29.281 7.3.1). A session "+
+			"tick: the responder behind GtpuDecap gate 2 receives unknown G-PDUs and "+
+			"control messages, including the peer's Error Indications (TS 29.281 7.3.1). A session "+
 			"whose FAR sends with a TEID the peer reported is reported to the SMF as "+
 			"an Error Indication Report (TS 29.244 5.10). Empty: the graph's responder "+
 			"does not track them (its track_errors argument) and no such report is sent")
+	gtpuEndMarkers := flag.String("gtpu-end-markers", "",
+		"the GtpuResponder module whose End Marker log is drained once per -urr-interval "+
+			"tick (its track_end_markers argument). An End Marker on a PDR's local F-TEID is "+
+			"reported as a Usage Report with the EMRRE trigger for each URR of that PDR that "+
+			"asks for REEMR (TS 29.244 8.2.19, 8.2.41). Empty: a URR that asks for REEMR is refused")
 	metricsAddr := flag.String("metrics", "",
 		"serve this node's own numbers (Prometheus text format) on host:port; "+
 			"empty: no endpoint")
@@ -207,9 +145,7 @@ func run() error {
 			"replays it before the PFCP socket opens, keeping the sessions and the "+
 			"Recovery Time Stamp the SMF knows; empty: every start is a clean slate")
 	endMarker := flag.String("end-marker", "",
-		"the graph's unix_port socket an End Marker packet is written to when a "+
-			"modification's SNDEM flag moves a tunnel out from under a session "+
-			"(TS 29.244 5.3.2); empty: this UPF constructs none and advertises no EMPU")
+		"the base graph unix_port path for End Markers; upfd appends .<transport_route_domain> to select the old routed tunnel")
 	// The config file's own flag: its value is read back from the flag set
 	// (applyLayers), because it must be layered like any other flag before the
 	// file it names is read.
@@ -236,11 +172,10 @@ func run() error {
 	flag.Parse()
 
 	// Which flags any source named -- the command line, the environment or the
-	// config file: the profile is what a flag that names nothing resolves to,
-	// so an override is a flag a source named, not one whose value happens to
-	// differ from its default. It is resolved before anything reads a flag.
-	given, err := applyLayers(flag.CommandLine)
-	if err != nil {
+	// config file: an override is a flag a source named, not one whose value
+	// happens to differ from its default. It is resolved before anything reads
+	// a flag.
+	if _, err := applyLayers(flag.CommandLine); err != nil {
 		return err
 	}
 	if *printConfig {
@@ -252,33 +187,12 @@ func run() error {
 			return err
 		}
 		fmt.Printf("%s\n", out)
-		if !*printProfile {
-			return nil
-		}
+		return nil
 	}
 
 	mode, err := session.ParseRouteMode(*routeMode)
 	if err != nil {
 		return fmt.Errorf("-route-mode: %w", err)
-	}
-
-	// The profile, before anything else this run does: it is a start-time
-	// choice, and a name that is not a profile must not fall back to the
-	// default -- a deployment whose rules land in a structure nobody chose is
-	// exactly what naming the profile is for. What it resolves to is read here
-	// and never again: the packet path holds no profile check.
-	prof, err := session.ProfileFor(*profile)
-	if err != nil {
-		return err
-	}
-	if *printProfile {
-		// The resolution itself, for an operator or an arm (ci/profile.sh):
-		// the graph to apply and the modules the daemon must have loaded for
-		// this profile, printed before either exists. It is printed from here
-		// rather than repeated in ci/ so that the profile is defined once.
-		fmt.Printf("profile\t%s\ngraph\t%s\nmodules\t%s\nuplink\t%s\ndownlink\t%s\n",
-			prof.Name, prof.Graph, strings.Join(prof.Modules, ","), prof.Up.String(), prof.Down.String())
-		return nil
 	}
 
 	var lvl slog.Level
@@ -339,30 +253,25 @@ func run() error {
 			return fmt.Errorf("-buffer-store %q needs a positive -urr-interval: the Downlink Data Report is what that loop's reading of the buffering counters owes the SMF",
 				*bufferStore)
 		}
-		graph, err := graphConfig(profileArgs(prof, given, graphArgs{
-			n3: *n3Addr, n3MAC: *n3MAC, peerMAC: *peerMAC,
-			capacity:  uint32(*capacity),
-			n6NextHop: uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
+		graph, err := graphConfig(graphArgs{
+			fteidAddresses: fteidAddresses,
+			capacity:       uint32(*capacity),
+			n6NextHop:      uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			accessNextHop: uint32(*accessNextHop),
 			atsss:         *atsss,
 			routeMode:     mode,
 			pdrTableUL:    *pdrTableUL, pdrTableDL: *pdrTableDL,
-			firewallUL: *firewallUL, firewallDL: *firewallDL,
-			pdrMatchUL: *pdrMatchUL, pdrMatchDL: *pdrMatchDL,
-			selectDL: *selectDL, selectActionsDL: *selectActionsDL,
-			selectFieldsDL: *selectFieldsDL,
-			pdrFieldsUL:    *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
+			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
-			teidTable: *teidTable, teidGate: uint32(*teidGate),
-			gtpuErrors: *gtpuErrors,
-			endMarker:  *endMarker,
-			actionsUL:  *actionsUL, metersUL: *metersUL,
-			meterLevelsUL: uint32(*meterLevelsUL),
-			actionsDL:     *actionsDL, metersDL: *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
-			meterLevelsDL: uint32(*meterLevelsDL),
-			countersUL:    *countersUL, countersDL: *countersDL,
+			gtpuDecap:      *gtpuDecap,
+			gtpuErrors:     *gtpuErrors,
+			gtpuEndMarkers: *gtpuEndMarkers,
+			endMarker:      *endMarker,
+			metersUL:       *metersUL,
+			metersDL:       *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
+			countersUL: *countersUL, countersDL: *countersDL,
 			bufferStore: *bufferStore, bufferCounter: *bufferCounter, bufferGate: uint32(*bufferGate),
-		}))
+		})
 		if err != nil {
 			return err
 		}
@@ -430,23 +339,15 @@ func run() error {
 		// MNOP (8.2.25 octet 7, bit 5): the session layer's reports carry the
 		// packet counts, so the feature is as real as the layer itself.
 		cfg.UPFunctionFeatures[2] |= n4.MNOP
-		if graph.EndMarker != "" {
-			// EMPU (TS 29.244 5.3.2, 8.2.25 octet 6 bit 1): this UPF
-			// constructs End Marker packets, and says so only where the graph
-			// takes them -- the port the flag names is the whole mechanism.
+		if hasEndMarker(graph) {
+			// EMPU advertises End Marker construction (TS 29.244 8.2.25) when
+			// the routed End Marker base path is configured.
 			cfg.UPFunctionFeatures[1] |= n4.EMPU
 		}
 		ready := []any{"bess", *bessAddr, "bess_version", client.Version(),
-			"daemon_epoch", client.Epoch(), "n3", graph.N3Addr.String(),
-			// The profile, as the one thing this run resolved it to: the rule
-			// home each direction uses, the graph that carries it and the
-			// modules the daemon must have loaded. Reported here because this
-			// is the only moment it exists -- there is no profile in the packet
-			// path or the session path to ask (docs/design.md).
-			"profile", prof.Name, "graph", prof.Graph,
-			"modules", strings.Join(prof.Modules, ","),
-			"uplink", graph.Up.Strategy().String(),
-			"downlink", graph.Down.Strategy().String()}
+			"daemon_epoch", client.Epoch(), "fteid_endpoints", graph.FTEIDEndpoints,
+			"uplink", graph.Up.PDRTable,
+			"downlink", graph.Down.PDRTable}
 		if graph.Instances != nil {
 			ready = append(ready, "network_instances", strings.Join(graph.Instances.Names(), ","))
 		}
@@ -787,64 +688,49 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 
 // graphArgs is the flag set graphConfig turns into a session.Config.
 type graphArgs struct {
-	n3, n3MAC, peerMAC string
-	capacity           uint32
-	n6NextHop          uint32
-	n3NextHop          uint32
-	accessNextHop      uint32
-	atsss              string
-	routeMode          session.RouteMode
-	instances          string
-	maxDomains         uint32
-	pdrTableUL         string
-	pdrTableDL         string
-	firewallUL         string
-	firewallDL         string
-	pdrMatchUL         string
-	pdrMatchDL         string
-	selectDL           string
-	selectActionsDL    string
-	selectFieldsDL     string
-	pdrFieldsUL        string
-	pdrFieldsDL        string
-	teidTable          string
-	teidGate           uint32
-	gtpuErrors         string
-	actionsUL          string
-	metersUL           string
-	actionsDL          string
-	metersDL           string
-	countersUL         string
-	bufferStore        string
-	bufferCounter      string
-	bufferGate         uint32
-	countersDL         string
-	tunnels            string
-	tunnelsUL          string
-	meterLevelsUL      uint32
-	meterLevelsDL      uint32
-	endMarker          string
+	fteidAddresses entryList
+	capacity       uint32
+	n6NextHop      uint32
+	n3NextHop      uint32
+	accessNextHop  uint32
+	atsss          string
+	routeMode      session.RouteMode
+	instances      string
+	maxDomains     uint32
+	pdrTableUL     string
+	pdrTableDL     string
+	pdrFieldsUL    string
+	pdrFieldsDL    string
+	gtpuDecap      string
+	gtpuErrors     string
+	gtpuEndMarkers string
+	metersUL       string
+	metersDL       string
+	countersUL     string
+	bufferStore    string
+	bufferCounter  string
+	bufferGate     uint32
+	countersDL     string
+	tunnels        string
+	tunnelsUL      string
+	endMarker      string
 }
 
 // graphConfig is the deployed graph's shape, from the flags.
 func graphConfig(a graphArgs) (session.Config, error) {
-	n3, n3MAC, peerMAC := a.n3, a.n3MAC, a.peerMAC
-	addr, err := netip.ParseAddr(n3)
-	if err != nil || !addr.Is4() {
-		return session.Config{}, fmt.Errorf("-n3-addr %q: an IPv4 address is required with -bess", n3)
+	fteidEndpoints, err := parseFTEIDAddresses(a.fteidAddresses, a.instances != "")
+	if err != nil {
+		return session.Config{}, fmt.Errorf("-fteid-address: %w", err)
 	}
-	// One direction holds its rules in one structure: the profile selects which
-	// (or the deployment, through the module flags), and two of the three named
-	// at once would be two writers of one chain -- the compiler writes each
-	// rule into both, and the packet path reads whichever the graph wires. Only
-	// the uplink has a keyed-matcher flag: its key is the F-TEID, which names a
-	// session on N3 and nothing on N6 (the downlink's own selector is the next
-	// step, docs/claims.md), so a downlink one would name a rule home no
-	// module provides.
-	if a.firewallUL != "" && a.pdrMatchUL != "" {
-		return session.Config{}, fmt.Errorf(
-			"the uplink has one rule home: -firewall-ul %q and -pdr-match-ul %q both name one",
-			a.firewallUL, a.pdrMatchUL)
+	if len(fteidEndpoints) == 0 {
+		return session.Config{}, fmt.Errorf("-fteid-address: at least one local GTP-U endpoint is required with -bess")
+	}
+	hasN3 := false
+	for _, endpoint := range fteidEndpoints {
+		hasN3 = hasN3 || endpoint.ReferencePoint == "n3"
+	}
+	if !hasN3 {
+		return session.Config{}, fmt.Errorf("-fteid-address: an N3 endpoint is required")
 	}
 	// Each table matches the inner IPv4 packet: the UE address on the side the
 	// PDI names, and the SDF tuple where a filter constrains it
@@ -859,71 +745,35 @@ func graphConfig(a graphArgs) (session.Config, error) {
 	if err != nil {
 		return session.Config{}, fmt.Errorf("-pdr-fields-dl: %w", err)
 	}
-	// One path or none: a selector writes the key a matcher reads, so a
-	// deployment that names one without the other would either select sessions
-	// nothing matches or match a key nothing writes.
-	if a.atsss != "" && a.pdrMatchDL == "" {
-		return session.Config{}, fmt.Errorf(
-			"-atsss %q needs -pdr-match-dl: the matcher writes the MAR id into the steering attribute, "+
-				"and the wildcard table has no rule field for it", a.atsss)
-	}
-	if (a.selectDL == "") != (a.pdrMatchDL == "") {
-		return session.Config{}, fmt.Errorf(
-			"-select-dl %q and -pdr-match-dl %q are one path: the selector writes the session id the "+
-				"matcher reads as its key", a.selectDL, a.pdrMatchDL)
-	}
-	if a.selectDL != "" && a.selectActionsDL == "" {
-		return session.Config{}, fmt.Errorf(
-			"-select-dl %q needs -select-actions-dl: a rule's action id is validated as a reference "+
-				"into an ActionTable's actions resource", a.selectDL)
-	}
-	if a.selectDL != "" && a.firewallDL != "" {
-		return session.Config{}, fmt.Errorf(
-			"the downlink has one rule home: -firewall-dl %q and -pdr-match-dl %q both name one",
-			a.firewallDL, a.pdrMatchDL)
-	}
-	// A level is a meter id slot in one action. The Meter's and ActionTable's
-	// modules declare how many there are (`levels` in their args) and the
-	// framework refuses a pair that disagrees; 16 is the meter_id attribute's
-	// own bound (64 bytes / 4), and 0 and 1 are the single-meter record.
-	if a.meterLevelsUL > 16 || a.meterLevelsDL > 16 {
-		return session.Config{}, fmt.Errorf(
-			"-meter-levels-ul %d and -meter-levels-dl %d: at most 16 meter ids fit in one meter_id "+
-				"attribute", a.meterLevelsUL, a.meterLevelsDL)
-	}
-	// The selector's key is the session's, so only the fields a session has can
-	// be in it: the UE address, and the route domain the deployment classified
-	// the packet in. A field of one PDR would need one rule per PDR, and the
-	// selector would no longer name the session the matcher holds rules under.
-	var selectFields []session.Field
-	if a.selectDL != "" {
-		selectFields, err = parsePDRFields(a.selectFieldsDL)
-		if err != nil {
-			return session.Config{}, fmt.Errorf("-select-fields-dl: %w", err)
-		}
-		for _, f := range selectFields {
-			if f != session.DstIP && f != session.RouteDomain {
-				return session.Config{}, fmt.Errorf(
-					"-select-fields-dl: the %s is a field of one PDR, and the selector's key is the session's "+
-						"(dst_ip, and route_domain where the deployment has one)", f)
-			}
-		}
-	}
 	var domains *routing.Domains
 	if a.instances != "" {
 		if domains, err = parseInstances(a.instances, a.maxDomains, a.routeMode); err != nil {
 			return session.Config{}, fmt.Errorf("-instances: %w", err)
 		}
 	}
+	for _, endpoint := range fteidEndpoints {
+		if endpoint.Instance == "" {
+			continue
+		}
+		if domains == nil {
+			return session.Config{}, fmt.Errorf("-fteid-address: endpoint %d names instance %q without -instances",
+				endpoint.ID, endpoint.Instance)
+		}
+		if _, ok := domains.Lookup(endpoint.Instance); !ok {
+			return session.Config{}, fmt.Errorf("-fteid-address: endpoint %d names unknown instance %q",
+				endpoint.ID, endpoint.Instance)
+		}
+	}
 	graph := session.Config{
 		RouteMode: a.routeMode,
-		TEIDTable: a.teidTable,
-		TEIDGate:  a.teidGate,
+		GTPUDecap: a.gtpuDecap,
 		// The responder that counts the peer's Error Indications, when the
 		// graph's has tracking on (TS 29.244 5.10).
 		GTPUErrors: a.gtpuErrors,
-		// The socket an End Marker packet is written to, when the deployment
-		// has one (TS 29.244 5.3.2).
+		// The responder whose End Marker log is drained, when the graph's
+		// tracks them (TS 29.244 8.2.19 REEMR).
+		GTPUEndMarkers: a.gtpuEndMarkers,
+		// The base path for routed End Markers, when the deployment has one.
 		EndMarker: a.endMarker,
 		// The graph's tables and these spaces are one number: the modules
 		// refuse an id beyond their capacity.
@@ -937,20 +787,8 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		Up: session.Direction{
 			PDRTable:  a.pdrTableUL,
 			PDRFields: upFields,
-			// The uplink's PDRs may live in a firewall module instead of the
-			// WildcardMatch table (BESS's `firewall`, whose rules carry port
-			// ranges and both address families), or in the keyed per-session
-			// matcher, whose map holds one key per session; empty is the table.
-			// The three are one home each (the check above).
-			Firewall: a.firewallUL,
-			PdrMatch: a.pdrMatchUL,
-			Actions:  a.actionsUL,
-			Meters:   a.metersUL,
-			// How many meter ids one action carries: 0/1 is the single
-			// meter_id the graphs had; 2 names the flow's own QER and the
-			// session's shared one, and needs the meter stack's modules.
-			MeterLevels: a.meterLevelsUL,
-			Counters:    a.countersUL,
+			Meters:    a.metersUL,
+			Counters:  a.countersUL,
 			// An uplink forward can add an outer header of its own: indirect
 			// data forwarding (Destination Interface Access) and the uplink of
 			// an N9 tunnel (Destination Interface Core with an Outer Header
@@ -963,24 +801,13 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		Down: session.Direction{
 			PDRTable:  a.pdrTableDL,
 			PDRFields: downFields,
-			Firewall:  a.firewallDL,
-			// The downlink's PDRs may live in the keyed per-session matcher,
-			// whose map is keyed by the session id the selector writes: the
-			// three names are one path (the check above), because a matcher
-			// nothing selects a session for matches nothing at all.
-			PdrMatch:        a.pdrMatchDL,
-			Selector:        a.selectDL,
-			SelectorActions: a.selectActionsDL,
-			SelectorFields:  selectFields,
-			Actions:         a.actionsDL,
-			Meters:          a.metersDL,
-			MeterLevels:     a.meterLevelsDL,
-			Counters:        a.countersDL,
-			NextHop:         a.n3NextHop,
-			Tunnels:         a.tunnels,
+			Meters:    a.metersDL,
+			Counters:  a.countersDL,
+			NextHop:   a.n3NextHop,
+			Tunnels:   a.tunnels,
 		},
-		Instances: domains,
-		N3Addr:    addr,
+		Instances:      domains,
+		FTEIDEndpoints: fteidEndpoints,
 		// Where a forward whose FAR names Destination Interface Access leaves
 		// by, whichever direction the PDR is on: a downlink forward's encap,
 		// and the indirect-forwarding tunnel an uplink forward leaves through
@@ -1005,24 +832,5 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			Gate:    a.bufferGate,
 		}
 	}
-	if graph.N3MAC, err = parseMAC(n3MAC); err != nil {
-		return session.Config{}, fmt.Errorf("-n3-mac: %w", err)
-	}
-	if graph.PeerMAC, err = parseMAC(peerMAC); err != nil {
-		return session.Config{}, fmt.Errorf("-peer-mac: %w", err)
-	}
 	return graph, nil
-}
-
-func parseMAC(s string) ([6]byte, error) {
-	var out [6]byte
-	hw, err := net.ParseMAC(s)
-	if err != nil {
-		return out, err
-	}
-	if len(hw) != 6 {
-		return out, fmt.Errorf("%q is not a 6-byte address", s)
-	}
-	copy(out[:], hw)
-	return out, nil
 }

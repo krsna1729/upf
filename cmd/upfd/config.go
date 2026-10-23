@@ -19,7 +19,7 @@ import (
 // can put its whole shape in a file and override one flag on one run.
 //
 // The environment spells a flag as UPFD_<FLAG>, in upper case with '-' as '_':
-// -n3-addr is UPFD_N3_ADDR, -print-profile is UPFD_PRINT_PROFILE.
+// -fteid-address is UPFD_FTEID_ADDRESS, -print-config is UPFD_PRINT_CONFIG.
 //
 // The config file names itself: -config <path> or UPFD_CONFIG. It is optional
 // -- with no path named, no file is read at all, and a file the operator named
@@ -48,10 +48,8 @@ func envName(flagName string) string {
 
 // applyLayers resolves every flag of fs from the highest source that names it:
 // the command line (parsed before this call), then the environment, then the
-// config file. It returns the names any source named -- which is what "the
-// operator chose this" means downstream, where a profile must not override a
-// value that came from a file any more than one that came from the command
-// line.
+// config file. It returns the names any source named, which is what "the
+// operator chose this" means downstream.
 func applyLayers(fs *flag.FlagSet) (map[string]bool, error) {
 	named := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { named[f.Name] = true })

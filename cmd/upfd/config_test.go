@@ -20,7 +20,7 @@ func layeredFlags() *flag.FlagSet {
 	fs.String("n4", "0.0.0.0:8805", "the N4 listen address")
 	fs.Uint("capacity", 1<<16, "the id spaces")
 	fs.Duration("urr-interval", 0, "the reporting interval")
-	fs.Bool("print-profile", false, "print the profile")
+	fs.Bool("print-config", false, "print the effective settings")
 	fs.String("instances", "", "the network instances")
 	return fs
 }
@@ -67,16 +67,16 @@ func TestLayeringResolvesFromTheHighestSource(t *testing.T) {
 	if got := fs.Lookup("urr-interval").Value.String(); got != "5s" {
 		t.Errorf("urr-interval is %q, want the config file's 5s", got)
 	}
-	if got := fs.Lookup("print-profile").Value.String(); got != "false" {
-		t.Errorf("print-profile is %q, want the flag's own default", got)
+	if got := fs.Lookup("print-config").Value.String(); got != "false" {
+		t.Errorf("print-config is %q, want the flag's own default", got)
 	}
 	for _, name := range []string{"config", "n4", "instances", "capacity", "urr-interval"} {
 		if !named[name] {
 			t.Errorf("%s was resolved from a source and is not reported as named", name)
 		}
 	}
-	if named["print-profile"] {
-		t.Error("a flag no source named is reported as named, and a profile would not be allowed to fill it")
+	if named["print-config"] {
+		t.Error("a flag no source named is reported as named")
 	}
 
 	// The command line wins over everything.
@@ -198,7 +198,7 @@ func TestPrintConfigRoundTrips(t *testing.T) {
 		"-instances", "name=internet,domain=0,next-hop=1",
 		"-capacity", "4096",
 		"-urr-interval", "30s",
-		"-print-profile",
+		"-print-config",
 	}); err != nil {
 		t.Fatalf("parsing: %v", err)
 	}
@@ -240,8 +240,8 @@ func TestPrintConfigRoundTrips(t *testing.T) {
 func TestEnvNamesFollowTheFlags(t *testing.T) {
 	for _, c := range []struct{ flag, env string }{
 		{"n4", "UPFD_N4"},
-		{"n3-addr", "UPFD_N3_ADDR"},
-		{"print-profile", "UPFD_PRINT_PROFILE"},
+		{"fteid-address", "UPFD_FTEID_ADDRESS"},
+		{"print-config", "UPFD_PRINT_CONFIG"},
 		{"buffer-gate", "UPFD_BUFFER_GATE"},
 	} {
 		if got := envName(c.flag); got != c.env {
@@ -250,13 +250,12 @@ func TestEnvNamesFollowTheFlags(t *testing.T) {
 	}
 }
 
-// TestALayeredFlagCountsAsNamedForAProfile: a value that came from the file is
-// the operator's choice as much as one that came from the command line, so the
-// profile must not override it -- the profile is what a flag that names nothing
-// resolves to.
-func TestALayeredFlagCountsAsNamedForAProfile(t *testing.T) {
+// TestALayeredFlagCountsAsNamed: a value that came from the file or the
+// environment is the operator's choice as much as one that came from the
+// command line.
+func TestALayeredFlagCountsAsNamed(t *testing.T) {
 	t.Setenv("UPFD_PDR_TABLE_UL", "fw_ul")
-	fs := flag.NewFlagSet("profile", flag.ContinueOnError)
+	fs := flag.NewFlagSet("layered", flag.ContinueOnError)
 	fs.String("pdr-table-ul", "pdr_ul", "the uplink rule table")
 	fs.Duration("urr-interval", 0, "the reporting interval")
 	fs.String(configFlag, "", "the config file")
@@ -273,9 +272,69 @@ func TestALayeredFlagCountsAsNamedForAProfile(t *testing.T) {
 	if got := fs.Lookup("pdr-table-ul").Value.String(); got != "fw_ul" {
 		t.Errorf("pdr-table-ul is %q, want the environment's fw_ul", got)
 	}
-	// And a flag nothing named is left at its default, so a profile may fill
-	// it.
+	// And a flag nothing named is left at its default.
 	if named["urr-interval"] {
 		t.Error("a flag no source named counts as named")
+	}
+}
+
+func TestFTEIDAddressFlagLayersAndRoundTrip(t *testing.T) {
+	const first = "endpoint=7,reference=n3,transport-domain=1,source=access,instance=foo,ipv4=192.0.2.9"
+	const second = "endpoint=8,reference=n9,transport-domain=2,source=core,instance=bar,ipv4=192.0.2.10"
+	const mappings = first + ";" + second
+	for _, source := range []string{"file", "environment", "command line"} {
+		t.Run(source, func(t *testing.T) {
+			fs := layeredFlags()
+			var addresses entryList
+			fs.Var(&addresses, "fteid-address", "F-TEID endpoint mappings")
+			path := writeConfig(t, `{"fteid-address":"`+mappings+`"}`)
+			t.Setenv("UPFD_FTEID_ADDRESS", "")
+			t.Setenv("UPFD_CONFIG", path)
+			want := mappings
+			var args []string
+			switch source {
+			case "environment":
+				t.Setenv("UPFD_FTEID_ADDRESS", second+";"+first)
+				want = second + ";" + first
+			case "command line":
+				t.Setenv("UPFD_FTEID_ADDRESS", first)
+				args = []string{"-fteid-address", second, "-fteid-address", first}
+				want = second + ";" + first
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := applyLayers(fs); err != nil {
+				t.Fatal(err)
+			}
+			if addresses.String() != want {
+				t.Fatalf("layers produced %q, want %q", addresses.String(), want)
+			}
+			endpoints, err := parseFTEIDAddresses(addresses, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstID, secondID := uint32(7), uint32(8)
+			if source != "file" {
+				firstID, secondID = 8, 7
+			}
+			if len(endpoints) != 2 || endpoints[0].ID != firstID ||
+				endpoints[1].ID != secondID {
+				t.Fatalf("endpoint order is %+v, want IDs %d then %d", endpoints, firstID, secondID)
+			}
+			printed, err := effectiveConfig(fs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			values, err := readConfig(writeConfig(t, string(printed)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored entryList
+			if err := restored.Set(values["fteid-address"]); err != nil ||
+				restored.String() != addresses.String() {
+				t.Fatalf("print-config did not round-trip F-TEID mappings: %v, %v", restored, err)
+			}
+		})
 	}
 }

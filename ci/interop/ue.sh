@@ -23,8 +23,9 @@ case "${1:-}" in
 start)
   dk inspect "$PREFIX-smf" >/dev/null 2>&1 || die "the core is not up (ci/interop/up.sh)"
   GNB_ARGS=()
-  # With real packets the gNB container's address and MAC are fixed: upfd's one
-  # downlink next hop (-peer-mac) is that MAC.
+  # With real packets the gNB's address and MAC are fixed. The UPF's transport
+  # Router learns this peer's MAC from ARP; the gNB has a permanent neighbor for
+  # the UPF's N3 address because no host kernel owns that address.
   [ -n "$DATAPLANE" ] && GNB_ARGS=(--ip "$GNB_IP" --mac-address "$GNB_MAC")
   nf ueransim --network-alias gnb.free5gc.org --cap-add NET_ADMIN --device /dev/net/tun \
     "${GNB_ARGS[@]}" \

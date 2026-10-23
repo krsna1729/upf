@@ -143,6 +143,7 @@ func TestAnInterfacesEgressesAreItsOwn(t *testing.T) {
 	d, err := New([]Interface{{
 		Instance: "internet", Domain: 0, NextHop: 1,
 		Hops: map[Egress]uint32{
+			{DestIfc: 0, Tunnel: true}:  7,
 			{DestIfc: 1, Tunnel: false}: 1,
 			{DestIfc: 1, Tunnel: true}:  3,
 			{DestIfc: 2, Tunnel: false}: 4,
@@ -161,6 +162,7 @@ func TestAnInterfacesEgressesAreItsOwn(t *testing.T) {
 		e    Egress
 		want uint32
 	}{
+		{Egress{DestIfc: 0, Tunnel: true}, 7},
 		{Egress{DestIfc: 1}, 1},
 		{Egress{DestIfc: 1, Tunnel: true}, 3},
 		{Egress{DestIfc: 2}, 4},
@@ -212,10 +214,6 @@ func TestAnEgressTableTheDeploymentCannotHaveIsRefused(t *testing.T) {
 	}{
 		{"a destination interface above the spec's values",
 			Interface{Instance: "internet", Hops: map[Egress]uint32{{DestIfc: 6}: 1}}, "above the values the spec defines"},
-		{"the access side",
-			Interface{Instance: "internet", Hops: map[Egress]uint32{{DestIfc: 0}: 1}}, "destination interface 0 (access)"},
-		{"a tunneled access side",
-			Interface{Instance: "internet", Hops: map[Egress]uint32{{DestIfc: 0, Tunnel: true}: 1}}, "destination interface 0 (access)"},
 		{"a next hop of 0",
 			Interface{Instance: "internet", Hops: map[Egress]uint32{{DestIfc: 1}: 0}}, "is 0, which is no next hop"},
 		{"an ARP responder with no MAC",

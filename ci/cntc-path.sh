@@ -13,10 +13,10 @@
 #       passes without the UPF being asked; the unknown-SEID answer is tested in
 #       internal/session and internal/n4.
 #   N3  CNTC's NT-01..03 frames (ci/cntc/frames.py), one variant at a time, at line
-#       rate through the real TEID table and GtpuDecap, with a pfcpsim session
-#       installed: the daemon must stay up (and write no crash report), the frames
-#       a UPF must refuse must stop at the stage that refuses them, and the valid
-#       ones must reach the router.
+#       rate through endpoint-scoped F-TEID admission and GtpuDecap, with a
+#       pfcpsim session installed: the daemon must stay up, malformed packets
+#       must drop, control/unknown traffic must use gate 2, and valid frames
+#       must reach the Router.
 #
 # This is not CNTC's verdict and earns no certificate: CNTC's own N3 tests send
 # through a NIC and read port counters (its adapters are per UPF), and upfd has
@@ -82,7 +82,7 @@ start() {
   for _ in $(seq 1 60); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 0.5; done
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 || { cat "$WORK/bessd.log" >&2; fail "bessd did not come up"; }
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$1" >/dev/null
-  "$WORK/upfd" -n4 "$N4_ADDR:8805" -node-id "$N4_ADDR" -bess "127.0.0.1:$BESS_PORT" -n3-addr "$N3" \
+  "$WORK/upfd" -n4 "$N4_ADDR:8805" -node-id "$N4_ADDR" -bess "127.0.0.1:$BESS_PORT" -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 \
     -log-level info >"$WORK/upfd.log" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 40); do grep -q 'n4 listening' "$WORK/upfd.log" 2>/dev/null && break; sleep 0.25; done
@@ -125,9 +125,10 @@ stop
 
 # ---------------------------------------------------------------------------
 echo "== N3: CNTC's NT-01..03 frames, one variant at a time"
-# variant | stage that must stop it: teid (the TEID table's default gate), decap, or
-# none (it must reach the router)
-VARIANT_LIST="valid:none psc_valid:none unknown_teid:teid truncated_hdr:teid echo_request:decap reserved_type:decap bad_version:decap gpdu_no_inner:decap len_overflow:decap psc_malformed:decap"
+# route = admitted and forwarded; miss/control = decap gate 2; drop = no decap
+# output. The unknown TEID and non-G-PDU control messages intentionally share
+# gate 2, while malformed frames stop before either output gate.
+VARIANT_LIST="valid:route psc_valid:route unknown_teid:miss echo_request:control reserved_type:control truncated_hdr:drop bad_version:drop gpdu_no_inner:drop len_overflow:drop psc_malformed:drop"
 CRASH_LOG=/tmp/bessd_crash.log
 for entry in $VARIANT_LIST; do
   v=${entry%%:*} stage=${entry##*:}
@@ -138,17 +139,30 @@ for entry in $VARIANT_LIST; do
     { cat "$WORK/step.out" >&2; fail "$v: the session was not established"; }
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
   sleep 3
-  sent=$(metric src_up 0); teid=$(metric teid 0); decap=$(metric decap0 0); routed=$(metric rt 0)
+  sent=$(metric src_up 0); admitted=$(metric decap0 0); gate2=$(metric decap0 2); routed=$(metric rt 0)
   kill -0 "$BESS_PID" 2>/dev/null || fail "$v: bessd died"
   [ "$(stat -c %Y "$CRASH_LOG" 2>/dev/null || echo 0)" = "$BEFORE" ] || fail "$v: bessd wrote a crash report"
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 || fail "$v: bessd stopped answering"
   [ "${sent:-0}" -gt 0 ] || fail "$v: nothing was sent"
   case $stage in
-    none)  [ "${routed:-0}" -gt 0 ] || fail "$v: a valid frame did not reach the router (sent=$sent teid=$teid decap=$decap)" ;;
-    teid)  [ "${teid:-0}" -eq 0 ] || fail "$v: passed the TEID table (teid=$teid)" ;;
-    decap) [ "${teid:-0}" -gt 0 ] && [ "${decap:-0}" -eq 0 ] || fail "$v: expected to reach decap and stop there (teid=${teid:-0} decap=${decap:-0})" ;;
+    route)
+      [ "${admitted:-0}" -gt 0 ] && [ "${routed:-0}" -gt 0 ] ||
+        fail "$v: an admitted valid frame did not reach the Router (sent=$sent admitted=$admitted routed=$routed)"
+      ;;
+    miss)
+      [ "${admitted:-0}" -eq 0 ] && [ "${gate2:-0}" -gt 0 ] && [ "${routed:-0}" -eq 0 ] ||
+        fail "$v: unknown TEID did not use gate 2 (admitted=$admitted gate2=$gate2 routed=$routed)"
+      ;;
+    control)
+      [ "${admitted:-0}" -eq 0 ] && [ "${gate2:-0}" -gt 0 ] && [ "${routed:-0}" -eq 0 ] ||
+        fail "$v: control traffic did not use gate 2 (admitted=$admitted gate2=$gate2 routed=$routed)"
+      ;;
+    drop)
+      [ "${admitted:-0}" -eq 0 ] && [ "${gate2:-0}" -eq 0 ] && [ "${routed:-0}" -eq 0 ] ||
+        fail "$v: malformed traffic left decap (admitted=$admitted gate2=$gate2 routed=$routed)"
+      ;;
   esac
-  echo "ok: $v: sent=$sent teid=${teid:-0} decap=${decap:-0} routed=${routed:-0}, must stop at: $stage"
+  echo "ok: $v: sent=$sent admitted=${admitted:-0} gate2=${gate2:-0} routed=${routed:-0}, must stop at: $stage"
   stop
 done
 echo "ok: bessd stayed up through every variant and wrote no crash report"

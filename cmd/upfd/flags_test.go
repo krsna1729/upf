@@ -9,6 +9,7 @@ import (
 
 	"github.com/krsna1729/upf/internal/routing"
 	"github.com/krsna1729/upf/internal/session"
+	"github.com/wmnsk/go-pfcp/ie"
 )
 
 // TestParseInstancesReadsTheEgresses: each *-next-hop key is one egress of the
@@ -17,7 +18,7 @@ import (
 // on the data network.
 func TestParseInstancesReadsTheEgresses(t *testing.T) {
 	d, err := parseInstances(
-		"name=internet,domain=1,next-hop=1,tunnel-next-hop=3,sgi-lan-next-hop=4,arp=arp_n6,arp-mac=02:00:00:00:06:01;"+
+		"name=internet,domain=1,next-hop=1,tunnel-next-hop=3,access-next-hop=6,sgi-lan-next-hop=4,arp=arp_n6,arp-mac=02:00:00:00:06:01;"+
 			" name=vn,domain=2,vn-next-hop=5", 4, session.RouteByHop)
 	if err != nil {
 		t.Fatalf("the deployment was refused: %v", err)
@@ -33,6 +34,7 @@ func TestParseInstancesReadsTheEgresses(t *testing.T) {
 	}{
 		{"a plain forward toward the data network", routing.Egress{DestIfc: 1}, 1},
 		{"a tunnel out of the instance", routing.Egress{DestIfc: 1, Tunnel: true}, 3},
+		{"a tunnel toward Access", routing.Egress{DestIfc: 0, Tunnel: true}, 6},
 		{"a forward to the service LAN", routing.Egress{DestIfc: 2}, 4},
 	} {
 		if hop, ok := internet.Hop(c.e); !ok || hop != c.want {
@@ -180,12 +182,12 @@ func TestParseInstancesRefuses(t *testing.T) {
 // than silently dropped -- a dropped field is a rule keyed on less than the
 // table matches.
 func TestParsePDRFieldsNamesTheGraphsKey(t *testing.T) {
-	got, err := parsePDRFields("src, dst, proto, sport, dport, teid")
+	got, err := parsePDRFields("src, dst, proto, sport, dport, fteid, qfi")
 	if err != nil {
-		t.Fatalf("the graph's six fields were refused: %v", err)
+		t.Fatalf("the graph's seven fields were refused: %v", err)
 	}
 	want := []session.Field{session.SrcIP, session.DstIP, session.Proto,
-		session.SrcPort, session.DstPort, session.UpfTEID}
+		session.SrcPort, session.DstPort, session.FTEIDContext, session.QFI}
 	if len(got) != len(want) {
 		t.Fatalf("the flag parsed %d fields, want %d", len(got), len(want))
 	}
@@ -194,6 +196,11 @@ func TestParsePDRFieldsNamesTheGraphsKey(t *testing.T) {
 			t.Errorf("field %d is %v, want %v", i, got[i], want[i])
 		}
 	}
+	// The admission context replaced the per-endpoint key fields; a profile
+	// still naming them must not quietly key less than it says.
+	if _, err := parsePDRFields("teid,endpoint"); err == nil {
+		t.Error("the removed endpoint key fields were accepted")
+	}
 	if _, err := parsePDRFields("src,domain,tunnel"); err == nil {
 		t.Error("a field name the graph has no such field for was accepted")
 	} else if !strings.Contains(err.Error(), "\"tunnel\"") {
@@ -201,5 +208,80 @@ func TestParsePDRFieldsNamesTheGraphsKey(t *testing.T) {
 	}
 	if _, err := parsePDRFields(" , "); err == nil {
 		t.Error("a flag naming no field was accepted")
+	}
+}
+
+func TestParseFTEIDAddresses(t *testing.T) {
+	entries := entryList{
+		"endpoint=7,reference=n3,transport-domain=1,source=access,instance=foo,ipv4=192.0.2.9,ipv6=2001:db8::9",
+		"endpoint=8,reference=n9,transport-domain=2,source=core,instance=bar,ipv4=192.0.2.10",
+	}
+	endpoints, err := parseFTEIDAddresses(entries, true)
+	if err != nil || len(endpoints) != 2 || endpoints[0].ID != 7 ||
+		endpoints[0].ReferencePoint != "n3" || endpoints[0].TransportRouteDomain != 1 ||
+		endpoints[0].SourceInterface != ie.SrcInterfaceAccess ||
+		endpoints[0].IPv4 != netip.MustParseAddr("192.0.2.9") ||
+		endpoints[0].IPv6 != netip.MustParseAddr("2001:db8::9") ||
+		endpoints[1].ID != 8 || endpoints[1].ReferencePoint != "n9" ||
+		endpoints[1].TransportRouteDomain != 2 ||
+		endpoints[1].SourceInterface != ie.SrcInterfaceCore {
+		t.Fatalf("F-TEID endpoints: %+v, error %v", endpoints, err)
+	}
+	for _, bad := range []string{
+		"reference=n3,transport-domain=1,source=access,ipv4=192.0.2.9",
+		"endpoint=0,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.9",
+		"endpoint=7,reference=n3,transport-domain=0,source=access,ipv4=192.0.2.9",
+		"endpoint=4294967296,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.9",
+		"endpoint=7,reference=n3,transport-domain=1,source=core,ipv4=192.0.2.9",
+		"endpoint=7,reference=n19,transport-domain=1,source=access,ipv4=192.0.2.9",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv4=::1",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv6=::ffff:192.0.2.1",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv4=0.0.0.0",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv4=169.254.1.1",
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv6=2001:db8::1%eth0",
+	} {
+		if _, err := parseFTEIDAddresses(entryList{bad}, false); err == nil {
+			t.Errorf("invalid F-TEID endpoint accepted: %s", bad)
+		}
+	}
+	if _, err := parseFTEIDAddresses(entryList{
+		"endpoint=7,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.9",
+	}, true); err == nil {
+		t.Error("multi-instance endpoint without instance was accepted")
+	}
+	if _, err := parseFTEIDAddresses(entryList{
+		"endpoint=7,reference=n3,transport-domain=1,source=access,instance=foo,ipv4=192.0.2.9",
+		"endpoint=7,reference=n9,transport-domain=2,source=core,instance=bar,ipv4=192.0.2.10",
+	}, true); err == nil {
+		t.Error("duplicate endpoint ID was accepted")
+	}
+	if got, err := parseFTEIDAddresses(entryList{
+		"endpoint=9,reference=n3,transport-domain=3,source=access,ipv6=fd00::1",
+	}, false); err != nil || got[0].IPv6 != netip.MustParseAddr("fd00::1") {
+		t.Errorf("valid ULA endpoint rejected: %+v, %v", got, err)
+	}
+}
+
+func TestParseInstancesAccessTunnelEgress(t *testing.T) {
+	domains, err := parseInstances("name=direct,domain=0,access-next-hop=2;name=indirect,domain=1,access-next-hop=3", 2, session.RouteByHop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]uint32{"direct": 2, "indirect": 3} {
+		ifc, ok := domains.Lookup(name)
+		if !ok {
+			t.Fatalf("missing instance %q", name)
+		}
+		if got, ok := ifc.Hop(routing.Egress{DestIfc: 0, Tunnel: true}); !ok || got != want {
+			t.Errorf("%s Access tunnel hop %d (found %v), want %d", name, got, ok, want)
+		}
+		if _, ok := ifc.Hop(routing.Egress{DestIfc: 0}); ok {
+			t.Errorf("%s tunnel-only Access mapping also matched plain Access", name)
+		}
+	}
+	for _, value := range []string{"-1", "4294967296", "not-a-hop"} {
+		if _, err := parseInstances("name=invalid,domain=0,access-next-hop="+value, 1, session.RouteByHop); err == nil {
+			t.Errorf("invalid Access hop %q accepted", value)
+		}
 	}
 }

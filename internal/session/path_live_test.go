@@ -80,7 +80,7 @@ func pathEstablishmentWith(cpSEID uint64, ueIP, sdf string,
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter(sdf, "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -104,11 +104,11 @@ func pathEstablishmentWith(cpSEID uint64, ueIP, sdf string,
 // over the control plane makes deploy/session-path.yaml carry packets in both
 // directions. The graph's two Sources run from the moment it is applied, so the
 // counters where each chain leaves the UPF are the evidence -- zero before the
-// session exists (nothing selects those packets: the TEID table drops the G-PDU
-// and the downlink table has no rule), non-zero after:
+// session exists (F-TEID admission misses go to gate 2, outside the PDR chains),
+// non-zero after:
 //
-//   - the uplink's counter is the router's output: the TEID rule matched, the
-//     decap stripped the tunnel, the PDR rule matched the UE's packet, its
+//   - the uplink's counter is the router's output: ingress admitted and
+//     decapsulated the tunnel, the PDR rule matched the UE's packet, its
 //     action selected the next hop, the meter passed it and the router found
 //     the N6 route.
 //   - the downlink's is the encap's output: the PDR rule matched the data
@@ -134,6 +134,56 @@ func TestLiveSessionCarriesPackets(t *testing.T) {
 func TestLiveSessionCarriesPacketsWithAnSDFPrefix(t *testing.T) {
 	carriesPackets(t, pathEstablishmentWithSDF(0x3333, "10.45.0.2",
 		"permit out udp from any to 10.45.0.0/16 53"), false)
+}
+
+// TestLiveSessionCarriesPacketsWithAPortRange: the downlink filter names a
+// port range around the frames' destination port (53) instead of the port, so
+// the rule is a WildcardMatch range on that field (BESS D-186) and the packets
+// must still cross.
+func TestLiveSessionCarriesPacketsWithAPortRange(t *testing.T) {
+	carriesPackets(t, pathEstablishmentWithSDF(0x3334, "10.45.0.2",
+		"permit out udp from any to 10.45.0.0/16 50-60"), false)
+}
+
+// TestLiveSessionCarriesNothingOutsideAPortRange is the range's other edge: a
+// range that stops one port short of the frames' 53 (54-60) must select none of
+// them. Without it, a range compiled to a masked-out field would pass the arm
+// above while matching every port.
+func TestLiveSessionCarriesNothingOutsideAPortRange(t *testing.T) {
+	target := os.Getenv("UPF_BESS_TARGET")
+	if target == "" {
+		t.Skip("set UPF_BESS_TARGET (ci/session-path.sh does) to run against a live bessd")
+	}
+	ctx := context.Background()
+	client, err := bess.Dial(ctx, target)
+	if err != nil {
+		t.Fatalf("dialing %s: %v", target, err)
+	}
+	defer client.Close()
+	if err := client.Refresh(ctx); err != nil {
+		t.Fatalf("reading the daemon's schema: %v", err)
+	}
+	c := New(liveConfig(), client, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	resp := c.Establish(pathEstablishmentWithSDF(0x3335, "10.45.0.2",
+		"permit out udp from any to 10.45.0.0/16 54-60")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the daemon refused the establishment with cause %d", got)
+	}
+	defer func() {
+		del := message.NewSessionDeletionRequest(0, 0, upFSEID(t, resp), 9, 0)
+		if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
+			t.Errorf("the deletion answered cause %d", got)
+		}
+	}()
+	// The uplink is not constrained by the downlink filter: its packets
+	// crossing is what says the session reached the packet path at all.
+	waitForPackets(t, ctx, client, "rt", 10*time.Second)
+	before := gatePackets(t, ctx, client, "enc")
+	time.Sleep(time.Second)
+	if n := gatePackets(t, ctx, client, "enc") - before; n != 0 {
+		t.Errorf("a range of 54-60 let %v downlink packets to port 53 through", n)
+	}
 }
 
 // carriesPackets establishes one session and waits for both chains to carry
@@ -192,11 +242,11 @@ func carriesPackets(t *testing.T, req *message.SessionEstablishmentRequest, cont
 // TestLiveSessionSharedRecords is the shape a real SMF sends when it programs
 // several uplink filters onto one tunnel: two uplink PDRs sharing one F-TEID and
 // one QER, then a Modify that removes one of them. Both halves are where the
-// engine's transaction rules bite -- one TEID rule named twice by the
-// establishment, an erase of a key the same transaction writes by the removal --
-// and the recorder the unit tests use takes anything, so this is the only place
-// the daemon's verdict is heard (core/dataplane/transaction_engine.cc rejects a
-// second operation on one (resource, key) in a transaction).
+// the engine's transaction rules bite -- two PDRs share one F-TEID admission
+// entry, and removing one must not erase a key the same transaction retains.
+// The recorder used by unit tests accepts anything, so this live daemon check
+// verifies the transaction engine rejects duplicate operations on one
+// (resource, key) (`core/dataplane/transaction_engine.cc`).
 func TestLiveSessionSharedRecords(t *testing.T) {
 	target := os.Getenv("UPF_BESS_TARGET")
 	if target == "" {
@@ -230,26 +280,24 @@ func TestLiveSessionSharedRecords(t *testing.T) {
 	}()
 	t.Logf("established SEID %d with two uplink PDRs on one F-TEID", upFSEID(t, resp))
 
-	// PDR 1 is the one the shared TEID rule was written from (the first PDR, in
-	// precedence order), and PDR 2 survives to rewrite it: that is the case
-	// where a removal's erase list and a write can name one key in one
-	// transaction. Then PDR 2 goes too, which is the case where the session has
-	// no user of the TEID left and the rule is erased.
+	// The shared admission entry must survive removing PDR 1 while PDR 2 still
+	// names the same F-TEID. Removing PDR 2 then leaves no user of the key, so
+	// the entry is erased.
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewRemovePDR(ie.NewPDRID(1)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
-		t.Fatalf("the daemon refused the removal of the TEID's PDR with cause %d", got)
+		t.Fatalf("the daemon refused the removal of the F-TEID's PDR with cause %d", got)
 	}
-	t.Logf("removed PDR 1; PDR 2 rewrote the shared TEID rule in the same transaction")
+	t.Logf("removed PDR 1; PDR 2 retained the shared admission entry")
 
 	mod = message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 3, 0,
 		ie.NewRemovePDR(ie.NewPDRID(2)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
-		t.Fatalf("the daemon refused the second removal with cause %d", got)
+		t.Fatalf("the daemon refused removal of the last F-TEID PDR with cause %d", got)
 	}
-	t.Logf("removed PDR 2; the session holds no user of the TEID rule now")
+	t.Logf("removed PDR 2; the session released the admission entry")
 }
 
 // gatePackets is the packets a module's output gate has counted, from the
@@ -333,7 +381,7 @@ func pathUrrEstablishment(cpSEID uint64, ueIP string, urr *ie.IE) *message.Sessi
 			ie.NewPrecedence(100),
 			ie.NewPDI(
 				ie.NewSourceInterface(ie.SrcInterfaceCore),
-				ie.NewUEIPAddress(0x02, ueIP, "", 0, 0),
+				ie.NewUEIPAddress(0x06, ueIP, "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to assigned 53", "", "", "", 0),
 			),
 			ie.NewFARID(2),
@@ -365,9 +413,9 @@ func pathUrrEstablishment(cpSEID uint64, ueIP string, urr *ie.IE) *message.Sessi
 // daemon, end to end: the compiler's URR is measured by the graph's counting
 // module, Evaluate reads that module's own command, the quota the test
 // provisioned is spent, and the packet path stops carrying the session's
-// traffic -- which is what the counter says, and what the action table's own
-// gate counter says (it keeps rising before the evaluation and stands still
-// after it, while the graph's source runs on).
+// traffic -- which is what the counter says, and what the meter's own gate
+// counter says (it keeps rising before the evaluation and stands still after
+// it, while the graph's source runs on).
 func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 	target := os.Getenv("UPF_BESS_TARGET")
 	if target == "" {
@@ -446,22 +494,22 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 	}
 
 	// The enforcement reached the packet path: over the same interval the
-	// source keeps producing and the action table sees nothing.
+	// source keeps producing and the meter sees nothing.
 	produced := gatePackets(t, ctx, client, "src_up")
-	forwarded := gatePackets(t, ctx, client, "at_ul")
+	forwarded := gatePackets(t, ctx, client, "mt_ul")
 	time.Sleep(500 * time.Millisecond)
 	producedAfter := gatePackets(t, ctx, client, "src_up")
-	forwardedAfter := gatePackets(t, ctx, client, "at_ul")
+	forwardedAfter := gatePackets(t, ctx, client, "mt_ul")
 	if producedAfter == produced {
 		t.Fatalf("the graph's source stopped producing (%v packets): this test says nothing about the drop", produced)
 	}
 	if forwardedAfter != forwarded {
-		t.Errorf("after the quota ran out %v more packets reached the action table; "+
+		t.Errorf("after the quota ran out %v more packets reached the meter; "+
 			"the PDRs that name the URR must drop (source produced %v in the same interval)",
 			forwardedAfter-forwarded, producedAfter-produced)
 	}
 	t.Logf("the report: %d packets, %d octets, trigger %v; the source produced %v packets "+
-		"after the enforcement and the action table saw none",
+		"after the enforcement and the meter saw none",
 		report.Up.Packets, report.Up.Octets, report.Trigger, producedAfter-produced)
 }
 
@@ -756,10 +804,10 @@ func TestLiveTwoInstancesRouteIndependently(t *testing.T) {
 	cfg := liveConfig()
 	cfg.Instances = instances
 	// deploy/session-instances.yaml's uplink table classifies by the tunnel the
-	// packet arrived on (`upf_teid`, the decap's own metadata attribute): that
+	// packet arrived on (`fteid_context`, the decap's own metadata attribute): that
 	// is what tells two instances' sessions with one UE address apart, and the
 	// field list here mirrors the manifest's the way every other list does.
-	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, UpfTEID, QFI}
+	cfg.Up.PDRFields = []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, FTEIDContext, QFI}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := New(cfg, client, log)

@@ -1,0 +1,69 @@
+3GPP TS 23.502 V16.9.0 (2021-06), Release 16
+Procedures for the 5G System (5GS)
+
+Official archive: https://www.3gpp.org/ftp/Specs/archive/23_series/23.502/23502-g90.zip
+Archive member: 23502-g90.docx
+Converted to UTF-8 text with LibreOffice (`--convert-to 'txt:Text (encoded):UTF8'`). The excerpts below retain clause headings and selected clause text; page numbers and the table of contents are omitted.
+
+4.3.5.4 Addition of additional PDU Session Anchor and Branching Point or UL CL
+Clause 4.3.5.4 describes a procedure to add a PDU Session Anchor and a Branching Point or UL CL for an established PDU Session.
+1. UE has an established PDU Session with a UPF including the PDU Session Anchor 1 (PSA1 in Figure 4.3.5.4-1). The PDU Session User Plane involves at least the (R)AN and the PDU Session Anchor 1.
+2. At some point the SMF decides to establish a new PDU Session Anchor e.g. due to UE mobility, new flow detection. The SMF selects a UPF and using N4 establish the new PDU Session Anchor 2 (PSA2 in Figure 4.3.5.4-1) of the PDU Session.
+3. The SMF selects a UPF and using N4 establish the Branching Point (in the case of IPv6 multi-homing) or a UL CL for the PDU Session. It provides the necessary uplink forwarding rules towards PSA1 and PSA2 including the PSA1 CN Tunnel Info and the PSA2 CN Tunnel Info. In addition, the AN Tunnel Info is provided for downlink forwarding. In the case of IPv6 multi-homing, the SMF also provides traffic filters for the IPv6 prefixes corresponding to PSA1 and PSA2 indicating what traffic shall be forwarded towards PSA1 and PSA2 respectively.
+NOTE 1: If the Branching Point or UL CL and the PSA2 are co-located in a single UPF then steps 2 and 3 can be merged. If a Branching Point is already allocated, step 3 is skipped.
+4. The SMF updates the PSA1 via N4. It provides the Branching Point or UL CL CN Tunnel Info for the downlink traffic.
+NOTE 2: If the Branching Point or UL CL and the PSA1 are co-located in a single UPF then steps 3 and 4 can be merged.
+5. The SMF updates PSA2 via N4. It provides the Branching Point or UL CL CN Tunnel Info for down-link traffic.
+NOTE 3: If the Branching Point or UL CL and the PSA2 are co-located in a single UPF then step 5 is not needed.
+
+4.9.1.3 Inter NG-RAN node N2 based handover
+4.9.1.3.1 General
+The source NG-RAN decides to initiate an N2-based handover to the target NG-RAN. This can be triggered, for example, due to new radio conditions or load balancing, if there is no Xn connectivity to the target NG-RAN, an error indication from the target NG-RAN after an unsuccessful Xn-based handover (i.e. no IP connectivity between T-RAN and S-UPF), or based on dynamic information learnt by the S-RAN.
+The availability of a direct forwarding path is determined in the source NG-RAN and indicated to the SMFs. If IP connectivity is available between the source and target NG-RAN and security association(s) is in place between them, a direct forwarding path is available.
+If a direct forwarding path is not available, indirect forwarding may be used. The SMFs use the indication from the source NG-RAN to determine whether to apply indirect forwarding.
+
+4.9.1.3.2 Preparation phase, steps 11a-11f
+11a. AMF to SMF: Nsmf_PDUSession_UpdateSMContext Request (PDU Session ID, N2 SM response received from T-RAN).
+For each N2 SM response received from the T-RAN (N2 SM information included in Handover Request Acknowledge), AMF sends the received N2 SM response to the SMF indicated by the respective PDU Session ID.
+If no new T-UPF is selected, SMF stores the N3 tunnel info of T-RAN from the N2 SM response if N2 handover is accepted by T-RAN.
+The SMF/UPF allocates the N3 UP address and Tunnel IDs for indirect data forwarding corresponding to the data forwarding tunnel endpoints established by T-RAN.
+11b. [Conditional] SMF to T-UPF: N4 Session Modification Request (T-RAN SM N3 forwarding Information list, indication to allocate DL forwarding tunnel(s) for indirect forwarding).
+If the SMF selected a T-UPF in step 6a, the SMF updates the T-UPF by providing the T-RAN SM N3 forwarding information list by sending a N4 Session Modification Request to the T-UPF.
+If indirect forwarding applies based on indication from the S-RAN and the UPF is re-allocated and if the SMF decides to setup the indirect forwarding tunnel on the same T-UPF, the SMF also requests in the N4 Session Modification Request message to the T-UPF, to allocate DL forwarding tunnel(s) for indirect forwarding.
+Indirect forwarding may be performed via a UPF which is different from the T-UPF, in which case the SMF selects a T-UPF for indirect forwarding.
+11c. [Conditional] T-UPF to SMF: N4 Session Modification Response (T-UPF SM N3 forwarding Information list).
+The T-UPF allocates Tunnel Info and returns an N4 Session Modification Response message to the SMF.
+The T-UPF SM N3 forwarding info list includes T-UPF N3 address, T-UPF N3 Tunnel identifiers for forwarding data.
+11d. [Conditional] SMF to S-UPF: N4 Session Modification Request (T-RAN SM N3 forwarding Information list or T-UPF SM N3 forwarding Information list, indication to allocate DL forwarding tunnel(s) for indirect forwarding).
+If the UPF is re-allocated, this message includes the T-UPF SM N3 forwarding info list. If the UPF is not re-allocated, this message includes the T-RAN SM N3 forwarding information list.
+If indirect forwarding applies based on indication from NG-RAN and UPF allocates tunnel identities, the SMF indicates in the N4 Session Modification Request message to the S-UPF to allocate DL forwarding tunnel(s) for indirect forwarding.
+Indirect forwarding may be performed via a UPF which is different from the S-UPF.
+11e. [Conditional] S-UPF to SMF: N4 Session Modification Response (S-UPF SM N3 forwarding Information list).
+The S-UPF allocates Tunnel Info and returns an N4 Session establishment Response message to the SMF.
+The S-UPF SM N3 forwarding Information list includes S-UPF N3 address, S-UPF N3 Tunnel identifiers for DL data forwarding.
+11f. SMF to T-AMF: Nsmf_PDUSession_UpdateSMContext Response (N2 SM Information).
+The SMF sends an Nsmf_PDUSession_UpdateSMContext Response message per PDU Session to T-AMF.
+The SMF creates an N2 SM information containing the DL forwarding Tunnel Info to be sent to the S-RAN by the AMF. The SMF includes this information in the Nsmf_PDUSession_UpdateSMContext response. The DL forwarding Tunnel Info can be one of the following information:
+- If direct forwarding applies, then the SMF includes the T-RAN N3 forwarding information the SMF received in step 11a.
+- If the indirect forwarding tunnel is setup in step 11b or 11d, then the SMF includes the T-UPF or S-UPF DL forwarding information containing the N3 UP address and the DL Tunnel ID of the UPF.
+
+4.9.1.3.3 Execution phase, steps 3 and 8a-15b
+3. Uplink packets are sent from T-RAN to T-UPF and UPF (PSA). Downlink packets are sent from UPF (PSA) to S-RAN via S-UPF. The S-RAN should start forwarding of downlink data from the S-RAN towards the T-RAN for QoS Flows or DRBs subject to data forwarding. This may be either direct (step 3a) or indirect forwarding (step 3b).
+8a. [Conditional] SMF to T-UPF (intermediate): N4 Session Modification Request.
+If new T-UPF is inserted or an existing intermediate S-UPF is re-allocated, the SMF shall send N4 Session Modification Request indicating DL AN Tunnel Info of T-RAN to the T-UPF.
+9a. [Conditional] SMF to S-UPF (intermediate): N4 Session Modification Request.
+If UPF is not re-allocated, the SMF shall send N4 Session Modification Request indicating DL AN Tunnel Info of T-RAN to the S-UPF.
+10a. [Conditional] SMF to UPF (PSA): N4 Session Modification Request.
+For non-roaming or local breakout roaming scenario, the SMF sends N4 Session Modification Request message to PDU Session Anchor UPF, UPF (PSA), providing N3 AN Tunnel Info of T-RAN or the DL CN Tunnel Info of T-UPF if a new T-UPF is inserted or an existing intermediate S-UPF is re-allocated.
+11. SMF to T-AMF: Nsmf_PDUSession_UpdateSMContext Response (PDU Session ID).
+SMF confirms reception of Handover Complete.
+If indirect data forwarding applies, the SMF starts an indirect data forwarding timer, to be used to release the resource of indirect data forwarding tunnel.
+13a. [Conditional] SMF to S-UPF (intermediate): N4 Session Release Request.
+If there is a source intermediate UPF, the SMF initiates resource release, after timer in step 6 or indirect data forwarding timer expires, by sending an N4 Session Release Request (Release Cause) to source UPF. This message is also used to release the indirect data forwarding resource in S-UPF.
+13b. S-UPF to SMF: N4 Session Release Response.
+The S-UPF acknowledges with an N4 Session Release Response message to confirm the release of resources.
+In the case of indirect data forwarding, the resource of indirect data forwarding is also released.
+15a. [Conditional] SMF to T-UPF: N4 Session Modification Request.
+If indirect forwarding applies and UPF is re-allocated, after timer of indirect data forwarding expires, the SMF sends N4 Session Modification Request to T-UPF to release the indirect data forwarding resource.
+15b. [Conditional] T-UPF to SMF: N4 Session Modification Response.
+The T-UPF acknowledges with an N4 Session Modification Response message to confirm the release of indirect data forwarding resources.

@@ -45,21 +45,66 @@ flowchart TB
 
 | PFCP | BESS |
 |---|---|
-| PDR (Precedence, PDI: Source Interface, F-TEID, Network Instance, UE IP, SDF filters, QFI) | one rule in the PDR table (WildcardMatch over masked keys) whose result is `{gate, ActionId}`; the rule's priority is the Precedence inverted (8.2.11's lower value is the higher precedence, the classifier applies the higher priority), and the QFI is the last key field where the graph declares it, so one session's several QoS flows are several rules; a port *range* is refused on this path — the opt-in firewall path below carries it, and see the OMEC table below |
-| F-TEID the CP function asks the UP function to choose (8.2.3: the CH flag, and CHID for a group the CP function names) | one TEID rule in front of the decap per F-TEID we allocate; the PDIs of a session that carry one CHOOSE ID share the F-TEID the session gave that group, so an SMF's several filters on one tunnel are one rule and one Created PDR value |
+| PDR (Precedence, PDI: Source Interface, F-TEID, Network Instance, UE IP, SDF filters, QFI) | one or more rules in the direction's `WildcardMatch`; keys combine the inner flow/QFI and endpoint-scoped F-TEID metadata, plus `route_domain` on the downlink table. Results carry the ActionId, meter IDs and next hop |
+| F-TEID the CP function asks the UP function to choose (8.2.3: CH and CHID) | one exact `<decap>/fteids` entry per distinct `{endpoint_id, family, local_address, teid}`; its value selects UL gate 0 or DL gate 1. CHOOSE/CHID reuse is scoped to one PFCP session: PDRs in that session that name one CHID share its F-TEID, while separate N4 sessions keep separate F-SEIDs and ownership |
 | FAR (Apply Action, Forwarding Parameters: Destination Interface, Network Instance, Outer Header Creation) | a *treatment* resource the action references (forward / drop / buffer / notify) plus the next hop and GTP-U encap parameters |
-| QER (Gate Status, MBR, GBR, Averaging Window, QFI) | a meter resource per QER, referenced from the action: a two-rate three-colour meter whose peak is the MBR (8.2.8) and whose committed rate is the GBR (8.2.7), so the band between them leaves the meter's gate 1 -- green and yellow are forwarded by the graph, and a deployment that marks or sheds the guarantee changes that one connection. Its burst is the rate over the QER's Averaging Window (8.2.115), its QFI goes into the tunnel record (where the encap writes the downlink packet's PDU Session Container from), and a PDR naming several QERs is gated by all of them but policed by the session's shared one (docs/claims.md, status-20 and status-35: one action carries one meter id; a chain of ActionTable/Meter pairs composes several, proven by `ci/meter-compose.sh`, and the compiler's composition is status-35). Two facts such a chain has to be built on, probed rather than assumed (2026-10-19, a scratch graph, two runs of it): `meter_id: 0` is "no meter" -- the packet passes that stage unmetered (the probe's green gate counted 72M packets, its red gate 0) -- and an action record naming an id its table's meters resource does not hold is refused at *apply* (`references missing mt/meters/07000000`), the reference check an action id gets (D-021). So every stage's table must hold an entry for every action id, with 0 where that stage's QER is not the PDR's, and a stage cannot be left without an entry for a packet it will see |
+| QER (Gate Status, MBR, GBR, Averaging Window, QFI) | the PDR result carries the selected flow-meter ID first and the session-shared meter ID second; `Meter(levels: 2)` processes them in order, so a red first level does not charge the second. GBR/MBR map to committed/peak rate, Averaging Window to burst, and QFI goes into tunnel records. Gate status from every named QER is folded; see `ci/meter-compose.sh` and claims status-20/35 |
 | URR (Measurement Method, Reporting Triggers, thresholds, period) | per-rule counters in the `UrrCount` module, one entry per rule a URR's PDRs name, keyed by the rule's ActionId, plus the decision in `session.EvaluateAll` -- one bulk reading per counter module per tick, every session judged in memory against it -- and `session.Evaluate`, the single-session reading that names its own rules: it reads the module's counters, reports the period, a threshold or a quota, and stops the traffic of a spent quota. Every limit and the period are measured over the usage since the URR's last report (a report opens the next window), which is the window the report itself carries; the alternative -- accumulate from provisioning and compare the running total -- needs a second base per URR, and the SMF's lever (an Update URR that provisions a new quota, which clears the flag) is the same either way. Time is the dataplane's own fact: the counting module stamps a rule's first packet of a reading and the last one it counted (one stamp pair per rule, shared and stored once per counted batch -- a timestamp is the rule's, not a worker's), the reading carries the wall clock it took them at, and the controller places them on the clock an SMF reads; a reading the reporting side makes closes the window and the next packet opens the next one, while a diagnostic read of the same command leaves it alone. A time threshold and a time quota are then measured against the time the *window's* traffic ran -- the window's own first packet to the reading's last -- which is the base the volume limits use too, with the idle gaps taken out of it. A graph whose counters carry no stamps falls back to the window's length, the same number while the traffic is continuous. Sending the report as a PFCP Session Report Request is `internal/n4`'s `Report` (the one exchange this node initiates, with retries and the Session Report Response routed back to the caller), driven by `upfd -urr-interval`; a report the SMF does not answer is held by the loop (a bounded per-session queue, the oldest report first, so the UR-SEQNs the SMF reads stay in order, retried with a doubling backoff and at most one attempt per tick, since each attempt costs the n4 layer's whole retry budget) rather than dropped, because an unanswered send leaves the outcome unknown while a refusal is an answer. Two facts hold the counters together: a rule's entry exists exactly while a URR measures it (a rule that drops keeps it, so an erase always finds it), and the first reading of a URR is the window's baseline (the cells outlive an erased entry and the id pool reissues ActionIds, so a fresh rule's first reading may hold the previous holder's totals) |
-| Error Indication Report (ERIR: a tunnel this UPF sends into that the peer's GTP-U reports unreachable, 5.10) | the `GtpuResponder` behind the TEID table's default gate counts every Error Indication the peer sends, per TEID, in a fixed-size lock-free table (`track_errors`, `get_errors`); the report tick reads that one table once per tick (`-gtpu-errors <module>` names it) and every count above a session's high-water mark becomes a Session Report Request whose Report Type has the ERIR bit and whose Error Indication Report IE carries the remote F-TEID the session sends with (7.5.8.4). No UP Function Features bit advertises it: 8.2.25 defines none for it |
+| Error Indication Report (ERIR: a tunnel this UPF sends into that the peer's GTP-U reports unreachable, 5.10) | `GtpuDecap` sends unknown G-PDUs and control to gate 2; `GtpuResponder` answers unknown G-PDUs with Error Indications and counts peer Error Indications per TEID for `-gtpu-errors` |
+| End Marker Reception Report (a URR's REEMR, 8.2.19; the Usage Report Trigger's EMRRE, 8.2.41) | `GtpuResponder` records each End Marker that reaches decap gate 2 as an (endpoint_id, local TEID) event in a per-worker ring (`track_end_markers`); the tick drains it once (`-gtpu-end-markers`), and each REEMR URR measuring a PDR on that F-TEID is reported with EMRRE |
 | Session (CP F-SEID, UP F-SEID) | one transaction's worth of resources, all named `<session-id>/…` |
 | Network Instance (N3/N6/N9) | a route domain; overlapping subscriber prefixes never collide because each domain has its own table |
 | Outer Header Creation (TEID, peer address) | the tunnel encap parameters of the treatment |
 | BAR (DL Buffering Duration, DL Buffering Suggested Packet Count) and the BUFF Apply Action | the deployment's own packet store (BESS's `packet_store`) on a branch the BUFF rule delivers to, keyed by the rule's ActionId; the first buffered packet is reported to the SMF as a Downlink Data Report, and the SMF's next instruction releases what is held. Two facts to know: the store's caps and timeout are the SMF's own per-flow numbers where its BAR gives them -- the compiler writes a `flows` entry per buffering rule, `timeout_ns` from 8.2.29 and `max_packets_per_flow` from 8.2.30, each left out where the SMF named none, so a flow without an instruction of its own falls back to the module's arguments (`requires_paused_workers: false`; the store enforces the cap on every arrival and frees a flow's packets past its timeout on the owner's own sweep — `EvictExpiredBounded`, 256 flows a run, since BESS 0bfd2783; an older daemon freed only at its global `max_packets`), and the DDN trigger is a *poll* -- the branch's counters read once per `-urr-interval` tick, so the report's latency is up to that tick and a deployment that wants DDN must set the interval; BESS's bounded dataplane->control event channel (G1.4) is what replaces the counter hop |
-| Path management: an Echo Request (TS 29.281 7.2.1) and an End Marker on a FAR that moves (5.3.2's SNDEM, 7.3.2) | the echo is the datapath's -- the TEID table's default gate is the `gtpu_responder` module behind it, so a message no session names is answered or dropped there, not in the packet path; the end marker is the controller's -- `upfd` builds the 60-byte frame (old TEID, old peer, N3 source) and writes it to the graph's `unix_port` after the transaction that switched the tunnel has landed, because a marker is a message this node *sends*, not state a transaction can hold |
+| Path management: Echo Request and End Marker | `GtpuDecap` sends control and admission misses to gate 2; `GtpuResponder` handles Echo and Error Indication traffic. `upfd` builds an End Marker from the old tunnel's local/peer addresses and TEID, then writes it to the Unix socket at `<base>.<transport_route_domain>` |
 
 The datapath therefore never chases relations: the PFCP side resolves
 `PDR → QER/FAR` once, at programming time, and the packet carries an
 `ActionId` that names the resolved object graph.
+
+### Control and Reporting Pipeline: Dataplane ──▶ Controller ──▶ SMF
+
+Dataplane events, the `upfd` code that reads them, and the PFCP report each becomes (TS 29.244 7.5.8). `upfd` sends four kinds of report:
+
+```mermaid
+flowchart LR
+    E1["<b>First DL packet for a BUFF rule</b><br/>stamped by cnt_buf, held in PacketStore"] --> C1["<b>session/downlink.go</b><br/>polled each tick; one notification<br/>per episode (ddnSent)"] --> M1["<b>Downlink Data Report</b><br/>Session Report, DLDR, PDR ID"]
+    E2["<b>URR counters</b><br/>UrrCount cnt_ul / cnt_dl"] --> C2["<b>session/report.go</b><br/>volume/time thresholds and quotas"] --> M2["<b>Usage Report</b><br/>Session Report, USAR, URR ID"]
+    E3["<b>GTP-U Error Indication</b><br/>counted by GtpuResponder<br/>on decap gate 2 (get_errors)"] --> C3["<b>session/erir.go</b><br/>polled each tick; new counts<br/>matched to FAR F-TEIDs"] --> M3["<b>Error Indication Report</b><br/>Session Report, ERIR, remote F-TEID"]
+    E4["<b>GTP-U End Marker</b><br/>logged by GtpuResponder<br/>on decap gate 2 (drain_end_markers)"] --> C4["<b>session/emrr.go</b><br/>drained each tick; matched to<br/>a PDR's local F-TEID"] --> M4["<b>Usage Report</b><br/>Session Report, USAR, EMRRE"]
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DP as Dataplane (BESS)
+    participant UPFD as upfd
+    participant SMF as SMF
+
+    Note over DP,SMF: Downlink data notification
+    UPFD->>DP: read the buffering counters (first-packet stamp)
+    UPFD->>SMF: Session Report Request (Downlink Data Report)
+    SMF->>UPFD: Session Modification Request (FAR → FORW)
+    UPFD->>DP: release the held packets to encap
+
+    Note over DP,SMF: Usage reporting
+    UPFD->>DP: read URR counters
+    UPFD->>SMF: Session Report Request (Usage Report)
+    SMF->>UPFD: Session Modification Request (new quota or removal)
+
+    Note over DP,SMF: Error Indication
+    UPFD->>DP: read the responder's Error Indication table
+    UPFD->>SMF: Session Report Request (Error Indication Report, F-TEID)
+
+    Note over DP,SMF: End Marker reception
+    UPFD->>DP: drain the responder's End Marker log
+    UPFD->>SMF: Session Report Request (Usage Report, EMRRE)
+```
+
+Not implemented: User Plane Path Failure Node Reports, and forwarding to the
+CP function (Destination Interface 3 is refused, cause 73; see
+`docs/compliance.md`). End Marker *construction* on SNDEM is implemented
+(`session/endmarker.go`); it is a message this node sends, not a report.
 
 ## The packet path, and how its cost is proven
 
@@ -73,110 +118,72 @@ One lookup and one record read, whatever the session contains: a session with a 
 a URR and a BAR costs the same steps as one with none. The compiler resolves
 PDR → QER/FAR/URR at install time; the packet path never chases a relation.
 
-**The key** is what a BESS classifier can read: *packet* bytes at an offset. A
-classifier's fields are `{offset, num_bytes}` (`bess::pb::Field`, `module_msg.proto`;
-`bessctl/conf/samples/session_pipeline.yaml` uses offset 26 for the IPv4 source), and
-metadata attributes are not matchable. The TEID of an uplink G-PDU sits in the outer
-header the decap module strips, so after decap it exists only as metadata -- but
-*before* decap it is packet bytes at a fixed offset (Eth 14 + IPv4 20 + UDP 8 + the
-GTP-U header's flags, type and length 4). The F-TEID is therefore a **rule** of the
-table in front of the decap, one per session:
+**The key and admission.** `GtpuDecap` owns `<module>/fteids`, keyed by the
+complete ingress identity: endpoint ID, outer address family, local outer
+destination address and TEID. The graph writes the nonzero endpoint ID before
+decap; a Vif does this for port traffic, and a `SetMetadata` module does it for
+single-endpoint test graphs. Transport route domain is separate: it selects the
+post-encap FIB and is not part of the ingress key.
 
-- `teid/rules` holds one rule per session: the four bytes of the TEID, masked all
-  ones, whose gate is the decap's output. A G-PDU whose TEID no rule names never
-  reaches the decap (the table's default gate drops it), so the decap needs no
-  session table at all: it strips headers, writes `upf_teid` and passes the inner
-  packet on (TS 29.281 answers an Error Indication to the peer -- the responder
-  behind the table's default gate does, 7.3.1; the notification path to the SMF
-  is the responder's error table plus the report tick, `docs/claims.md`'s
-  status-28). This is also the *whole* cost of the F-TEID
-  match, and it
-  is one hash lookup, the same table machinery every other rule uses.
-- A *session table* in the plugin was the first design, and it does not work: the
-  fork's `SlotResource` keys are dense ids in `1..capacity` (`slot_table.h`), and a
-  TEID is an arbitrary 32-bit id (0x11223344 is a plausible one). The rule table has
-  no such constraint, and it inherits the classifier's transactional model (D-141)
-  and its reference checking.
-- the decap writes `upf_teid` for the modules downstream that read it. A
-  write-only metadata attribute no module reads is not allocated at all -- the
-  pipeline gives it `kMetadataOffsetNoWrite` (`core/metadata.cc`,
-  `FillOffsetArrays`: "attr not read downstream") -- so a graph that wants the TEID
-  in metadata must contain a reader, and `deploy/smoke-gtpu.yaml` has one.
-- the PDR rules match what the PDI names after the F-TEID: the UE IPv4 address and the
-  SDF tuple (protocol, ports, at their fixed offsets). `WildcardMatch` masks make
-  "UE IP only" and "UE IP plus 5-tuple" the same table.
-- a PDR whose PDI names *only* an F-TEID (no UE IP, no SDF) cannot be selected by a
-  packet classifier. The compiler refuses it with a PFCP cause instead of installing a
-  catch-all rule, which would hand one session's traffic to another's action. Real
-  SMFs put the UE IP in the PDI; the interop milestone checks that against open5gs
-  rather than assuming it.
+The internal key is fixed-width and exact: `endpoint_id` (BE32), family (4 or
+6), a 16-byte address slot, and `teid` (BE32). The local address is 4 or 16 raw
+bytes; IPv4 occupies the final four bytes of the slot. A `FteidEntry` carries
+direction 0 (UL) or 1 (DL) and a nonzero compiler-allocated `context_id`. The
+compiler gives every (session, direction, endpoint, TEID) its own context; the
+IPv4 and IPv6 keys of one dual-stack F-TEID share it. It reuses the corresponding
+endpoint/family key for PDIs in one session that share a chosen F-TEID; the
+same TEID at another endpoint or local address is a different key. A different
+session cannot claim an already-owned complete key.
 
-**Framing.** The graph carries Ethernet frames: BESS's core modules read IPv4 behind
-an Ethernet header (`core/modules/ip_lookup.cc` reads `eth + 1`), so the decap leaves
-the inner packet behind a header it writes from the headroom the outer headers
-occupied (the outer frame's addresses, the inner packet's version), and the encap
-takes that header off before it writes the outer one -- a G-PDU's payload is the inner
-IP packet, not a frame (TS 29.281). Neither direction copies a payload byte, and
-each egress names its peer in that header itself: the encap builds the outer
-frame's addresses from the tunnel record, and the `Router` writes the resolved
-next hop's `dst_mac`/`src_mac` into the frame it forwards (BESS D-153) -- so a
-frame leaving N6 names the data network's next hop and the interface it left by
-(`deploy/upf.yaml`'s hop 1, byte-checked by `ci/session-path.sh` at `dump_n6`).
+For each packet, the module parses the outer Ethernet/IP/UDP/GTP-U headers,
+builds the key from the endpoint tag and parsed outer destination, then performs
+one batched exact-index lookup. An admitted UL packet leaves gate 0 and an
+admitted DL packet leaves gate 1, decapsulated to an inner Ethernet frame.
+Unknown G-PDUs and packets the parser classifies as GTP-U control leave gate 2
+whole, for the responder. Malformed outer/GTP-U packets and non-IP inner
+payloads drop. Decap reads `endpoint_id` and writes `fteid_context` (the
+entry's `context_id`) and QFI metadata; PDR tables key on them after decap
+(7 fields UL, 8 DL with `route_domain`). BESS allocates offsets only for attributes with readers, so
+each graph must keep the readers declared for those fields.
 
-**Two chains, one per direction.** A module has one output gate per path, and a rule
-names an `ActionId` that resolves against the actions resource its table declares
-(D-141). One classifier table and one action table therefore cannot serve both
-directions: the uplink's meter feeds the router toward N6 and the downlink's feeds the
-tunnel toward N3, and a downlink rule's action lives in the downlink table. The graph
-has `pdr_ul → at_ul → mt_ul → rt` and `pdr_dl → at_dl → mt_dl → enc`, each table
-declaring its own chain's actions resource, so every rule's reference is exact.
-`deploy/session-live.yaml` is that graph (module names: the session layer's `Config`).
+`GtpuResponder` answers Echo Requests and returns an Error Indication for an
+unknown G-PDU; it records peer Error Indications for the report tick. A received
+End Marker remains control traffic and does not enter a PDR chain.
 
-Both results — the gate and the ActionId — come from one lookup
+The PDR keys still include the inner UE address and the SDF tuple. A PDR that
+names only an F-TEID has no UE address for the classifier key and is refused;
+F-TEID admission does not replace the session's inner-packet match.
+
+**Framing.** The graph carries Ethernet frames: BESS's core modules read IPv4
+behind Ethernet (`core/modules/ip_lookup.cc` reads `eth + 1`). Decap writes an
+inner Ethernet header from the outer frame's MAC addresses and the inner IP
+version, using the headroom freed by the outer headers. Encap removes that
+inner Ethernet header, places the inner IP packet in the G-PDU, and writes
+outer IPv4/IPv6 addresses from the tunnel record. It leaves outer Ethernet
+addresses unresolved; the post-encap Router resolves the next hop with
+ARP/ND and writes its MAC pair (BESS D-153). Neither direction copies a payload
+byte. The Router decrements the outer hop count, so it does not change the
+subscriber packet's inner TTL after encapsulation.
+
+**Two chains, one per direction.** A module has one output gate per path: the
+uplink's meter feeds the router toward N6 and the downlink's feeds the tunnel
+toward N3. A rule's result is one record the classifier writes -- the action id,
+the two meter levels and the Router next hop -- so no action table sits between
+the classifier and the meter. The graph has `pdr_ul → mt_ul → rt` and
+`pdr_dl → mt_dl → enc`; each PDR table declares the same result fields.
+`deploy/session-live.yaml` is that graph (module names: the session layer's
+`Config`).
+
+Both results — the gate and the classifier's result record — come from one lookup
 (`{gate, ActionId}`, the BESS-side item *Classifier result model*).
 
-**The firewall path (opt-in).** A direction may name a BESS `firewall` module
-instead of its WildcardMatch table (`session.Direction.Firewall`, `upfd
--firewall-ul`/`-firewall-dl`). Its table is tuple space over the *masked fields
-alone* — one group per (family, protocol, source prefix length, destination
-prefix length) — and a rule's ports are checked after its group's key hits, so
-a port **range** costs it no group, no mask and no entry (BESS D-147); IPv4 and
-IPv6 rules live in one policy. Those are the two shapes a 4-byte mask cannot
-carry, and they are what the WildcardMatch path refuses rather than widening
-(`internal/session`: the SDF's port range, and a prefix that is not IPv4).
-
-Three things follow from the module's own shape, and they are what a deployment
-has to know before naming one:
-
-- **The policy is written whole.** `<module>/rules` is a *singleton* holding the
-  ordered policy, and the module builds the table whole and swaps it. So the
-  compiler writes every live session's rules of that module, not one session's:
-  a write of its own would erase the rules of the sessions already programmed,
-  and a packet no rule matches is *dropped*, not passed. The order is the
-  spec's own — TS 29.244 8.2.11 has the lower Precedence value win and a
-  firewall list applies its first matching rule, so the list is sorted by
-  Precedence ascending, with no inversion (unlike `rulePriority`, where the
-  classifier applies the *higher* priority).
-- **A rule is a match, not an action.** `FirewallArg.Rule` carries
-  `src_ip`/`dst_ip` (CIDR strings whose length is mandatory), `proto`, the four
-  port-range fields and `drop`; the module's only words are drop and pass, it
-  passes a matching packet on the gate it arrived on and writes no packet
-  metadata. So a firewall rule cannot name the ActionId or the next hop the
-  WildcardMatch path's rule names, nor the PDI's QFI, the route domain or the
-  tunnel: those stay fields of the WildcardMatch key, and a deployment that
-  wants meters, tunnels or per-rule counters behind the classifier needs BESS
-  to carry an action word in the rule first. A PDR that buffers is refused on
-  this path for the same reason (its packets are delivered on the store's gate,
-  and a firewall rule has only the one it arrived on). What the two paths do
-  share is the choice of sides: the uplink's rule is its UE address (or the
-  SDF's source), the downlink's is the SDF's destination or the UE's.
-- **No deployed graph names the module.** It is BESS's D-147 work and is not in
-  the stage the `ci/` arms run against, and a graph that names a module the
-  daemon does not have fails to load — so no `deploy/*.yaml` graph carries it,
-  and the flag is the only way to ask for the path. Nothing about this changes
-  a deployment that does not pass it: with no module named, both directions are
-  the WildcardMatch table with its refusals
-  (`TestTheFirewallPathIsOptIn`).
+**What the key cannot carry is refused.** A 4-byte masked key has no form for
+a prefix that is not IPv4, so the compiler refuses those PDRs with cause 73
+rather than widening the rule (`internal/session`, `matchValue`; claims
+status-7). An SDF port **range** is carried: WildcardMatch checks inclusive
+per-field ranges after the masked key hits (BESS D-186), so the compiler masks
+the port out and names the bounds in the key's `ranges` (`portMatch`; claims
+status-6).
 
 **The action record** (one cache line, read once, never written by a worker):
 
@@ -204,7 +211,7 @@ costs the arms below are expected to confirm:
 | echo (TS 29.281 path management) | one parse and a 67-byte reply, on a message no session's rule matched | 0 |
 
 **State policy (the path to 400G).** What the *controller* writes is shared and read,
-never written, by the packet path: one classifier table and one `ActionTable` per
+never written, by the packet path: one classifier table and its result fields per
 direction (`classifier::ConcurrentMaskedTable`, `dataplane::SlotTable` -- a rule or a
 record exists once for every worker, and a configuration change is published as a new
 generation), so a session's rules cost memory once rather than once per worker. What
@@ -346,7 +353,7 @@ that MBR allows for 51-byte packets plus a token bucket's slack.
 | OMEC pattern | Why it is unnecessary here | What this repo does instead |
 |---|---|---|
 | A goroutine and a `ModuleCommand` per PDR/FAR/QER, unordered; `SendMsgToUPFWithCompletion` per session | BESS's transaction engine orders, validates and rolls back server-side; a client that orders internals has to reimplement all of it | one `Transaction` per session change, `WithExpectedGeneration` when the caller has a generation in hand |
-| Cartesian expansion of port ranges into many rules | a range is a set of masked values **per field** (an n-bit field decomposes into at most 2n-2 masked entries), and a rule whose masks cover several fields matches the *product* of those per-field sets: a two-port range is up to 30x30 entries, a smaller product than OMEC's naive expansion but still a product. `max_tuples` is the budget that bounds it, and a rule whose masks cannot carry the constraint is refused rather than widened (docs/claims.md) | one rule per PDR with a masked key, and the opt-in firewall path (above) for the ranges that key cannot carry: a range there costs no group, no mask and no entry |
+| Cartesian expansion of port ranges into many rules | a range as masked values is a set **per field** (an n-bit field decomposes into at most 2n-2 masked entries), and a rule whose masks cover several fields matches the *product* of those per-field sets: a two-port range is up to 30x30 entries. BESS's WildcardMatch checks inclusive per-field ranges after its masked key hits (D-186), so a range costs no mask and no tuple | one rule per PDR with a masked key; a port range is a WildcardMatch range on its field, the field's mask zero (claims status-6) |
 | Client-side establishment, then a second pass to modify | desired state is the model: `ApplyPipeline` diffs and plans, and resource contents ride along in the same call | `Pipeline` + `PlanPipeline` before a change, `ApplyPipeline` for topology |
 | Retries, idempotency and "did it apply?" reinvented in the client | the SDK owns it: one request id per logical transaction, `GetTransaction` after an unanswered send, `DaemonRestartedError` when the epoch moved | `internal/bess` wraps exactly that and nothing else |
 | State in the controller that the dataplane also holds (and they drift) | the dataplane is the state of record; sessions are reconstructible | the controller keeps only what PFCP needs (session ids, SEIDs, the last reported counters) |
@@ -395,7 +402,7 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 
 - The compiler's id spaces (actions, meters, TEIDs) are bounded by
   `upfd -capacity`, and the graph's tables must be at least that wide: the
-  ActionTable and the Meter take `capacity`, the GtpuEncap takes `max_tunnels`
+  Meter takes `capacity`, the GtpuEncap takes `max_tunnels`
   (and the decap's session table its own default), and a module refuses an id
   beyond its limit as invalid -- a mismatch is a session the SMF sees refused,
   not a slow path.
@@ -418,7 +425,7 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   session itself, so a release frees its own rules rather than walking every live
   key under the lock -- at the million-session target that walk is the difference
   between a release and a stall. What makes the key's contents a statement
-  is the same fact from the other side: the tunnel on the uplink (`upf_teid`)
+  is the same fact from the other side: the tunnel on the uplink (`fteid_context`)
   and the route domain where a graph writes one are why two instances serving
   one subscriber prefix are two rules rather than a collision.
 - A released id is not handed out again until the pool's walk of its space has
@@ -460,9 +467,8 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
   alone. The maps the compiler owns are emptied in the daemon with
   `Control.ResetResources`: one request names them, the daemon converges each
   to no entries and applies the erases in batches, so no session key is read
-  over the wire and the 64 MiB message limit no longer bounds a table. Two
-  resources are not whole-table clears. A firewall is a singleton whose value is
-  the whole policy, so the sweep replaces a non-empty policy with an empty one.
+  over the wire and the 64 MiB message limit no longer bounds a table. One
+  resource is not a whole-table clear.
   An ARP responder table holds the interface's own entry beside the subscribers'
   -- the one table with two writers -- so the sweep reads it with
   `ReadResource`'s pages and erases only the addresses inside the interface's
@@ -511,8 +517,8 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
    outside the interface's pool, puts the interface's domain in the rule's key
    wherever the graph declares it (`domain` in `-pdr-fields-*`), and sends a
    forward out by the FAR's instance (or the PDI's) rather than by the
-   direction's. Port ranges stay refused rather than widened (see the
-   classifier work below).
+   direction's. An SDF port range is a WildcardMatch range on its field
+   (BESS D-186): the key masks the port out and names the inclusive bounds.
    *Out:* the vif wiring's hardware half (the section above: a real port's
    interface writes `route_domain`, and the software half of that is proven on
    a veth by `ci/veth-port.sh` -- what is left is the packet-placement
@@ -537,87 +543,106 @@ Moving the pin is a decision, not a `go get`: read the diff of `message/` and
 Each milestone lands with its tests and a run that shows it, not with a
 scaffold for the next one.
 
-## N3, N6, N9: one port, three interfaces
+## N3, N6, N9: all PMD partitions
 
-The UPF faces three reference points, and they are **IP-level** interfaces:
-3GPP does not define their L2, so the deployment decides whether they are one
-NIC, one NIC with tagged sub-interfaces, or three.
+The reference points are logical IP-level interfaces. 3GPP does not prescribe
+their L2 attachment or the number of PMD ports. For one interface each and one
+to three PMD ports there are five distinct physical-port partitions: one shared
+port (`{N3, N6, N9}`), the three two-port pairings (`{N3, N9} | {N6}`,
+`{N3, N6} | {N9}`, `{N6, N9} | {N3}`), and three separate ports. A shared port
+needs a discriminator such as Vif's `(VLAN, destination MAC)`; a port-specific
+ingress path can write the endpoint tag directly. VLAN/MAC choices within a
+partition are deployment details.
 
-BESS's `vif` module (`core/modules/vif.{h,cc}`) is built for this and is more
-than a lookup: it matches and strips 802.1Q, finds an interface by `(VLAN,
-destination MAC)` -- and by IP when it answers ARP on that interface's behalf --
-writes `vif_id` and `route_domain` into the packet's metadata, and sends the
-frame out of the vif's own output gate. It is configured through `VifArg` -- a list of `interface`s with `id`, `vlan`,
-`mac_addr`, `ip_addr`, `route_domain` and `gate`, plus a `default_gate` for
-unclassified traffic -- and through `VifCommandAddArg` with the same
-per-interface fields (`protobuf/module_msg.proto`), which is the shape `upfd`
-drives. So N3, N6 and N9 can be
-three interfaces on one PMD port, each with its own address, its own ARP answers
-and its own routing domain; nothing in 3GPP requires a distinct MAC per reference
-point, and a shared MAC is fine where the segments are tagged apart.
+BESS `Vif` (`core/modules/vif.{h,cc}`) matches and strips 802.1Q, looks up
+`(VLAN, destination MAC)`, writes `vif_id` and `route_domain`, and selects the
+configured output gate. The interface's IP is used for its ARP/ND responses.
+Different MACs can distinguish interfaces on one VLAN; a shared MAC can
+distinguish them on different VLANs. The Vif is configured by `VifArg` and
+`VifCommandAddArg` (`protobuf/module_msg.proto`).
 
-```mermaid
-flowchart TB
-    port["one PMDPort"] --> vif["Vif<br/>matches (VLAN, destination MAC)"]
-    vif -->|gate| n3["N3 interface"]
-    vif -->|gate| n6["N6 interface"]
-    vif -->|gate| n9["N9 interface"]
-    vif -.->|"writes vif_id + route_domain"| key["PDR rule key"]
-```
+`ci/veth-layouts.sh` exercises these port partitions as nine attachment
+cases. The five partitions are complete for one interface each and one to
+three PMDs; the remaining rows vary how a shared port tags the logical
+interface or whether a three-port graph uses Vif, and one attaches every
+logical endpoint to two of four ports:
 
-`route_domain` is written, and now read: `core/route/route_domain.h` and
-`Router` (`core/route/router.h`) are domain-aware (`kMaxRouteDomains`, a
-`max_domains` per router, routes taken per domain) and `vif` writes the domain
-into packet metadata; a match table that declares the attribute among its
-fields (`attr_name: route_domain`, as `deploy/veth-port.yaml`'s downlink table
-does) consumes it, so the domain a packet arrived with is what its PDR rule is
-keyed on. The Router's own per-domain *routes* are a separate path, and no graph
-here uses it: a session's action names its next hop by id, not by domain. What a
-*PDR* selects is not a vif but a **network instance** (TS 29.244 8.2.4), beside
-the **source interface** (8.2.2), which this repo does read
-(`internal/session/compile.go`). That link is in now:
-`internal/routing` is the deployment's interfaces (name, route domain, next hop,
-subscriber pool), the compiler resolves the Network Instance of a PDI and of a
-FAR's forwarding parameters against them -- refusing a name the deployment does
-not serve, and an address outside the interface's pool -- puts the interface's
-domain in the rule's key wherever the graph declares it (`domain` in
-`-pdr-fields-*`) and sends a forward out by the FAR's instance. An interface carries one hop
-*per egress* since 2026-10-19: the FAR's **Destination Interface** (8.2.24)
-chooses between the instance's plain hop, a tunnel out of it (an Outer Header
-Creation: N9 and indirect data forwarding), the service LAN's and the 5G VN
-re-injection, the `-instances` keys and `-access-next-hop` name them, and an
-egress the instance does not declare is refused with cause 73 rather than
-served by whatever hop the direction had -- an interface whose forwards all
-tunnel, or that only re-injects, needs no plain hop, and a forward that needs
-one is then the thing refused. A forward that **adds an outer header** needs
-more than a hop: the tunnel's own parameters are a per-session record in the
-direction's encap module (`upfd -tunnels` for the downlink, `-tunnels-ul` for
-an uplink forward that carries one -- indirect data forwarding and the uplink
-of an N9 tunnel), and a direction with no module refuses the forward rather
-than compiling a rule the encap drops for want of a record. The interface's ARP identity (the
-module and the MAC) is where a session's UE address is answered from. The packet-side
-half is the vif's `route_domain` -- a rule's key can carry the domain only where
-something writes it into the packet -- and it is in: `deploy/veth-port.yaml`
-declares the three interfaces on one port and the tables that read what they
-write. The deployed graph wires the same module for its one N6 port: `vif_n6`
-matches the data network's frames by `(VLAN, MAC)`, and `l2_sort` sorts by
-EtherType ahead of it -- an ARP request names the broadcast MAC that no `Vif`
-matches, so it is diverted to `arp_n6` (`upf_arp_responder`, this repo's own
-module, `docs/datapath.md`), which answers for the interface's own address *and*
-for every live session's UE address, while the IP frames continue to the
-interface and its downlink chain. The `Vif`'s own ARP answer is inert in that
-graph (the graphs that put a `Vif` first still use it), and nothing there reads
-the domain it writes (`deploy/upf.yaml`; `ci/session-path.sh` and
-`ci/iface-path.sh` send the frames through it). A deployment that has no vif still tells two instances apart by what the
-ingress writes on its own: on the uplink the tunnel the G-PDU arrived on
-(`upf_teid`, the decap's own attribute), which is
-what `deploy/session-instances.yaml` declares and `ci/session-instances.sh`
-drives -- its own manifest, so the shared graph's recorded figures stay the
-figures of the arm that produced them. That is a fact about the key, not luck:
-two instances serving one subscriber prefix are two rules because the tunnel
-they arrived on is part of what selects them, and a graph whose key leaves it
-out is refused the second claim (see "Restart and failure semantics").
+| PMDs | test case | ingress discriminator |
+|---:|---|---|
+| 1 | `one-mac` | one Vif, three untagged MACs |
+| 1 | `one-vlan` | one MAC on three VLANs; N3/N9 reuse the local IPv4 address and TEID |
+| 1 | `one-hybrid` | N3/N9 use distinct untagged MACs; N6 shares N3's MAC on a VLAN |
+| 2 | `two-n3n9-n6` | N3/N9 share one Vif; N6 has its own PMD |
+| 2 | `two-n3n6-n9` | N3/N6 share one Vif; N9 has its own PMD |
+| 2 | `two-n6n9-n3` | N6/N9 share one Vif; N3 has its own PMD |
+| 3 | `three-vif` | one Vif per PMD |
+| 3 | `three-direct` | one destination-MAC filter and endpoint tag per PMD path; no Vif |
+| 4 | `four-fanin` | every logical endpoint on two ports; two ports shared by two endpoints |
 
+Every case is the production-shaped graph (decap, both PDR chains, `rt`, `enc`
+and `rt_transport`, each Router interface on its own attachment) programmed by
+one compiler that holds the sessions of every permitted scenario -- Modes 1,
+2, 3, 5 and 6, never Mode 4 -- before any packet is sent. Each scenario's real
+G-PDUs or N6 IP traffic go out on every attachment of their endpoint, and the
+arm checks the route-domain split, the endpoint/F-TEID admission gates, the
+exact decap/`rt`/`enc` gates each scenario names, the egress attachment, and
+the unknown-TEID path; every phase is replayed after Mode 6's leg and cleanup.
+Each logical endpoint has one local address across its attachments, the
+compiler's one per endpoint and family. `ci/iface-path.sh` covers the
+Source/Destination Interface grammar, and `ci/veth-port.sh` covers `upfd` on
+a real port. Other VLAN/MAC assignments are deployment values within the
+same partition classes, not additional PMD topologies.
+
+For a shared local transport IP, the attachment discriminator is still
+required before decap. `one-vlan` proves the configured N3/N9 endpoints remain
+distinct when both use the same local IPv4 address and TEID, because the Vif's
+VLAN and the graph's endpoint tag carry the difference.
+
+
+`Vif` writes the attachment's `vif_id` and
+`route_domain`. A PDR table reads `route_domain` only when its configured key
+declares that field; `deploy/veth-port.yaml` and `deploy/upf.yaml`'s `pdr_dl`
+do. The compiler resolves each PFCP Network Instance against
+`internal/routing`, refuses an instance the deployment does not serve, and
+writes the resolved domain into the rule result where the graph has a reader.
+The N6 graph puts `UpfArpResponder` before `vif_n6`: it answers ARP for the
+interface and active UE addresses, then the Vif classifies IPv4/IPv6 data
+traffic and supplies the attachment's domain.
+
+The control-plane concepts stay separate from this attachment metadata:
+Source Interface identifies the logical side a PDR applies to, not packet
+direction or a PMD port; the FAR's Destination Interface selects an egress role.
+For GTP-U ingress, the graph tags `endpoint_id` before decap, and
+`GtpuDecap` admits the composite endpoint/family/local-address/TEID key. Its
+known-UL and known-DL outputs select the PDR chain. A tunneled egress gets
+per-session parameters from the direction's `GtpuEncap` module; an egress that
+needs a tunnel but has no configured encap module is refused rather than
+compiled into a path that would drop it.
+
+The two Router lookups are also distinct. `rt` normally executes the
+`next_hop_id` the PDR result writes. `rt_transport` uses a destination FIB
+keyed by `transport_route_domain` after encapsulation. Deployment-owned
+resources configure these routes and their resolver next hops; PFCP Network
+Instance names do not populate the transport FIB. See [Router behavior](router.md)
+for the route and neighbor contract.
+
+### Scenario Scope and Controller Ownership
+
+The six labels in [the Release 16 role matrix](compliance.md#project-scenarios-and-release-16-role-scope) are project traffic scenarios, not a 3GPP taxonomy. TS 23.501 §6.2.3 allows some or all UPF functionalities in one UPF instance. That permits function co-residence; it does not combine separate PDU sessions, create a group-level N4 session, or make every labeled topology procedure-backed.
+
+The matrix records the exact session, group, peer-UPF and temporary-tunnel scope. In brief: Mode 5 local switching uses separate member PDU-session N4 contexts under one SMF and common PSA; N19 between different PSAs requires group-level N4 and is not implemented here. Mode 6 is temporary handover state; `ci/iface-path.sh` checks a local N4/data-plane fixture, not the complete N2 procedure. Mode 4's N9-to-N9 tandem session shape is not established by the pinned R16 excerpts and is not claimed as compliant.
+
+One `upfd` owns one `bessd` graph and accepts one CP-function association at a time. That association may control many independent PDU-session contexts. `internal/n4` rejects a second CP function; running a second `upfd` against the same `bessd` is unsupported because each startup sweep clears session-owned resources and compiler IDs are process-local. These are runtime ownership constraints, not limits imposed by the 3GPP role model.
+
+### Outer Transport Routing After Encapsulation
+
+The deployed path separates the session's forwarding decision from outer transport. A PDR/FAR selects the egress role and session tunnel record. `GtpuEncap` writes the outer IPv4 or IPv6 header, GTP-U header, local/peer addresses, and transport route domain. `rt_transport` then routes on the outer destination within that domain, resolves the neighbor with ARP or IPv6 Neighbor Discovery, rewrites the L2 header, and decrements the outer TTL or hop limit. The inner packet keeps its own routed hop count.
+
+The route table, resolver interfaces, and neighbor bindings belong to the deployment; PFCP Network Instance names do not install transport routes. `deploy/upf.yaml` declares separate N3 and N9 transport domains, each with IPv4 and IPv6 routes, while both logical endpoints share the N3 PMD port in that graph. A deployment can instead bind reference points to separate PMD ports or share a port through Vif demultiplexing. The Router fails closed on a missing route, expired hop count, or unresolved neighbor. It has no routing protocol or RIB, and the UPF does not claim arbitrary dynamic carrier routing; see [Router behavior](router.md).
+
+The graph does not require one physical port per 3GPP reference point. A shared PMD port needs an ingress discriminator that can identify the logical endpoint before GTP-U admission: Vif's `(VLAN, destination MAC)` key, or a distinct physical-port path that writes the endpoint ID. If two logical endpoints arrive on the same attachment with identical discriminator fields, the graph cannot tell them apart. Packet direction is separate again: the admitted endpoint/F-TEID selects the compiler's known-UL or known-DL path; Source Interface is not a physical port or a universal direction bit.
+
+For the complete placement limitation, the RSS discussion below remains separate from topology: a veth can prove software demultiplexing and route-domain selection, but its AF_PACKET fanout is not NIC RSS.
 **A plain NIC cannot put both halves of a session on one worker, and the port
 count is not the reason.** The uplink arrives as GTP-U and the downlink as the
 UE's own flow; outer-header hashing sees two unrelated tuples, because the inner
@@ -642,16 +667,15 @@ GTP-U exists in both engines we build (mlx5's flow steering, and ice's
 measuring. Whether this box's NIC and DPDK can do it belongs on the hardware
 list, not in the basis of the placement policy.
 
-**What a veth proves, and what it cannot.** The port half of this section is
-measured on a software port, so that it does not wait for a NIC:
-`deploy/veth-port.yaml` declares one PMD port (the af_packet PMD over a kernel
-veth, `qpairs=4`) with four `QueueInc`s into a `Vif` whose three interfaces are
-N3, N6 and N9 -- each with its own MAC, its own address and its own route
-domain -- and the PDR tables whose keys carry what the Vif writes;
-`ci/veth-port.sh` deploys it and checks the result; `docs/datapath.md` holds
-the recipe and the checklist — the queue count from BESS and DPDK telemetry,
-the L2 landing, the vif split with its route domains end to end, and the
-per-queue spread under many flows.
+**What a veth proves, and what it cannot.** `ci/veth-port.sh` deploys the
+single-PMD graph, programs a downlink PDR over N4, and checks the Vif's
+route-domain match, post-encap Router, outer L2 rewrite and queue spread.
+`ci/veth-layouts.sh` generates the nine production-shaped attachment graphs in
+the matrix above and drives every permitted scenario's sessions through them:
+real N3/N9 G-PDUs and N6 traffic on every attachment, endpoint/F-TEID
+admission, the exact Router and encap gates, and the unknown-TEID path. Both
+lanes create isolated veth pairs and remove only their
+own interfaces.
 
 What the veth cannot do is the measurement this section is about. The af_packet
 PMD advertises no RSS offload at all -- the telemetry's `ethdev_rss_hf` is `0x0`,
@@ -682,229 +706,63 @@ checkpoint is the restart wall below.
 
 ### Which session a packet belongs to, and which of its rules matches it
 
-Every packet forces two questions, and they are answered differently in each
-direction.
+The datapath makes two decisions in order: endpoint-scoped ingress admission,
+then the PDR match on the decapsulated packet.
 
 ```mermaid
 flowchart TB
-    pkt["packet"] --> dir{"direction?"}
-    dir -->|N3| teid["TEID → session<br/>exact match"]
-    dir -->|N6| ue["UE address/prefix → session<br/>masked key (LPM owed)"]
-    teid --> pdr["that session's PDR rules"]
-    ue --> pdr
-    pdr --> act["matching rule → ActionId"]
-    act --> rest["meter, counter, next hop, tunnel"]
+    outer["N3/N9 GTP-U frame"] --> tag["graph tags endpoint_id"]
+    tag --> admission["GtpuDecap<br/>endpoint, family, local IP, TEID"]
+    admission -->|"known UL"| ul["pdr_ul · WildcardMatch<br/>inner tuple + F-TEID metadata + QFI"]
+    admission -->|"known DL/N9"| dl["pdr_dl · WildcardMatch<br/>inner tuple + route_domain + F-TEID metadata"]
+    n6["N6 IP frame"] --> domain["Vif writes route_domain"]
+    domain --> dl
+    admission -->|"unknown G-PDU/control"| control["gate 2 · GtpuResponder"]
+    ul --> result["PDR result → ActionId"]
+    dl --> result
+    result --> treatment["meter, counter, next hop, tunnel"]
 ```
 
-1. **Which session does this packet belong to?** On N3 the packet is inside a
-   GTP-U tunnel and the **TEID names the session exactly** — the SMF gave that
-   TEID to the gNB for that one session — so this lookup is exact, and no prefix
-   structure is involved on the uplink, ever. On N6 the packet is bare: no
-   tunnel, no TEID, and the only thing in it that names a session is the **UE's
-   own IP address**, which the SMF assigned to the session and sent in the PDI's
-   UE IP Address IE (TS 29.244 8.2.62). Because the SMF may name a *prefix*
-   rather than a single address — a framed route, or a /64 for prefix delegation
-   — that lookup is a longest-prefix match, which is what the LPM is for, and it
-   is **downlink-only for exactly this reason**.
-2. **Which of that session's rules matches it, and what does that rule say to
-   do?** That is the PDR stage, in both directions.
+1. **Ingress admission.** The graph writes a nonzero `endpoint_id` before
+   `GtpuDecap`. Its exact `<module>/fteids` key is
+   `{endpoint_id, address_family, local_address, teid}`; IPv4 and IPv6 local
+   addresses are separate keys. The entry's direction selects UL gate 0 or DL
+   gate 1. A miss or pending reservation sends a valid G-PDU to gate 2; parsed
+   control traffic also uses gate 2, and malformed packets drop. The table
+   distinguishes equal TEIDs at different endpoints or local addresses, and a
+   second PFCP session cannot claim the same complete key.
 
-**The chain has a session selector now, and the shared table still needs none.**
-The shared PDR table's own key carries the masked UE address (or prefix), so the
-prefix matching happens where the SMF's PDI puts it: inside the PDR table, in
-both directions (`deploy/upf.yaml`, `deploy/session-path.yaml`). A dedicated
-downlink selector exists only so that a session can be named *before* a 2–4 rule
-scan — i.e. so each session can own its rules — so it is **not needed, it is
-enabled**, and it is written only for the profile whose downlink is the keyed
-per-session map. What was built is the spec's own look-up rather than the LPM
-this section first expected: **an exact match on (route domain, UE IPv4
-address)**, which is what 5.2.1 with 8.2.62's exact address asks for, as stock
-modules — `ExactMatch` (`sel_dl`) writing the session id into the packet's
-`action_id` metadata, then the keyed matcher reading that id
-(`internal/session/selector.go`, live in `ci/pdrmatch-path.sh`). An LPM is the
-structure for an IPv6 UE *prefix* or a framed route, and it is owed when those
-are served (IPv6 is refused today: `docs/claims.md`, status-7). Under that design the
-shared table does **not** disappear either: a profile whose downlink is the
-shared table keeps it, and the compiler chooses per direction which structure a
-rule goes in.
+2. **PDR match.** `pdr_ul` and `pdr_dl` are shared `WildcardMatch` tables. They
+   match inner IP/flow fields and the endpoint metadata written by decap; the
+   downlink table also carries `route_domain`. `qfi` distinguishes PDRs for
+   named QoS flows, while a PDR without a QFI leaves that field masked out.
+   The compiler requires an inner UE address for the rule key. The current
+   default PDR fields carry IPv4 addresses; outer GTP-U admission, encapsulation
+   and routing support IPv4 and IPv6.
 
-**The break-even line below is what a deployment below the target decides on.**
-It is not a threshold the selector waits for: the selector is written, and the
-line says where a *shared* downlink table is still the better choice.
+3. **Treatment and egress.** The matching rule writes its ActionId, meter IDs,
+   next hop and route domain. `GtpuEncap` reads the tunnel record selected by
+   the action and writes outer IP/UDP/GTP-U; `rt_transport` routes that outer
+   packet by `transport_route_domain` and resolves its neighbor with ARP/ND.
 
-**The decision is a break-even line, not a threshold:**
+CHOOSE/CHID allocations are scoped to one PFCP session. PDRs in that session
+that reuse a CHID share the selected TEID; separate N4 sessions retain separate
+F-SEIDs and admission-key ownership. This does not create a group-level N4
+session.
 
-```
-churn_break_even (sessions/s) = (per-packet LPM+scan cost × downlink packets/s)
-                                ÷ shard rebuild cost
-```
-
-with its two halves labelled by whose measurement they are. The per-packet cost
-is an LPM lookup plus a 2–4 rule scan **in our graph** — ours to measure. The
-table end — `LookupBatch` at 2, 3 and 4 rules, the fixed overhead, and the
-per-rule and per-group memory that is also the per-session footprint budget —
-is **BESS's published rows** (Main's), and the denominator is BESS's own
-rebuild row, "about 50 µs at 1K rules and about 1 ms at 10,000"
-(`bess/docs/dataplane-tables.md`, `benchmarking.md`; Main's later sample reads
-44 µs). What the line means in words: the rebuild is a **spike** (one session
-change) against a **steady tax** (per downlink packet), so a deployment that
-churns rarely and forwards heavily sits far below the line and keeps the shared
-table, while a lab or a small network sits below it by orders of magnitude —
-which is why the expected outcome below that line is that the LPM is never
-written. The x-axis ceiling comes from our own measured establishment envelope
-(`ci/bench-n4.sh`), so it is a measured bound rather than an assumed one. **The
-number is still owed**: this is the decision *rule*, and no decision is taken.
-
-**The capacity target is what makes the selector required rather than
-optional.** At O(10^6) sessions the shared table's rebuild stops being a spike a
-deployment can absorb: 1M sessions at 2–4 PDRs is 100k–1M rules per shard, which
-extrapolates BESS's rebuild row above to tens of milliseconds per session
-change, so even 0.1 %/min of churn — about 17 establishments a second — is 17 ×
-tens of milliseconds, i.e. a core spent on rebuilds. Per-session programming is
-therefore required at the target, and with it the downlink longest-prefix
-selector — **v4 and v6**, because a 1M-session deployment has v6 UEs and prefix
-delegation is exactly the case an exact lookup cannot serve. The break-even line
-then says *where the crossover sits for deployments below the target*, not
-whether the LPM is written at all.
-
-**What 10^6 multiplies is not only rule sets.** The target multiplies **1M LPM
-entries, 1M TEID entries and 1M meters** too — four structures that all grow
-with the session count — so the per-session footprint budget is what holds
-*every* one of them to account, not just the rules. It is a measured budget we
-owe, with BESS's per-rule, per-group and LPM-per-entry rows as its inputs, and
-nothing about it is assumed; the target size and the arithmetic are in "Session
-scale" below. The control plane's unit is the per-session transaction for the
-same reason: 1M small transactions, each O(that session's rules), never 1M
-rebuilds of a shared structure — which is also why any resource whose value is
-"every session's rules" is the shape to look for in a new table (the three
-O(total sessions) operations in "Session scale" are what that shape costs).
-
-**One downlink LPM, not one per session — and how many is bounded by the domain
-count.** `rte_lpm`'s `tbl24` is `RTE_LPM_TBL24_NUM_ENTRIES` = `1 << 24` entries
-of a 4-byte `struct rte_lpm_tbl_entry` (a union over a `uint32_t`), i.e. **64
-MiB fixed per table, whatever it holds**, plus `tbl8` groups of
-`RTE_LPM_TBL8_GROUP_NUM_ENTRIES` = 256 entries × 4 B = **1 KiB each**, allocated
-per table (`number_tbl8s`, 256 groups by default) and used for the prefixes
-longer than /24 that fall in a /24's entry. A per-session LPM is therefore
-impossible at 1M sessions (64 MiB each); a single table holding every session's
-prefixes is not, which is what this design already assumes. But the fixed cost
-means our *per-domain* tables multiply it, and **both families pay it**: a
-dual-stack domain is two tables — `rte_lpm` and `rte_lpm6` each costing 64 MiB
-fixed per table — so three such domains are ~384 MiB before a single group, i.e.
-**~128 MiB per dual-stack domain**. That is a count times a fixed number, so the
-whole cost is predictable before anything is deployed (`domains × 128 MiB`),
-which is what makes "few, long-lived domains" a constraint rather than a
-preference: it decides whether a per-tenant domain is affordable at all. The
-group memory depends on *clustering* rather than on the entry count: 1M /32s
-spread over 1M distinct /24s is ~1M groups (~1 GB by the same 1 KiB-per-group
-arithmetic), while the same 1M inside a few shared /24s is a handful of groups
-— so the deployment's address plan matters as much as the session count. v6 is
-the same shape, not a cheaper one: `rte_lpm6`'s `tbl24` is also `1 << 24`
-entries of a 4-byte `struct rte_lpm6_tbl_entry` (`lib/lpm/rte_lpm6.c`), its
-`tbl8` groups are the same 1 KiB each, and it adds a `rules_tbl` hash over the
-rules. None of these numbers is settled: Main is measuring **both families'
-fixed parts and both group behaviours** (and a realistic v4 distribution), and
-will not publish the row until both exist — the shape and the arithmetic here
-come from the headers, the numbers are owed.
-
-**The three pieces have one owner each.** The keyed write is ours to write —
-the map-resource module above, `PdrMatch`-shaped, one key per session,
-`ExactMatch`'s shape rather than the firewall module's whole-policy singleton.
-The matcher side is BESS's, and it is two pieces, not one: the `firewall`
-module extracts a rule's key from the packet and applies its verdict (the
-D-147 work, which the compiler can opt into today with `upfd -firewall-ul` and
-`-firewall-dl`, and no deployment configures), and **`FirewallScan` is the
-small-policy matcher we hold one of per session**, in
-`core/classifier/firewall_table.h` beside `FirewallTable`. On BESS's side of
-that line — neither of these is ours, and we have not run them —
-`FirewallScan`'s `Lookup`/`LookupBatch` return the same `Match` shape and call
-the same `FirewallTable::Matches` predicate the index calls per group, so the
-two structures cannot disagree about what a rule means; its `Create` makes the
-same refusals the index's `Build` makes, rule for rule; and their test walks a
-random corpus of both families through the scan, the index and a scalar
-reference for agreement. Both pieces land in Main's next push. And the selector
-that *names the session* on the downlink is the LPM: a different structure,
-with a different cost (a lookup per packet, inside the break-even line above)
-and a different limit (the domain count, and the deployment's address plan).
-Keeping the three apart is what lets each be measured and replaced on its own —
-and conflating them is how a whole-policy write came to look like the right
-shape for per-session state in the first place.
-
-### Profiles: one compiler, three dataplane strategies
-
-The three pieces above are chosen per deployment, and that choice is what the
-comparison is about — so it is carried as a **profile** rather than as flags
-that accumulate. A profile is five things and nothing more:
-
-- **the graph** (or the per-direction fragments): which matcher module sits in
-  the chain, and how its output is wired;
-- **the compiler strategy per direction**: what a session's PDRs are written
-  into — the shared `WildcardMatch` table, the firewall policy, or the keyed
-  map;
-- **the module list** the daemon must load (`-m upf_datapath`, `-m firewall`),
-  which is also where the plugin's build-and-load cost lives;
-- **the capability envelope**: what the profile expresses and what it refuses —
-  the wildcard table refuses port ranges and IPv6 (cause 75), the firewall
-  policy carries both but rewrites the whole policy per session change, the
-  keyed module carries both and writes one key;
-- **the measured rows**, generated by the bench with the profile's name and the
-  deployment shape attached, never typed by hand.
-
-Three to start: `generic-wildcard` (the shipped default), `generic-firewall`
-(the opt-in that carries ranges and IPv6), and `custom-pdrmatch` (the keyed
-module). `upfd -profile <name>` selects one and the individual flags stay as
-overrides; the arms in `ci/` take a profile name so one workload can be run
-against each (`session-path.sh` with `PROFILE=custom` and `FIREWALL=1`), and
-the benches are re-run whenever either side changes, so the tradeoff is live
-rather than argued once from a snapshot.
-
-**A profile costs nothing at runtime, by construction.** It is a start-time
-choice: the flag resolves to a graph and a per-direction strategy before the
-controller serves PFCP and before the daemon loads its modules, so the packet
-path holds no profile check and the session path holds no profile branch — the
-profile *is* the graph and the strategy, not a layer consulted per packet or
-per PDR. What it must never become: a table of function pointers dispatched
-per packet, a "which profile am I" lookup inside the module, or a strategy
-object allocated per session. And the shipped default must not regress:
-`generic-wildcard` produces the same graph, the same rules and the same packet
-path as today, which the existing arms prove by producing the same numbers
-before and after — a differential on the default rather than a promise.
-
-Four guardrails, because a profile is a strategy selection and not a fork:
-
-- **A profile never forks the compiler.** Parsing, validation and the PFCP
-  semantics stay in one place; a profile chooses *where* the rules live. A
-  profile that needs its own copy of a predicate has failed the way the shared
-  `Matches` predicate exists to prevent.
-- **The equivalence gate applies to every profile.** A profile is admitted when
-  the random-corpus test shows it answers like the reference, not when it is
-  faster.
-- **No new profile without a deployment that needs one.**
-- **Measured rows are generated**, with the profile's name and its deployment
-  shape in the output, because the crossover moves with the address plan and
-  the churn.
-
-**One gap the profiles make visible**, and it belongs in `generic-firewall`'s
-envelope rather than in a footnote: **our compiler does not emit a firewall
-rule's `action_id` yet.** The stock module writes a per-rule `action_id` into
-packet metadata and an `ActionTable` downstream resolves it (D-141), so stock
-BESS *can* carry a range or IPv6 PDR that forwards to its own FAR's next hop —
-but `firewallRule` emits only the verdict and the match, so that path cannot
-serve such a PDR until the compiler emits the id and the graph points the
-firewall's output at the ActionTable it already has. Stated as a limitation
-with its consequence, and as the next item after the keyed module. Any comment
-claiming a firewall rule cannot carry an id usefully is wrong: each rule
-carries its own.
+For GTP-U sessions, the shipped `pdr_ul` and `pdr_dl` stages are shared
+`WildcardMatch` tables; there is no separate per-session selector. The compiler
+writes composite admission keys to `GtpuDecap`. Endpoint metadata and
+`route_domain` also form part of the downlink PDR key.
 
 ## Where a table lives: shared, per-worker, or behind a ring
 
 The default is **shared**: a table a controller writes and workers read (the
-classifier's rules, the action table, the tunnel records, the TEID table, the
-next hops) has no reason to be copied per worker. Every write in a session's
-life arrives out of band, one PFCP message at a time, and the BESS contract
-prices the shared read path. Partitioning a controller-written table multiplies
-its memory by the worker count and buys nothing: the writer is not the packet
-path.
+classifier rules and their PDR result records, tunnel records, F-TEID admission entries,
+and next hops) is shared across workers. PFCP session life arrives out of band,
+one message at a time, and BESS's contract prices the shared read path.
+Partitioning a controller-written table multiplies its memory by the worker
+count and buys nothing: the writer is not the packet path.
 
 **Per-worker state is for writes the packet path makes.** A table whose entries
 change because packets flow -- a NAT binding learned on the wire, a flow's usage
@@ -951,28 +809,32 @@ structure this design uses, so the arithmetic below is that table at this shape
 | per session | state in BESS | measured bytes | at 10^6 sessions |
 |---|---|---|---|
 | 4 PDR | WildcardMatch rule (one masked table, shared by the workers) | not measured: 16-byte key, mask, value, priority, result, cuckoo body | about 360 MB (2.9 GB only if the table were copied per worker, which it is not) |
-| 4 FAR | ActionTable record (`dataplane::SlotTable<ActionId, Action>`, one cache line per record) | 64 B/object | 256 MB |
+| 4 FAR | classifier result record (the action id, two meter ids, the next hop) | 16 B/rule | 64 MB |
 | 2 QER | `MeterSet` | 64 B state + 8 B pointer | 144 MB (1,048,576 meters measure 64 MiB) |
 | 2 URR | `CounterSet` block | 4 KiB for three counters (each slot per worker: 64 slots) | the wall: 8 GB if each URR owns a full per-worker block |
 | 1 MAR (ATSSS, P1) | per-session record | not measured, small | about 64 MB |
-| 1 F-TEID | the decap's tunnel table | 64 B/object | 64 MB |
+| 1 distinct F-TEID | `GtpuDecap/<module>/fteids` exact key plus direction record | not measured: fixed-width key and shared exact-index overhead | capacity must be measured at target scale |
 
-The table is not the whole footprint, and the per-session budget is what holds
-all of it: 10^6 sessions multiply **1M LPM entries, 1M TEID entries and 1M
-meters** as well as the rules, and each of those is a structure of its own. The
-target for all four is the low hundreds of bytes per session -- a kilobyte per
-session is a gigabyte, which is the difference between deployable and not -- and
-it is a *measured* budget we owe, with BESS's per-rule, per-group and
-LPM-per-entry rows as its inputs. Nothing about it is assumed, and the LPM side
-of it is not a per-session table: there is **one downlink LPM, not one per
-session**, because `rte_lpm`'s `tbl24` costs 64 MiB fixed per table (the
-arithmetic is in "N3, N6, N9"), so the LPM instances are bounded by the domain
-count and the domains have to stay few. That fixed cost and a realistic prefix
-distribution are Main's measurements to make; what is settled is the shape.
+The table is not the whole footprint. This capacity model assumes one distinct
+F-TEID per session: at 10^6 sessions, it therefore needs 1M exact F-TEID keys,
+4M PDR rules, 4M FAR records, 2M meters, 2M URR entries, and 1M MAR records.
+Route/FIB entry count is deployment-specific; FIBs are per route domain, not
+per session.
 
-**The control plane has three O(total sessions) operations**, and they fail
-before the dataplane footprint above becomes the limit. They are all ours, and
-the 1M target is a claim about the whole system, so all three have to be
+The low-hundreds-of-bytes/session target is not yet demonstrated. F-TEID index
+overhead is not measured. The table's 4 KiB per URR figure implies 8 KiB/session
+for two URRs if each owns a full per-worker block; the actual counter placement
+and target worker count must be measured before claiming the memory budget.
+
+There is one downlink LPM per route domain, not per session, because `rte_lpm`'s
+`tbl24` costs 64 MiB fixed per table (the arithmetic is in "N3, N6, N9"). LPM
+instances are bounded by the domain count, so the number of domains must stay
+small. The fixed cost and realistic prefix distribution are measurements to
+make; what is settled is the shape.
+
+**The control plane has two O(total sessions) operations**, and they fail
+before the dataplane footprint above becomes the limit. They are both ours, and
+the 1M target is a claim about the whole system, so both have to be
 addressed:
 
 1. **`Compiler.Sweep`.** The sweep no longer reads session tables key by key:
@@ -983,33 +845,7 @@ addressed:
    is gone from the sweep's path; the remaining per-key work is the ARP
    subscribers', whose number is the interfaces' pools, not the sessions'. See
    "Restart and failure semantics".
-2. **The firewall policy is a whole-policy singleton, so every session change
-   rewrites every session's rules.** `compile.go`'s `firewallChanges` builds
-   "the whole policy of every configured firewall module ... every live
-   session's rules", because BESS's `Firewall` exposes `rules` as a singleton
-   (`ResourceTable::Singleton<FirewallArg>("rules", false)`, D-147) that takes
-   the policy, not a rule. That is O(all rules) per change -- the shared-table
-   scaling problem, in the control plane -- and it would bite precisely the
-   deployment that needs that path (ranges and IPv6 at scale). It is a
-   *deliberate* property of that module (one table, replaced whole, published by
-   RCU, workers never paused: right for a firewall, wrong for per-session
-   programming), and it is opt-in today (a no-op for a deployment that
-   configures no firewall module, which is every deployment today), so it is a
-   trap for the future rather than a present defect. **The keyed write is
-   already a resource kind, so the fix is ours to write rather than an ask:**
-   `ResourceTable::Map<Key, Value>` is how `ExactMatch` exposes its `rules`
-   (with `settings` as the singleton beside it, `exact_match.cc`), and the
-   transaction engine applies map operations per key. A module that exposes
-   **one session's rule lists as one key's value** -- a `PdrMatch`-shaped
-   module, keyed by session or by (domain, session), singleton for its own
-   settings -- makes a session change one upsert, O(that session's rules), which
-   is the transaction unit the rest of this design assumes. Until it exists the
-   firewall path stays a lab-scale path. The general lesson is worth keeping:
-   a whole-policy write is O(all rules) whatever the structure behind it, so any
-   resource whose value is "every session's rules" has this problem -- the
-   firewall path is just the one that got written first, and it is why to check
-   every new resource for the shape.
-3. **The URR report loop's read path.** `upfd` calls `Compiler.EvaluateAll` once
+2. **The URR report loop's read path.** `upfd` calls `Compiler.EvaluateAll` once
    per `-urr-interval` tick (`cmd/upfd/main.go`), which walks every session, and
    each session's `Evaluate` makes its **own** `reader.RuleCounts` RPC per
    counter module (`internal/session/report.go`) -- at 1M sessions that is one to
@@ -1342,89 +1178,69 @@ missing, or a starved box and a slow UPF look alike.
   lane holds the subscriber ARP answer: a request for a live session's UE
   address is answered with the interface's MAC and the session's address, one
   session's two colliding addresses ride one transaction and both survive, and a
-  deleted session's address stops being answered.
+  deleted session's address stops being answered. Its `concurrent` window holds
+  Modes 1, 2, 3 and 5 at once (Mode 3's N9 arrival on Mode 1's TEID at the
+  other endpoint) with every stream running, each session's bytes at its own
+  exit and at no other.
+- `ci/veth-layouts.sh` + `ci/vethlayout` — every attachment layout as the
+  production-shaped graph, with one compiler holding the sessions of Modes 1,
+  2, 3, 5 and 6 (`ci/scenario`) and every scenario's packets sent on every
+  attachment; exact decap, Router and encap counts per phase.
 
 ---
 
-## The fork's Router, and this UPF's gaps
+## Routing and neighbor resolution
 
-The Router has two packet-path modes, and a deployment chooses one in the
-module's own argument (BESS D-155). In the default **hop** mode the answer is
-decided when the session is installed: the FAR's egress is resolved to a hop id
-(`internal/session/compile.go`, the action record), and the Router maps that id
-to `{dst_mac, src_mac, egress gate}`. In **destination** mode the action names
-no hop (0), and the Router looks the packet's own IPv4 destination up in the
-route domain the packet carries, so one egress can reach many destinations.
+The BESS `Router` has next-hop and destination-routing modes. The graph
+configures two instances because inner session forwarding and outer GTP-U
+transport use different metadata and routes.
 
-This UPF exposes the choice as `upfd -route-mode=hop|destination`: the
-compiler writes hop ids in the first mode and 0 in the second, `-instances`
-requires no `*-next-hop` keys in the second, and the graph must carry the
-matching `Router` argument. Part 1 is what the fork's Router does today, read
-in this tree and named by file and line. Part 2 is what routing inside a
-network instance still needs beyond the FIB: connected/local routes and a
-neighbour resolver.
+| module | mode | lookup | UPF role |
+|---|---|---|---|
+| `rt` | `ROUTE_MODE_NEXT_HOP_ID` by default | `next_hop_id` from the PDR result | Inner session forwarding. Hop 1 reaches N6, hops 2/3 reach `GtpuEncap`, and hop 5 is the optional service-LAN re-injection path. |
+| `rt_transport` | `ROUTE_MODE_DESTINATION` | IPv4/IPv6 destination in `transport_route_domain` | Routes outer GTP-U packets, responses and End Markers to N3/N9. |
 
-### Part 1 - what the Router does
+`upfd -route-mode=destination` changes the compiler's inner-routing result:
+the action names hop 0 and the matching `rt` must use destination mode.
+Destination mode performs a per-domain dual-stack longest-prefix lookup.
+Next-hop mode reads the configured hop directly. Both modes rewrite Ethernet
+addresses for a resolved adjacency and decrement IPv4 TTL; destination mode
+also decrements IPv6 hop limit. The Router does not generate ICMP errors.
 
-| fact | where |
-|---|---|
-| One Router owns both halves: the per-domain FIBs (an LPM each) and the next hops every domain's routes share. A route is `(domain, IPv4 dst) --LPM--> NextHopId --slot table--> NextHop`; a domain id is an index into a dense array of `max_domains` slots published through a SlotTable, so a reader resolves a domain with one acquire load, no lock and no search, and an unknown or out-of-range domain is a miss | `core/route/router.h:104-135`, `core/route/route_domain.h` |
-| The module's packet path has two modes. `ProcessBatch` dispatches on the `mode` argument: hop mode reads `next_hop_id` from packet metadata and maps a whole burst through `LookupNextHops`; destination mode calls `route::ResolveFrame` -- parse, LPM lookup in the packet's domain, TTL, rewrite -- and sends the frame to the hop's egress (`interface = gate + 1`, D-049). Hop mode never consults a FIB; destination mode ignores `next_hop_id` | `core/modules/router.cc` (`ProcessBatch`, `RouteById`, `RouteByDestination`) |
-| An unresolved hop fails closed: a hop whose neighbour state is not `kResolved`, or one that names neither MAC, drops the packet; `OnEvent(PreResume)` reports an unreadable `next_hop_id` attribute once instead of dropping silently | `core/modules/router.cc:300-345`, `:285-298` |
-| A hop that names both `dst_mac` and `src_mac` has the frame's Ethernet addresses rewritten in place (`route::RewriteL2`, BESS D-153); a hop that names one or none forwards the header it arrived with. A shared payload is copied first, so a rewrite never writes into a buffer another module holds | `core/modules/router.cc:320-345`, `core/route/l3_packet.h` |
-| The configuration is the module's own resources: `<module>/next_hops` (keyed by hop id, `{dst_mac, src_mac, egress_gate}`), `<module>/groups` (ECMP) and `<module>/routes` (keyed by `{domain, IPv4 prefix}`, naming a hop or a group). Our policy graphs write hops 1-5: 1 the data network's hop (a MAC pair), 2 the access side's (through the encap), 3 a tunnel out of the instance, 4 the service LAN's, 5 the 5G VN re-injection. `deploy/route-path.yaml` writes two routes instead | `deploy/upf.yaml`, `deploy/iface-path.yaml`, `deploy/route-path.yaml` |
-| Hops are not scoped by domain: `LookupNextHops` takes ids and nothing else. Only routes are (`RouteKey` carries the domain). Two network instances that leave by the same hop share it | `core/route/router.h:478-490`, `:104-135` |
-| The library has the routing half: `LookupRoute(domain, dst)`, `SetRoute`, `ReplaceRouteSetAtomic` (strict replacement of one domain's whole route set), ECMP groups (`groups_`, `LookupGroup`), and a neighbor table. Destination mode uses the lookup, the groups and the forwarding chain on the packet path; the neighbor table is still control-side only | `core/route/router.h`, `core/route/forward.h`, `core/route/neighbor_table.h` |
+## Routes and neighbor resolution
 
-### Part 2 - the gaps, each with its seam
+Each Router owns `<module>/routes`, `/next_hops` and `/groups`. Routes name a
+next-hop ID or group. `deploy/upf.yaml` gives `rt_transport` IPv4 and IPv6
+default routes in transport domains 1 and 2. Its resolver-owned next hops pick
+the N3/N9 interface and peer; `GtpuEncap` writes `transport_route_domain`.
+The inner `rt` has a dynamic N6 next hop plus static gate mappings for tunnel
+egress and optional reinjection.
 
-**(a) A FIB lookup on the packet path.** Implemented in the fork, and exposed
-by this repository. A deployment whose instance has more than one destination
-behind one interface -- a transit N6 with many prefixes, an N9 peer chosen by
-address, an ECMP set -- selects `mode: ROUTE_MODE_DESTINATION` on the Router
-and `upfd -route-mode=destination`. The compiler then writes hop 0 in every
-action (`0` is the action table's "no next hop"), and the Router routes each
-packet by its own IPv4 destination in the domain its `route_domain` metadata
-names, from the graph's `rt/routes` resource; a destination with no route is
-dropped (or punted to `punt_miss_gate`). The TTL and, where a hop names both
-MACs, the L2 rewrite are the forwarding chain's in both modes (BESS D-153 and
-the TTL change), so no graph carries `UpdateTTL`; doing both would decrement
-twice. The one limit the mode keeps: the lookup uses the packet's own domain,
-so a FAR
-that forwards into a *different* Network Instance than the packet was
-classified in is refused by the compiler; policy hops are the way to express
-that. `deploy/route-path.yaml` is the lab graph and `ci/route-path.sh` the
-end-to-end proof. Routes, next hops and ECMP groups are graph resources; the
-UPF does not derive them.
+The Router's `NeighborResolver` learns ARP and IPv6 ND state. `Vif` tags
+incoming control frames with `vif_id`; Router validates and
+queues them to the bounded control-side resolver path. The maintenance path
+updates complete next-hop records and emits ARP/ND solicitations on the
+configured gate. Neighbor updates change adjacency, not the route that names
+it. Unresolved neighbors fail closed in the UPF graph.
 
-**(b) Connected and local routes.** Still nothing derives them. An interface
-that knows its own address and domain (`Vif`'s `interfaces`: `ip_addr`,
-`route_domain`) is the natural input and `SetRoute`/`ReplaceRouteSetAtomic` the
-output, so a deployment could write one interface line instead of every prefix
-it serves; today the graph's resources are written by hand, and a prefix the
-deployment's own interface holds must be listed like any other.
-`route::ConnectedRouteFor(address, length, egress)` (BESS D-164) returns the
-prefix and a hop on the interface, so the remaining work is the wiring from a
-Vif's configured address to a Router route -- not a new library piece.
+## Remaining UPF routing limits
 
-**(c) A neighbour resolver module.** `route::NeighborTable`
-(`core/route/neighbor_table.h`) is complete and control-side: `Bind` ties a hop
-to an `(interface, IPv4)` neighbour, `Update` records what resolution learned
-and returns the hops to republish, `Publish` writes them into a Router, and a
-learned neighbour and a controller's statement end in the same `NextHop`. The
-header says plainly what is missing: "No ARP is sent or answered here ... a
-resolver module is the application's", and nothing in `core/modules/` drives the
-table (`grep -l NeighborTable core/modules/` is empty). Our deployment writes
-both MACs of every hop, so `RewriteL2` always has a pair and no resolution is
-needed; a data network whose next hop moves (a router that answers for a virtual
-address, a peer whose MAC changes) needs the module: send the request
-(`BuildArpRequest`), parse the reply (`ParseArp`), and publish what `Update`
-returns. Until then, a MAC that changes is a control-plane edit, not packet-side
-learning.
+- The graph owns its routes. `upfd` maps PFCP Network Instances to route
+  domains, but does not install FIB entries or run a routing protocol. BESS
+  provides the FIB, not a RIB. `rt_transport/routes` is static graph
+  configuration.
+- No automatic connected or local route is derived from a Vif. The deployment
+  writes prefixes explicitly; BESS has an IPv4 `ConnectedRouteFor` helper but
+  does not synthesize IPv6 connected routes.
+- Destination mode uses the packet's current route domain. A FAR that forwards
+  into a different Network Instance requires a policy next hop; the compiler
+  refuses that cross-instance FAR in destination mode.
+- `UpfArpResponder` answers IPv4 ARP for N6 interface and UE addresses. `Vif`
+  answers ND for its own interface address, but the graph does not proxy NDP
+  for the UE pool. The default inner PDR key also uses IPv4 address fields;
+  outer GTP-U transport supports IPv4 and IPv6.
 
-What follows from (a)-(c) for the deployment as it stands: the default
-deployment still resolves an egress per FAR to a hop id, and refuses an egress
-the instance does not declare (`internal/routing`). A routed deployment names
-no hop and lets the FIB decide; its routes, connected prefixes and neighbour
-learning are graph and controller work, and only the FIB lookup itself is the
-module's.
+`deploy/route-path.yaml` and `ci/route-path.sh` exercise destination-mode
+forwarding. `docs/router.md` describes the deployed Router bindings and
+neighbor-resolution behavior; the BESS tree's `docs/routing.md` and
+`docs/neighbor-resolution.md` describe the library and resolver contracts.

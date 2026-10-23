@@ -576,8 +576,7 @@ func (c *Client) ResetResources(ctx context.Context, names ...string) (uint64, e
 // Naming several resources packs all of them into one response, and the daemon
 // refuses a response above its 64 MiB message limit with RESOURCE_EXHAUSTED
 // ("name fewer resources"). Use ResourcePages for a table that may be large;
-// Contents is for a small table or a singleton (the firewall policy in
-// session.Compiler.Sweep).
+// Contents is for a small table or a singleton.
 func (c *Client) Contents(ctx context.Context, names ...string) (map[string][]Entry, error) {
 	snap, err := c.sdk.Pipeline(ctx, sdk.WithResources(names...))
 	if err != nil {
@@ -630,13 +629,10 @@ type ErrorCount struct {
 }
 
 // ErrorCounts reads a GTP-U responder's error table through its own get_errors
-// action (datapath/upf_datapath.proto): the Error Indications the peer sent
-// this UPF, one count per TEID they named. Naming no TEID reads every entry
-// the table holds. It is the counterpart of RuleCounts and a reading of its
-// own: the table belongs to the responder behind the TEID table's default
-// gate, and a graph may have that module without a URR counter (or the other
-// way), so a session layer that measured usage but read errors out of the
-// counter module would read the wrong module's answer.
+// action (datapath/upf_datapath.proto): peer Error Indications, one count per
+// TEID. Naming no TEID reads every entry the table holds. It is independent of
+// usage counters: a graph may enable the gate-2 responder without a URR
+// counter, and the session layer must read the responder's own answer.
 func (c *Client) ErrorCounts(ctx context.Context, module string, teids ...uint32) ([]ErrorCount, error) {
 	arg, err := c.Message("upf.pb.GtpuResponderCommandGetErrorsArg",
 		map[string]any{"teids": teids})
@@ -668,4 +664,44 @@ func (c *Client) ErrorCounts(ctx context.Context, module string, teids ...uint32
 		})
 	}
 	return out, nil
+}
+
+// EndMarker is one End Marker a GTP-U responder recorded (TS 29.281 7.3.2):
+// the logical endpoint it arrived on and this UPF's local TEID it named.
+type EndMarker struct {
+	EndpointID uint32
+	TEID       uint32
+}
+
+// DrainEndMarkers takes the End Markers a GTP-U responder recorded since the
+// previous drain (drain_end_markers, datapath/upf_datapath.proto), each
+// returned once, and the running count of those its full rings lost. A drain
+// consumes what it returns, so one caller -- the report loop -- owns it.
+func (c *Client) DrainEndMarkers(ctx context.Context, module string) ([]EndMarker, uint64, error) {
+	arg, err := c.Message("upf.pb.GtpuResponderCommandDrainEndMarkersArg", nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	result, err := c.sdk.InvokeAction(ctx, module, "drain_end_markers", arg)
+	if err != nil {
+		return nil, 0, fmt.Errorf("bess: %s drain_end_markers: %w", module, err)
+	}
+	response, err := c.Message("upf.pb.GtpuResponderCommandDrainEndMarkersResponse", nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := result.UnmarshalTo(response); err != nil {
+		return nil, 0, fmt.Errorf("bess: %s drain_end_markers answered %s: %w", module, result.GetTypeUrl(), err)
+	}
+	fields := response.ProtoReflect().Descriptor().Fields()
+	list := response.ProtoReflect().Get(fields.ByName("end_markers")).List()
+	out := make([]EndMarker, 0, list.Len())
+	for i := range list.Len() {
+		entry := list.Get(i).Message()
+		out = append(out, EndMarker{
+			EndpointID: uint32(uintField(entry, "endpoint_id")),
+			TEID:       uint32(uintField(entry, "teid")),
+		})
+	}
+	return out, uintField(response.ProtoReflect(), "dropped"), nil
 }
