@@ -29,20 +29,11 @@ is the id everything downstream is keyed by.
 
 ```mermaid
 flowchart TB
-    n3["N3/N9 PMD ingress"] --> vif["vif_n3n9 · Vif"]
-    vif --> tags["tag_n3/tag_n9<br/>endpoint_id + transport domain"]
-    tags --> decap["decap0 · GtpuDecap<br/>exact endpoint/F-TEID admission"]
-    decap -->|"gate 0 · known UL"| metadata["mt_ul_read<br/>metadata offsets"]
-    metadata --> pdrul["pdr_ul · WildcardMatch<br/>inner tuple + fteid_context + QFI"]
-    pdrul --> meter["mt_ul · Meter"]
-    meter -->|"gates 0, 1"| count["cnt_ul · UrrCount"]
-    count --> rt["rt · inner Router"]
-    rt --> n6["n6_out · PortOut"]
-    decap -->|"gate 1 · known DL/N9"| pdrdl["pdr_dl · WildcardMatch"]
-    decap -->|"gate 2 · unknown G-PDU/control"| responder["echo0 · GtpuResponder"]
+    in["n3_in → vif_n3n9 → tag_n3 / tag_n9<br/>endpoint_id + transport domain"] --> decap["decap0 · GtpuDecap<br/>exact endpoint/F-TEID admission"]
+    decap -->|"gate 0 · known UL"| ul["pdr_ul · WCM: inner tuple + fteid_context + QFI<br/>→ mt_ul (gates 0, 1) → cnt_ul → rt → n6_out"]
+    decap -->|"gate 1 · known DL/N9"| pdrdl["pdr_dl · downlink, below"]
+    decap -->|"gate 2 · unknown G-PDU/control"| responder["echo0 · GtpuResponder<br/>→ rt_transport → N3/N9 egress"]
     decap -->|"malformed"| drop(("drop"))
-    responder --> transport["rt_transport · outer Router"]
-    transport --> n3out["N3/N9 egress"]
 ```
 
 `GtpuDecap` owns the endpoint-scoped `<module>/fteids` index. The graph tags
@@ -61,22 +52,15 @@ chase the PFCP resource graph.
 
 ```mermaid
 flowchart TB
-    n6in["n6_in · PortInc"] --> arp["arp_n6 · UpfArpResponder"]
-    arp -->|"ARP reply"| n6out["n6_out · PortOut"]
-    n6in --> vif["vif_n6 · Vif"]
-    vif -->|"IPv4/IPv6"| pdr["pdr_dl · WildcardMatch<br/>inner tuple + route domain + fteid_context + QFI"]
+    n6in["n6_in → tag_n6 → l2_sort"] -->|"ARP"| arp["arp_n6 answers → n6_out<br/>a copy feeds rt's neighbor input"]
+    n6in -->|"IP"| vif["vif_n6 · Vif"]
+    vif -->|"IPv4/IPv6"| pdr["pdr_dl · WCM<br/>inner tuple + route domain + fteid_context + QFI"]
     decap["decap0 gate 1 · admitted DL/N9"] --> pdr
-    pdr --> meter["mt_dl · Meter"]
-    pdr -->|"gate 1 · BUFF in buffer-path"| cb["cnt_buf · UrrCount"]
-    cb --> buf["buf · PacketStore<br/>key_attrs: [action_id]"]
-    buf -->|"release"| meter
-    buf -->|"eviction, unwired"| drop(("drop"))
-    meter -->|"gates 0, 1"| cnt["cnt_dl · UrrCount"]
-    cnt --> steer["atsss · optional access selection"]
-    steer --> rt["rt · inner Router"]
-    rt -->|"tunnel next hop"| enc["enc · GtpuEncap<br/>outer IPv4/IPv6, UDP, GTP-U"]
-    enc --> transport["rt_transport · transport-domain FIB<br/>ARP/ND and L2 rewrite"]
-    transport --> n3out["N3/N9 egress"]
+    pdr --> chain["mt_dl (gates 0, 1) → cnt_dl → atsss → rt · inner Router"]
+    pdr -->|"gate 1 · BUFF in buffer-path"| buf["cnt_buf → buf · PacketStore<br/>key_attrs: [action_id]"]
+    buf -->|"release"| chain
+    chain -->|"gates 1, 2 · tunnel next hop"| enc["enc · GtpuEncap → rt_transport<br/>per-domain FIB, ARP/ND → N3/N9 egress"]
+    chain -->|"gate 4 · 5G-VN re-injection"| pdr
 ```
 
 The buffering branch exists only in `deploy/buffer-path.yaml`. Release feeds the
