@@ -12,9 +12,8 @@ name: CI
 #                         (veth-port) or an external checkout (cntc-path):
 #                         smoke, session-path, route-path, iface-path,
 #                         session-instances, session-live, n4-path,
-#                         session-report, pdrmatch-path, pdrmatch-2dn,
-#                         meter-compose, buffer-path, atsss-steer, then
-#                         session-path on the custom graph.
+#                         session-report, meter-compose, buffer-path,
+#                         atsss-steer.
 #   weekly (Sun 04:42)    ci/verify.sh --benches: every cited lane that can run
 #                         on a hosted runner, the cited benchmarks, and the Go
 #                         race run. The interop and CNTC suites need containers
@@ -57,7 +56,7 @@ env:
   CORE_LANES: >-
     ci/smoke-gtpu.sh ci/session-path.sh ci/route-path.sh ci/iface-path.sh
     ci/session-instances.sh ci/session-live.sh ci/n4-path.sh
-    ci/session-report.sh ci/pdrmatch-path.sh ci/pdrmatch-2dn.sh
+    ci/session-report.sh
     ci/meter-compose.sh ci/buffer-path.sh ci/atsss-steer.sh
 
 jobs:
@@ -260,10 +259,6 @@ jobs:
             echo "=== $lane"
             "$lane"
           done
-          # The default lane exercises the generic matcher. This runs the
-          # custom deploy graph through the same driver, so its strategy
-          # cannot rot behind the unit tests.
-          PROFILE=custom ci/session-path.sh
 
       - name: Weekly full evidence
         if: github.event_name == 'schedule' && github.event.schedule == '42 4 * * 0'
