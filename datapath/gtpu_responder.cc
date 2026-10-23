@@ -29,6 +29,7 @@ using bess::utils::be32_t;
 constexpr uint8_t kEchoRequest = 1;
 constexpr uint8_t kEchoResponse = 2;
 constexpr uint8_t kErrorIndication = 26;
+constexpr uint8_t kEndMarker = 254;
 constexpr uint8_t kGtpdu = 255;
 
 // An Echo Response's information elements (TS 29.281 7.2.2): the
@@ -61,6 +62,9 @@ const Commands GtpuResponder::cmds = {
     {"get_errors", "upf.pb.GtpuResponderCommandGetErrorsArg",
      MODULE_CMD_FUNC(&GtpuResponder::CommandGetErrors), Command::THREAD_SAFE,
      "upf.pb.GtpuResponderCommandGetErrorsResponse"},
+    {"drain_end_markers", "upf.pb.GtpuResponderCommandDrainEndMarkersArg",
+     MODULE_CMD_FUNC(&GtpuResponder::CommandDrainEndMarkers), Command::THREAD_SAFE,
+     "upf.pb.GtpuResponderCommandDrainEndMarkersResponse"},
 };
 
 namespace {
@@ -108,6 +112,14 @@ CommandResponse GtpuResponder::Init(const upf::pb::GtpuResponderArg &arg) {
   stamp_ = static_cast<uint32_t>(seconds);
   if (arg.track_errors()) {
     errors_ = std::make_unique<ErrorSlot[]>(kErrorSlots);
+  }
+  if (arg.track_end_markers()) {
+    endpoint_attr_ = AddMetadataAttr("endpoint_id", sizeof(be32_t),
+                                     bess::metadata::Attribute::AccessMode::kRead);
+    if (endpoint_attr_ < 0) {
+      return CommandFailure(-endpoint_attr_, "add_metadata_attr() failed");
+    }
+    end_markers_ = std::make_unique<upf::datapath::EndMarkerLog>(Worker::kMaxWorkers);
   }
   if (!arg.reply_gate_attr().empty()) {
     reply_gate_attr_ = AddMetadataAttr(
@@ -179,11 +191,28 @@ CommandResponse GtpuResponder::CommandGetErrors(
   return CommandSuccess(response);
 }
 
+CommandResponse GtpuResponder::CommandDrainEndMarkers(
+    const upf::pb::GtpuResponderCommandDrainEndMarkersArg &) {
+  upf::pb::GtpuResponderCommandDrainEndMarkersResponse response;
+  if (end_markers_ == nullptr) {
+    return CommandSuccess(response);
+  }
+  for (const auto &event : end_markers_->Drain()) {
+    auto *entry = response.add_end_markers();
+    entry->set_endpoint_id(event.endpoint_id);
+    entry->set_teid(event.teid);
+  }
+  response.set_dropped(end_markers_->Dropped());
+  return CommandSuccess(response);
+}
+
 void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
   const auto reply_offset =
       reply_gate_attr_ >= 0 ? attr_offset(reply_gate_attr_) : -1;
+  const auto endpoint_offset =
+      endpoint_attr_ >= 0 ? attr_offset(endpoint_attr_) : -1;
 
   for (size_t i = 0; i < cnt; i++) {
     bess::PacketRef pkt = batch->packet(i);
@@ -258,6 +287,20 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
         }
       }
       continue;  // no reply: ogates[i] stays DROP_GATE
+    }
+    // The peer ends the stream on this UPF's own tunnel (7.3.2): the header's
+    // TEID is the local one. Record it with the endpoint it came in on, never
+    // reply.
+    if (g[1] == kEndMarker) {
+      if (end_markers_ != nullptr && bess::metadata::IsValidOffset(endpoint_offset)) {
+        const uint32_t endpoint =
+            get_attr_with_offset<be32_t>(endpoint_offset, pkt).value();
+        const uint32_t teid = Get32(g + 4);
+        if (endpoint != 0 && teid != 0) {
+          end_markers_->Record(ctx->wid.value(), {endpoint, teid});
+        }
+      }
+      continue;
     }
     const bool echo = g[1] == kEchoRequest;
     if (!echo && g[1] != kGtpdu) [[unlikely]] {

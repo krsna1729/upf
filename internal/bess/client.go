@@ -666,3 +666,43 @@ func (c *Client) ErrorCounts(ctx context.Context, module string, teids ...uint32
 	}
 	return out, nil
 }
+
+// EndMarker is one End Marker a GTP-U responder recorded (TS 29.281 7.3.2):
+// the logical endpoint it arrived on and this UPF's local TEID it named.
+type EndMarker struct {
+	EndpointID uint32
+	TEID       uint32
+}
+
+// DrainEndMarkers takes the End Markers a GTP-U responder recorded since the
+// previous drain (drain_end_markers, datapath/upf_datapath.proto), each
+// returned once, and the running count of those its full rings lost. A drain
+// consumes what it returns, so one caller -- the report loop -- owns it.
+func (c *Client) DrainEndMarkers(ctx context.Context, module string) ([]EndMarker, uint64, error) {
+	arg, err := c.Message("upf.pb.GtpuResponderCommandDrainEndMarkersArg", nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	result, err := c.sdk.InvokeAction(ctx, module, "drain_end_markers", arg)
+	if err != nil {
+		return nil, 0, fmt.Errorf("bess: %s drain_end_markers: %w", module, err)
+	}
+	response, err := c.Message("upf.pb.GtpuResponderCommandDrainEndMarkersResponse", nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := result.UnmarshalTo(response); err != nil {
+		return nil, 0, fmt.Errorf("bess: %s drain_end_markers answered %s: %w", module, result.GetTypeUrl(), err)
+	}
+	fields := response.ProtoReflect().Descriptor().Fields()
+	list := response.ProtoReflect().Get(fields.ByName("end_markers")).List()
+	out := make([]EndMarker, 0, list.Len())
+	for i := range list.Len() {
+		entry := list.Get(i).Message()
+		out = append(out, EndMarker{
+			EndpointID: uint32(uintField(entry, "endpoint_id")),
+			TEID:       uint32(uintField(entry, "teid")),
+		})
+	}
+	return out, uintField(response.ProtoReflect(), "dropped"), nil
+}

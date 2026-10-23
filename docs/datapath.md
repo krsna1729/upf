@@ -234,15 +234,19 @@ header.
 The main graph sends `GtpuDecap` gate 2 here. The responder replies to Echo
 Requests and to unknown nonzero-TEID G-PDUs with the corresponding GTP-U
 messages. It can count peer Error Indications per TEID when `track_errors` is
-enabled; the control plane reads those counters with `get_errors`. IPv4 and
-IPv6 outer headers are supported for replies, including the mandatory IPv6 UDP
-checksum.
+enabled; the control plane reads those counters with `get_errors`. With
+`track_end_markers` it records each End Marker as an (endpoint_id, local TEID)
+event, reading the `endpoint_id` metadata decap was fed; the control plane
+drains them with `drain_end_markers`. IPv4 and IPv6 outer headers are
+supported for replies, including the mandatory IPv6 UDP checksum.
 
-Received Error Indications are counted and dropped. End Markers and other
-unsupported message types are dropped; this ingress path does not emit an End
-Marker Reception Report. Replies are rewritten in place, with outer addresses
-and UDP ports swapped, lengths updated, and Ethernet MACs swapped. The
-post-encap Router resolves their next hop.
+Received Error Indications and End Markers are recorded and dropped; other
+unsupported message types are dropped. End Markers go to one single-producer
+ring per worker (`end_marker_log.h`, 256 events each): a drain returns each
+event once, and a full ring drops and counts rather than stall the worker.
+Replies are rewritten in place, with outer addresses and UDP ports swapped,
+lengths updated, and Ethernet MACs swapped. The post-encap Router resolves
+their next hop.
 
 ### `urr_count` — usage, and the buffering signal
 
@@ -267,7 +271,9 @@ the arrival signal the Downlink Data Report is decided from on the BUFF branch.
   asked for or the whole table when it was asked for none. The counts only grow
   — nothing clears them, and a read races no packet — so the reporting side
   keeps its own high-water mark per session (`internal/session/erir.go`) and
-  one reading serves every session of a tick (`-gtpu-errors`).
+  one reading serves every session of a tick (`-gtpu-errors`). Its End Marker
+  log is `drain_end_markers` (`-gtpu-end-markers`): events, not counts, so a
+  TEID that changes hands carries no history to the next session.
 * **Reads** are the `get_counts` command
   (`upf.pb.UrrCountCommandGetCountsArg` → `…Response`), which is also how the
   control side asks for a *window*: with `restart_window` the module clears each
@@ -351,8 +357,8 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 |---|---|
 | control_v2, one transaction per session change | `internal/session` writes a session's rules, actions, meters, counters and tunnels together or not at all, with a request id that survives retries |
 | resources and codecs (D-129) | the tables above: configuration written in a transaction, a codec that validates the key, and a readback the startup sweep uses. The store's `flows` is one of them (one entry per flow id, each field optional, absent meaning the module-wide argument), written by the session compiler with the SMF's own numbers (8.2.29's duration as `timeout_ns`, 8.2.30's count as `max_packets_per_flow`) in the same transaction as the rule: an upsert or an erase moves no packet and stops no worker, and an erase is configuration only — `drop` is what frees what a flow holds |
-| module commands | `get_counts` (counters), `get_errors` (the responder's Error Indication table: monotonic counts, no clear, read by the report tick), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
-| metadata attributes | `action_id` (PDR result, read by counters/encap/store), `fteid_context` (written by decap, read by the PDR tables), `endpoint_id` (tagged before decap, read by decap), `qfi` (decap output, read by the PDR tables), `route_domain` (Vif/PDR result, read by tables and inner Router), `vif_id` (Vif or tag output, read by the Router's neighbor input), and `transport_route_domain` (encap/tag output, read by `rt_transport`) |
+| module commands | `get_counts` (counters), `get_errors` (the responder's Error Indication table: monotonic counts, no clear, read by the report tick), `drain_end_markers` (the responder's End Marker events, each returned once), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
+| metadata attributes | `action_id` (PDR result, read by counters/encap/store), `fteid_context` (written by decap, read by the PDR tables), `endpoint_id` (tagged before decap, read by decap and, with `track_end_markers`, by the responder), `qfi` (decap output, read by the PDR tables), `route_domain` (Vif/PDR result, read by tables and inner Router), `vif_id` (Vif or tag output, read by the Router's neighbor input), and `transport_route_domain` (encap/tag output, read by `rt_transport`) |
 | slot tables (`dataplane/slot_table.h`) | every per-rule table: ids are 1..capacity, an erased key retires for a grace period, and publishing into a retiring slot is refused — which is why released ids wait their walk (`docs/design.md`, the id pool) |
 | packet ownership | `bess::PacketRef` and the store's explicit free/release path; our modules copy no packet and allocate none |
 | tasks (`RegisterTask`/`RunTask`) | BESS's store drains released packets from a task; **none of our modules has one** — nothing in our packet path runs between packets |

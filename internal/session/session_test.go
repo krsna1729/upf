@@ -39,6 +39,9 @@ type recorder struct {
 	// errorCounts is the fake dataplane's GTP-U responders, by module name:
 	// what ErrorCounts answers (finding 15).
 	errorCounts map[string][]bess.ErrorCount
+	// endMarkers is the fake responders' End Marker logs, by module name: what
+	// DrainEndMarkers answers once and then forgets, as the module does.
+	endMarkers map[string][]bess.EndMarker
 	// calls is every counter reading the compiler made, in order: what the
 	// usage-report tick's cost is measured by (one read per module rather than
 	// one per session, report_test.go).
@@ -195,6 +198,17 @@ func (r *recorder) ErrorCounts(_ context.Context, module string, teids ...uint32
 		}
 	}
 	return out, nil
+}
+
+// DrainEndMarkers answers a GtpuResponder's End Marker log (EndMarkerReader):
+// the events the test seeded, each returned once, as drain_end_markers does.
+func (r *recorder) DrainEndMarkers(_ context.Context, module string) ([]bess.EndMarker, uint64, error) {
+	if r.readFail != nil {
+		return nil, 0, r.readFail
+	}
+	out := r.endMarkers[module]
+	delete(r.endMarkers, module)
+	return out, 0, nil
 }
 
 // PeekRuleCounts is RuleCounts without the window restart (WindowReader): the

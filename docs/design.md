@@ -51,6 +51,7 @@ flowchart TB
 | QER (Gate Status, MBR, GBR, Averaging Window, QFI) | the PDR result carries the selected flow-meter ID first and the session-shared meter ID second; `Meter(levels: 2)` processes them in order, so a red first level does not charge the second. GBR/MBR map to committed/peak rate, Averaging Window to burst, and QFI goes into tunnel records. Gate status from every named QER is folded; see `ci/meter-compose.sh` and claims status-20/35 |
 | URR (Measurement Method, Reporting Triggers, thresholds, period) | per-rule counters in the `UrrCount` module, one entry per rule a URR's PDRs name, keyed by the rule's ActionId, plus the decision in `session.EvaluateAll` -- one bulk reading per counter module per tick, every session judged in memory against it -- and `session.Evaluate`, the single-session reading that names its own rules: it reads the module's counters, reports the period, a threshold or a quota, and stops the traffic of a spent quota. Every limit and the period are measured over the usage since the URR's last report (a report opens the next window), which is the window the report itself carries; the alternative -- accumulate from provisioning and compare the running total -- needs a second base per URR, and the SMF's lever (an Update URR that provisions a new quota, which clears the flag) is the same either way. Time is the dataplane's own fact: the counting module stamps a rule's first packet of a reading and the last one it counted (one stamp pair per rule, shared and stored once per counted batch -- a timestamp is the rule's, not a worker's), the reading carries the wall clock it took them at, and the controller places them on the clock an SMF reads; a reading the reporting side makes closes the window and the next packet opens the next one, while a diagnostic read of the same command leaves it alone. A time threshold and a time quota are then measured against the time the *window's* traffic ran -- the window's own first packet to the reading's last -- which is the base the volume limits use too, with the idle gaps taken out of it. A graph whose counters carry no stamps falls back to the window's length, the same number while the traffic is continuous. Sending the report as a PFCP Session Report Request is `internal/n4`'s `Report` (the one exchange this node initiates, with retries and the Session Report Response routed back to the caller), driven by `upfd -urr-interval`; a report the SMF does not answer is held by the loop (a bounded per-session queue, the oldest report first, so the UR-SEQNs the SMF reads stay in order, retried with a doubling backoff and at most one attempt per tick, since each attempt costs the n4 layer's whole retry budget) rather than dropped, because an unanswered send leaves the outcome unknown while a refusal is an answer. Two facts hold the counters together: a rule's entry exists exactly while a URR measures it (a rule that drops keeps it, so an erase always finds it), and the first reading of a URR is the window's baseline (the cells outlive an erased entry and the id pool reissues ActionIds, so a fresh rule's first reading may hold the previous holder's totals) |
 | Error Indication Report (ERIR: a tunnel this UPF sends into that the peer's GTP-U reports unreachable, 5.10) | `GtpuDecap` sends unknown G-PDUs and control to gate 2; `GtpuResponder` answers unknown G-PDUs with Error Indications and counts peer Error Indications per TEID for `-gtpu-errors` |
+| End Marker Reception Report (a URR's REEMR, 8.2.19; the Usage Report Trigger's EMRRE, 8.2.41) | `GtpuResponder` records each End Marker that reaches decap gate 2 as an (endpoint_id, local TEID) event in a per-worker ring (`track_end_markers`); the tick drains it once (`-gtpu-end-markers`), and each REEMR URR measuring a PDR on that F-TEID is reported with EMRRE |
 | Session (CP F-SEID, UP F-SEID) | one transaction's worth of resources, all named `<session-id>/…` |
 | Network Instance (N3/N6/N9) | a route domain; overlapping subscriber prefixes never collide because each domain has its own table |
 | Outer Header Creation (TEID, peer address) | the tunnel encap parameters of the treatment |
@@ -63,13 +64,14 @@ The datapath therefore never chases relations: the PFCP side resolves
 
 ### Control and Reporting Pipeline: Dataplane ──▶ Controller ──▶ SMF
 
-Dataplane events, the `upfd` code that reads them, and the PFCP report each becomes (TS 29.244 7.5.8). `upfd` sends three kinds of report:
+Dataplane events, the `upfd` code that reads them, and the PFCP report each becomes (TS 29.244 7.5.8). `upfd` sends four kinds of report:
 
 ```mermaid
 flowchart LR
     E1["<b>First DL packet for a BUFF rule</b><br/>stamped by cnt_buf, held in PacketStore"] --> C1["<b>session/downlink.go</b><br/>polled each tick; one notification<br/>per episode (ddnSent)"] --> M1["<b>Downlink Data Report</b><br/>Session Report, DLDR, PDR ID"]
     E2["<b>URR counters</b><br/>UrrCount cnt_ul / cnt_dl"] --> C2["<b>session/report.go</b><br/>volume/time thresholds and quotas"] --> M2["<b>Usage Report</b><br/>Session Report, USAR, URR ID"]
     E3["<b>GTP-U Error Indication</b><br/>counted by GtpuResponder<br/>on decap gate 2 (get_errors)"] --> C3["<b>session/erir.go</b><br/>polled each tick; new counts<br/>matched to FAR F-TEIDs"] --> M3["<b>Error Indication Report</b><br/>Session Report, ERIR, remote F-TEID"]
+    E4["<b>GTP-U End Marker</b><br/>logged by GtpuResponder<br/>on decap gate 2 (drain_end_markers)"] --> C4["<b>session/emrr.go</b><br/>drained each tick; matched to<br/>a PDR's local F-TEID"] --> M4["<b>Usage Report</b><br/>Session Report, USAR, EMRRE"]
 ```
 
 ```mermaid
@@ -93,13 +95,16 @@ sequenceDiagram
     Note over DP,SMF: Error Indication
     UPFD->>DP: read the responder's Error Indication table
     UPFD->>SMF: Session Report Request (Error Indication Report, F-TEID)
+
+    Note over DP,SMF: End Marker reception
+    UPFD->>DP: drain the responder's End Marker log
+    UPFD->>SMF: Session Report Request (Usage Report, EMRRE)
 ```
 
-Not implemented: End Marker reception reports, User Plane Path Failure Node
-Reports, and forwarding to the CP function (Destination Interface 3 is refused,
-cause 73; see `docs/compliance.md`). End Marker *construction* on SNDEM is
-implemented (`session/endmarker.go`); it is a message this node sends, not a
-report.
+Not implemented: User Plane Path Failure Node Reports, and forwarding to the
+CP function (Destination Interface 3 is refused, cause 73; see
+`docs/compliance.md`). End Marker *construction* on SNDEM is implemented
+(`session/endmarker.go`); it is a message this node sends, not a report.
 
 ## The packet path, and how its cost is proven
 

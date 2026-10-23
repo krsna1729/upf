@@ -59,10 +59,13 @@ modules:
   # The peer's GTP-U Error Indication (TS 29.281 7.3.1): type 26, header TEID 0,
   # and a TEID IE naming the tunnel the peer cannot reach. The endpoint-tagged
   # frame misses `decap0/fteids`, reaches gate 2, and `echo_err` records it for
-  # the SMF's Error Indication Report (TS 29.244 5.10).
+  # the SMF's Error Indication Report (TS 29.244 5.10). The old I-UPF's End
+  # Marker (7.3.2): type 254 on this UPF's own uplink F-TEID (0x11223344 at
+  # 192.0.2.1, endpoint 1); `echo_err` records it with its endpoint for the End
+  # Marker Reception Report (TS 29.244 8.2.19 REEMR, 8.2.41 EMRRE).
   - name: echo_err
     mclass: GtpuResponder
-    arg: {track_errors: true}
+    arg: {track_errors: true, track_end_markers: true}
   - name: src_err
     mclass: Source
     arg: {pkt_size: 55, burst: 1}
@@ -71,6 +74,14 @@ modules:
     arg:
       templates:
         - "AgAAAAABAgAAAAACCABFAAApAAAAAEARKpoKFB4CChQeAQhoCGgAFQAAMBoABQAAAAAQVWZ3iA=="
+  - name: src_em
+    mclass: Source
+    arg: {pkt_size: 50, burst: 1}
+  - name: rewrite_em
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAACAgAAAAABCABFAAAkAAFAAEARULEKFB4CwAACAQhoCGgAEAAAMP4AABEiM0Q="
 
   - name: decap0
     mclass: GtpuDecap
@@ -242,6 +253,8 @@ connections:
   - {upstream: rewrite_up, downstream: set_n3_endpoint}
   - {upstream: src_err, downstream: rewrite_err}
   - {upstream: rewrite_err, downstream: set_n3_endpoint}
+  - {upstream: src_em, downstream: rewrite_em}
+  - {upstream: rewrite_em, downstream: set_n3_endpoint}
   - {upstream: set_n3_endpoint, downstream: decap0}
   - {upstream: decap0, downstream: mt_md}
   - {upstream: decap0, downstream: pdr_dl, ogate: 1}

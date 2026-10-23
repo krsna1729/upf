@@ -76,6 +76,14 @@ type ErrorReader interface {
 	ErrorCounts(ctx context.Context, module string, teids ...uint32) ([]bess.ErrorCount, error)
 }
 
+// EndMarkerReader is the GTP-U responder's End Marker log as a dataplane
+// capability: the End Markers that arrived since the previous drain, each
+// returned once, by the endpoint and local TEID it came in on (TS 29.281
+// 7.3.2). A drain consumes what it returns, so only the report loop calls it.
+type EndMarkerReader interface {
+	DrainEndMarkers(ctx context.Context, module string) ([]bess.EndMarker, uint64, error)
+}
+
 // StoreCommands is the dataplane as a command sender for the packet store: the
 // release and drop of what one flow holds (TS 29.244 5.2.4.1). It is a
 // capability of its own for the same reason CounterReader is -- a graph with no
@@ -301,6 +309,14 @@ type Config struct {
 	// reported is reported as an Error Indication Report (TS 29.244 5.10).
 	GTPUErrors string
 
+	// GTPUEndMarkers is the GTP-U responder module whose End Marker log the
+	// report loop drains (track_end_markers). A URR that asks for REEMR
+	// (TS 29.244 8.2.19) is refused when it is empty: the End Marker it asks
+	// to hear about would never be seen. With it set, an End Marker on a PDR's
+	// local F-TEID is reported as a Usage Report with the EMRRE trigger
+	// (8.2.41) for every REEMR URR the PDR names.
+	GTPUEndMarkers string
+
 	// RouteMode is how the graph's Router decides a forward's egress. It must
 	// agree with the Router module's own `mode` argument: a graph in
 	// ROUTE_MODE_DESTINATION ignores the next hop an action names, and a graph
@@ -427,6 +443,11 @@ type Compiler struct {
 	// and a graph without counting modules is a graph a URR cannot report from
 	// (Evaluate says so rather than reporting zero forever).
 	counters CounterReader
+
+	// markersDropped is the End Marker log's lost count the report loop last
+	// logged: the drain answers a running total, and only an increase is news.
+	// Only EvaluateAll touches it, from the one report loop.
+	markersDropped uint64
 	// peek is the same counter reader without the window restart, when the
 	// dataplane offers it (WindowReader): the DDN path's reading.
 	peek WindowReader
@@ -1151,6 +1172,10 @@ type urr struct {
 	onTimeTh    bool
 	onVolQuota  bool
 	onTimeQuota bool
+	// onEndMarker is REEMR (8.2.19 octet 7): report when an End Marker arrives
+	// on the local F-TEID of a PDR this URR measures (Usage Report Trigger
+	// EMRRE, 8.2.41).
+	onEndMarker bool
 
 	// linkedReporting is LIUSA (8.2.19): the URR is reported through its link,
 	// not on its own triggers -- the group's report is owed when a URR it is

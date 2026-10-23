@@ -11,10 +11,12 @@
 #include <cstring>
 #include <memory>
 #include <span>
+#include <thread>
 #include <vector>
 
 #include "utils/logging.h"
 #include "dataplane/resource.h"
+#include "end_marker_log.h"
 #include "fteid_resource.h"
 #include "flow/shared_exact_index.h"
 #include "gtpu_admission.h"
@@ -446,6 +448,73 @@ TEST(GtpuOuterWriter, EncodesQfiZeroAndOmitsAnAbsentQfi) {
   EXPECT_EQ(plain_gtpu[0] & 0x04, 0);
   EXPECT_EQ(upf::datapath::GetWire16(plain_gtpu + 2), 20);
   EXPECT_EQ(plain.size(), plain_headers + inner_length);
+}
+
+using upf::datapath::EndMarkerEvent;
+using upf::datapath::EndMarkerLog;
+
+TEST(EndMarkerLog, DeliversEachEventOnceInArrivalOrder) {
+  EndMarkerLog log(2);
+  log.Record(0, {1, 0x11});
+  log.Record(1, {2, 0x11});
+  log.Record(0, {1, 0x22});
+  const std::vector<EndMarkerEvent> want = {{1, 0x11}, {1, 0x22}, {2, 0x11}};
+  EXPECT_EQ(log.Drain(), want) << "worker 0's events in order, then worker 1's";
+  EXPECT_TRUE(log.Drain().empty()) << "a drained event is not delivered again";
+  log.Record(1, {2, 0x33});
+  EXPECT_EQ(log.Drain(), (std::vector<EndMarkerEvent>{{2, 0x33}}));
+  EXPECT_EQ(log.Dropped(), 0u);
+}
+
+TEST(EndMarkerLog, AFullRingDropsAndCountsUntilDrained) {
+  EndMarkerLog log(1);
+  for (uint32_t i = 1; i <= EndMarkerLog::kRingSize + 3; ++i) {
+    log.Record(0, {1, i});
+  }
+  EXPECT_EQ(log.Dropped(), 3u);
+  const auto first = log.Drain();
+  ASSERT_EQ(first.size(), EndMarkerLog::kRingSize);
+  EXPECT_EQ(first.front().teid, 1u) << "the ring keeps the oldest, drops the newest";
+  EXPECT_EQ(first.back().teid, EndMarkerLog::kRingSize);
+  log.Record(0, {1, 0xabc});  // the drain freed the ring
+  EXPECT_EQ(log.Drain(), (std::vector<EndMarkerEvent>{{1, 0xabc}}));
+  log.Record(5, {1, 1});  // a slot past the log's workers
+  EXPECT_EQ(log.Dropped(), 4u);
+}
+
+// Producers race a drainer: every recorded event is delivered exactly once,
+// and recorded plus dropped is everything produced.
+TEST(EndMarkerLog, ConcurrentWorkersAndDrainLoseAndRepeatNothing) {
+  constexpr size_t kWorkers = 4;
+  constexpr uint32_t kPerWorker = 20000;
+  EndMarkerLog log(kWorkers);
+  std::atomic<size_t> done{0};
+  std::vector<std::thread> workers;
+  for (size_t w = 0; w < kWorkers; ++w) {
+    workers.emplace_back([&log, &done, w] {
+      for (uint32_t i = 1; i <= kPerWorker; ++i) {
+        log.Record(w, {static_cast<uint32_t>(w + 1), i});
+      }
+      done.fetch_add(1);
+    });
+  }
+  std::vector<std::vector<uint32_t>> seen(kWorkers);
+  auto take = [&] {
+    for (const auto &e : log.Drain()) {
+      seen[e.endpoint_id - 1].push_back(e.teid);
+    }
+  };
+  while (done.load() < kWorkers) take();
+  for (auto &t : workers) t.join();
+  take();
+  uint64_t delivered = 0;
+  for (const auto &teids : seen) {
+    delivered += teids.size();
+    EXPECT_TRUE(std::is_sorted(teids.begin(), teids.end()));
+    EXPECT_EQ(std::adjacent_find(teids.begin(), teids.end()), teids.end())
+        << "an event delivered twice";
+  }
+  EXPECT_EQ(delivered + log.Dropped(), uint64_t{kWorkers} * kPerWorker);
 }
 
 }  // namespace

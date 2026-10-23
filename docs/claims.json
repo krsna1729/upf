@@ -1482,6 +1482,64 @@
    "message_clause": "5.10"
   },
   {
+   "id": "status-40",
+   "scope": "status",
+   "evidence": [
+    "TestAREEMRURRNeedsAnEndMarkerLog",
+    "TestAnEndMarkerOnThePDRsFTEIDBecomesAnEMRREUsageReport",
+    "TestLiveEndMarkerBecomesAnEMRRReport",
+    "datapath/gtpu_datapath_test.cc",
+    "ci/session-path.sh"
+   ],
+   "result": {
+    "state": "ok",
+    "evidence": {
+     "TestAREEMRURRNeedsAnEndMarkerLog": {
+      "state": "ok"
+     },
+     "TestAnEndMarkerOnThePDRsFTEIDBecomesAnEMRREUsageReport": {
+      "state": "ok"
+     },
+     "TestLiveEndMarkerBecomesAnEMRRReport": {
+      "state": "skip"
+     },
+     "datapath/gtpu_datapath_test.cc": {
+      "state": "ok"
+     },
+     "ci/session-path.sh": {
+      "state": "ok"
+     }
+    }
+   },
+   "clause": "8.2.41",
+   "part": "procedures",
+   "title": "**fixed**: with `track_end_markers`, the responder connected to `GtpuDecap` gate 2 records each End Marker (TS 29.281 7.3.2) as an (endpoint_id, local TEID) event in a per-worker single-producer ring; the report tick drains it once (`drain_end_markers`, `-gtpu-end-markers <module>`), and every URR that asks for REEMR (8.2.19 octet 7) and measures a PDR on that endpoint-scoped local F-TEID is reported in a Usage Report whose Usage Report Trigger carries EMRRE, beside any other trigger due in the same tick. A REEMR URR is refused when the deployment drains no End Marker log. A full ring drops and counts events, and the tick logs the loss",
+   "declared": "",
+   "spec": "TS 29.244",
+   "messages": [
+    "End Marker and its reception report"
+   ],
+   "message": "End Marker and its reception report",
+   "statement": "8.2.19 REEMR and 8.2.41 octet 7 bit 5: \"EMRRE (End Marker Reception REport): this indicates that the UP function has received End Marker from the old I-UPF\"",
+   "detail": "**fixed**: with `track_end_markers`, the responder connected to `GtpuDecap` gate 2 records each End Marker (TS 29.281 7.3.2) as an (endpoint_id, local TEID) event in a per-worker single-producer ring; the report tick drains it once (`drain_end_markers`, `-gtpu-end-markers <module>`), and every URR that asks for REEMR (8.2.19 octet 7) and measures a PDR on that endpoint-scoped local F-TEID is reported in a Usage Report whose Usage Report Trigger carries EMRRE, beside any other trigger due in the same tick. A REEMR URR is refused when the deployment drains no End Marker log. A full ring drops and counts events, and the tick logs the loss",
+   "effect": "the SMF learns the old I-UPF's stream has ended on this UPF's tunnel, which is when it can release the old path's forwarding resources",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "`TestAnEndMarkerOnThePDRsFTEIDBecomesAnEMRREUsageReport` (the report, its EMRRE trigger, once per event, and the same TEID on another endpoint reporting nothing, over the fake dataplane), `TestAREEMRURRNeedsAnEndMarkerLog` (the refusal), `EndMarkerLog.*` in `datapath/gtpu_datapath_test.cc` (each event once, a full ring counted, concurrent workers against a drain), `TestLiveEndMarkerBecomesAnEMRRReport` in `ci/session-path.sh` (the lane graph's End Marker on the session's F-TEID, the live drain, the report)"
+    }
+   ],
+   "kind": "conformance",
+   "block": 8,
+   "claim": "an End Marker on a REEMR URR's PDR becomes an EMRRE usage report",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "8.2.41"
+  },
+  {
    "id": "status-29",
    "scope": "status",
    "evidence": [

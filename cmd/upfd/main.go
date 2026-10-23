@@ -137,6 +137,11 @@ func run() error {
 			"whose FAR sends with a TEID the peer reported is reported to the SMF as "+
 			"an Error Indication Report (TS 29.244 5.10). Empty: the graph's responder "+
 			"does not track them (its track_errors argument) and no such report is sent")
+	gtpuEndMarkers := flag.String("gtpu-end-markers", "",
+		"the GtpuResponder module whose End Marker log is drained once per -urr-interval "+
+			"tick (its track_end_markers argument). An End Marker on a PDR's local F-TEID is "+
+			"reported as a Usage Report with the EMRRE trigger for each URR of that PDR that "+
+			"asks for REEMR (TS 29.244 8.2.19, 8.2.41). Empty: a URR that asks for REEMR is refused")
 	metricsAddr := flag.String("metrics", "",
 		"serve this node's own numbers (Prometheus text format) on host:port; "+
 			"empty: no endpoint")
@@ -268,11 +273,12 @@ func run() error {
 			firewallUL: *firewallUL, firewallDL: *firewallDL,
 			pdrFieldsUL: *pdrFieldsUL, pdrFieldsDL: *pdrFieldsDL,
 			instances: *instances, maxDomains: uint32(*maxDomains),
-			gtpuDecap:  *gtpuDecap,
-			gtpuErrors: *gtpuErrors,
-			endMarker:  *endMarker,
-			metersUL:   *metersUL,
-			metersDL:   *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
+			gtpuDecap:      *gtpuDecap,
+			gtpuErrors:     *gtpuErrors,
+			gtpuEndMarkers: *gtpuEndMarkers,
+			endMarker:      *endMarker,
+			metersUL:       *metersUL,
+			metersDL:       *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
 			countersUL: *countersUL, countersDL: *countersDL,
 			bufferStore: *bufferStore, bufferCounter: *bufferCounter, bufferGate: uint32(*bufferGate),
 		})
@@ -711,6 +717,7 @@ type graphArgs struct {
 	pdrFieldsDL    string
 	gtpuDecap      string
 	gtpuErrors     string
+	gtpuEndMarkers string
 	metersUL       string
 	metersDL       string
 	countersUL     string
@@ -785,6 +792,9 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		// The responder that counts the peer's Error Indications, when the
 		// graph's has tracking on (TS 29.244 5.10).
 		GTPUErrors: a.gtpuErrors,
+		// The responder whose End Marker log is drained, when the graph's
+		// tracks them (TS 29.244 8.2.19 REEMR).
+		GTPUEndMarkers: a.gtpuEndMarkers,
 		// The base path for routed End Markers, when the deployment has one.
 		EndMarker: a.endMarker,
 		// The graph's tables and these spaces are one number: the modules

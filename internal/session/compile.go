@@ -396,6 +396,7 @@ type urrReq struct {
 	onTimeTh    bool
 	onVolQuota  bool
 	onTimeQuota bool
+	onEndMarker bool
 	// linkedReporting is LIUSA (8.2.19): the URR reports through its link
 	// rather than on its own triggers. Which URRs that is is `linked` below.
 	linkedReporting bool
@@ -428,12 +429,13 @@ const (
 
 // The Reporting Triggers bits this UP implements (TS 29.244 8.2.19), one octet
 // at a time: PERIO, VOLTH, TIMTH and LIUSA in the first, VOLQU and TIMQU in the
-// second. Every other bit -- QUHTI, START, STOPT, DROTH, ENVCL, MACAR, EVETH,
-// EVEQU, IPMJL, QUVTI, REEMR, UPINT, and the spares -- is refused when the URR
-// is read: a trigger the SMF asked for and this UP quietly ignores is a report
-// the SMF never gets, and it bills from them.
+// second, REEMR in the third. Every other bit -- QUHTI, START, STOPT, DROTH,
+// ENVCL, MACAR, EVETH, EVEQU, IPMJL, QUVTI, UPINT, and the spares -- is refused
+// when the URR is read: a trigger the SMF asked for and this UP quietly ignores
+// is a report the SMF never gets, and it bills from them. REEMR is further
+// refused when the deployment drains no End Marker log (resolve).
 var (
-	triggersImplemented = [2]uint8{trigPeriodic | trigVolumeTh | trigTimeTh | trigLiusa, trigVolQuota | trigTimeQuota}
+	triggersImplemented = [3]uint8{trigPeriodic | trigVolumeTh | trigTimeTh | trigLiusa, trigVolQuota | trigTimeQuota, trigEndMarker}
 	triggersFirstOctet  = map[uint8]string{0x08: "QUHTI", 0x10: "START", 0x20: "STOPT", 0x40: "DROTH"}
 	triggersSecondOctet = map[uint8]string{0x04: "ENVCL", 0x08: "MACAR", 0x10: "EVETH", 0x20: "EVEQU", 0x40: "IPMJL", 0x80: "QUVTI"}
 	triggersThirdOctet  = map[uint8]string{0x01: "REEMR", 0x02: "UPINT"}
@@ -446,6 +448,10 @@ const (
 	trigLiusa     = 0x80 // LIUSA (octet 5 bit 8)
 	trigVolQuota  = 0x01 // VOLQU (octet 6 bit 1)
 	trigTimeQuota = 0x02 // TIMQU (octet 6 bit 2)
+	trigEndMarker = 0x01 // REEMR (octet 7 bit 1)
+	// trigEndMarkerReceived is EMRRE in the Usage Report Trigger (8.2.41,
+	// octet 7 bit 5): the report REEMR asks for.
+	trigEndMarkerReceived = 0x10
 	// trigTermination is TERMR in the Usage Report Trigger (8.2.41, octet 6
 	// bit 4). It is a *report's* trigger, not one an SMF can ask for, so
 	// triggersImplemented does not carry it.
@@ -1114,6 +1120,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		if u.hasTriggers {
 			entry.periodic, entry.onVolumeTh, entry.onTimeTh = u.periodic, u.onVolumeTh, u.onTimeTh
 			entry.onVolQuota, entry.onTimeQuota = u.onVolQuota, u.onTimeQuota
+			entry.onEndMarker = u.onEndMarker
 			entry.linkedReporting = u.linkedReporting
 		}
 		if u.hasPeriod {
@@ -1643,6 +1650,13 @@ func (c *Compiler) resolve(s *Session) error {
 		if u := s.URRs[uid]; u.linkedReporting && len(u.linked) == 0 && !linkedTo[uid] {
 			return fmt.Errorf(
 				"%w: URR %d asks for Linked Usage Reporting (LIUSA), and no URR of the session is linked to it",
+				errNotExpressible, uid)
+		}
+		// REEMR asks to hear of an End Marker, which only a drained End Marker
+		// log sees: accepted without one, the report could never be sent.
+		if s.URRs[uid].onEndMarker && c.cfg.GTPUEndMarkers == "" {
+			return fmt.Errorf(
+				"%w: URR %d asks for End Marker reception reports (REEMR), and this deployment tracks no End Markers",
 				errNotExpressible, uid)
 		}
 	}
@@ -4826,6 +4840,9 @@ func parseURR(i *ie.IE) (urrReq, error) {
 			if len(flags) > 1 {
 				u.onVolQuota = flags[1]&trigVolQuota != 0
 				u.onTimeQuota = flags[1]&trigTimeQuota != 0
+			}
+			if len(flags) > 2 {
+				u.onEndMarker = flags[2]&trigEndMarker != 0
 			}
 		case ie.MeasurementPeriod:
 			v, err := c.MeasurementPeriod()

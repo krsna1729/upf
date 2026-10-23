@@ -92,6 +92,10 @@ const (
 	TriggerTermination
 	// TriggerImmediate is the report a Query URR or QAURR asks for (IMMER).
 	TriggerImmediate
+	// TriggerEndMarker is EMRRE (8.2.41): an End Marker arrived on a local
+	// F-TEID of a PDR the URR measures, and nothing else is due. A report due
+	// for another reason carries EMRRE beside it (Report.EndMarker).
+	TriggerEndMarker
 )
 
 // String names the trigger as a log line and a failure message do.
@@ -111,6 +115,8 @@ func (t Trigger) String() string {
 		return "termination"
 	case TriggerImmediate:
 		return "immediate"
+	case TriggerEndMarker:
+		return "end marker"
 	}
 	return "unknown trigger"
 }
@@ -179,6 +185,11 @@ type Report struct {
 	// by linked URRs sharing a sequence. It is empty for an unlinked URR, whose
 	// report is exactly one Usage Report IE.
 	Linked []LinkedUsage
+
+	// EndMarker says an End Marker arrived on a local F-TEID of a PDR this
+	// report's URR measures and asks for REEMR: the Usage Report Trigger
+	// carries EMRRE (8.2.41, octet 7) whatever else it carries.
+	EndMarker bool
 }
 
 // LinkedUsage is one URR of a linked group (8.2.55) as the group's report
@@ -202,6 +213,9 @@ type LinkedUsage struct {
 	// group's report opens every member's next window, so the delivered base
 	// moves for each of them.
 	RawUp, RawDown Usage
+
+	// EndMarker is Report.EndMarker for this member: its own REEMR saw one.
+	EndMarker bool
 }
 
 // flags is the Reporting Trigger this report carries (8.2.19), as the two
@@ -254,12 +268,12 @@ func (r Report) IEs() []*ie.IE {
 	if usar == 0 {
 		return ies
 	}
-	ies = append(ies, usageReportIE(ie.UsageReportWithinSessionReportRequest, r.URRID, r.Seqn, r.Trigger, r.Up, r.Down, r.Duration, r.First, r.Last))
+	ies = append(ies, usageReportIE(ie.UsageReportWithinSessionReportRequest, r.URRID, r.Seqn, r.Trigger, r.EndMarker, r.Up, r.Down, r.Duration, r.First, r.Last))
 	// A linked group is reported whole: each of the rest is its own Usage
 	// Report IE, and every one of them carries this report's UR-SEQN -- the one
 	// sequence the group shares (8.2.71).
 	for _, g := range r.Linked {
-		ies = append(ies, usageReportIE(ie.UsageReportWithinSessionReportRequest, g.URRID, r.Seqn, r.Trigger, g.Up, g.Down, g.Duration, g.First, g.Last))
+		ies = append(ies, usageReportIE(ie.UsageReportWithinSessionReportRequest, g.URRID, r.Seqn, r.Trigger, g.EndMarker, g.Up, g.Down, g.Duration, g.First, g.Last))
 	}
 	return ies
 }
@@ -267,17 +281,22 @@ func (r Report) IEs() []*ie.IE {
 // usageReportIE is one Usage Report within a Session Report Request (7.5.8.2):
 // the URR, the UR-SEQN it is reported under, the trigger, and the volume and
 // duration its window measured. Every Usage Report of one report shares that
-// report's UR-SEQN, which is what links a group's URRs to the SMF.
-func usageReportIE(typ ie.IEType, urrID, seqn uint32, trigger Trigger, up, down Usage, duration time.Duration, first, last time.Time) *ie.IE {
+// report's UR-SEQN, which is what links a group's URRs to the SMF. endMarker
+// adds EMRRE to whatever trigger the report leads with.
+func usageReportIE(typ ie.IEType, urrID, seqn uint32, trigger Trigger, endMarker bool, up, down Usage, duration time.Duration, first, last time.Time) *ie.IE {
 	total := up.add(down)
 	octet5, octet6 := trigger.flags()
+	var octet7 uint8
+	if endMarker {
+		octet7 = trigEndMarkerReceived
+	}
 	usage := []*ie.IE{
 		ie.NewURRID(urrID),
 		ie.NewURSEQN(seqn),
 		// Octets 5 to 7 of Figure 8.2.41-1, all three: a quota's or a
-		// termination's bit is in octet 6, and an IE that left octet 5 out for
-		// being empty would put that bit where PERIO is.
-		ie.NewUsageReportTrigger(octet5, octet6, 0),
+		// termination's bit is in octet 6, EMRRE in octet 7, and an IE that left
+		// an octet out for being empty would move the later bits.
+		ie.NewUsageReportTrigger(octet5, octet6, octet7),
 		// All six counts: the SMF may bill either the total or the
 		// directions, and the UPF knows all of them (8.2.44).
 		ie.NewVolumeMeasurement(0x3f,
@@ -326,17 +345,24 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	slices.Sort(seids)
 
 	readsErrors := c.cfg.GTPUErrors != ""
-	if len(modules) == 0 && !readsErrors {
+	// The End Marker log is drained every tick it is configured, whether or
+	// not any session asks: a drain is what frees the ring, and an End Marker
+	// no REEMR URR names is one nobody asked to hear about.
+	readsMarkers := c.cfg.GTPUEndMarkers != ""
+	if len(modules) == 0 && !readsErrors && !readsMarkers {
 		// No session measures anything: nothing to read, and nothing owed --
 		// the per-session path returns before its own read on exactly this
 		// fact.
 		return nil
 	}
-	counters, errorReader := c.counters, ErrorReader(nil)
+	counters, errorReader, markerReader := c.counters, ErrorReader(nil), EndMarkerReader(nil)
 	if r, ok := c.counters.(ErrorReader); ok {
 		errorReader = r
 	}
-	if counters == nil || (readsErrors && errorReader == nil) {
+	if r, ok := c.counters.(EndMarkerReader); ok {
+		markerReader = r
+	}
+	if counters == nil || (readsErrors && errorReader == nil) || (readsMarkers && markerReader == nil) {
 		// The graph has no counting module this control plane can read, and
 		// every session's URRs would report nothing: the caller's log is where
 		// an operator sees it. The error table is read through the same
@@ -386,6 +412,28 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 		}
 	}
 
+	// The End Markers since the last tick (TS 29.281 7.3.2), each delivered
+	// once by the drain: the keys a REEMR URR's PDRs are judged against. A
+	// drain that fails loses nothing -- the events stay in the ring for the
+	// next one.
+	var markers map[endMarkerKey]bool
+	if readsMarkers {
+		read, dropped, err := markerReader.DrainEndMarkers(ctx, c.cfg.GTPUEndMarkers)
+		if err != nil {
+			c.log.Warn("session: end markers", "module", c.cfg.GTPUEndMarkers, "error", err)
+		} else {
+			if dropped > c.markersDropped {
+				c.log.Warn("session: end markers lost to a full ring", "module", c.cfg.GTPUEndMarkers,
+					"lost", dropped-c.markersDropped)
+				c.markersDropped = dropped
+			}
+			markers = make(map[endMarkerKey]bool, len(read))
+			for _, m := range read {
+				markers[endMarkerKey{endpoint: m.EndpointID, teid: m.TEID}] = true
+			}
+		}
+	}
+
 	var out []Report
 	for _, seid := range seids {
 		c.mu.Lock()
@@ -414,7 +462,7 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 			c.log.Warn("session: usage evaluation", "seid", seid, "error", unread)
 			continue
 		}
-		reports, err := c.judge(ctx, seid, s, counts, now)
+		reports, err := c.judge(ctx, seid, s, counts, markers, now)
 		if err != nil {
 			// The dataplane refused the enforcement: the caller's log is where
 			// an operator sees it, and the reports decided before the failure
@@ -478,7 +526,7 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 		}
 		counts[module] = readingsOf(read)
 	}
-	return c.judge(ctx, seid, s, counts, now)
+	return c.judge(ctx, seid, s, counts, nil, now)
 }
 
 // judge is the half of an evaluation that runs with the counters in hand:
@@ -487,7 +535,7 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 // the same way a modification writes them. The read is the caller's: Evaluate
 // reads one session's rules, EvaluateAll reads each counter module once for
 // every session of the tick.
-func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts map[string]map[uint32]reading, now time.Time) ([]Report, error) {
+func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts map[string]map[uint32]reading, markers map[endMarkerKey]bool, now time.Time) ([]Report, error) {
 	c.mu.Lock()
 	if c.sessions[seid] != s {
 		c.mu.Unlock()
@@ -495,7 +543,7 @@ func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts ma
 		// belongs to a session the SMF no longer has.
 		return nil, nil
 	}
-	reports, stopped := c.decide(s, counts, now)
+	reports, stopped := c.decide(s, counts, markers, now)
 	c.mu.Unlock()
 
 	if !stopped {
@@ -581,7 +629,12 @@ func (c *Compiler) measuredModules(s *Session, modules map[string]bool) {
 // owes nothing itself and the group is due only where another member is. Its
 // window still moves with the group's report, and its own limits still stop the
 // traffic (quotaReached above), which is what the SMF reads in the report.
-func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now time.Time) ([]Report, bool) {
+//
+// markers are the End Markers that arrived since the last tick: a URR that
+// asks for REEMR is due when one came in on a PDR it measures, from its first
+// tick on -- an End Marker is an event, not a measurement, so it needs no
+// baseline -- and a report due for another reason carries it too.
+func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, markers map[endMarkerKey]bool, now time.Time) ([]Report, bool) {
 	var reports []Report
 	stopped := false
 	for _, members := range linkedGroups(s) {
@@ -590,6 +643,7 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 			uid            uint32
 			trigger        Trigger
 			due            bool
+			endMarker      bool
 			up, down       Usage // the window's usage
 			rawUp, rawDown Usage // the cumulative reading, the next window's base
 			window         time.Duration
@@ -601,6 +655,7 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 			u := s.URRs[uid]
 			up, down, first, last := c.countsOf(s, uid, counts)
 			st := memberState{uid: uid, rawUp: up, rawDown: down}
+			st.endMarker = endMarkerArrived(s, uid, markers)
 			if !u.baselined {
 				// The first reading of a URR is its baseline, not its usage
 				// (report.go, "the window"). It owes nothing itself, but the
@@ -609,6 +664,9 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 				u.baselined = true
 				u.reported, u.lastUp, u.lastDown = now, up, down
 				u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, now
+				if st.endMarker && !u.linkedReporting {
+					st.trigger, st.due, anyDue = TriggerEndMarker, true, true
+				}
 				states = append(states, st)
 				continue
 			}
@@ -657,6 +715,9 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 				// for it, and it is still opened by that report below.
 				trigger, due = 0, false
 			}
+			if !due && st.endMarker && !u.linkedReporting {
+				trigger, due = TriggerEndMarker, true
+			}
 			st.trigger, st.due = trigger, due
 			if due {
 				anyDue = true
@@ -684,7 +745,7 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 			Trigger: l.trigger, Seqn: seqn,
 			Up: l.up, Down: l.down,
 			Duration: l.window, First: l.first, Last: l.last, Enforcing: s.URRs[l.uid].enforcing,
-			RawUp: l.rawUp, RawDown: l.rawDown, DecidedAt: now,
+			RawUp: l.rawUp, RawDown: l.rawDown, DecidedAt: now, EndMarker: l.endMarker,
 		}
 		for i, st := range states {
 			if i == lead {
@@ -694,7 +755,7 @@ func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, now 
 				URRID: st.uid, Up: st.up, Down: st.down,
 				Duration: st.window, First: st.first, Last: st.last,
 				Enforcing: s.URRs[st.uid].enforcing,
-				RawUp:     st.rawUp, RawDown: st.rawDown,
+				RawUp:     st.rawUp, RawDown: st.rawDown, EndMarker: st.endMarker,
 			})
 			if s.URRs[st.uid].enforcing {
 				r.Enforcing = true
@@ -956,7 +1017,7 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 func usageReports(typ ie.IEType, trigger Trigger, windows []urrWindow) []*ie.IE {
 	out := make([]*ie.IE, 0, len(windows))
 	for _, w := range windows {
-		out = append(out, usageReportIE(typ, w.uid, w.seqn, trigger, w.up, w.down, w.duration, w.first, w.last))
+		out = append(out, usageReportIE(typ, w.uid, w.seqn, trigger, false, w.up, w.down, w.duration, w.first, w.last))
 	}
 	return out
 }

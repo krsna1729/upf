@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <memory>
 
+#include "end_marker_log.h"
 #include "module.h"
 #include "upf_datapath.pb.h"
 
@@ -15,8 +16,9 @@
 //
 // GtpuDecap sends Echo Requests, peer Error Indications and valid G-PDUs whose
 // endpoint-scoped F-TEID is not admitted. This module answers Echo Requests,
-// returns an Error Indication for an unadmitted G-PDU, and counts peer Error
-// Indications for Session Report generation. Other control types are dropped.
+// returns an Error Indication for an unadmitted G-PDU, counts peer Error
+// Indications for Session Report generation, and records End Markers as events
+// for End Marker Reception Reports. Other control types are dropped.
 //
 // Both replies are the request with its Ethernet, IPv4 and UDP addresses
 // swapped, the type replaced, and the lengths recomputed. An Echo Response
@@ -50,6 +52,11 @@ class GtpuResponder final : public Module {
   CommandResponse CommandGetErrors(
       const upf::pb::GtpuResponderCommandGetErrorsArg &arg);
 
+  // The End Markers recorded since the previous drain (TS 29.281 7.3.2), each
+  // returned once, with the count lost to a full ring.
+  CommandResponse CommandDrainEndMarkers(
+      const upf::pb::GtpuResponderCommandDrainEndMarkersArg &arg);
+
  private:
   // One entry: 0 is empty (an Error Indication never names TEID 0 -- that is
   // the echo path), and the count only grows.
@@ -69,6 +76,8 @@ class GtpuResponder final : public Module {
   int reply_gate_attr_ = -1;  // optional ingress BE32 output gate
   std::unique_ptr<ErrorSlot[]> errors_;
   std::atomic<uint64_t> untracked_{0};
+  int endpoint_attr_ = -1;  // "endpoint_id", read when End Markers are tracked
+  std::unique_ptr<upf::datapath::EndMarkerLog> end_markers_;
 };
 
 #endif  // UPF_DATAPATH_GTPU_ECHO_H_

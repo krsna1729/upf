@@ -90,6 +90,11 @@ message GtpuResponderArg {
   bool track_errors = 3;
   // Read a BE32 gate from ingress metadata; empty always replies on gate 0.
   string reply_gate_attr = 4;
+  // Record the End Markers that arrive (TS 29.281 7.3.2) as (endpoint_id,
+  // TEID) events for drain_end_markers. The endpoint is the "endpoint_id"
+  // metadata GtpuDecap reads, so the responder must sit behind decap gate 2.
+  // Off, an End Marker is dropped like any message the module does not answer.
+  bool track_end_markers = 5;
 }
 
 // GtpuResponderCommandGetErrorsArg selects the TEIDs to read.
@@ -112,6 +117,22 @@ message GtpuResponderCommandGetErrorsResponse {
   // Indications that found no free slot (the table is small and a flood of
   // distinct TEIDs would not be a tunnel failure but a scan).
   uint64 untracked = 2;
+}
+
+// GtpuResponderCommandDrainEndMarkersArg takes nothing: a drain returns every
+// End Marker recorded since the previous one.
+message GtpuResponderCommandDrainEndMarkersArg {}
+
+// GtpuResponderCommandDrainEndMarkersResponse is the End Markers recorded since
+// the previous drain, each delivered once.
+message GtpuResponderCommandDrainEndMarkersResponse {
+  message EndMarker {
+    uint32 endpoint_id = 1;  // the logical endpoint it arrived on
+    uint32 teid = 2;         // this UPF's local TEID the header names
+  }
+  repeated EndMarker end_markers = 1;
+  // Events lost to a full per-worker ring since the module started.
+  uint64 dropped = 2;
 }
 
 // GtpuEncapArg configures encapsulation; addresses are supplied per tunnel.
