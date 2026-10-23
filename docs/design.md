@@ -547,37 +547,12 @@ scaffold for the next one.
 
 The reference points are logical IP-level interfaces. 3GPP does not prescribe
 their L2 attachment or the number of PMD ports. For one interface each and one
-to three PMD ports, the diagram shows all five distinct physical-port
-partitions: one shared port, each of the three two-port pairings, and three
-separate ports. A shared port needs a discriminator such as Vif's
-`(VLAN, destination MAC)`; a port-specific ingress path can write the endpoint
-tag directly. VLAN/MAC choices within a partition are deployment details.
-
-```mermaid
-flowchart TB
-    subgraph one["1 PMD — one shared port"]
-        p1["PMD 0"] --> v1["Vif<br/>(VLAN, destination MAC)"]
-        v1 --> a1["N3"]
-        v1 --> b1["N6"]
-        v1 --> c1["N9"]
-    end
-    subgraph two["2 PMDs — all three pairings"]
-        p21["PMD 0"] --> v21["Vif"]
-        v21 --> a21["N3 + N9"]
-        p22["PMD 1"] --> b21["N6"]
-        p23["PMD 0"] --> v22["Vif"]
-        v22 --> a22["N3 + N6"]
-        p24["PMD 1"] --> b22["N9"]
-        p25["PMD 0"] --> v23["Vif"]
-        v23 --> a23["N6 + N9"]
-        p26["PMD 1"] --> b23["N3"]
-    end
-    subgraph three["3 PMDs — one per reference point"]
-        p31["PMD 0"] --> a31["N3"]
-        p32["PMD 1"] --> b31["N6"]
-        p33["PMD 2"] --> c31["N9"]
-    end
-```
+to three PMD ports there are five distinct physical-port partitions: one shared
+port (`{N3, N6, N9}`), the three two-port pairings (`{N3, N9} | {N6}`,
+`{N3, N6} | {N9}`, `{N6, N9} | {N3}`), and three separate ports. A shared port
+needs a discriminator such as Vif's `(VLAN, destination MAC)`; a port-specific
+ingress path can write the endpoint tag directly. VLAN/MAC choices within a
+partition are deployment details.
 
 BESS `Vif` (`core/modules/vif.{h,cc}`) matches and strips 802.1Q, looks up
 `(VLAN, destination MAC)`, writes `vif_id` and `route_domain`, and selects the

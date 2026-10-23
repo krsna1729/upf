@@ -71,7 +71,7 @@ fixture does not wire.
 ### The control plane's own port
 
 ```mermaid
-flowchart LR
+flowchart TB
     upfd["upfd · End Marker builder"] -->|"one frame · SOCK_SEQPACKET"| ports["cp_marker_n3 / cp_marker_n9<br/>paths <base>.1 / <base>.2"]
     ports --> domain["SetMetadata<br/>transport_route_domain"]
     domain --> router["rt_transport · outer Router"]
@@ -82,7 +82,8 @@ flowchart LR
 `upfd` builds an End Marker from the old tunnel's address family, local/peer
 addresses and TEID. It writes to the socket selected by the old transport
 route domain. The deployment routes that frame through the same post-encap
-Router as session traffic; synthetic graphs dump it for byte checks.
+Router as session traffic (`ci/veth-transport.sh` captures it on the wire, IPv4
+and IPv6, with the resolved MAC); synthetic graphs dump it for byte checks.
 
 | graph | used by | what differs |
 |---|---|---|
