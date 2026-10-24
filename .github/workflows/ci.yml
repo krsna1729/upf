@@ -69,7 +69,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27.2'
           cache-dependency-path: go.sum
@@ -89,7 +89,7 @@ jobs:
       # The lanes program the session with go test (ci/session-path.sh): use
       # the same toolchain as Units, not whatever the runner image happens to
       # ship.
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27.2'
           cache-dependency-path: go.sum
