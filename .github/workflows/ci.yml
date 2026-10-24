@@ -103,7 +103,7 @@ jobs:
       # same pin never clones or builds BESS at all.
       - name: Restore vendored BESS
         id: bess-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: build/bess
           key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v4
@@ -142,7 +142,7 @@ jobs:
 
       - name: Restore DPDK
         if: steps.bess-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .ci/bess/deps
           key: bess-dpdk-${{ runner.arch }}-${{ steps.dpdk.outputs.key }}-v1
@@ -157,14 +157,14 @@ jobs:
 
       - name: Save DPDK
         if: steps.bess-cache.outputs.cache-hit != 'true' && steps.dpdk.outputs.key != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .ci/bess/deps
           key: bess-dpdk-${{ runner.arch }}-${{ steps.dpdk.outputs.key }}-v1
 
       - name: Restore ccache
         if: steps.bess-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ runner.arch }}-${{ steps.pin.outputs.sha }}-v1
@@ -184,7 +184,7 @@ jobs:
 
       - name: Save ccache
         if: steps.bess-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ runner.arch }}-${{ steps.pin.outputs.sha }}-v1
@@ -206,7 +206,7 @@ jobs:
 
       - name: Save vendored BESS
         if: steps.bess-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: build/bess
           key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v4
@@ -214,7 +214,7 @@ jobs:
       # The plugin is small, but a cache saves meson setup on every run and
       # keeps a pin bump's rebuild incremental.
       - name: Restore plugin build
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: datapath/build
           key: plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('datapath/**') }}-v1
@@ -235,7 +235,7 @@ jobs:
           ninja -C datapath/build
 
       - name: Save plugin build
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: datapath/build
           key: plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('datapath/**') }}-v1
