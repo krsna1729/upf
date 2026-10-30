@@ -1629,13 +1629,13 @@
    "id": "status-33",
    "scope": "status",
    "evidence": [
-    "TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown",
+    "TestARemovedQERsMeterReturnsAtTeardown",
     "TestZeroIsALegalRuleID"
    ],
    "result": {
     "state": "ok",
     "evidence": {
-     "TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown": {
+     "TestARemovedQERsMeterReturnsAtTeardown": {
       "state": "ok"
      },
      "TestZeroIsALegalRuleID": {
@@ -1654,7 +1654,7 @@
    "message": "Session Modification",
    "statement": "29.244 7.5.4.x (Update/Remove in a Modification Request), 8.2.74/8.2.75",
    "detail": "two **open** gaps found while reading the parser for finding 18: (a) `parseRemovals` has no `Remove QER` case, so a Remove QER IE is silently ignored (the QER, its meter and the PDRs' links stay); (b) `0` still means \"absent\" for the PDR ID (`parsePDR`), FAR ID (`parseFAR`), BAR ID (`parseBAR`) and URR ID (`parseURR`), though the spec reserves 0 for none of them (the QER ID was fixed in `e5cddf2`)",
-   "effect": "(a) a CP that removes a QER leaves it enforcing; (b) an SMF numbering any of those IDs from 0 is refused. Neither is exercised by free5GC or pfcpsim (both number from 1). **Fixed**: (a) `parseRemovals` reads Remove QER (its return is the `removals` struct now), and `merge` takes the QER out -- refusing first while a PDR of the session still names it (cause 73, the order a URR removal takes), and holding the QER's meters until teardown (`removedQERs`, released in `releaseSession`), because a meter handed back at the removal would be one a refused modification restores the QER to (`TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown`, fail-first: with the reference check off the modification is accepted and the removal is undone by the refusal it triggers); (b) each parser tracks the IE with a `hasID` flag (`hasFarID` for a PDR's FAR reference, which is mandatory in a Create PDR and was read as \\u201cno FAR\\u201d at 0), and `TestZeroIsALegalRuleID` establishes a session whose five rules are all numbered 0, then pins a PDR with no FAR ID as a missing mandatory IE (cause 69)",
+   "effect": "(a) a CP that removes a QER leaves it enforcing; (b) an SMF numbering any of those IDs from 0 is refused. Neither is exercised by free5GC or pfcpsim (both number from 1). **Fixed**: (a) `parseRemovals` reads Remove QER (its return is the `removals` struct now), and `merge` takes the QER out -- unlinking it from any PDR that still names it (`status-43`), and holding the QER's meters until teardown (`removedQERs`, released in `releaseSession`), because a meter handed back at the removal would be one a refused modification restores the QER to (`TestARemovedQERsMeterReturnsAtTeardown`); (b) each parser tracks the IE with a `hasID` flag (`hasFarID` for a PDR's FAR reference, which is mandatory in a Create PDR and was read as \\u201cno FAR\\u201d at 0), and `TestZeroIsALegalRuleID` establishes a session whose five rules are all numbered 0, then pins a PDR with no FAR ID as a missing mandatory IE (cause 69)",
    "extra": [
     {
      "name": "evidence",
@@ -2673,7 +2673,7 @@
    "message": "Session Modification",
    "statement": "Table 7.5.4.2-1 NOTE 1: \"The IEs which do not need to be modified shall not be included in the Update PDR IE. The UP function shall continue to behave according to the values previously received for IEs not present in the Update PDR IE.\" Precedence, PDI, FAR ID, URR ID and QER ID are each present only when they change; a URR ID or QER ID list, when present, is the whole new list",
    "detail": "`parsePDR` records which of Precedence and PDI an Update PDR carried, and `merge` fills each one the update left out -- the precedence, the whole PDI, the FAR or MAR reference, the URR and QER lists -- from the stored PDR. An Update PDR for a PDR the session does not hold is refused (cause 73): there is nothing to keep. Outer Header Removal is not read from any PDR, so there is no stored value to keep",
-   "effect": "before the fix an Update PDR without Precedence reset it to 0, so the updated rule outranked every other PDR of the session and took their packets; one without a FAR ID was refused (cause 66); one without a PDI, URR ID or QER ID dropped them. A consequence of the spec reading: a PDR's last URR or QER cannot be dissociated by an Update PDR (an empty list has no encoding), and Remove URR/QER is still refused while a PDR names it",
+   "effect": "before the fix an Update PDR without Precedence reset it to 0, so the updated rule outranked every other PDR of the session and took their packets; one without a FAR ID was refused (cause 66); one without a PDI, URR ID or QER ID dropped them. A PDR's last URR or QER cannot be dissociated by an Update PDR (an empty list has no encoding); Remove URR/QER does it (`status-43`)",
    "extra": [
     {
      "name": "evidence",
@@ -2683,6 +2683,52 @@
    "kind": "conformance",
    "block": 4,
    "claim": "an Update PDR keeps the precedence, PDI, FAR, URR and QER it leaves out",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.4"
+  },
+  {
+   "id": "status-43",
+   "scope": "status",
+   "evidence": [
+    "TestRemovingAURRAPDRStillNamesReportsAndUnlinksIt",
+    "TestRemovingAQERAPDRStillNamesUnlinksIt"
+   ],
+   "result": {
+    "state": "ok",
+    "evidence": {
+     "TestRemovingAURRAPDRStillNamesReportsAndUnlinksIt": {
+      "state": "ok"
+     },
+     "TestRemovingAQERAPDRStillNamesUnlinksIt": {
+      "state": "ok"
+     }
+    }
+   },
+   "clause": "5.2.2.3.1",
+   "part": "procedures",
+   "title": "a Remove URR or Remove QER unlinks the rule from the PDRs that still name it",
+   "declared": "",
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Modification"
+   ],
+   "message": "Session Modification",
+   "statement": "5.2.2.3.1: \"When being instructed to remove a URR or the last PDR associated to a URR, the UP function shall stop its ongoing measurements for the URR and include a Usage Report in the PFCP Session Modification Response or in an additional PFCP Session Report Request if there are non-null measurements to report for the URR.\" 5.4.5: \"The TDF-C may stop the DL DSCP marking for the application during the PFCP session by removing the related QER or removing the DL Flow Level Marking IE from the related QER, the TDF-U shall then stop such function consequently.\"",
+   "detail": "`merge` used to refuse a Remove URR or Remove QER (cause 73) while a PDR of the session still named the rule. It now removes the rule and takes its ID out of every PDR's URR or QER list (`unlinkFromPDRs`); each changed PDR's previous form joins the replaced ones, so compile erases the counter entry a PDR measured by no URR any more and rewrites its rule without the removed QER's meter. The URR's window is read before the merge, so the response still carries its TERMR report. A URR another URR links to (8.2.55) is still refused",
+   "effect": "the SMF can stop measuring or enforcing a PDR's last URR or QER without removing the PDR -- the one way to do it, since an Update PDR cannot carry an empty URR or QER list -- and the final usage is reported",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code"
+    }
+   ],
+   "kind": "conformance",
+   "block": 6,
+   "claim": "Remove URR / Remove QER is applied while a PDR names the rule, with the URR's termination report",
    "spec_version": "16.9.1",
    "release": "16",
    "file": "docs/spec/29.244-v16.9.1.txt",

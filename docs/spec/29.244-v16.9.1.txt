@@ -215,6 +215,13 @@ Upon receiving the Usage Report from the UP function, the CP function may initia
 -	creating a new FAR (e.g. for redirect) and/or modifying the existing FAR; or
 -	modifying the QER (s) in the PFCP session.
 
+5.4.5	DL Flow Level Marking for Application Detection
+DL flow level marking is performed using DL DSCP marking. DL DSCP marking for application indication refers to the process in the TDF of marking detected downlink application traffic with a DSCP value received within an installed ADC rule matching this traffic. See Annex U of 3GPP TS 23.203 [7] and clauses 4.5.2.7 and 4b.5.14 of 3GPP TS 29.212 [8].
+DL DSCP marking for application indication is controlled by the TDF-C by associating a QER, including the ToS or Traffic Class within the DL Flow Level Marking IE, to the PDR matching the DL traffic to be marked. The TDF-U performs the DL DSCP marking for the detected DL traffic and sends the marked packet to the PGW-U.
+If a tunnelling protocol is used between the TDF-U and the PGW-U, the DSCP value for service data flow detection shall be carried in the inner IP header.
+The TDF-C may stop the DL DSCP marking for the application during the PFCP session by removing the related QER or removing the DL Flow Level Marking IE from the related QER, the TDF-U shall then stop such function consequently.
+Policy and charging control in the downlink direction by the PCEF for an application detected by the TDF is performed by the PGW-C configuring a PDR with a PDI containing an SDF Filter with the corresponding DSCP value.
+
 5.4.15	Packet Rate enforcement
 5.4.15.1	General
 Packet rate enforcement refers to the process of limiting the rate of uplink and/or downlink packets allowed to be sent for a PDN connection or a PDU session.

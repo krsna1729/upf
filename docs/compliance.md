@@ -182,8 +182,11 @@ value of every IE it leaves out (NOTE 1):
 
 An Update PDR for a PDR the session does not hold is cause 73. An empty URR or
 QER list has no encoding, so a PDR's last URR or QER is not dissociated by an
-Update PDR, and Remove URR / Remove QER stay refused (cause 73) while a PDR
-names them.
+Update PDR. Remove URR / Remove QER does it: the rule goes and its ID leaves
+the URR or QER list of every PDR that named it (TS 29.244 5.2.2.3.1, 5.4.5).
+A removed URR's final usage is reported (TERMR) in the Modification Response,
+and the PDR forwards on without the counter or meter. A URR another URR still
+links to (8.2.55) stays refused (cause 73).
 
 ## The subscriber's ARP answer
 

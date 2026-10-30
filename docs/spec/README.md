@@ -25,7 +25,7 @@ The archive and excerpt hashes make the copies checkable:
 
 | Specification | Archive SHA-256 | Excerpt SHA-256 |
 |---|---|---|
-| TS 29.244 V16.9.1 | `88c0e4d30643bb49403214c09c749bd4c70da0ecbd32f6c9eb182b995da4dac7` | `f91969b3733832536a3992bf32a0176ecb4e90618b3a9382d3964700d54b7a70` |
+| TS 29.244 V16.9.1 | `88c0e4d30643bb49403214c09c749bd4c70da0ecbd32f6c9eb182b995da4dac7` | `a060a85dad12af322fd129ab583f09495dee0f5ef45ce2bdcef8a8b58e413a42` |
 | TS 29.281 V16.2.0 | `1cd5d70ebbe60393c215cf259196e7ac18622bea540c8c12d80fefceb10fdece` | `83849f824e84a8c4aa513fdfd43e3b64d7f123b678b496eb60840d45179d0edc` |
 | TS 38.415 V16.6.0 | `0a54fa84efb85eb7c377160e4458cb8cf90f91cce57f5598fd5f06da4c7c9f6f` | `e81aac78132d777a6c3d58f8648a3012ea382917c361bd1789101be5780a3d84` |
 | TS 23.501 V16.9.0 | `c88a8dbc0d7cfb36b9c77140a5133649fcd02834c7b91a6943e5b58a7c086052` | `5c1cb69106a95154fa6d94ae7f6a21a12aec338389c865d90bac731cf7c2ae51` |
@@ -79,6 +79,10 @@ tables.
 | 18 | 8 of 15 | +3,001 / -160 | MPTCP expanded to Multipath/MPQUIC, HR-SBO mapped N6 IP/routing, Forwarding Policy metadata, MAR Redundant steering |
 | 19 | 13 of 15 | +3,799 / -95 | PDU Set marking, transport level marking, SDF Filter SMMII, MPQUIC-E, ePDG/TWAN FQ-CSID; several other diffs are only "3GPP TS"→"TS" cleanup |
 | 20 | 3 of 15 | +175 / -26 | SCONE marking, start pause of charging, PDU Set Importance for N6-unmarked PDUs |
+
+5.4.5, excerpted later for the QER removal (`status-43`), was compared the
+same way: identical in V16.7.0 and in Releases 17 and 18; Release 19 only
+drops "3GPP" before two "TS" references; Release 20 is identical to 19.
 
 The other cited clauses changed very little: TS 29.281 7.3.1 gained
 "Recovery Time Stamp" in Release 17 and is otherwise stable through 19;

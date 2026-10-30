@@ -276,6 +276,32 @@ func TestRemovingAURRReportsItsLastWindowAsATerminationReport(t *testing.T) {
 	}
 }
 
+// TestRemovingAURRAPDRStillNamesReportsAndUnlinksIt: 5.2.2.3.1 -- "When being
+// instructed to remove a URR ... the UP function shall stop its ongoing
+// measurements for the URR and include a Usage Report in the PFCP Session
+// Modification Response". A Remove URR alone, with PDR 1 still naming the URR,
+// is answered with the termination report, and the PDR goes on forwarding
+// with no counter.
+func TestRemovingAURRAPDRStillNamesReportsAndUnlinksIt(t *testing.T) {
+	c, rec, seid, _ := measured(t, 0x3066, 900, 6)
+	urr, _, trig, up := reportOf(t, c.Modify(query(seid, 2, ie.NewRemoveURR(ie.NewURRID(7)))))
+	if urr != 7 || up != 900 {
+		t.Errorf("the report is URR %d with %d uplink octets; want URR 7 with 900", urr, up)
+	}
+	if len(trig) < 2 || trig[0] != 0 || trig[1] != 0x08 {
+		t.Errorf("the trigger is %#v, want only TERMR", trig)
+	}
+	if r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2}); r.gate() == dropGate {
+		t.Error("the PDR drops after its URR was removed")
+	}
+	if n := len(rec.entries); n != 0 {
+		t.Errorf("%d counter entries outlived the removed URR", n)
+	}
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 3, 0))); got != ie.CauseRequestAccepted {
+		t.Errorf("the deletion answered cause %d", got)
+	}
+}
+
 func TestMeasurementInformationThatAsksForWhatIsDoneIsAccepted(t *testing.T) {
 	// free5GC sets MBQE|MNOP on every URR it sends (0x11) and 0 elsewhere; a
 	// real SMF's session is refused by the old blanket refusal. 0, MNOP, ISTM
