@@ -12,14 +12,12 @@ using namespace upf::appliance;
 namespace upb = upf::pb;
 
 const ResourceTables UpfAppliance::resource_tables = {
-    ResourceTable::Map<upb::FteidKey, upb::FteidEntry>("fteids"),
-    ResourceTable::Map<bess::pb::WildcardMatchRuleKey, bess::pb::WildcardMatchRuleValue>("pdr_ul"),
-    ResourceTable::Map<bess::pb::WildcardMatchRuleKey, bess::pb::WildcardMatchRuleValue>("pdr_dl"),
-    ResourceTable::Map<bess::pb::MeterIdKey, bess::pb::MeterPolicyValue>("meters").Rebuilds(),
-    ResourceTable::Map<upb::CounterKey, upb::CounterEntry>("counters_ul"),
-    ResourceTable::Map<upb::CounterKey, upb::CounterEntry>("counters_dl"),
+    // Session-major layout: one entry per session carries what the masked
+    // layout writes as fteids, pdr_ul/pdr_dl, meters, counters_ul/dl and
+    // tunnels entries. Inserts and erases run beside the workers; updating a
+    // live session requires paused workers (its Reserve refuses otherwise).
+    ResourceTable::Map<upb::UpfSessionKey, upb::UpfSession>("sessions"),
     ResourceTable::Map<upb::CounterKey, upb::CounterEntry>("buffer_counters"),
-    ResourceTable::Map<upb::TunnelKey, upb::TunnelEntry>("tunnels"),
     ResourceTable::Map<upb::AtsssSteeringPolicyKey, upb::AtsssSteeringPolicy>("policies"),
     ResourceTable::Map<upb::AtsssAccessHealthKey, upb::AtsssAccessHealth>("health"),
     ResourceTable::Map<upb::UpfArpResponderEntryKey, upb::UpfArpResponderEntryValue>("entries"),
@@ -200,7 +198,7 @@ CommandResponse UpfAppliance::CommandGetDrops(const bess::pb::EmptyArg &) {
     "control_zero_teid", "control_l3", "control_no_room", "arp_short", "arp_not_request",
     "arp_unknown", "nd_unknown", "neighbor_input_full", "neighbor_tx_full", "neighbor_alloc",
     "neighbor_publish", "buffer_evicted", "buffer_expired", "buffer_dropped",
-    "buffer_request_full", "buffer_state_full", "neighbor_consumed"};
+    "buffer_request_full", "buffer_state_full", "neighbor_consumed", "session_gone"};
   static_assert(std::size(names) == static_cast<size_t>(Reason::kCount));
   upb::UpfApplianceCommandGetDropsResponse out;
   for (size_t i = 0; i < std::size(names); ++i) {
@@ -211,8 +209,8 @@ CommandResponse UpfAppliance::CommandGetDrops(const bess::pb::EmptyArg &) {
 }
 CheckConstraintResult UpfAppliance::CheckModuleConstraints() const {
   auto result = Module::CheckModuleConstraints();
-  if (counters_ul_.cells) {
-    for (size_t wid = counters_ul_.cells->workers(); wid < active_workers().size(); ++wid)
+  if (buffer_counters_.cells) {
+    for (size_t wid = buffer_counters_.cells->workers(); wid < active_workers().size(); ++wid)
       if (active_workers()[wid]) {
         LOG(ERROR) << name() << ": active worker id exceeds counter worker_planes";
         return CHECK_FATAL_ERROR;
@@ -223,7 +221,8 @@ CheckConstraintResult UpfAppliance::CheckModuleConstraints() const {
 std::string UpfAppliance::GetDesc() const {
   uint64_t drops = 0;
   for (const auto &n : reasons_) drops += n.load(std::memory_order_relaxed);
-  return std::format("{} interfaces, {} UL / {} DL PDRs, {} counted outcomes", interfaces_.size(),
-      pdr_ul_.table ? pdr_ul_.table->size() : 0, pdr_dl_.table ? pdr_dl_.table->size() : 0, drops);
+  return std::format("{} interfaces, {} sessions, {} UL / {} DL PDRs, {} counted outcomes",
+      interfaces_.size(), sessions_ ? sessions_->LiveCount() : 0,
+      pdr_ul_ ? pdr_ul_->size() : 0, pdr_dl_ ? pdr_dl_->size() : 0, drops);
 }
 ADD_MODULE(UpfAppliance, "upf_appliance", "owns the complete UPF user plane; no graph or fallback")

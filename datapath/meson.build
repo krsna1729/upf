@@ -48,8 +48,9 @@ upf_datapath = shared_module(
   'upf_datapath',
   ['arp_responder.cc', 'atsss_steer.cc', 'gtpu_decap.cc', 'gtpu_responder.cc', 'gtpu_encap.cc',
    'urr_count.cc',
-   # UpfAppliance: the whole user plane in one module.
+   # UpfAppliance: the whole user plane in one module (session-major layout).
    'upf_appliance.cc', 'upf_appliance_resources.cc', 'upf_appliance_path.cc',
+   'upf_appliance_sessions.cc',
    'upf_appliance_slow.cc', 'upf_appliance_buffer.cc', 'upf_appliance_selftest.cc',
    upf_proto[0], upf_proto[1]],
   include_directories: include_directories('.'),

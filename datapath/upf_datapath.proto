@@ -182,7 +182,9 @@ enum AtsssSteeringMode {
 message AtsssAccessAction {
   // The Router next hop, nonzero.
   uint32 next_hop_id = 1;
-  // The GtpuEncap tunnel record, 0 when this access adds no outer header.
+  // Graph: GtpuEncap tunnel record. Session-major appliance: 1-based action
+  // position within the matched session; 0 retains the matched action's tunnel.
+  // An absent local action/tunnel drops no_tunnel (no fallback).
   uint32 tunnel_id = 2;
   // The usage-counter record, 0 when this access has none.
   uint32 accounting_id = 3;
@@ -380,9 +382,9 @@ message UpfApplianceArg {
   GtpuDecapArg decap = 1;
   UpfAppliancePdrArg pdr_ul = 2;
   UpfAppliancePdrArg pdr_dl = 3;
-  UrrCountArg counters = 4; // same capacity for all three independent banks
-  UpfApplianceMeterArg meter = 5;
-  GtpuEncapArg encap = 6;
+  UrrCountArg counters = 4; // buffer_counters only; UL/DL URR cells are per session
+  UpfApplianceMeterArg meter = 5; // levels only; capacity must be 0 (QERs are per session)
+  GtpuEncapArg encap = 6; // ports only; max_tunnels must be 0 (tunnels are per session)
   AtsssSteerArg atsss = 7; // capacity only; no packet metadata used
   UpfArpResponderArg arp = 8;
   UpfApplianceBufferArg buffer = 9;
@@ -392,6 +394,99 @@ message UpfApplianceArg {
   repeated UpfApplianceMarkerInput marker_inputs = 13;
   repeated UpfApplianceNextHopClass next_hop_classes = 14;
   uint64 recovery_time_stamp = 15; // zero: this module's start, NTP seconds
+  UpfApplianceSessionArg session = 16;
+}
+
+// Session-major variant (appliance study, scratch). Session id s owns one
+// fixed stride of a flat DPDK array: its QERs (token state beside the
+// compiled profile), then its actions (FAR, URR cells, tunnel). The stride is
+// max_qers * 192 + max_actions * 192 bytes for every id up to capacity
+// on the x86-64 study target (each action keeps independent UL/DL URR cells).
+message UpfApplianceSessionArg {
+  uint32 capacity = 1;     // session ids 1..capacity; zero: 65536
+  uint32 max_actions = 2;  // per session, 1..8; zero: 4
+  uint32 max_qers = 3;     // per session, 0..255; zero: 4
+}
+
+// "<module>/sessions": one PFCP session's whole compiled user plane, written
+// as ONE entry instead of the masked layout's F-TEID, PDR, meter, counter and
+// tunnel entries.
+message UpfSessionKey {
+  uint32 session_id = 1;  // 1..capacity
+}
+// A QER's profile: the fields of bess.pb.MeterPolicyValue (rates bytes/s,
+// bursts bytes). Actions name a QER by its 1-based position; actions naming
+// the same position share one token bucket.
+message UpfSessionQer {
+  message SrTcm {
+    uint64 committed_rate = 1;
+    uint64 committed_burst = 2;
+    uint64 excess_burst = 3;
+  }
+  message TrTcm {
+    uint64 committed_rate = 1;
+    uint64 committed_burst = 2;
+    uint64 peak_rate = 3;
+    uint64 peak_burst = 4;
+  }
+  message TrTcmRfc4115 {
+    uint64 committed_rate = 1;
+    uint64 committed_burst = 2;
+    uint64 excess_rate = 3;
+    uint64 excess_burst = 4;
+  }
+  oneof profile {
+    SrTcm sr_tcm = 1;
+    TrTcm tr_tcm = 2;
+    TrTcmRfc4115 tr_tcm_rfc4115 = 3;
+  }
+}
+// What a matched PDR does: the masked layout's PDR result record, URR
+// counter entries and tunnel entry in one. Its current direction is its PDRs',
+// but UL and DL packet/octet/time histories remain independent across rewrites.
+// An action without a PDR is permitted as an ATSSS tunnel-only target:
+// tunnel present, count=false, pdr_qer=session_qer=0. It consumes an action
+// position. Policies sharing this layout use the same positional selectors.
+// Both directional counter banks survive rewrites for unchanged action_id AND
+// position, even while the PDR changes direction or counting is disabled.
+// Moving an action resets both banks; moving a QER resets its token state.
+message UpfSessionAction {
+  uint32 action_id = 1;           // global, nonzero: URR report key, buffer flow
+  uint32 next_hop_id = 2;         // inner Router next hop; 0: none
+  uint32 route_domain = 3;
+  uint32 steering_policy_id = 4;  // DL ATSSS policy; 0: none
+  uint32 pdr_qer = 5;             // first meter level, 1-based QER; 0: none
+  uint32 session_qer = 6;         // second meter level, 1-based QER; 0: none
+  bool count = 7;                 // URR: counted in counters_ul or counters_dl
+  TunnelEntry tunnel = 8;         // absent: no encap tunnel
+}
+// A range on one PDR key field, as WildcardMatchRuleKey's.
+message UpfSessionRange {
+  uint32 field = 1;
+  uint64 low = 2;
+  uint64 high = 3;
+}
+// A PDR rule as packed key bytes in the PDR key field order: UL 18 bytes
+// (src 4, dst 4, proto 1, sport 2, dport 2, context 4, qfi 1), DL 22 (src,
+// dst, proto, sport, dport, route domain 4, context, qfi).
+message UpfSessionPdr {
+  bool downlink = 1;
+  bytes value = 2;
+  bytes mask = 3;
+  repeated UpfSessionRange ranges = 4;
+  int64 priority = 5;
+  uint32 gate = 6;    // 0 forward, 1 buffer, others drop
+  uint32 action = 7;  // 1-based position in actions
+}
+message UpfSessionFteid {
+  FteidKey key = 1;
+  FteidEntry entry = 2;
+}
+message UpfSession {
+  repeated UpfSessionFteid fteids = 1;
+  repeated UpfSessionQer qers = 2;
+  repeated UpfSessionAction actions = 3;
+  repeated UpfSessionPdr pdrs = 4;
 }
 message UpfApplianceCommandGetDropsResponse {
   message DropCount { string reason = 1; uint64 count = 2; }

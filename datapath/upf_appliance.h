@@ -17,46 +17,31 @@
 #include "fteid_resource.h"
 #include "gtpu_control.h"
 #include "classifier/concurrent_masked.h"
-#include "classifier/masked_rule_resource.h"
-#include "classifier/record_arena.h"
 #include "dataplane/action_id.h"
 #include "dataplane/slot_resource.h"
 #include "dataplane/slot_table.h"
 #include "framework/memory_scope.h"
 #include "framework/resource_bindings.h"
-#include "meter/meter_resource.h"
 #include "rcu/rcu_ptr.h"
 #include "route/router.h"
 #include "stats/keyed_counters.h"
 #include "stats/metric_registry.h"
 #include "utils/dpdk_memory.h"
+#include "upf_appliance_sessions.h"
 
 namespace upf::appliance {
 using Id = bess::dataplane::ActionId;
 using bess::framework::Sized;
-struct Tunnel {
-  uint32_t teid = 0;
-  uint8_t family = 0;
-  uint8_t local[16]{}, peer[16]{};
-  uint32_t transport_route_domain = 0;
-  uint8_t qfi = 0;
-  uint16_t marking = 0;
-  bool has_qfi = false;
-};
 struct CounterEntry {};
 struct Stamps { std::atomic<uint64_t> first{0}, last{0}; };
+// The buffer_counters bank (packets sent to the buffer, by action id). The
+// UL/DL URR cells live in the session store.
 struct Counters {
   Sized<bess::dataplane::SlotTable<Id, CounterEntry>> entries;
   Sized<bess::stats::KeyedCounters> cells;
   bess::framework::MemoryLease stamps_lease;
   bess::utils::DpdkArray<Stamps> stamps;
   std::unique_ptr<bess::dataplane::SlotResource<Id, CounterEntry>> resource;
-};
-struct Pdr {
-  bess::framework::MemoryLease table_lease, records_lease;
-  std::shared_ptr<bess::classifier::ConcurrentMaskedTable> table;
-  std::shared_ptr<bess::classifier::RecordArena> records;
-  std::unique_ptr<bess::classifier::MaskedRuleResource> resource;
 };
 struct Interface {
   uint16_t ingress_gate = 0, output_gate = 0, vlan = 0, id = 0;
@@ -72,7 +57,11 @@ struct FrameState {
   const Interface *interface = nullptr;
   uint32_t endpoint_id = 0, fteid_context = 0;
   uint32_t route_domain = 0, transport_route_domain = 0;
-  uint32_t action_id = 0, meters[2]{}, next_hop_id = 0, policy_id = 0;
+  uint32_t action_id = 0, next_hop_id = 0, policy_id = 0;
+  // The matched PDR's session and action (SessionResource's result id).
+  uint32_t session_id = 0;
+  uint8_t action_index = 0, tunnel_action_index = 0;
+  std::array<uint8_t, 2> qer{};  // per meter level: 1-based QER, 0 none
   uint8_t qfi = 0xff, direction = 0, repass = 0;
   gate_idx_t output_gate = DROP_GATE;
 };
@@ -91,7 +80,7 @@ enum class Reason : size_t {
   kArpShort, kArpNotRequest, kArpUnknown, kNdUnknown, kNeighborInputFull,
   kNeighborTxFull, kNeighborAlloc, kNeighborPublish, kBufferEvicted,
   kBufferExpired, kBufferDropped, kBufferRequestFull, kBufferStateFull,
-  kNeighborConsumed,
+  kNeighborConsumed, kSessionGone,
   kCount
 };
 }  // namespace upf::appliance
@@ -143,8 +132,8 @@ class UpfAppliance final : public Module {
   void MeterCountRoute(Context *, bess::PacketBatch *, State *, size_t);
   void Finish(Context *, bess::PacketBatch *, State *, size_t);
   void Resume(Context *, bess::PacketBatch *, State *, size_t);
-  void CountUsage(Context *, bess::PacketBatch *, State *, size_t,
-                  upf::appliance::Counters &, bool buffer);
+  void CountBuffer(Context *, bess::PacketBatch *, State *, size_t);
+  void CountSessions(Context *, bess::PacketBatch *, State *, size_t);
   void Hold(Context *, bess::PacketRef, const State &);
   CommandResponse InitBuffer(const upf::pb::UpfApplianceArg &);
   void BufferTask(Context *, bess::PacketBatch *);
@@ -164,13 +153,12 @@ class UpfAppliance final : public Module {
   std::array<std::array<std::atomic<uint64_t>, 3>, 2> meter_colors_{};
   bess::stats::MetricSource meter_metric_;
   bess::framework::Sized<bess::flow::SharedExactIndex> fteids_;
+  // Driven by sessions_ (one session entry carries its F-TEIDs); not a
+  // resource of its own.
   bess::framework::Sized<upf::datapath::FteidResource> fteid_resource_;
-  upf::appliance::Pdr pdr_ul_, pdr_dl_;
-  bess::framework::Sized<bess::meter::MeterResource> meters_;
-  bess::rcu::RcuPtr<bess::meter::MeterSet> meter_set_{init_context().rcu()};
-  upf::appliance::Counters counters_ul_, counters_dl_, buffer_counters_;
-  bess::framework::Sized<bess::dataplane::SlotTable<Id, upf::appliance::Tunnel>> tunnels_;
-  std::unique_ptr<bess::dataplane::SlotResource<Id, upf::appliance::Tunnel>> tunnel_resource_;
+  bess::framework::Sized<bess::classifier::ConcurrentMaskedTable> pdr_ul_, pdr_dl_;
+  bess::framework::Sized<upf::appliance::SessionResource> sessions_;
+  upf::appliance::Counters buffer_counters_;
   bess::framework::Sized<bess::dataplane::SlotTable<Id, upf::atsss::SteeringPolicy>> policies_;
   bess::framework::Sized<bess::dataplane::SlotTable<Id, upf::atsss::AccessHealth>> health_;
   std::unique_ptr<bess::dataplane::SlotResource<Id, upf::atsss::SteeringPolicy>> policy_resource_;

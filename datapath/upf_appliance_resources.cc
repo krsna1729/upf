@@ -10,9 +10,7 @@
 #include "commands.h"
 #include "dataplane/resource_registry.h"
 #include "framework/resource_codec.h"
-#include "meter/meter_resource_codec.h"
 #include "utils/endian.h"
-#include <format>
 #include "utils/ip.h"
 #include "utils/time.h"
 
@@ -22,34 +20,6 @@ using namespace upf::appliance;
 using upf::atsss::AccessHealth;
 using upf::atsss::AccessAction;
 using upf::atsss::SteeringPolicy;
-using Error = std::pair<int, std::string>;
-bool DecodeFieldData(const bess::pb::FieldData &data, int field_size,
-                     std::vector<uint8_t> *out, const char *what, size_t idx,
-                     Error *err) {
-  const size_t want = static_cast<size_t>(field_size);
-  out->assign(want, 0);
-  if (data.encoding_case() == bess::pb::FieldData::kValueBin) {
-    const std::string &bin = data.value_bin();
-    if (bin.size() > want) {
-      *err = std::make_pair(
-          EINVAL,
-          std::format("idx {}: {} is {} bytes, field is {}", idx,
-                              what, bin.size(), want));
-      return false;
-    }
-    std::memcpy(out->data(), bin.data(), bin.size());
-    return true;
-  }
-  uint64_t value = data.value_int();
-  if (!bess::utils::uint64_to_bin(out->data(), value, field_size,
-                                  /*big_endian=*/true)) {
-    *err = std::make_pair(EINVAL,
-                          std::format("idx {}: not a correct {}-byte {}",
-                                              idx, field_size, what));
-    return false;
-  }
-  return true;
-}
 std::expected<dataplane::ResourceKey, std::string> HealthKey(
     const upf::pb::AtsssAccessHealthKey &key) {
   if (key.health_id() == 0) {
@@ -95,6 +65,10 @@ std::expected<std::any, std::string> PolicyValue(
       return std::unexpected(std::format(
           "access {} names health id 0, which no access record answers", i));
     }
+    // Session-local 1-based action position; zero retains the PDR action.
+    // Existence is checked in the matched session by the encap lane.
+    if (in.tunnel_id() > SessionResource::kMaxActions)
+      return std::unexpected(std::format("access {} tunnel selector exceeds {}", i, SessionResource::kMaxActions));
     policy.access[static_cast<size_t>(i)] = AccessAction{
         .next_hop_id = in.next_hop_id(),
         .tunnel_id = in.tunnel_id(),
@@ -103,57 +77,6 @@ std::expected<std::any, std::string> PolicyValue(
     };
   }
   return std::any(policy);
-}
-std::vector<size_t> Widths(bool dl) {
-  return dl ? std::vector<size_t>{4,4,1,2,2,4,4,1}
-            : std::vector<size_t>{4,4,1,2,2,4,1};
-}
-std::expected<dataplane::ResourceKey, std::string> PdrKey(
-    const bess::pb::WildcardMatchRuleKey &key, bool dl) {
-  const auto widths = Widths(dl);
-  if (key.values_size() != static_cast<int>(widths.size()) ||
-      key.masks_size() != static_cast<int>(widths.size()))
-    return std::unexpected("incorrect number of PDR values or masks");
-  std::vector<std::byte> value, mask;
-  std::vector<size_t> offsets;
-  for (size_t i = 0; i < widths.size(); ++i) {
-    offsets.push_back(value.size());
-    std::vector<uint8_t> v, m;
-    Error error;
-    if (!DecodeFieldData(key.values(i), widths[i], &v, "field", i, &error) ||
-        !DecodeFieldData(key.masks(i), widths[i], &m, "field", i, &error))
-      return std::unexpected(error.second);
-    for (size_t j = 0; j < widths[i]; ++j) {
-      if ((v[j] & static_cast<uint8_t>(~m[j])) != 0)
-        return std::unexpected("invalid pair of value and mask");
-      value.push_back(std::byte(v[j])); mask.push_back(std::byte(m[j]));
-    }
-  }
-  std::vector<bool> ranged(widths.size(), false);
-  std::vector<bess::classifier::ConcurrentMaskedTable::KeyRange> ranges;
-  for (const auto &r : key.ranges()) {
-    const size_t f = r.field();
-    if (f >= widths.size() || ranged[f])
-      return std::unexpected("invalid or duplicate range field");
-    ranged[f] = true;
-    const uint64_t max = (uint64_t{1} << (8 * widths[f])) - 1;
-    if (r.low() > r.high() || r.high() > max)
-      return std::unexpected("range is empty or wider than its field");
-    for (size_t j = 0; j < widths[f]; ++j)
-      if (mask[offsets[f] + j] != std::byte{0})
-        return std::unexpected("range field has a nonzero mask");
-    if (r.low() == 0 && r.high() == max) continue;
-    ranges.push_back({static_cast<uint32_t>(offsets[f]),
-                      static_cast<uint32_t>(widths[f]), r.low(), r.high()});
-  }
-  std::ranges::sort(ranges, {}, &bess::classifier::ConcurrentMaskedTable::KeyRange::offset);
-  return bess::classifier::MaskedRuleResource::Key(mask, value, ranges);
-}
-uint32_t Read32(const std::vector<std::byte> &v, size_t off) {
-  uint32_t n = 0;
-  for (size_t i = off; i < off + 4; ++i)
-    n = (n << 8) | (i < v.size() ? std::to_integer<uint8_t>(v[i]) : 0);
-  return n;
 }
 }  // namespace
 
@@ -166,6 +89,18 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
     return CommandFailure(EINVAL, "worker_planes exceeds maximum");
   if (arg.meter().levels() != 0 && arg.meter().levels() != 2)
     return CommandFailure(EINVAL, "meter levels must be 2");
+  // Session-major layout: QERs and tunnels live in each session's stride.
+  if (arg.meter().capacity() != 0 || arg.encap().max_tunnels() != 0)
+    return CommandFailure(EINVAL, "the session layout sizes QERs and tunnels per session "
+                                  "(session.max_qers/max_actions): meter.capacity and "
+                                  "encap.max_tunnels must be 0");
+  const SessionResource::Limits limits{
+      .capacity = arg.session().capacity() ? arg.session().capacity() : 65536,
+      .max_actions = arg.session().max_actions() ? arg.session().max_actions() : 4,
+      .max_qers = arg.session().max_qers() ? arg.session().max_qers() : 4};
+  if (limits.max_actions > SessionResource::kMaxActions || limits.max_qers > 255 ||
+      limits.capacity > (std::numeric_limits<uint32_t>::max() >> SessionResource::kActionBits))
+    return CommandFailure(EINVAL, "session capacity, max_actions (1..8) or max_qers (0..255) out of range");
   const size_t fteid_capacity = arg.decap().max_fteids() ? arg.decap().max_fteids() : 65536;
   if (fteid_capacity > std::numeric_limits<uint32_t>::max() / 2)
     return CommandFailure(EINVAL, "max_fteids exceeds exact-index limits");
@@ -186,154 +121,50 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
       fteid_capacity, init_context().rcu(), memory.socket());
   fteid_resource_ = memory.Create<upf::datapath::FteidResource>(
       "fteid_records", name() + "/fteids", *fteids_, init_context().rcu(), fteid_capacity);
-  bindings_.push_back( init_context().codecs().Bind(
-      *fteid_resource_,
-      std::make_shared<bess::framework::TypedCodec<
-          upf::pb::FteidKey, upf::pb::FteidEntry>>(
-          [](const upf::pb::FteidKey &key)
-              -> std::expected<dataplane::ResourceKey, std::string> {
-            if (key.endpoint_id() == 0 || key.teid() == 0)
-              return std::unexpected("endpoint_id and teid must be nonzero");
-            const size_t bytes = key.address_family() == 4 ? 4 :
-                                 key.address_family() == 6 ? 16 : 0;
-            if (bytes == 0 || key.local_address().size() != bytes)
-              return std::unexpected("local_address length must match family 4 or 6");
-            upf::datapath::FteidId id{};
-            id[0] = static_cast<uint8_t>(key.endpoint_id() >> 24);
-            id[1] = static_cast<uint8_t>(key.endpoint_id() >> 16);
-            id[2] = static_cast<uint8_t>(key.endpoint_id() >> 8);
-            id[3] = static_cast<uint8_t>(key.endpoint_id());
-            id[4] = static_cast<uint8_t>(key.address_family());
-            std::memcpy(id.data() + (bytes == 4 ? 17 : 5),
-                        key.local_address().data(), bytes);
-            id[21] = static_cast<uint8_t>(key.teid() >> 24);
-            id[22] = static_cast<uint8_t>(key.teid() >> 16);
-            id[23] = static_cast<uint8_t>(key.teid() >> 8);
-            id[24] = static_cast<uint8_t>(key.teid());
-            return dataplane::EncodeKey(id);
+  // The PDR tables stay lookup structures; a rule's result id names its
+  // session and action, which the session resource writes.
+  using Table = bess::classifier::ConcurrentMaskedTable;
+  auto make_table = [&](const char *table_name, uint32_t key_len, size_t tuples)
+      -> std::expected<Sized<Table>, std::string> {
+    auto lease = memory.LeaseFor<Table>(table_name, key_len, tuples, init_context().rcu());
+    auto table = Table::Create(key_len, tuples, init_context().rcu());
+    if (!table) return std::unexpected(table.error());
+    return bess::framework::MemoryScope::Adopt(std::move(lease), std::move(*table));
+  };
+  auto ul = make_table("pdr_ul", 18, arg.pdr_ul().max_tuples() ? arg.pdr_ul().max_tuples() : 16);
+  if (!ul) return CommandFailure(EINVAL, "%s", ul.error().c_str());
+  pdr_ul_ = std::move(*ul);
+  auto dl = make_table("pdr_dl", 22, arg.pdr_dl().max_tuples() ? arg.pdr_dl().max_tuples() : 8);
+  if (!dl) return CommandFailure(EINVAL, "%s", dl.error().c_str());
+  pdr_dl_ = std::move(*dl);
+  auto session_lease = memory.Lease("sessions", SessionResource::Bytes(limits),
+                                    SessionResource::GlibcBytes(limits));
+  sessions_ = bess::framework::MemoryScope::Adopt(
+      std::move(session_lease),
+      std::make_unique<SessionResource>(name() + "/sessions", name() + "/next_hops", limits,
+                                        *pdr_ul_, *pdr_dl_, *fteid_resource_,
+                                        [this] { return HasRunningWorker(); }));
+  bindings_.push_back(init_context().codecs().Bind(
+      *sessions_,
+      std::make_shared<bess::framework::TypedCodec<upf::pb::UpfSessionKey, upf::pb::UpfSession>>(
+          [](const upf::pb::UpfSessionKey &key) -> std::expected<dataplane::ResourceKey, std::string> {
+            if (key.session_id() == 0) return std::unexpected("session id 0 names no session");
+            return dataplane::EncodeKey(key.session_id());
           },
-          [](const upf::pb::FteidEntry &value)
-              -> std::expected<std::any, std::string> {
-            if (value.direction() > 1)
-              return std::unexpected("direction must be 0 (UL) or 1 (DL)");
-            if (value.context_id() == 0)
-              return std::unexpected("context_id must be nonzero");
-            return std::any(upf::datapath::FteidRecord{
-                static_cast<uint8_t>(value.direction()), value.context_id()});
+          [](const upf::pb::UpfSession &value) -> std::expected<std::any, std::string> {
+            auto decoded = DecodeSession(value);
+            if (!decoded) return std::unexpected(decoded.error());
+            return std::any(std::move(*decoded));
           },
           [this](const auto &visit) {
-            fteid_resource_->ForEach([&visit](const upf::datapath::FteidId &id,
-                                         const upf::datapath::FteidRecord &record) {
-              upf::pb::FteidKey key;
-              const uint32_t endpoint = uint32_t{id[0]} << 24 |
-                                        uint32_t{id[1]} << 16 |
-                                        uint32_t{id[2]} << 8 | id[3];
-              const uint32_t teid = uint32_t{id[21]} << 24 |
-                                    uint32_t{id[22]} << 16 |
-                                    uint32_t{id[23]} << 8 | id[24];
-              key.set_endpoint_id(endpoint);
-              key.set_address_family(id[4]);
-              key.set_teid(teid);
-              const size_t off = id[4] == 4 ? 17 : 5;
-              key.set_local_address(
-                  reinterpret_cast<const char *>(id.data() + off),
-                  id[4] == 4 ? 4 : 16);
-              upf::pb::FteidEntry value;
-              value.set_direction(record.direction);
-              value.set_context_id(record.context_id);
+            sessions_->ForEachLive([&visit](uint32_t id, const upf::pb::UpfSession &value) {
+              upf::pb::UpfSessionKey key;
+              key.set_session_id(id);
               visit(key, value);
             });
           })));
-  if (auto r = enroll(fteid_resource_.get()); !r)
+  if (auto r = enroll(sessions_.get()); !r)
     return CommandFailure(EEXIST, "%s", r.error().c_str());
-  const size_t meter_capacity = arg.meter().capacity() ? arg.meter().capacity() : 65536;
-  auto meter_lease = memory.LeaseFor<bess::meter::MeterResource>("meters", meter_capacity);
-  auto meter = std::make_unique<bess::meter::MeterResource>(
-      name() + "/meters", meter_capacity, meter_set_, meter_lease.growth());
-  meters_ = bess::framework::MemoryScope::Adopt(std::move(meter_lease), std::move(meter));
-  bindings_.push_back(init_context().codecs().Bind(*meters_, bess::meter::MakeMeterResourceCodec(*meters_)));
-  if (auto r = enroll(meters_.get()); !r)
-    return CommandFailure(EEXIST, "%s", r.error().c_str());
-  auto init_pdr = [&](Pdr &pdr, const char *table_name, bool dl, size_t tuples)
-      -> std::expected<void, std::string> {
-    using Table = bess::classifier::ConcurrentMaskedTable;
-    using Resource = bess::classifier::MaskedRuleResource;
-    const size_t key_len = dl ? 22 : 18;
-    const size_t record_size = dl ? 24 : 20;
-    pdr.table_lease = memory.LeaseFor<Table>(table_name, static_cast<uint32_t>(key_len), tuples, init_context().rcu());
-    auto table = Table::Create(key_len, tuples, init_context().rcu());
-    if (!table) return std::unexpected(table.error());
-    // Retire callbacks can retain the table beyond teardown; its admission
-    // must travel with that final owner, as in WildcardMatch.
-    auto table_owner = std::make_shared<bess::framework::Sized<Table>>(
-        bess::framework::MemoryScope::Adopt(std::move(pdr.table_lease), std::move(*table)));
-    Table *table_raw = table_owner->get();
-    pdr.table = std::shared_ptr<Table>(std::move(table_owner), table_raw);
-    pdr.records_lease = memory.LeaseFor<bess::classifier::RecordArena>(
-        std::string(table_name) + "_results", record_size, init_context().rcu());
-    auto records_owner = std::make_shared<bess::framework::Sized<bess::classifier::RecordArena>>(
-        bess::framework::MemoryScope::Adopt(std::move(pdr.records_lease),
-          std::make_unique<bess::classifier::RecordArena>(record_size, init_context().rcu())));
-    auto *records_raw = records_owner->get();
-    pdr.records = std::shared_ptr<bess::classifier::RecordArena>(std::move(records_owner), records_raw);
-    auto check = [record_size](const Resource::Value &v) -> Resource::Result {
-      if (!bess::IsValidGateValue(v.gate)) return std::unexpected("invalid gate");
-      if (v.result.size() > record_size) return std::unexpected("PDR result too large");
-      return {};
-    };
-    pdr.resource = std::make_unique<Resource>(name() + "/" + table_name, Resource::Hooks{
-      .table = [&pdr] { return pdr.table; },
-      .check_value = check,
-      .references = [this](const Resource::Value &v) {
-        std::vector<dataplane::Reference> refs;
-        for (size_t offset : {size_t{4}, size_t{8}, size_t{12}}) {
-          const uint32_t id = Read32(v.result, offset);
-          if (id) refs.push_back({name() + (offset == 12 ? "/next_hops" : "/meters"),
-                                 dataplane::EncodeKey(Id(id))});
-        }
-        return refs;
-      },
-      .records = pdr.records,
-      .may_reference = {name() + "/meters", name() + "/next_hops"}});
-    bindings_.push_back(init_context().codecs().Bind(*pdr.resource,
-      std::make_shared<bess::framework::TypedCodec<bess::pb::WildcardMatchRuleKey, bess::pb::WildcardMatchRuleValue>>(
-        [dl](const auto &key) { return PdrKey(key, dl); },
-        [check](const bess::pb::WildcardMatchRuleValue &v) -> std::expected<std::any, std::string> {
-          if (!bess::IsValidGateValue(v.gate())) return std::unexpected("invalid gate");
-          Resource::Value value{v.priority(), static_cast<uint16_t>(v.gate()),
-            std::vector<std::byte>(reinterpret_cast<const std::byte *>(v.result().data()),
-                                  reinterpret_cast<const std::byte *>(v.result().data()) + v.result().size())};
-          if (auto ok = check(value); !ok) return std::unexpected(ok.error());
-          return std::any(std::move(value));
-        },
-        [&pdr, dl](const auto &visit) {
-          const auto widths = Widths(dl);
-          pdr.table->ForEach([&](auto mask, auto bytes, const auto &r, auto ranges) {
-            bess::pb::WildcardMatchRuleKey key;
-            bess::pb::WildcardMatchRuleValue value;
-            size_t pos = 0;
-            auto range = ranges.begin();
-            for (size_t i = 0; i < widths.size(); ++i) {
-              key.add_values()->set_value_bin(reinterpret_cast<const char *>(bytes.data() + pos), widths[i]);
-              key.add_masks()->set_value_bin(reinterpret_cast<const char *>(mask.data() + pos), widths[i]);
-              if (range != ranges.end() && range->offset == pos) {
-                auto *out = key.add_ranges();
-                out->set_field(i); out->set_low(range->low); out->set_high(range->high); ++range;
-              }
-              pos += widths[i];
-            }
-            value.set_priority(r.priority); value.set_gate(r.gate);
-            const auto record = pdr.records->Lookup(r.result_id);
-            value.set_result(reinterpret_cast<const char *>(record.data()), record.size());
-            visit(key, value);
-          });
-        })));
-    return enroll(pdr.resource.get());
-  };
-  if (auto r = init_pdr(pdr_ul_, "pdr_ul", false, arg.pdr_ul().max_tuples() ? arg.pdr_ul().max_tuples() : 16); !r)
-    return CommandFailure(EINVAL, "%s", r.error().c_str());
-  if (auto r = init_pdr(pdr_dl_, "pdr_dl", true, arg.pdr_dl().max_tuples() ? arg.pdr_dl().max_tuples() : 8); !r)
-    return CommandFailure(EINVAL, "%s", r.error().c_str());
   auto init_counter = [&](Counters &bank, const char *table) -> std::expected<void, std::string> {
     bank.cells = memory.Create<bess::stats::KeyedCounters>(std::string(table) + "_cells", capacity_, 2, planes);
     bank.stamps_lease = memory.Lease(std::string(table) + "_stamps", bess::utils::DpdkArray<Stamps>::Bytes(capacity_, memory.socket()));
@@ -358,78 +189,8 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
         })));
     return enroll(bank.resource.get());
   };
-  for (auto pair : {std::pair{&counters_ul_, "counters_ul"},
-                    std::pair{&counters_dl_, "counters_dl"},
-                    std::pair{&buffer_counters_, "buffer_counters"}})
-    if (auto r = init_counter(*pair.first, pair.second); !r)
-      return CommandFailure(EEXIST, "%s", r.error().c_str());
-  tunnels_ = memory.Create<dataplane::SlotTable<Id, Tunnel>>("tunnels", arg.encap().max_tunnels() ? arg.encap().max_tunnels() : 65536);
-  tunnel_resource_ = std::make_unique<dataplane::SlotResource<Id, Tunnel>>(
-      name() + "/tunnels", *tunnels_);
-  bindings_.push_back( init_context().codecs().Bind(
-      *tunnel_resource_,
-      std::make_shared<bess::framework::TypedCodec<upf::pb::TunnelKey,
-                                                    upf::pb::TunnelEntry>>(
-          [](const upf::pb::TunnelKey &key)
-              -> std::expected<dataplane::ResourceKey, std::string> {
-            if (key.action_id() == 0)
-              return std::unexpected("action id 0 names no tunnel");
-            return dataplane::EncodeKey(Id(key.action_id()));
-          },
-          [](const upf::pb::TunnelEntry &value)
-              -> std::expected<std::any, std::string> {
-            if (value.teid() == 0)
-              return std::unexpected("the 'teid' field is required");
-            const size_t length = value.local_address().size();
-            if ((length != 4 && length != 16) ||
-                value.peer_address().size() != length)
-              return std::unexpected("local_address and peer_address must both be 4 or 16 bytes");
-            if (value.qfi() > 63)
-              return std::unexpected("invalid 'qfi' field");
-            if (!value.qfi_present() && value.qfi() != 0)
-              return std::unexpected("qfi must be zero when qfi_present is false");
-            if (value.marking() > 0xffff)
-              return std::unexpected("invalid 'marking' field");
-            Tunnel tunnel{};
-            tunnel.teid = value.teid();
-            tunnel.family = length == 4 ? 4 : 6;
-            const size_t offset = length == 4 ? 12 : 0;
-            std::memcpy(tunnel.local + offset, value.local_address().data(), length);
-            std::memcpy(tunnel.peer + offset, value.peer_address().data(), length);
-            if (std::all_of(tunnel.local, tunnel.local + 16,
-                            [](uint8_t byte) { return byte == 0; }) ||
-                std::all_of(tunnel.peer, tunnel.peer + 16,
-                            [](uint8_t byte) { return byte == 0; }))
-              return std::unexpected("tunnel addresses must not be unspecified");
-            tunnel.transport_route_domain = value.transport_route_domain();
-            tunnel.qfi = static_cast<uint8_t>(value.qfi());
-            tunnel.has_qfi = value.qfi_present();
-            tunnel.marking = static_cast<uint16_t>(value.marking());
-            return std::any(tunnel);
-          },
-          [this](const auto &visit) {
-            for (size_t i = 1; i <= tunnels_->capacity(); ++i) {
-              const Id id(static_cast<Id::rep_type>(i));
-              const Tunnel *tunnel = tunnels_->Current(id);
-              if (tunnel == nullptr) continue;
-              upf::pb::TunnelKey key;
-              key.set_action_id(id.value());
-              upf::pb::TunnelEntry value;
-              value.set_teid(tunnel->teid);
-              const size_t offset = tunnel->family == 4 ? 12 : 0;
-              const size_t length = tunnel->family == 4 ? 4 : 16;
-              value.set_local_address(
-                  reinterpret_cast<const char *>(tunnel->local + offset), length);
-              value.set_peer_address(
-                  reinterpret_cast<const char *>(tunnel->peer + offset), length);
-              value.set_qfi(tunnel->qfi);
-              value.set_qfi_present(tunnel->has_qfi);
-              value.set_marking(tunnel->marking);
-              value.set_transport_route_domain(tunnel->transport_route_domain);
-              visit(key, value);
-            }
-          })));
-  if (auto r = enroll(tunnel_resource_.get()); !r) return CommandFailure(EEXIST, "%s", r.error().c_str());
+  if (auto r = init_counter(buffer_counters_, "buffer_counters"); !r)
+    return CommandFailure(EEXIST, "%s", r.error().c_str());
   const size_t atsss_capacity = arg.atsss().capacity() ? arg.atsss().capacity() : 65536;
   health_ = memory.Create<dataplane::SlotTable<Id, AccessHealth>>("health", atsss_capacity);
   policies_ = memory.Create<dataplane::SlotTable<Id, SteeringPolicy>>("policies", atsss_capacity);
@@ -457,12 +218,10 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
   policy_resource_ = std::make_unique<dataplane::SlotResource<Id, SteeringPolicy>>(
       name() + "/policies", *policies_, [this](const SteeringPolicy &p) {
         std::vector<dataplane::Reference> refs;
-        for (const auto &a : p.access) {
+        for (const auto &a : p.access)
           if (a.next_hop_id) refs.push_back({name() + "/next_hops", dataplane::EncodeKey(Id(a.next_hop_id))});
-          if (a.tunnel_id) refs.push_back({name() + "/tunnels", dataplane::EncodeKey(Id(a.tunnel_id))});
-        }
         return refs;
-      }, std::vector<std::string>{name() + "/next_hops", name() + "/tunnels"});
+      }, std::vector<std::string>{name() + "/next_hops"});
   bindings_.push_back( init_context().codecs().Bind(
       *policy_resource_,
       std::make_shared<bess::framework::TypedCodec<
@@ -551,32 +310,34 @@ void UpfAppliance::ReleaseResources() {
   }
   for (auto &binding : bindings_) binding.Reset();
   bindings_.clear();
-  pdr_ul_.resource.reset(); pdr_dl_.resource.reset();
-  pdr_ul_.table.reset(); pdr_dl_.table.reset();
-  pdr_ul_.records.reset(); pdr_dl_.records.reset();
-  pdr_ul_.table_lease.reset(); pdr_dl_.table_lease.reset();
-  pdr_ul_.records_lease.reset(); pdr_dl_.records_lease.reset();
-  policy_resource_.reset(); health_resource_.reset(); tunnel_resource_.reset();
-  policies_.reset(); health_.reset(); tunnels_.reset();
-  for (auto *bank : {&counters_ul_, &counters_dl_, &buffer_counters_}) {
-    bank->resource.reset(); bank->entries.reset(); bank->cells.reset();
-    bank->stamps = {}; bank->stamps_lease.reset();
-  }
+  // The session store before the tables and F-TEID index it drives.
+  sessions_.reset();
+  pdr_ul_.reset(); pdr_dl_.reset();
+  policy_resource_.reset(); health_resource_.reset();
+  policies_.reset(); health_.reset();
+  buffer_counters_.resource.reset(); buffer_counters_.entries.reset(); buffer_counters_.cells.reset();
+  buffer_counters_.stamps = {}; buffer_counters_.stamps_lease.reset();
   fteid_resource_.reset(); fteids_.reset(); entries_.reset();
-  meters_.reset(); errors_.reset(); end_markers_.reset();
+  errors_.reset(); end_markers_.reset();
 }
 
 CommandResponse UpfAppliance::CommandGetCounts(const upf::pb::UrrCountCommandGetCountsArg &arg) {
-  upf::appliance::Counters *bank = nullptr;
-  if (arg.table() == "counters_ul") bank = &counters_ul_;
-  else if (arg.table() == "counters_dl") bank = &counters_dl_;
-  else if (arg.table() == "buffer_counters") bank = &buffer_counters_;
-  else return CommandFailure(EINVAL, "table must be counters_ul, counters_dl, or buffer_counters");
+  const bool session_bank = arg.table() == "counters_ul" || arg.table() == "counters_dl";
+  if (!session_bank && arg.table() != "buffer_counters")
+    return CommandFailure(EINVAL, "table must be counters_ul, counters_dl, or buffer_counters");
+  upf::appliance::Counters *bank = &buffer_counters_;
   upf::pb::UrrCountCommandGetCountsResponse response;
   struct timeval wall {};
   gettimeofday(&wall, nullptr);
   response.set_read_wall_unix_ns(static_cast<uint64_t>(wall.tv_sec) * 1000000000ull + static_cast<uint64_t>(wall.tv_usec) * 1000ull);
   response.set_read_monotonic_ns(tsc_to_ns(rdtsc()));
+  if (session_bank) {
+    // The URR cells live in the sessions' strides.
+    sessions_->Counts(arg.table() == "counters_dl",
+                      std::span<const uint32_t>(arg.action_ids().data(), arg.action_ids_size()),
+                      arg.restart_window(), &response);
+    return CommandSuccess(response);
+  }
   auto report = [&](uint32_t id) {
     auto *count = response.add_counts();
     count->set_action_id(id);
