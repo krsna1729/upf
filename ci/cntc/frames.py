@@ -4,15 +4,18 @@
 # The N3 frames of TOSSI CNTC's robustness suite (upfbench/suites/n3neg/_pktgen.py:
 # a valid G-PDU, an unknown TEID, control and reserved message types, a wrong
 # version, three truncations, a valid and a malformed PDU Session Container),
-# built byte by byte -- no scapy -- and written into a copy of
-# deploy/session-path.yaml whose uplink Rewrite carries them.
+# built byte by byte -- no scapy -- and written into the selected real
+# session-path deployment. UPF_TARGET=graph|appliance selects the same target
+# as upfd; GRAPH may override its deployment. Only external fixtures change.
 #
 #   frames.py <out.yaml> <variant> [<variant> ...]
+#   frames.py <out.yaml> --control-plane    # paused, no fixture traffic
+import argparse
 import base64
 import os
-import re
 import struct
-import sys
+
+import yaml  # CNTC's existing PyYAML dependency
 
 TEID = 210001   # pfcpsim's uplink TEID for --baseID 210001, as CNTC's NT tests use it
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -66,12 +69,57 @@ VARIANTS = {
     'psc_malformed': frame(flags=0x34, opt=struct.pack('!HBB', 0, 0, 0x85), payload=b'\xff\x85\x00'),
 }
 
+def render(out, names, control_plane=False):
+    target = os.environ.get('UPF_TARGET', 'graph')
+    if target not in ('graph', 'appliance'):
+        raise ValueError('UPF_TARGET must be graph or appliance')
+    default = 'session-path-appliance.yaml' if target == 'appliance' else 'session-path.yaml'
+    path = os.environ.get('GRAPH') or os.path.join(ROOT, 'deploy', default)
+    with open(path) as f:
+        deployment = yaml.safe_load(f)
+    modules = {m['name']: m for m in deployment['modules']}
+    if target == 'appliance':
+        assert modules['upf']['mclass'] == 'UpfAppliance', 'appliance fixture must own a real UpfAppliance'
+    else:
+        assert modules['decap0']['mclass'] == 'GtpuDecap', 'graph fixture must own GtpuDecap'
+        # Observe the real responder's output, not an internal test tap.
+        deployment['modules'].append({'name': 'sink_control', 'mclass': 'Sink'})
+        deployment['connections'].append({'upstream': 'echo_err', 'downstream': 'sink_control'})
+    # Isolate one N3 stream: no downlink, Error Indication or End Marker
+    # background traffic may contribute PDR failures, URR usage or replies.
+    for name in ('src_err', 'src_em', 'src_dn', 'src_up'):
+        modules[name]['arg']['burst'] = 0
+    if not control_plane:
+        frames = [VARIANTS[name] for name in names]
+        # This is a disposition/conservation test, not a QER overload test.
+        # Source has no packet/rate limit of its own. A one-packet burst at
+        # 100 pps stays below the unchanged n4bench 1-Mbit/s UL QER (and
+        # pfcpsim's higher MBRs), so every valid input must still be counted
+        # and forwarded. Bound scheduler credit too, to avoid a resume burst.
+        modules['src_up']['arg'].update(pkt_size=max(map(len, frames)), burst=1)
+        deployment.setdefault('traffic_classes', []).append({
+            'name': 'cntc_n3_rate', 'policy': 'rate_limit', 'resource': 'packet',
+            'wid': 0, 'limit': {'packet': 100}, 'max_burst': {'packet': 1}})
+        deployment['tasks'] = [
+            task for task in deployment.get('tasks', [])
+            if task['module'] != 'src_up' or task.get('task', 0) != 0]
+        deployment['tasks'].append({'module': 'src_up', 'parent': 'cntc_n3_rate'})
+        modules['rewrite_up']['arg']['templates'] = [
+            base64.b64encode(frame).decode() for frame in frames]
+    # No daemon shares another run's marker socket (including CF-only runs).
+    marker = os.path.join(os.path.abspath(os.environ.get('TMPDIR', os.path.dirname(out))),
+                          'cntc-marker-%s.sock.1' % os.environ.get('BESS_PORT', os.getpid()))
+    for port in deployment.get('ports', []):
+        if port['name'] == 'cp_marker':
+            port['arg']['path'] = marker
+    with open(out, 'w') as f:
+        yaml.safe_dump(deployment, f, sort_keys=False)
+
+
 if __name__ == '__main__':
-    out, names = sys.argv[1], sys.argv[2:] or list(VARIANTS)
-    tpl = '\n'.join('        - "%s"' % base64.b64encode(VARIANTS[n]).decode() for n in names)
-    src = open(os.path.join(ROOT, 'deploy/session-path.yaml')).read()
-    new = re.sub(r'(  - name: rewrite_up\n    mclass: Rewrite\n    arg:\n      templates:\n)        - "[^"]*"\n',
-                 lambda m: m.group(1) + tpl + '\n', src)
-    assert new != src, 'deploy/session-path.yaml no longer has the rewrite_up block this script replaces'
-    new = new.replace('arg: {pkt_size: 87, burst: 32}', 'arg: {pkt_size: 100, burst: 32}', 1)
-    open(out, 'w').write(new)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('out')
+    parser.add_argument('variants', nargs='*', metavar='variant')
+    parser.add_argument('--control-plane', action='store_true')
+    args = parser.parse_args()
+    render(args.out, args.variants or list(VARIANTS), args.control_plane)

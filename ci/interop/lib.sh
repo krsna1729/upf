@@ -11,6 +11,15 @@
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 . "$ROOT/ci/bess-env.sh"      # BESS/STAGE/DPDK_LIB, GOWORK=off, free_port
 
+# Both targets use the same real SMF and UE; only the owned dataplane changes.
+UPF_TARGET=${UPF_TARGET:-graph}
+case "$UPF_TARGET" in
+  graph) DEFAULT_GRAPH=$ROOT/deploy/session-path.yaml ;;
+  appliance) DEFAULT_GRAPH=$ROOT/deploy/appliance.yaml ;;
+  *) echo "interop: UPF_TARGET must be graph or appliance" >&2; exit 2 ;;
+esac
+export UPF_TARGET
+
 IX=${IX:-$ROOT/build/run/interop}
 STATE=$IX/state               # pid files, exit statuses, the picked ports
 LOGS=$IX/logs                 # one log per process / container
@@ -33,7 +42,7 @@ N4=$UPF_IP:8805
 
 TAG=${F5GC_TAG:-v4.3.0}       # free5gc/<nf>:$TAG, one release for every NF and the simulator
 MONGO_IMAGE=${MONGO_IMAGE:-mongo:4.4}
-GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
+GRAPH=${GRAPH:-$DEFAULT_GRAPH}
 PLUG=${PLUG:-$ROOT/datapath/build}
 CERT_URL=https://raw.githubusercontent.com/free5gc/free5gc-compose/master/cert
 
@@ -70,13 +79,20 @@ IF_N6=upfi-n6    # bessd's N6 port; its peer is eth0 inside $DN_NS
 BESSCTL=$STAGE/bin/bessctl
 export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-# dp_pkts <module>: packets the module sent out, from the daemon's own metrics.
-# The graph's counting modules (cnt_ul, cnt_dl) are what a URR report is built
-# from, so their movement is the dataplane proof the traffic stage reads.
+# dp_pkts <ul|dl>: the target's actual usage counters, never port/control traffic.
+# Graph keeps its counting-module metrics; the owned appliance exposes its
+# counter banks through the installed get_counts action.
 dp_pkts() {
-  "$BESSCTL" -s "127.0.0.1:$(cat "$STATE/bess_port")" metrics 2>/dev/null |
-    grep bess_gate_packets_total | grep "module=\"$1\"" | grep 'direction="out"' |
-    awk '{s += $NF} END {print s + 0}'
+  local direction=$1
+  if [ "$UPF_TARGET" = appliance ]; then
+    "$BESSCTL" -s "127.0.0.1:$(cat "$STATE/bess_port")" \
+      action upf get_counts "{\"table\":\"counters_$direction\"}" |
+      python3 -c 'import json,sys; print(sum(int(c.get("packets", 0)) for c in json.load(sys.stdin).get("counts", [])))'
+  else
+    "$BESSCTL" -s "127.0.0.1:$(cat "$STATE/bess_port")" metrics |
+      grep bess_gate_packets_total | grep "module=\"cnt_$direction\"" | grep 'direction="out"' |
+      awk '{s += $NF} END {print s + 0}'
+  fi
 }
 
 # Go: the mise toolchain the repo is built with, unless GO says otherwise.

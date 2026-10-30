@@ -72,7 +72,8 @@ if [ -s "$STATE/bessd.pid" ]; then
   fi
   rm -f "$STATE/bess_port" "$STATE/bessd-own.pid"
 fi
-rm -f "$STATE/n4_backend_port" "$STATE/graph.yaml" "$STATE/end-marker.sock"
+rm -f "$STATE/n4_backend_port" "$STATE/target" "$STATE/graph.yaml" \
+  "$STATE/end-marker.sock" "$STATE/end-marker.sock.1" "$STATE/end-marker.sock.2"
 # The veths and the data network's namespace (a no-op when DATAPLANE never ran).
 if [ -n "$DATAPLANE" ] || ip netns list 2>/dev/null | grep -q "^$DN_NS\b"; then
   "$(dirname "${BASH_SOURCE[0]}")/net.sh" down && log "net: removed $IF_N3, $IF_N6 and $DN_NS"

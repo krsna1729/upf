@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Render deploy/upf.yaml for the interop veths. The transport Router resolves
-# the gNB and data-network neighbors; the graph supplies each link's local
-# interface identity, not static tunnel MAC addresses.
+# Render deploy/upf.yaml or deploy/appliance.yaml for the interop veths. Each
+# target's own resolver learns the gNB and data-network neighbors; the rendered
+# interfaces supply local identities, not static tunnel MAC addresses.
 #
 #   graph.py <deployed.yaml> <out.yaml> <if_n3> <if_n6> <n3_ip> <n3_mac>
 #            <gnb_ip> <n6_mac> <dn_ip> <dn_gw> <marker_path>
@@ -59,6 +59,27 @@ ports = f'''ports:
 '''
 new = replace_once(text, r"^ports:\n.*?(?=^modules:)", ports,
                    "ports block", re.MULTILINE | re.DOTALL)
+
+if "mclass: UpfAppliance" in text:
+    # Keep the production port -> owned appliance -> port deployment. Only the
+    # lab's live interface identities and resolver bindings differ.
+    for old, replacement, label in (
+        ("mac_addr: '02:00:00:00:03:01', ip_addr: '192.0.2.1'",
+         f"mac_addr: '{n3_mac}', ip_addr: '{n3_ip}'", "N3 identity"),
+        ("addresses: ['192.0.2.1/24',",
+         f"addresses: ['{n3_ip}/24',", "N3 prefix"),
+        ("mac_addr: '02:00:00:00:06:01', ip_addr: '192.0.2.2', addresses: ['192.0.2.2/24']",
+         f"mac_addr: '{n6_mac}', ip_addr: '{dn_gw}', addresses: ['{dn_gw}/24']", "N6 identity"),
+        ("  upf/neighbors:\n    - {key: {id: 1}, value: {interface_id: 1, ipv4: '192.0.2.1'}}",
+         f"  upf/neighbors:\n    - {{key: {{id: 1}}, value: {{interface_id: 1, ipv4: '{dn_ip}'}}}}", "N6 resolver"),
+        ("  upf/transport_neighbors:\n    - {key: {id: 1}, value: {interface_id: 1, ipv4: '192.0.2.2'}}",
+         f"  upf/transport_neighbors:\n    - {{key: {{id: 1}}, value: {{interface_id: 1, ipv4: '{gnb_ip}'}}}}", "N3 resolver"),
+        ("  upf/entries:\n    - {key: {ip: '192.0.2.2'}, value: {mac_addr: '02:00:00:00:06:01'}}",
+         f"  upf/entries:\n    - {{key: {{ip: '{dn_gw}'}}, value: {{mac_addr: '{n6_mac}'}}}}", "N6 ARP identity"),
+    ):
+        new = replace_once(new, re.escape(old), lambda _: replacement, label)
+    open(out, "w").write(new)
+    sys.exit(0)
 
 # The Vifs and Router interfaces name the local address/MAC. Neighbor MACs
 # are learned by the Router from ARP, not injected into tunnel entries.

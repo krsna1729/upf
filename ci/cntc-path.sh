@@ -12,11 +12,10 @@
 #       side ("Not enough active sessions") and sends nothing, so CNTC's CF-05
 #       passes without the UPF being asked; the unknown-SEID answer is tested in
 #       internal/session and internal/n4.
-#   N3  CNTC's NT-01..03 frames (ci/cntc/frames.py), one variant at a time, at line
-#       rate through endpoint-scoped F-TEID admission and GtpuDecap, with a
-#       pfcpsim session installed: the daemon must stay up, malformed packets
-#       must drop, control/unknown traffic must use gate 2, and valid frames
-#       must reach the Router.
+#   N3  CNTC's NT-01..03 frames (ci/cntc/frames.py), one variant at a time,
+#       through the selected real graph or owned appliance with a pfcpsim
+#       session installed. ci/cntc/observe.py documents and checks the exact
+#       parser/admission, URR, control-reply and user-forwarding observations.
 #
 # This is not CNTC's verdict and earns no certificate: CNTC's own N3 tests send
 # through a NIC and read port counters (its adapters are per UPF), and upfd has
@@ -33,6 +32,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
+. "$ROOT/ci/cntc/env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 export GOWORK=off
@@ -64,12 +64,12 @@ export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
 BESS_PID="" UPFD_PID="" SIM_PID=""
 stop() {
-  [ -n "$SIM_PID" ] && kill "$SIM_PID" 2>/dev/null || true
-  [ -n "$UPFD_PID" ] && kill "$UPFD_PID" 2>/dev/null || true
-  if [ -n "$BESS_PID" ] && kill -0 "$BESS_PID" 2>/dev/null; then
-    "$BESSCTL" -s "127.0.0.1:$BESS_PORT" shutdown >/dev/null 2>&1 || true
-    wait "$BESS_PID" 2>/dev/null || true
+  if [ -n "$SIM_PID" ]; then kill "$SIM_PID" 2>/dev/null || true; wait "$SIM_PID" 2>/dev/null || true; fi
+  if [ -n "$UPFD_PID" ]; then kill "$UPFD_PID" 2>/dev/null || true; wait "$UPFD_PID" 2>/dev/null || true; fi
+  if [ -n "$BESS_PID" ]; then
+    check_clean_shutdown "$BESS_PID" || fail "bessd did not shut down cleanly"
   fi
+  rm -f "$TMPDIR/cntc-marker-$BESS_PORT.sock.1"
   BESS_PID="" UPFD_PID="" SIM_PID=""
 }
 trap stop EXIT
@@ -82,8 +82,8 @@ start() {
   for _ in $(seq 1 60); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 0.5; done
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 || { cat "$WORK/bessd.log" >&2; fail "bessd did not come up"; }
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$1" >/dev/null
-  "$WORK/upfd" -n4 "$N4_ADDR:8805" -node-id "$N4_ADDR" -bess "127.0.0.1:$BESS_PORT" -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 \
-    -log-level info >"$WORK/upfd.log" 2>&1 &
+  "$WORK/upfd" -n4 "$N4_ADDR:8805" -node-id "$N4_ADDR" -bess "127.0.0.1:$BESS_PORT" -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" \
+    "${TARGET_ARGS[@]}" -log-level info >"$WORK/upfd.log" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 40); do grep -q 'n4 listening' "$WORK/upfd.log" 2>/dev/null && break; sleep 0.25; done
   kill -0 "$UPFD_PID" 2>/dev/null || { cat "$WORK/upfd.log" >&2; fail "upfd exited"; }
@@ -96,16 +96,11 @@ start() {
   "${CTL[@]}" service associate >"$WORK/associate.out" 2>&1 || { cat "$WORK/associate.out" >&2; fail "CF-01: the association was refused"; }
 }
 
-# metric <module> <gate>: packets out of a module's gate, from the daemon's metrics.
-metric() {
-  "$BESSCTL" -s "127.0.0.1:$BESS_PORT" metrics 2>/dev/null >"$WORK/metrics.out" || true
-  grep bess_gate_packets_total "$WORK/metrics.out" | grep "module=\"$1\"" | grep "gate=\"$2\"" |
-    grep 'direction="out"' | awk '{print $NF}' | head -1 || true
-}
 
 # ---------------------------------------------------------------------------
 echo "== N4: pfcpsim, CNTC's messages (CF-01..04)"
-start "$ROOT/deploy/session-path.yaml"
+python3 "$ROOT/ci/cntc/frames.py" "$WORK/cf.yaml" --control-plane
+start "$WORK/cf.yaml"
 step() { # step <what> <pfcpctl args...>
   local what=$1; shift
   "${CTL[@]}" "$@" >"$WORK/step.out" 2>&1 || { cat "$WORK/step.out" >&2; cat "$WORK/upfd.log" >&2; fail "$what"; }
@@ -125,9 +120,9 @@ stop
 
 # ---------------------------------------------------------------------------
 echo "== N3: CNTC's NT-01..03 frames, one variant at a time"
-# route = admitted and forwarded; miss/control = decap gate 2; drop = no decap
-# output. The unknown TEID and non-G-PDU control messages intentionally share
-# gate 2, while malformed frames stop before either output gate.
+# Historical semantic names remain comparable across targets; the appliance's
+# evidence is its actual early-drop reasons, URR banks and physical outputs,
+# never fictitious internal stage gates (see ci/cntc/observe.py).
 VARIANT_LIST="valid:route psc_valid:route unknown_teid:miss echo_request:control reserved_type:control truncated_hdr:drop bad_version:drop gpdu_no_inner:drop len_overflow:drop psc_malformed:drop"
 CRASH_LOG=/tmp/bessd_crash.log
 for entry in $VARIANT_LIST; do
@@ -137,10 +132,15 @@ for entry in $VARIANT_LIST; do
   start "$WORK/n3.yaml"
   "${CTL[@]}" session create -c 1 -i 210001 -u 10.250.0.0/24 -g "$GNB" >"$WORK/step.out" 2>&1 ||
     { cat "$WORK/step.out" >&2; fail "$v: the session was not established"; }
+  python3 "$ROOT/ci/cntc/observe.py" --arm "$BESSCTL" "127.0.0.1:$BESS_PORT" "$TARGET" "$WORK/count-$v.json" ||
+    fail "$v: could not register the programmed PDRs for measurement"
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
   sleep 3
-  sent=$(metric src_up 0); admitted=$(metric decap0 0); gate2=$(metric decap0 2); routed=$(metric rt 0)
+  observations=$(python3 "$ROOT/ci/cntc/observe.py" "$BESSCTL" "127.0.0.1:$BESS_PORT" "$TARGET" "$v" "$WORK/observe-$v.json") ||
+    fail "$v: packet disposition check failed"
+  read -r sent admitted gate2 routed <<<"$observations"
   kill -0 "$BESS_PID" 2>/dev/null || fail "$v: bessd died"
+  kill -0 "$UPFD_PID" 2>/dev/null || fail "$v: upfd died"
   [ "$(stat -c %Y "$CRASH_LOG" 2>/dev/null || echo 0)" = "$BEFORE" ] || fail "$v: bessd wrote a crash report"
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 || fail "$v: bessd stopped answering"
   [ "${sent:-0}" -gt 0 ] || fail "$v: nothing was sent"
