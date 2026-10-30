@@ -12,6 +12,7 @@
 package n4
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -76,8 +77,12 @@ const (
 // sent, and the exchange is logged.
 //
 // The request, and the bytes behind it, belong to the socket's read loop: the
-// handler must copy anything it keeps. It also must not block for long,
-// because that loop serves one message at a time, heartbeats included.
+// handler must copy anything it keeps. With Config.SessionWorkers above one,
+// the methods are called concurrently for different sessions -- the messages
+// of one session are handled one at a time, in the order they arrived -- and
+// AssociationEnded only once every message read before the end was answered.
+// Otherwise the read loop serves one message at a time, heartbeats included,
+// and a handler must not block it for long.
 type SessionHandler interface {
 	Establish(req *message.SessionEstablishmentRequest) message.Message
 	Modify(req *message.SessionModificationRequest) message.Message
@@ -108,6 +113,15 @@ type Config struct {
 	// Sessions receives the session-level messages. It may be nil, in which
 	// case session requests are answered with Cause "Request rejected".
 	Sessions SessionHandler
+
+	// SessionWorkers is how many session messages are handled at once. A
+	// session's messages go to one worker, by the SEID that names the session
+	// (the CP F-SEID of an establishment), so each session's are handled in
+	// order. Zero or one handles them in the read loop itself. More than one
+	// is what lets the dataplane's transactions overlap: a session message is
+	// mostly the wait for its transaction, and the read loop's heartbeats and
+	// association messages no longer wait behind it.
+	SessionWorkers int
 
 	// HeartbeatEvery is the silence after which the UP function asks the CP
 	// function to prove it is there; HeartbeatTimeout is how long it waits for
@@ -202,7 +216,25 @@ type Server struct {
 	wake chan struct{}
 	done chan struct{}
 	once sync.Once
+
+	// work is one bounded queue per session worker, nil without workers.
+	// queued counts the messages read and not yet answered, under queuedMu;
+	// drained is signalled when it reaches zero.
+	work     []chan sessionWork
+	queuedMu sync.Mutex
+	queued   int
+	drained  *sync.Cond
 }
+
+// sessionWork is one session message a worker answers.
+type sessionWork struct {
+	msg  message.Message
+	from net.Addr
+}
+
+// sessionQueue is each worker's backlog: past it the read loop waits, which is
+// the socket's own buffer taking the burst, as it does without workers.
+const sessionQueue = 64
 
 // New returns a Server that will listen on cfg.Listen.
 func New(cfg Config) (*Server, error) {
@@ -241,7 +273,7 @@ func New(cfg Config) (*Server, error) {
 	if stamp.IsZero() {
 		stamp = time.Now()
 	}
-	return &Server{
+	s := &Server{
 		cfg:      cfg,
 		log:      cfg.Logger,
 		nodeID:   nodeID(cfg.NodeID),
@@ -249,7 +281,15 @@ func New(cfg Config) (*Server, error) {
 		recovery: ie.NewRecoveryTimeStamp(stamp),
 		wake:     make(chan struct{}, 1),
 		done:     make(chan struct{}),
-	}, nil
+	}
+	s.drained = sync.NewCond(&s.queuedMu)
+	if cfg.SessionWorkers > 1 {
+		s.work = make([]chan sessionWork, cfg.SessionWorkers)
+		for i := range s.work {
+			s.work[i] = make(chan sessionWork, sessionQueue)
+		}
+	}
+	return s, nil
 }
 
 // nodeID encodes id one way: an IPv4 address, an IPv6 address, or an FQDN.
@@ -301,6 +341,9 @@ func (s *Server) Serve() error {
 		return errors.New("n4: Serve before Listen")
 	}
 	go s.liveness()
+	for _, q := range s.work {
+		go s.sessionWorker(q)
+	}
 
 	buf := make([]byte, maxDatagram)
 	for {
@@ -316,7 +359,30 @@ func (s *Server) Serve() error {
 		if n == 0 {
 			continue
 		}
-		s.handle(buf[:n], from)
+		b := buf[:n]
+		if s.work != nil {
+			// A worker answers the message after this loop has read the next
+			// datagram into buf, and the parsed IEs point into the bytes.
+			b = bytes.Clone(b)
+		}
+		s.handle(b, from)
+	}
+}
+
+// sessionWorker answers the session messages queued to it, in order.
+func (s *Server) sessionWorker(q <-chan sessionWork) {
+	for {
+		select {
+		case w := <-q:
+			s.answerSession(w.msg, w.from)
+			s.queuedMu.Lock()
+			if s.queued--; s.queued == 0 {
+				s.drained.Broadcast()
+			}
+			s.queuedMu.Unlock()
+		case <-s.done:
+			return
+		}
 	}
 }
 
@@ -578,16 +644,40 @@ func (s *Server) onSession(msg message.Message, from net.Addr) {
 		s.rejectSession(msg, from, ie.CauseNoEstablishedPFCPAssociation, "no established association")
 	case s.cfg.Sessions == nil:
 		s.rejectSession(msg, from, ie.CauseRequestRejected, "no session layer")
+	case s.work != nil:
+		s.queuedMu.Lock()
+		s.queued++
+		s.queuedMu.Unlock()
+		s.work[sessionKey(msg)%uint64(len(s.work))] <- sessionWork{msg: msg, from: from}
 	default:
-		resp := s.dispatchSession(msg)
-		if resp == nil {
-			s.log.Warn("n4: session message produced no response",
-				"from", from, "type", msg.MessageTypeName(), "seq", msg.Sequence())
-			return
-		}
-		resp.SetSequenceNumber(msg.Sequence())
-		s.reply(from, resp)
+		s.answerSession(msg, from)
 	}
+}
+
+// answerSession hands a session message to the session layer and sends its
+// answer.
+func (s *Server) answerSession(msg message.Message, from net.Addr) {
+	resp := s.dispatchSession(msg)
+	if resp == nil {
+		s.log.Warn("n4: session message produced no response",
+			"from", from, "type", msg.MessageTypeName(), "seq", msg.Sequence())
+		return
+	}
+	resp.SetSequenceNumber(msg.Sequence())
+	s.reply(from, resp)
+}
+
+// sessionKey is the identity a session's messages share: the CP F-SEID an
+// establishment names, which is the SEID its retransmission names too, and the
+// UP SEID in the header of every later message. A session's establishment and
+// its later messages may go to different workers: the SMF learns the UP SEID
+// from the establishment's answer, so nothing of the session follows it until
+// it has been answered.
+func sessionKey(msg message.Message) uint64 {
+	if r, ok := msg.(*message.SessionEstablishmentRequest); ok {
+		return cpSEIDOf(r)
+	}
+	return msg.SEID()
 }
 
 func (s *Server) dispatchSession(msg message.Message) message.Message {
@@ -676,9 +766,18 @@ func (s *Server) noteActivity(from net.Addr) {
 }
 
 func (s *Server) ended(reason string) {
-	if s.cfg.Sessions != nil {
-		s.cfg.Sessions.AssociationEnded(reason)
+	if s.cfg.Sessions == nil {
+		return
 	}
+	// Every session message read before the end is answered first, as the
+	// read loop alone would have: the ones it reads after are refused, the
+	// peer being gone.
+	s.queuedMu.Lock()
+	for s.queued > 0 {
+		s.drained.Wait()
+	}
+	s.queuedMu.Unlock()
+	s.cfg.Sessions.AssociationEnded(reason)
 }
 
 // signal wakes the liveness loop to recompute its next step.
