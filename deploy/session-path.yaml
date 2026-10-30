@@ -73,7 +73,7 @@ modules:
     mclass: Rewrite
     arg:
       templates:
-        - "AgAAAAABAgAAAAACCABFAAApAAAAAEARKpoKFB4CChQeAQhoCGgAFQAAMBoABQAAAAAQVWZ3iA=="
+        - "AgAAAAACAgAAAAABCABFAAApAAAAAEARKpoKFB4CChQeAQhoCGgAFQAAMBoABQAAAAAQVWZ3iA=="
   - name: src_em
     mclass: Source
     arg: {pkt_size: 50, burst: 1}
@@ -215,6 +215,10 @@ modules:
   - name: enc
     mclass: GtpuEncap
     arg: {max_tunnels: 65536}
+  # Match production: the newly encapsulated frame crosses the outer Router.
+  - name: rt_transport
+    mclass: Router
+    arg: {mode: ROUTE_MODE_DESTINATION, max_domains: 3, max_ipv4_routes: 64, domain_attr: transport_route_domain}
   - name: mt_transport
     mclass: MetadataTest
     arg: {read: {transport_route_domain: 4}}
@@ -287,7 +291,8 @@ connections:
   - {upstream: cnt_dl, downstream: atsss}
   - {upstream: atsss, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
-  - {upstream: enc, downstream: mt_transport}
+  - {upstream: enc, downstream: rt_transport}
+  - {upstream: rt_transport, downstream: mt_transport}
   - {upstream: mt_transport, downstream: dump_d}
   - {upstream: dump_d, downstream: sink_n3}
 
@@ -316,6 +321,12 @@ resources:
       value: {egress_gate: 0, dst_mac: "AgAAAAYC", src_mac: "AgAAAAYB"}
     - key: {id: 2}
       value: {egress_gate: 1}
+  rt_transport/next_hops:
+    - key: {id: 1}
+      value: {egress_gate: 0}
+  rt_transport/routes:
+    - key: {ipv4: "0.0.0.0", prefix_length: 0, domain: 1}
+      value: {next_hop_id: 1}
 
   # l2_sort's one rule: an ARP frame (0x0806) -- the Vif's own answer -- leaves
   # by the port instead of entering the chain. Everything else takes the
