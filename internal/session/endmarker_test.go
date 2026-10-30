@@ -5,9 +5,12 @@ package session
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,6 +108,15 @@ func TestSNDEMIsReadWhereverTheCPFunctionPutsIt(t *testing.T) {
 	}
 }
 
+var endMarkerSockets atomic.Uint64
+
+// endMarkerBase is a cfg.EndMarker base in the Linux abstract namespace (the
+// leading '@'): a path under t.TempDir() can exceed sun_path's 108 bytes when
+// TMPDIR is long, and the compiler dials whatever name it is given.
+func endMarkerBase() string {
+	return fmt.Sprintf("@upf-end-marker-%d-%d", os.Getpid(), endMarkerSockets.Add(1))
+}
+
 // endMarkerListener is the graph's unix_port as a test sees it: it accepts the
 // compiler's connection (BESS's port listens, SOCK_SEQPACKET) and hands every
 // message it receives to the caller.
@@ -138,7 +150,7 @@ func endMarkerListener(t *testing.T, path string) <-chan []byte {
 // SMF moves a FAR's downstream F-TEID with the SNDEM flag, and what leaves is
 // one End Marker naming the tunnel the session is leaving -- not the new one.
 func TestAModificationWithSNDEMSendsTheOldTunnelsMarker(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "end-marker.sock")
+	path := endMarkerBase()
 	frames := endMarkerListener(t, path+".1")
 
 	cfg := testConfig()
@@ -205,7 +217,7 @@ func TestAModificationWithSNDEMSendsTheOldTunnelsMarker(t *testing.T) {
 // been handed to another subscriber -- a marker toward a context that now
 // exists would tell that peer a stream it is carrying has ended.
 func TestARestoredJournalSendsNoEndMarker(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "end-marker.sock")
+	path := endMarkerBase()
 	frames := endMarkerListener(t, path+".1")
 	j, _ := checkpointJournal(t, filepath.Join(t.TempDir(), "checkpoint"))
 
@@ -378,7 +390,7 @@ func TestFTEIDEndpointSelectionUsesSourceAndInstance(t *testing.T) {
 
 func TestEndMarkerSocketsAreSelectedAndReusedIndependently(t *testing.T) {
 	cfg := testConfig()
-	base := filepath.Join(t.TempDir(), "end-marker.sock")
+	base := endMarkerBase()
 	cfg.EndMarker = base
 	n3Path, n9Path := base+".1", base+".2"
 	n3Frames := endMarkerListener(t, n3Path)
@@ -431,7 +443,7 @@ func TestSNDEMUsesTheOldRoutedEndpointForAccessAndCoreTunnels(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := egressConfig(t)
-			base := filepath.Join(t.TempDir(), "end-marker.sock")
+			base := endMarkerBase()
 			cfg.EndMarker = base
 			n3Local := cfg.FTEIDEndpoints[0].IPv4
 			n9Local := cfg.FTEIDEndpoints[1].IPv4
