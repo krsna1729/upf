@@ -581,12 +581,13 @@ logical endpoint to two of four ports:
 
 Every case is the production-shaped graph (decap, both PDR chains, `rt`, `enc`
 and `rt_transport`, each Router interface on its own attachment) programmed by
-one compiler that holds the sessions of every permitted scenario -- Modes 1,
-2, 3, 5 and 6, never Mode 4 -- before any packet is sent. Each scenario's real
+one compiler that holds the sessions of every permitted scenario -- Modes 1
+to 6 and the N19 group-level session, set up over N4 -- before any packet is sent. Each scenario's real
 G-PDUs or N6 IP traffic go out on every attachment of their endpoint, and the
 arm checks the route-domain split, the endpoint/F-TEID admission gates, the
 exact decap/`rt`/`enc` gates each scenario names, the egress attachment, and
-the unknown-TEID path; every phase is replayed after Mode 6's leg and cleanup.
+the unknown-TEID path; every phase is replayed after Mode 6's forwarding,
+switch and release.
 Each logical endpoint has one local address across its attachments, the
 compiler's one per endpoint and family. `ci/iface-path.sh` covers the
 Source/Destination Interface grammar, and `ci/veth-port.sh` covers `upfd` on
@@ -630,7 +631,7 @@ for the route and neighbor contract.
 
 The six labels in [the Release 16 role matrix](compliance.md#project-scenarios-and-release-16-role-scope) are project traffic scenarios, not a 3GPP taxonomy. TS 23.501 §6.2.3 allows some or all UPF functionalities in one UPF instance. That permits function co-residence; it does not combine separate PDU sessions, create a group-level N4 session, or make every labeled topology procedure-backed.
 
-The matrix records the exact session, group, peer-UPF and temporary-tunnel scope. In brief: Mode 5 local switching uses separate member PDU-session N4 contexts under one SMF and common PSA; N19 between different PSAs requires group-level N4 and is not implemented here. Mode 6 is temporary handover state; `ci/iface-path.sh` checks a local N4/data-plane fixture, not the complete N2 procedure. Mode 4's N9-to-N9 tandem session shape is not established by the pinned R16 excerpts and is not claimed as compliant.
+The matrix records the exact session, group, peer-UPF and temporary-tunnel scope. In brief: Mode 5 local switching uses separate member PDU-session N4 contexts under one SMF and common PSA; N19 between different PSAs uses a group-level N4 session beside the members (TS 23.502 §4.13.8.2.2). Mode 4 is an UL CL behind an existing I-UPF or a Source UL CL holding an N9 forwarding tunnel (TS 23.502 §§4.3.5.4 step 6, 4.3.5.7): both legs are N9, chosen by the 3GPP Interface Type. Mode 6 is temporary handover state; the lanes drive its N4 steps (TS 23.502 §4.9.1.3), not N2 signalling. Received End Markers are not relayed through transit or forwarding tunnels.
 
 One `upfd` owns one `bessd` graph and accepts one CP-function association at a time. That association may control many independent PDU-session contexts. `internal/n4` rejects a second CP function; running a second `upfd` against the same `bessd` is unsupported because each startup sweep clears session-owned resources and compiler IDs are process-local. These are runtime ownership constraints, not limits imposed by the 3GPP role model.
 
@@ -1179,12 +1180,12 @@ missing, or a starved box and a slow UPF look alike.
   address is answered with the interface's MAC and the session's address, one
   session's two colliding addresses ride one transaction and both survive, and a
   deleted session's address stops being answered. Its `concurrent` window holds
-  Modes 1, 2, 3 and 5 at once (Mode 3's N9 arrival on Mode 1's TEID at the
-  other endpoint) with every stream running, each session's bytes at its own
-  exit and at no other.
+  Modes 1 to 5, N19 and Mode 6 (between the target's downlink switch and the
+  SMF's timer) at once with every stream running, each session's bytes at its
+  own exit and at no other.
 - `ci/veth-layouts.sh` + `ci/vethlayout` — every attachment layout as the
-  production-shaped graph, with one compiler holding the sessions of Modes 1,
-  2, 3, 5 and 6 (`ci/scenario`) and every scenario's packets sent on every
+  production-shaped graph, with one compiler holding the sessions of Modes 1
+  to 6 and N19 (`ci/scenario`) and every scenario's packets sent on every
   attachment; exact decap, Router and encap counts per phase.
 
 ---
