@@ -222,6 +222,12 @@ func Tunnel(teid uint32, peer string) *ie.IE {
 	return ie.NewOuterHeaderCreation(0x0100, teid, peer, "", 0, 0, 0)
 }
 
+// EndMarker is a GTP-U End Marker on teid (TS 29.281 7.3.2): version 1, type
+// 254, no information element, as the old path's sender ends a tunnel with it.
+func EndMarker(teid uint32) []byte {
+	return []byte{0x30, 254, 0, 0, byte(teid >> 24), byte(teid >> 16), byte(teid >> 8), byte(teid)}
+}
+
 // localFor is the address a PDR's F-TEID is pinned to: a Core-side PDR's, or
 // one whose Source Interface Type is N9 or N19, is the N9 endpoint's. Every
 // other value keeps N3's, including the values this UP refuses, so a refusal
