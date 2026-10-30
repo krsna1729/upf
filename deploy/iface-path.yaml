@@ -12,9 +12,10 @@
 #             src_ulcl_n6, src_ulcl_n9 -> rewrite_ulcl_* -/                                       (one session, two PDRs)
 #                                                                                                 rt -> enc -> dump_n3 (ogates 1, 2)
 #             src_vn  -> rewrite_vn  -/                                                            rt -> dump_lan     (ogate 3, the service LAN)
-#                                                                                                 rt -> pdr_dl       (ogate 4, the 5G VN re-injection)
+#             src_n19out, src_m6ul10, src_m6ul13, src_m6fwd10, src_m6fwd13 -/                     rt -> tag_vn -> pdr_dl (ogate 4, the 5G VN re-injection)
 #   N9        src_n9  -> rewrite_n9  -> tag_n9 -> decap0 (Mode 3's uplink: ogate 0, pdr_ul)
 #             src_ulcl_dn9 -> rewrite_ulcl_dn9 -/      (Mode 2's remote-PSA downlink: ogate 1, pdr_dl)
+#             src_m4ul, src_m4dl, src_n19in, src_m6dl10, src_m6t -/
 #   downlink  src_dn -> rewrite_dn -> l2_sort -> tag_n6 -> vif_n6 -> pdr_dl -> mt_dl -> cnt_dl -> atsss -> rt
 #             src_dn1 -> rewrite_dn1 -/ (Mode 1's downlink)
 #             src_arp -> rewrite_arp -> l2_sort -> arp_n6 -> dump_arp -> merge_n6 -> dump_n6 -> sink_n6
@@ -33,7 +34,7 @@
 # refused rather than silently sent out of N6 -- ci/ifacepath drives those too.
 #
 # The Router's gate is interface - 1 (D-049), so hop 3's egress_gate 2 and hop
-# 5's 4 are this file's connections to enc and to pdr_dl.
+# 5's 4 are this file's connections to enc and to tag_vn -> pdr_dl.
 #
 # The ARP proxy is on the ingress' ARP branch: l2_sort sends every ARP frame to
 # arp_n6 (an ARP request names the broadcast MAC, so no Vif would match it), and
@@ -60,6 +61,27 @@
 #                interface's MAC (02:00:00:00:06:01 from 02:00:00:00:06:02)
 #   rewrite_dn1  the same answer to S1's UE, 8.8.8.8:5000 -> 10.45.0.2:53 (Mode 1's
 #                downlink)
+#   rewrite_m4ul a G-PDU to 192.0.2.9 and TEID 0x1122334e holding
+#                10.45.0.11:5000 -> 8.8.8.8:53 (Mode 4: the upstream I-UPF's uplink, S11)
+#   rewrite_m4dl the same endpoint, TEID 0x1122334f, 8.8.8.8:5000 -> 10.45.0.11:53
+#                (Mode 4: the PSA's downlink)
+#   rewrite_n19in  a G-PDU to 192.0.2.9 and TEID 0x11223350 (S12's N19 F-TEID)
+#                holding 10.45.9.2:5000 -> 10.45.0.6:5000 (the other PSA's member to S5's UE)
+#   rewrite_n19out a G-PDU to TEID 0x11223347 (S4's) holding 10.45.0.5:5000 ->
+#                10.45.9.2:5000 (S4's UE to the member the other PSA anchors)
+#   rewrite_m6ul10 a G-PDU to TEID 0x1122334d holding 10.45.0.10:5000 -> 8.8.8.8:53
+#                (Mode 6: S10's uplink, the source I-UPF)
+#   rewrite_m6dl10 a G-PDU to 192.0.2.9 and TEID 0x11223351 holding
+#                8.8.8.8:5000 -> 10.45.0.10:53 (the PSA's downlink to S10)
+#   rewrite_m6ul13 a G-PDU to TEID 0x11223352 holding 10.45.0.13:5000 -> 8.8.8.8:53
+#                (S13's uplink, the target I-UPF)
+#   rewrite_m6t  a G-PDU to 192.0.2.9 and TEID 0x11223353 holding
+#                8.8.8.8:5000 -> 10.45.0.13:53 (the PSA's downlink to S13)
+#   rewrite_m6fwd10, rewrite_m6fwd13  the downlink being forwarded, 8.8.8.8:5000 ->
+#                10.45.0.10:53 and -> 10.45.0.13:53, to the N3 endpoint; the TEID
+#                below is 0 because the UP function chooses each forwarding
+#                F-TEID, and ci/ifacepath rewrites both templates (rewrite_*/templates)
+#                to the TEID the Created PDR names
 #   rewrite_arp  an ARP request for 10.45.0.2 from 192.0.2.2
 #   rewrite_arp2 the same for 10.44.0.2 (the sibling of 10.46.0.2: one
 #                session's two addresses, one transaction, one probe slot)
@@ -165,6 +187,91 @@ modules:
     arg:
       templates:
         - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM0xFAAAlEjQAAEARVDAKLgACCi0ACAA1E4gAEQAAaGVsbG8tdXBm"
+  # Mode 4 (S11, an I-UPF between an I-UPF and the PSA), both legs on N9.
+  - name: src_m4ul
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_m4ul
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM05FAAAlEjQAAEARTk0KLQALCAgICBOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_m4dl
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_m4dl
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM09FAAAlEjQAAEARTk0ICAgICi0ACxOIADUAEQAAaGVsbG8tdXBm"
+  # N19 (S12, the 5G VN group-level session): in from the other PSA, and out
+  # to the member it anchors.
+  - name: src_n19in
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_n19in
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM1BFAAAlEjQAAEARSzMKLQkCCi0ABhOIE4gAEQAAaGVsbG8tdXBm"
+  - name: src_n19out
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_n19out
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM0dFAAAlEjQAAEARSzQKLQAFCi0JAhOIE4gAEQAAaGVsbG8tdXBm"
+  # Mode 6 (S10, the source I-UPF; S13, the target I-UPF), and the downlink
+  # each forwards on the F-TEID it chose (the templates ci/ifacepath rewrites).
+  - name: src_m6ul10
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_m6ul10
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM01FAAAlEjQAAEARTk4KLQAKCAgICBOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_m6dl10
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_m6dl10
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM1FFAAAlEjQAAEARTk4ICAgICi0AChOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_m6ul13
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_m6ul13
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJREiM1JFAAAlEjQAAEARTksKLQANCAgICBOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_m6t
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_m6t
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GTAAAICwAACCQhoCGgANQAAMP8AJREiM1NFAAAlEjQAAEARTksICAgICi0ADROIADUAEQAAaGVsbG8tdXBm"
+  - name: src_m6fwd10
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_m6fwd10
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJQAAAABFAAAlEjQAAEARTk4ICAgICi0AChOIADUAEQAAaGVsbG8tdXBm"
+  - name: src_m6fwd13
+    mclass: Source
+    arg: {pkt_size: 87, burst: 32}
+  - name: rewrite_m6fwd13
+    mclass: Rewrite
+    arg:
+      templates:
+        - "AgAAAAABAgAAAAABCABFAABJEjQAAEAR5GzAAAICwAACAQhoCGgANQAAMP8AJQAAAABFAAAlEjQAAEARTksICAgICi0ADROIADUAEQAAaGVsbG8tdXBm"
 
   - name: pdr_ul
     mclass: WildcardMatch
@@ -215,6 +322,15 @@ modules:
     arg: {interval: 1}
   - name: sink_lan
     mclass: Sink
+  # The 5G VN re-injection's tag (deploy/upf.yaml's tag_vn): the second
+  # classification is the 5G VN Internal PDRs', which name no F-TEID, and a
+  # cleared admission context keeps the N19 PDR -- keyed by its tunnel's
+  # context alone -- from taking the packet it re-injected again.
+  - name: tag_vn
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: fteid_context, size: 4, value_int: 0}
 
   # -- the downlink ingress ----------------------------------------------------
   - name: src_dn
@@ -336,11 +452,31 @@ connections:
   - {upstream: rewrite_ulcl_n9, downstream: tag_n3}
   - {upstream: src_vn, downstream: rewrite_vn}
   - {upstream: rewrite_vn, downstream: tag_n3}
+  - {upstream: src_n19out, downstream: rewrite_n19out}
+  - {upstream: rewrite_n19out, downstream: tag_n3}
+  - {upstream: src_m6ul10, downstream: rewrite_m6ul10}
+  - {upstream: rewrite_m6ul10, downstream: tag_n3}
+  - {upstream: src_m6ul13, downstream: rewrite_m6ul13}
+  - {upstream: rewrite_m6ul13, downstream: tag_n3}
+  - {upstream: src_m6fwd10, downstream: rewrite_m6fwd10}
+  - {upstream: rewrite_m6fwd10, downstream: tag_n3}
+  - {upstream: src_m6fwd13, downstream: rewrite_m6fwd13}
+  - {upstream: rewrite_m6fwd13, downstream: tag_n3}
   - {upstream: tag_n3, downstream: decap0}
   - {upstream: src_n9, downstream: rewrite_n9}
   - {upstream: rewrite_n9, downstream: tag_n9}
   - {upstream: src_ulcl_dn9, downstream: rewrite_ulcl_dn9}
   - {upstream: rewrite_ulcl_dn9, downstream: tag_n9}
+  - {upstream: src_m4ul, downstream: rewrite_m4ul}
+  - {upstream: rewrite_m4ul, downstream: tag_n9}
+  - {upstream: src_m4dl, downstream: rewrite_m4dl}
+  - {upstream: rewrite_m4dl, downstream: tag_n9}
+  - {upstream: src_n19in, downstream: rewrite_n19in}
+  - {upstream: rewrite_n19in, downstream: tag_n9}
+  - {upstream: src_m6dl10, downstream: rewrite_m6dl10}
+  - {upstream: rewrite_m6dl10, downstream: tag_n9}
+  - {upstream: src_m6t, downstream: rewrite_m6t}
+  - {upstream: rewrite_m6t, downstream: tag_n9}
   - {upstream: tag_n9, downstream: decap0}
   - {upstream: decap0, downstream: mt_md, ogate: 0}
   - {upstream: decap0, downstream: pdr_dl, ogate: 1}
@@ -360,7 +496,8 @@ connections:
   - {upstream: rt, downstream: enc, ogate: 2}
   - {upstream: rt, downstream: dump_lan, ogate: 3}
   - {upstream: dump_lan, downstream: sink_lan}
-  - {upstream: rt, downstream: pdr_dl, ogate: 4}
+  - {upstream: rt, downstream: tag_vn, ogate: 4}
+  - {upstream: tag_vn, downstream: pdr_dl}
   - {upstream: enc, downstream: mt_transport}
   - {upstream: mt_transport, downstream: dump_n3}
   - {upstream: dump_n3, downstream: sink_n3}

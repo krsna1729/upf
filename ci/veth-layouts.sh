@@ -6,9 +6,9 @@
 # (asserted once the PMDs run), each deployed as the production-shaped graph
 # ci/vethlayout generates -- decap0, the PDR tables and chains, rt, enc and
 # rt_transport behind the layout's ports -- and programmed by one compiler
-# (vethlayout -drive) that establishes the sessions of Modes 1, 2, 3, 5 and 6
-# (ci/scenario) before any packet is sent. Mode 4 is not established by any
-# cited procedure and is not driven (docs/compliance.md).
+# (vethlayout -drive) to which a stand-in SMF sends, over N4, the sessions of
+# Modes 1 to 6 and the N19 group session (ci/scenario) before any packet is
+# sent.
 #
 # Per layout, once both Routers have resolved their neighbors, every
 # scenario's packets are sent on every attachment of the endpoint they arrive
@@ -18,10 +18,12 @@
 # uplink, downlink and unknown gates, endpoint_check (admission on the
 # endpoint the attachment tags), rt's gates and enc. rt_transport's gate and
 # the port's PortOut for the attachment each scenario egresses by must move
-# by at least as many: the resolvers' ARP shares them. Mode 6's temporary leg
-# and its cleanup run between the phases, and every earlier phase is replayed
-# after it, all sessions still live: no later session or modification may
-# have overwritten an earlier one. A TEID no session admits reaches the
+# by at least as many: the resolvers' ARP shares them. Mode 6's indirect
+# forwarding procedure (the forwarding tunnels on F-TEIDs the UP chooses, the
+# target's downlink switch, the releases after the timer) runs between the
+# phases, and every earlier phase is replayed after it, all remaining
+# sessions still live: no later session or modification may have overwritten
+# an earlier one. A TEID no session admits reaches the
 # unknown path and nothing else. The one-VLAN case gives N3 and N9 the same
 # local address, and Mode 3's F-TEID is Mode 1's TEID: only the endpoint id
 # tells the two admissions apart.
@@ -59,7 +61,7 @@ BESSCTL=$STAGE/bin/bessctl
 PINGS=${PINGS:-3}
 [[ "$PINGS" =~ ^[1-9][0-9]*$ ]] || { echo "veth-layouts: PINGS must be a positive integer" >&2; exit 2; }
 
-WORK=$(mktemp -d /tmp/upf-veth-layouts-XXXXXX)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/upf-veth-layouts-XXXXXX")
 LOG=$WORK/bessd.log
 BESSD_PID=
 BESSD_STARTED=0
@@ -331,17 +333,22 @@ count_of() {
 }
 
 # send_phase <phase>: every packet row of the phase, on every attachment of its
-# endpoint. The unknown TEID is one packet on the first N3 attachment.
+# endpoint. The unknown TEID is one packet on the first N3 attachment. A TEID
+# of @<name> is one the UP chose, which the driver wrote to teid-<name>.
 send_phase() {
-  local r k count=$PINGS
+  local r k teid count=$PINGS
   [ "$1" = unknown ] && count=1
   for r in "${!P_PHASE[@]}"; do
     [ "${P_PHASE[$r]}" = "$1" ] || continue
+    teid=${P_TEID[$r]}
+    if [[ "$teid" == @* ]]; then
+      teid=$(cat "$HS/teid-${teid#@}") || fail "the driver wrote no chosen TEID ${teid#@}"
+    fi
     for k in "${!A_NAME[@]}"; do
       [ "${A_NAME[$k]}" = "${P_EP[$r]}" ] || continue
       if [ "${P_KIND[$r]}" = gpdu ]; then
         sudo "$WORK/vethlayout" -send-gpdu -device "${A_DEV[$k]}" -local "${A_SRC[$k]}" \
-          -remote "${LOCAL[${P_EP[$r]}]}" -teid "${P_TEID[$r]}" -ue "${P_SRC[$r]}" \
+          -remote "${LOCAL[${P_EP[$r]}]}" -teid "$teid" -ue "${P_SRC[$r]}" \
           -dst "${P_DST[$r]}" -sport "${P_SPORT[$r]}" -dport "${P_DPORT[$r]}" -count "$count"
       else
         sudo "$WORK/vethlayout" -send-udp -device "${A_DEV[$k]}" -local "${A_SRC[$k]}" \
@@ -449,24 +456,71 @@ mode3_uplink() {
     rt/0/out=$B rt/1/out=0 rt/2/out=0 rt/4/out=0 enc/0/out=0 $(egress n6hop "$B")
 }
 mode3_downlink() {
+  # Destination Interface Access typed N9: the access side's hop, through the
+  # encap, sourced from the N9 endpoint toward the I-UPF.
   phase "Mode 3 downlink back over N9 (S9's UE, every N6 attachment)" m3dl \
     route_check_n6/3/out=$C decap0/0/out=0 decap0/1/out=0 decap0/2/out=0 \
-    rt/0/out=0 rt/1/out=0 rt/2/out=$C rt/4/out=0 enc/0/out=$C $(egress s9dl "$C")
+    rt/0/out=0 rt/1/out=$C rt/2/out=0 rt/4/out=0 enc/0/out=$C $(egress s9dl "$C")
 }
 mode5() {
   phase "Mode 5 local switch (S4 to S5, every N3 attachment)" m5 \
     route_check/1/out=$A decap0/0/out=$A decap0/1/out=0 decap0/2/out=0 endpoint_check/1/out=$A \
     rt/0/out=0 rt/1/out=$A rt/2/out=0 rt/4/out=$A enc/0/out=$A $(egress s5dl "$A")
 }
-mode6_forward() {
-  phase "Mode 6 temporary leg (S10's uplink to the target RAN)" m6 \
-    route_check/1/out=$A decap0/0/out=$A decap0/2/out=0 endpoint_check/1/out=$A \
-    rt/0/out=0 rt/1/out=$A rt/2/out=0 enc/0/out=$A $(egress s10fwd "$A")
+mode4_uplink() {
+  phase "Mode 4 N9 transit uplink (S11 from the upstream I-UPF, every N9 attachment)" m4ul \
+    route_check/2/out=$B decap0/0/out=$B decap0/1/out=0 decap0/2/out=0 \
+    endpoint_check/2/out=$B endpoint_check/1/out=0 \
+    rt/0/out=0 rt/1/out=0 rt/2/out=$B rt/4/out=0 enc/0/out=$B $(egress s11n9 "$B")
 }
-mode6_cleanup() {
-  phase "Mode 6 after the timer (S10's uplink back on N6)" m6 \
-    route_check/1/out=$A decap0/0/out=$A decap0/2/out=0 endpoint_check/1/out=$A \
-    rt/0/out=$A rt/1/out=0 rt/2/out=0 enc/0/out=0 $(egress n6hop "$A")
+mode4_downlink() {
+  phase "Mode 4 N9 transit downlink (S11 from the PSA, every N9 attachment)" m4dl \
+    route_check/2/out=$B decap0/0/out=0 decap0/1/out=$B decap0/2/out=0 \
+    endpoint_check_dl/2/out=$B endpoint_check_dl/1/out=0 \
+    rt/0/out=0 rt/1/out=$B rt/2/out=0 rt/4/out=0 enc/0/out=$B $(egress s11dl "$B")
+}
+n19_in() {
+  phase "N19 arrival (S12's N19 F-TEID to S5's UE, re-injected, every N9 attachment)" n19in \
+    route_check/2/out=$B decap0/0/out=0 decap0/1/out=$B decap0/2/out=0 \
+    endpoint_check_dl/2/out=$B endpoint_check_dl/1/out=0 \
+    rt/0/out=0 rt/1/out=$B rt/2/out=0 rt/4/out=$B enc/0/out=$B $(egress s5dl "$B")
+}
+n19_out() {
+  phase "N19 egress (S4's UE to the other PSA's member through S12, every N3 attachment)" n19out \
+    route_check/1/out=$A decap0/0/out=$A decap0/1/out=0 decap0/2/out=0 endpoint_check/1/out=$A \
+    rt/0/out=0 rt/1/out=0 rt/2/out=$A rt/4/out=$A enc/0/out=$A $(egress s12n19 "$A")
+}
+mode6_uplink() {
+  phase "Mode 6 I-UPF uplinks (S10 and S13 to the PSA, every N3 attachment)" m6ul \
+    route_check/1/out=$((2 * A)) decap0/0/out=$((2 * A)) decap0/1/out=0 decap0/2/out=0 \
+    endpoint_check/1/out=$((2 * A)) \
+    rt/0/out=0 rt/1/out=0 rt/2/out=$((2 * A)) rt/4/out=0 enc/0/out=$((2 * A)) $(egress s10n9 "$((2 * A))")
+}
+mode6_downlink() {
+  phase "Mode 6 source downlink (S10's N9 F-TEID to the source RAN, every N9 attachment)" m6dl \
+    route_check/2/out=$B decap0/1/out=$B decap0/2/out=0 endpoint_check_dl/2/out=$B \
+    rt/0/out=0 rt/1/out=$B rt/2/out=0 rt/4/out=0 enc/0/out=$B $(egress s10dl "$B")
+}
+mode6_held() {
+  phase "Mode 6 target downlink before 8a (S13's N9 F-TEID, dropped)" m6t \
+    route_check/2/out=$B decap0/1/out=$B decap0/2/out=0 endpoint_check_dl/2/out=$B \
+    rt/0/out=0 rt/1/out=0 rt/2/out=0 rt/4/out=0 enc/0/out=0
+}
+mode6_forward() {
+  phase "Mode 6 indirect forwarding (S10's and S13's chosen F-TEIDs, every N3 attachment)" m6fwd \
+    route_check/1/out=$((2 * A)) decap0/0/out=$((2 * A)) decap0/1/out=0 decap0/2/out=0 \
+    endpoint_check/1/out=$((2 * A)) \
+    rt/0/out=0 rt/1/out=$((2 * A)) rt/2/out=0 rt/4/out=0 enc/0/out=$((2 * A)) $(egress m6fwd "$((2 * A))")
+}
+mode6_switched() {
+  phase "Mode 6 target downlink after 8a (S13's N9 F-TEID to the target RAN)" m6t \
+    route_check/2/out=$B decap0/1/out=$B decap0/2/out=0 endpoint_check_dl/2/out=$B \
+    rt/0/out=0 rt/1/out=$B rt/2/out=0 rt/4/out=0 enc/0/out=$B $(egress s13dl "$B")
+}
+mode6_released() {
+  phase "Mode 6 after 13a and 15a (S10's and the forwarding F-TEIDs are unknown)" m6gone \
+    decap0/2/out=$((3 * A + B)) decap0/0/out=0 decap0/1/out=0 \
+    rt/0/out=0 rt/1/out=0 rt/2/out=0 rt/4/out=0 enc/0/out=0
 }
 
 # await <file>: the driver's handshake, failing at once if the driver has gone.
@@ -505,16 +559,19 @@ run_layout() {
   SINK_PID=$!
   HS=$WORK/handshake-$LAYOUT
   mkdir -p "$HS"
-  # One compiler holds every session: it establishes all of them, waits for
-  # both Routers' neighbors, and only then signals.
+  # One compiler holds every session, each sent to it over N4 by the driver's
+  # stand-in SMF: it establishes all of them, waits for both Routers'
+  # neighbors, and only then signals.
   "$WORK/vethlayout" -drive -layout "$LAYOUT" -target "$SERVER" -handshake "$HS" >"$WORK/driver.log" 2>&1 &
   DRIVER_PID=$!
   await established.done
-  for m in 1 2 3 5 6; do
+  for m in 1 2 3 4 5 6; do
     grep -q "^vethlayout: established: Mode $m " "$WORK/driver.log" ||
       fail "$LAYOUT: the driver established no Mode $m session"
   done
-  echo "ok: $LAYOUT: Modes 1, 2, 3, 5 and 6 established in one compiler; Mode 4 not driven"
+  grep -q "^vethlayout: established: Mode 5 .*S12: " "$WORK/driver.log" ||
+    fail "$LAYOUT: the driver established no N19 group session"
+  echo "ok: $LAYOUT: Modes 1 to 6 and the N19 group session established over N4 in one compiler"
 
   # A TEID no session admits reaches the unknown path, still endpoint-tagged,
   # and enters neither admission.
@@ -529,23 +586,43 @@ run_layout() {
   mode2_downlink
   mode3_uplink
   mode3_downlink
+  mode4_uplink
+  mode4_downlink
   mode5
+  n19_in
+  n19_out
+  mode6_uplink
+  mode6_downlink
+  mode6_held
 
+  # Mode 6's procedure: the forwarding tunnels (11b, 11d), forwarding (3b),
+  # the target's downlink switch (8a), and the releases after the timer (13a,
+  # 15a), each checked while every other session stays live.
   : >"$HS/established.go"
   await forward.done
   mode6_forward
+  mode6_held
   : >"$HS/forward.go"
-  await forward_cleanup.done
-  mode6_cleanup
-  # Every earlier phase again, in reverse, every session still live.
+  await switched.done
+  mode6_switched
+  mode6_forward
+  : >"$HS/switched.go"
+  await released.done
+  mode6_released
+  # Every earlier phase again, in reverse, every remaining session still live.
+  mode6_switched
+  n19_out
+  n19_in
   mode5
+  mode4_downlink
+  mode4_uplink
   mode3_downlink
   mode3_uplink
   mode2_downlink
   mode2_uplink
   mode1_downlink
   mode1_uplink
-  : >"$HS/forward_cleanup.go"
+  : >"$HS/released.go"
   wait "$DRIVER_PID" || { cat "$WORK/driver.log" >&2; DRIVER_PID=; fail "$LAYOUT: the driver failed"; }
   DRIVER_PID=
 
@@ -560,4 +637,4 @@ for layout in one-mac one-vlan one-hybrid two-n3n9-n6 two-n3n6-n9 two-n6n9-n3 th
   run_layout "$layout"
 done
 
-echo "veth-layouts: ok (9 attachment layouts, up to 4 promiscuous PMD ports; Modes 1, 2, 3, 5 and 6 through the compiled pipeline on every attachment, endpoint-scoped GTP-U admission, unknown-TEID separation)"
+echo "veth-layouts: ok (9 attachment layouts, up to 4 promiscuous PMD ports; Modes 1 to 6 and N19 over N4 through the compiled pipeline on every attachment, endpoint-scoped GTP-U admission, unknown-TEID separation)"

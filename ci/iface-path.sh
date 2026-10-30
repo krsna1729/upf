@@ -23,16 +23,25 @@
 # their frames out of two different exits (ULCL: the data network's hop and an
 # N9 tunnel) on the session's one TEID, and the remote PSA's downlink arrives on
 # that session's N9 F-TEID and leaves toward the gNB.
-# The `forward` and `forward_cleanup` windows exercise that temporary FAR
-# lifecycle with a local timer standing in for the SMF timer. They do not run
-# N2 signaling or the complete 5GC/NG-RAN handover procedure.
+# Mode 4 (S11, an I-UPF between an I-UPF and the PSA: TS 23.502 4.3.5.4 step
+# 6) is one transit window per direction: each arrives on an N9 F-TEID and
+# leaves through a tunnel sourced from the N9 endpoint, which the 3GPP
+# Interface Type selects (TS 29.244 8.2.118). The N19 windows run the 5G VN
+# group-level session (S12, TS 23.502 4.13.8.2.2) beside its members: the
+# other PSA's member reaches S5's UE over N19, and S4's UE reaches it back.
+# The m6_* windows run Mode 6, an N2 handover with the intermediate UPF
+# re-allocated and indirect forwarding (TS 23.502 4.9.1.3), with this UP as
+# the source I-UPF of S10 and the target I-UPF of S13: the steady legs, S13's
+# downlink dropped until step 8a, the forwarding tunnels of steps 11b and 11d
+# on the F-TEIDs the UP chose (the driver rewrites the two streams' frames to
+# them), the switch, and -- after the SMF's timer -- 13a and 15a, after which
+# nothing S10 or a forwarding F-TEID admitted leaves and S13 still does. The
+# stand-in SMF sends every message over PFCP; there is no RAN or N2 here.
 # The `concurrent` window adds Mode 3 (a PSA receiving N9: the uplink arrives on
 # an N9 F-TEID carrying the same TEID S1 holds on N3, and leaves by N6) and then
-# holds every Release 16 scenario this UP serves -- Modes 1, 2, 3 and 5 live
-# together, Mode 6's leg having been S1's -- with every stream running at once:
-# each session's own bytes must leave by its own exit and by no other. Mode 4
-# is not established by any cited procedure and is not driven
-# (docs/compliance.md).
+# holds every Release 16 scenario this UP serves -- Modes 1 to 5, N19, and
+# Mode 6 between the switch and the timer -- with every stream running at
+# once: each session's own bytes must leave by its own exit and by no other.
 #
 # Why windows rather than one run: every frame in this graph opens with the same
 # MACs, so each window injects exactly the streams its case is about and the
@@ -145,8 +154,11 @@ window() {
 # Each concurrent session's own bytes, by the Dump its exit feeds: the data
 # network's (dump_n6) for Mode 1's uplink, Mode 2's local branch, Mode 3's N9
 # arrival and S6's subscriber-side forward; the encap's (dump_n3) for Mode 1's
-# downlink, Mode 2's N9 branch and its remote PSA's downlink, and Mode 5's
-# re-injected packet. Each holds the inner source and destination.
+# downlink, Mode 2's N9 branch and its remote PSA's downlink, Mode 4's two
+# directions, Mode 5's re-injected packet, N19's two, and Mode 6's: S13's
+# uplink, and the downlink to S13's and S10's UEs (S13's switched leg and both
+# forwarding tunnels). Each holds the inner source and destination; the TEIDs
+# tell the legs that carry one inner packet apart.
 CONCURRENT_N6=(
   "0a 2d 00 02 08 08 08 08" # Mode 1 uplink (S1)
   "0a 2d 00 08 08 08 08 08" # Mode 2 local PSA branch (S8)
@@ -157,14 +169,30 @@ CONCURRENT_N3=(
   "08 08 08 08 0a 2d 00 02" # Mode 1 downlink (S1)
   "0a 2d 00 08 0a 2e 00 02" # Mode 2 N9 branch (S8)
   "0a 2e 00 02 0a 2d 00 08" # Mode 2 remote PSA's downlink (S8)
+  "0a 2d 00 0b 08 08 08 08" # Mode 4 uplink, to the PSA (S11)
+  "08 08 08 08 0a 2d 00 0b" # Mode 4 downlink, to the upstream I-UPF (S11)
   "0a 2d 00 05 0a 2d 00 06" # Mode 5, S4's UE to S5's (S5's tunnel)
+  "0a 2d 09 02 0a 2d 00 06" # N19 in: the other PSA's member to S5's UE
+  "0a 2d 00 05 0a 2d 09 02" # N19 out: S4's UE to the other PSA's member
+  "0a 2d 00 0d 08 08 08 08" # Mode 6 target I-UPF uplink (S13)
+  "08 08 08 08 0a 2d 00 0d" # Mode 6 downlink to S13's UE
+  "08 08 08 08 0a 2d 00 0a" # Mode 6 downlink to S10's UE, forwarded
+)
+# The TEIDs the encap wrote: Mode 1's, Mode 2's, Mode 4's both ways, Mode 5's
+# (S5's: the re-injection and the N19 arrival), N19's, and Mode 6's S13 uplink,
+# switched downlink and the two forwarding tunnels.
+CONCURRENT_TEIDS=(
+  "55 66 77 81" "55 66 77 88" "55 66 77 8c" "55 66 77 8d" "55 66 77 89"
+  "55 66 77 8e" "55 66 77 90" "55 66 77 91" "55 aa 55 aa" "55 aa 55 ab"
 )
 concurrent_seen() { # every concurrent signature is in the window's slice so far
   local n6 n3 sig
   n6=$(dump_hex dump_n6 "$WORK/concurrent.log")
   n3=$(dump_hex dump_n3 "$WORK/concurrent.log")
   for sig in "${CONCURRENT_N6[@]}"; do [ "${n6#*"$sig"}" != "$n6" ] || return 1; done
-  for sig in "${CONCURRENT_N3[@]}"; do [ "${n3#*"$sig"}" != "$n3" ] || return 1; done
+  for sig in "${CONCURRENT_N3[@]}" "${CONCURRENT_TEIDS[@]}"; do
+    [ "${n3#*"$sig"}" != "$n3" ] || return 1
+  done
 }
 # The concurrent window: the streams run until each session's bytes have been
 # printed, bounded below the driver's own 60-second wait for the go file. Then
@@ -191,10 +219,21 @@ window ulcl
 window ulcl_n9_down
 window down
 window mode1_down
-window forward
-window forward_cleanup
 window vn
+window transit_up
+window transit_down
+window n19_in
+window n19_out
+window m6_source_up
+window m6_source_down
+window m6_target_up
+window m6_held
+window m6_forward_source
+window m6_forward_target
+window m6_switched
 concurrent_window
+window m6_released
+window m6_target_kept
 window refuse
 window arp
 window gone
@@ -247,10 +286,9 @@ DN_N6=$(dump_hex dump_n6 "$WORK/down.log")
 DN_N3=$(dump_hex dump_n3 "$WORK/down.log")
 M1D_N6=$(dump_hex dump_n6 "$WORK/mode1_down.log")
 M1D_N3=$(dump_hex dump_n3 "$WORK/mode1_down.log")
-FW_N6=$(dump_hex dump_n6 "$WORK/forward.log")
-FW_N3=$(dump_hex dump_n3 "$WORK/forward.log")
-FC_N6=$(dump_hex dump_n6 "$WORK/forward_cleanup.log")
-FC_N3=$(dump_hex dump_n3 "$WORK/forward_cleanup.log")
+# The Mode 4, N19 and Mode 6 windows' Dumps, read by window name.
+n3_of() { dump_hex dump_n3 "$WORK/$1.log"; }
+n6_of() { dump_hex dump_n6 "$WORK/$1.log"; }
 VN_N6=$(dump_hex dump_n6 "$WORK/vn.log")
 VN_N3=$(dump_hex dump_n3 "$WORK/vn.log")
 CC_N6=$(dump_hex dump_n6 "$WORK/concurrent.log")
@@ -332,23 +370,6 @@ contains "mode1_down: it carries S1's downlink TEID" \
       "$M1D_N3" "55 66 77 81"
 empty "mode1_down: nothing left by the data network's exit" "$M1D_N6"
 
-# --- an uplink forward toward the access side (indirect forwarding) ---------
-contains "forward: the indirect forward left through the encap" \
-      "$FW_N3" "55 aa 55 aa"
-contains "forward: it carries the session's own packet" \
-      "$FW_N3" "0a 2d 00 02 08 08 08 08"
-empty "forward: it did not leave by the data network's exit" "$FW_N6"
-
-# --- Mode 6 temporary N3 forwarding FAR, then SMF-timer cleanup -------------
-# The driver starts a bounded timer on the accepted N4 update. This fixture
-# simulates its expiry and the SMF's cleanup update; it is not a full 5GC/NG-RAN
-# Mode 6 procedure.
-contains "forward_cleanup: the live session returned to the N6 egress" \
-      "$FC_N6" "0a 2d 00 02 08 08 08 08"
-contains "forward_cleanup: the restored N6 route carries its L2 pair" \
-      "$FC_N6" "02 00 00 00 06 02 02 00 00 00 06 01"
-empty "forward_cleanup: the temporary N3 tunnel is gone" "$FC_N3"
-
 # --- 5G VN Internal, both steps ---------------------------------------------
 # S4's uplink packet is re-injected into the subscriber-side table, where S5
 # takes it and tunnels it to the target UE's gNB: the TEID is S5's own.
@@ -358,11 +379,82 @@ contains "vn: the frame is the one S4's UE sent to S5's UE" \
       "$VN_N3" "0a 2d 00 05 0a 2d 00 06"
 empty "vn: the re-injection did not leave by the data network's exit" "$VN_N6"
 
+# --- Mode 4: an I-UPF between an I-UPF and the PSA ---------------------------
+# Both legs are N9 (TS 23.502 4.3.5.4 step 6): the uplink arrives on S11's N9
+# F-TEID (Source Interface Access, typed N9) and leaves through a tunnel to the
+# PSA; the PSA's downlink arrives on its other N9 F-TEID and leaves toward the
+# upstream I-UPF (Destination Interface Access, typed N9). Each tunnel is
+# sourced from the N9 endpoint (192.0.2.9) to the peer 10.20.30.9: the
+# downlink one without the type would be the RAN's N3 (192.0.2.1).
+T_UP=$(n3_of transit_up)
+T_DN=$(n3_of transit_down)
+contains "transit_up: the uplink left through the tunnel to the PSA" "$T_UP" "55 66 77 8c"
+contains "transit_up: it is the upstream I-UPF's packet" "$T_UP" "0a 2d 00 0b 08 08 08 08"
+contains "transit_up: the tunnel is sourced from the N9 endpoint" "$T_UP" "c0 00 02 09 0a 14 1e 09"
+empty "transit_up: nothing left by the data network's exit" "$(n6_of transit_up)"
+contains "transit_down: the downlink left through the tunnel to the upstream I-UPF" "$T_DN" "55 66 77 8d"
+contains "transit_down: it is the PSA's packet" "$T_DN" "08 08 08 08 0a 2d 00 0b"
+contains "transit_down: the tunnel is sourced from the N9 endpoint" "$T_DN" "c0 00 02 09 0a 14 1e 09"
+absent "transit_down: not from the N3 endpoint" "$T_DN" "c0 00 02 01 0a 14 1e 09"
+empty "transit_down: nothing left by the data network's exit" "$(n6_of transit_down)"
+
+# --- N19: the 5G VN group-level session -------------------------------------
+# S12's N19 PDR takes the other PSA's packet on its N19 F-TEID and re-injects
+# it into the 5G VN's classification, where S5's 5G VN Internal PDR tunnels it
+# to S5's gNB; S4's packet to the member the other PSA anchors is re-injected
+# the same way and S12's 5G VN Internal PDR tunnels it over N19, from the N9
+# endpoint.
+N19_IN=$(n3_of n19_in)
+N19_OUT=$(n3_of n19_out)
+contains "n19_in: the other PSA's member reached S5's gNB" "$N19_IN" "55 66 77 89"
+contains "n19_in: it is the member's packet to S5's UE" "$N19_IN" "0a 2d 09 02 0a 2d 00 06"
+empty "n19_in: nothing left by the data network's exit" "$(n6_of n19_in)"
+contains "n19_out: S4's packet left over N19" "$N19_OUT" "55 66 77 8e"
+contains "n19_out: it is S4's UE to the other PSA's member" "$N19_OUT" "0a 2d 00 05 0a 2d 09 02"
+contains "n19_out: the N19 tunnel is sourced from the N9 endpoint" "$N19_OUT" "c0 00 02 09 0a 14 1e 09"
+empty "n19_out: nothing left by the data network's exit" "$(n6_of n19_out)"
+
+# --- Mode 6: indirect data forwarding, UPF re-allocated ---------------------
+contains "m6_source_up: S10's uplink left through its tunnel to the PSA" \
+      "$(n3_of m6_source_up)" "55 66 77 8f"
+contains "m6_source_down: the PSA's downlink to S10 left toward the source RAN" \
+      "$(n3_of m6_source_down)" "55 66 77 8b"
+contains "m6_target_up: S13's uplink left through its tunnel to the PSA" \
+      "$(n3_of m6_target_up)" "55 66 77 90"
+empty "m6_held: S13's downlink is dropped until step 8a" "$(n3_of m6_held)$(n6_of m6_held)"
+# Steps 11b and 11d: each forwarding PDR's F-TEID is one the UP chose, on the
+# N3 endpoint (typed N3 for data forwarding); the stream's frame was rewritten
+# to it, and what it admitted left through the forwarding tunnel.
+M6_11B=$(grep -o 'Mode 6 11b: .*' "$WORK/driver.log" || true)
+M6_11D=$(grep -o 'Mode 6 11d: .*' "$WORK/driver.log" || true)
+contains "m6: the target UPF chose its forwarding F-TEID on the N3 endpoint" "$M6_11B" "the UP chose F-TEID 0x"
+contains "m6: ... on 192.0.2.1" "$M6_11B" "on 192.0.2.1"
+contains "m6: the source UPF chose its forwarding F-TEID on the N3 endpoint" "$M6_11D" "the UP chose F-TEID 0x"
+contains "m6: ... on 192.0.2.1" "$M6_11D" "on 192.0.2.1"
+FWD_S=$(n3_of m6_forward_source)
+FWD_T=$(n3_of m6_forward_target)
+contains "m6_forward_source: the forwarded downlink left toward the target UPF" "$FWD_S" "55 aa 55 aa"
+contains "m6_forward_source: it is the downlink to S10's UE" "$FWD_S" "08 08 08 08 0a 2d 00 0a"
+empty "m6_forward_source: nothing left by the data network's exit" "$(n6_of m6_forward_source)"
+contains "m6_forward_target: the forwarded downlink left toward the target RAN" "$FWD_T" "55 aa 55 ab"
+contains "m6_forward_target: it is the downlink to S13's UE" "$FWD_T" "08 08 08 08 0a 2d 00 0d"
+empty "m6_forward_target: nothing left by the data network's exit" "$(n6_of m6_forward_target)"
+contains "m6_switched: after step 8a S13's downlink left toward the target RAN" \
+      "$(n3_of m6_switched)" "55 66 77 91"
+# After the timer: 13a released S10 and 15a S13's forwarding PDR and FAR.
+contains "m6: the driver released S10 (13a) and S13's forwarding resources (15a)" \
+      "$DRIVER" "Mode 6: timer expired; S10 released (13a), S13's forwarding PDR and FAR removed (15a)"
+empty "m6_released: nothing S10 or a forwarding F-TEID admitted left" \
+      "$(n3_of m6_released)$(n6_of m6_released)"
+contains "m6_target_kept: S13's downlink still left toward the target RAN" \
+      "$(n3_of m6_target_kept)" "55 66 77 91"
+
 # --- every scenario at once -------------------------------------------------
-# Modes 1, 2, 3 and 5 (and S6) are established together and every stream runs
-# at once. The driver required each scenario exit's Router gate to move and the
-# service LAN's and the responder's not to; here each session's own bytes must
-# be in the Dump its exit feeds and in no other.
+# Modes 1 to 5, the N19 group session, S6 and Mode 6 between the switch and
+# the timer are established together and every stream runs at once. The
+# driver required each scenario exit's Router gate to move and the service
+# LAN's and the responder's not to; here each session's own bytes must be in
+# the Dump its exit feeds and in no other.
 contains "concurrent: every scenario's Router exit moved with all sessions live" \
       "$DRIVER" "concurrent: every scenario's exit moved with all sessions live"
 for sig in "${CONCURRENT_N6[@]}"; do
@@ -377,8 +469,8 @@ done
 # did S1 on N3 (its uplink bytes above), each by its own admission key.
 contains "concurrent: Mode 3's N9 F-TEID is S1's TEID on endpoint 2" \
       "$DRIVER" "established: S9: PSA receiving N9, forwarding to N6"
-for teid in "55 66 77 81" "55 66 77 88" "55 66 77 89"; do
-  contains "concurrent: the encap carried downlink TEID $teid" "$CC_N3" "$teid"
+for teid in "${CONCURRENT_TEIDS[@]}"; do
+  contains "concurrent: the encap carried TEID $teid" "$CC_N3" "$teid"
 done
 empty "concurrent: nothing left by the service LAN's exit or the responder" "$CC_LAN$CC_ARP"
 
@@ -387,8 +479,9 @@ empty "concurrent: nothing left by the service LAN's exit or the responder" "$CC
 # line (the driver's log) names the value or the IE.
 empty "refuse: no refused establishment wrote a frame" "$REF_N6"
 # The plan's four probes for this lane: with -access-next-hop ignored, the
-# indirect forward takes the uplink direction's hop and the 'forward' window
-# fails above; with direction() back to its old mapping, Src 2 flows into the
+# forwarding tunnels (an uplink-chain PDR whose FAR names Access) take the
+# uplink direction's hop and the m6_forward_* windows fail above; with
+# direction() back to its old mapping, Src 2 flows into the
 # uplink chain and the downlink-key checks above fail; with the Forwarding
 # Policy requirement dropped, the refusal below disappears; with the ARP entries
 # not written, the 'arp' window's reply and the entry line above disappear.

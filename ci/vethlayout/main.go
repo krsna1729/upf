@@ -8,12 +8,13 @@
 // takes, the packets each scenario phase sends, and the upfd flags that
 // configure a compiler for the same graph.
 //
-// With -drive it is that compiler: one session.Compiler over the BESS SDK
-// establishes every Release 16 scenario's sessions this UP serves (Modes 1, 2,
-// 3, 5 and 6, ci/scenario; Mode 4 is not established by any cited procedure
-// and is not driven), waits for both Routers to resolve their neighbors, and
-// then hands the phases to the shell through handshake files, running Mode 6's
-// temporary leg, its 4 s timer and the cleanup itself. Every session stays
+// With -drive it is that compiler: one session.Compiler over the BESS SDK,
+// behind the UP function's N4 node, to which a stand-in SMF sends every
+// Release 16 scenario's sessions over PFCP (ci/scenario: Modes 1 to 6 and the
+// N19 group session). It waits for both Routers to resolve their neighbors,
+// then hands the phases to the shell through handshake files, running Mode
+// 6's indirect forwarding procedure (preparation, the switch of the target's
+// downlink, its 4 s timer and the releases) itself. Every other session stays
 // established until the shell has replayed every scenario after Mode 6.
 //
 // It also sends the lane's packets: -send-gpdu for G-PDUs to a local endpoint,
@@ -33,6 +34,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -603,6 +605,11 @@ func graphFor(cfg layout, eps []endpoint, p plan, ifaces []string) (map[string]a
 			"interfaces":                     rtIfaces,
 			"neighbor_reachable_lifetime_ms": 0,
 		}),
+		// The re-injection clears the F-TEID context (deploy/upf.yaml's
+		// tag_vn): an N19 arrival's PDR is keyed by that context alone.
+		module("tag_vn", "SetMetadata", map[string]any{"attrs": []map[string]any{
+			{"name": "fteid_context", "size": 4, "value_int": 0},
+		}}),
 		module("enc", "GtpuEncap", map[string]any{"max_tunnels": 65536}),
 		module("rt_transport", "Router", map[string]any{
 			"mode":                           "ROUTE_MODE_DESTINATION",
@@ -644,7 +651,8 @@ func graphFor(cfg layout, eps []endpoint, p plan, ifaces []string) (map[string]a
 		wire("atsss", "rt", nil),
 		wire("rt", "enc", gate(hopAccess-1)),
 		wire("rt", "enc", gate(hopN9-1)),
-		wire("rt", "pdr_dl", gate(hopVN-1)),
+		wire("rt", "tag_vn", gate(hopVN-1)),
+		wire("tag_vn", "pdr_dl", nil),
 		wire("enc", "rt_transport", nil),
 	)
 
@@ -693,13 +701,24 @@ func attachmentOn(eps []endpoint, port int, name string) endpoint {
 
 // packet is one row of a scenario phase's sends: a G-PDU to the endpoint's
 // local address on each of its attachments (teid, inner source and
-// destination), or plain UDP from each N6 attachment's host (src "-").
+// destination), or plain UDP from each N6 attachment's host (src "-"). A
+// G-PDU to an F-TEID the UP chose names it instead of a TEID: the driver
+// writes the Created PDR's TEID to the handshake directory as
+// teid-<chosen>, and the contract's teid column is @<chosen>.
 type packet struct {
 	phase, endpoint, kind string
 	teid                  uint32
 	src, dst              string
 	sport, dport          uint16
+	chosen                string
 }
+
+// The F-TEIDs Mode 6's forwarding PDRs are given (scenario.CreateForwarding):
+// S10's from the source RAN, S13's from the source UPF.
+const (
+	chosenS10 = "s10fwd"
+	chosenS13 = "s13fwd"
+)
 
 // packets is every scenario phase's sends, in ci/scenario's identities:
 //
@@ -708,20 +727,40 @@ type packet struct {
 //	m2ul     Mode 2: S8's two uplink branches, one TEID
 //	m2dl     Mode 2: the remote PSA's downlink on S8's N9 F-TEID
 //	m3ul/m3dl  Mode 3: S9's uplink on its N9 F-TEID (S1's TEID); its downlink
+//	m4ul/m4dl  Mode 4: S11's uplink from the upstream I-UPF, and the PSA's
+//	         downlink, both on the N9 endpoint
 //	m5       Mode 5: S4's UE to S5's, re-injected
-//	m6       Mode 6: S10's uplink, through the temporary leg and after it
+//	n19in    N19: the other PSA's member to S5's UE on S12's N19 F-TEID
+//	n19out   N19: S4's UE to the other PSA's member, through S12
+//	m6ul/m6dl  Mode 6: S10's and S13's uplinks; S10's downlink from the PSA
+//	m6t      Mode 6: S13's downlink from the PSA (held, then to the target RAN)
+//	m6fwd    Mode 6: forwarded downlink on S10's and S13's chosen F-TEIDs
+//	m6gone   Mode 6: S10's and the forwarding F-TEIDs after the release
 func packets() []packet {
 	return []packet{
-		{"unknown", "n3", "gpdu", unknownTEID, scenario.UE1, dataNetwork, 40000, 53},
-		{"m1ul", "n3", "gpdu", scenario.UpTEID1, scenario.UE1, dataNetwork, 40000, 53},
-		{"m1dl", "n6", "udp", 0, "-", scenario.UE1, 5000, 53},
-		{"m2ul", "n3", "gpdu", scenario.UpTEID8, scenario.UE8, dataNetwork, 40000, 53},
-		{"m2ul", "n3", "gpdu", scenario.UpTEID8, scenario.UE8, scenario.ULCLBranch, 40000, 53},
-		{"m2dl", "n9", "gpdu", scenario.CoreTEID8, scenario.ULCLBranch, scenario.UE8, 53, 5000},
-		{"m3ul", "n9", "gpdu", scenario.UpTEID9, scenario.UE9, dataNetwork, 40000, 53},
-		{"m3dl", "n6", "udp", 0, "-", scenario.UE9, 5000, 53},
-		{"m5", "n3", "gpdu", scenario.UpTEID4, scenario.UE4, scenario.UE5, 5000, 5000},
-		{"m6", "n3", "gpdu", scenario.UpTEID10, scenario.UE10, dataNetwork, 40000, 53},
+		{"unknown", "n3", "gpdu", unknownTEID, scenario.UE1, dataNetwork, 40000, 53, ""},
+		{"m1ul", "n3", "gpdu", scenario.UpTEID1, scenario.UE1, dataNetwork, 40000, 53, ""},
+		{"m1dl", "n6", "udp", 0, "-", scenario.UE1, 5000, 53, ""},
+		{"m2ul", "n3", "gpdu", scenario.UpTEID8, scenario.UE8, dataNetwork, 40000, 53, ""},
+		{"m2ul", "n3", "gpdu", scenario.UpTEID8, scenario.UE8, scenario.ULCLBranch, 40000, 53, ""},
+		{"m2dl", "n9", "gpdu", scenario.CoreTEID8, scenario.ULCLBranch, scenario.UE8, 53, 5000, ""},
+		{"m3ul", "n9", "gpdu", scenario.UpTEID9, scenario.UE9, dataNetwork, 40000, 53, ""},
+		{"m3dl", "n6", "udp", 0, "-", scenario.UE9, 5000, 53, ""},
+		{"m4ul", "n9", "gpdu", scenario.UpTEID11, scenario.UE11, dataNetwork, 40000, 53, ""},
+		{"m4dl", "n9", "gpdu", scenario.CoreTEID11, dataNetwork, scenario.UE11, 5000, 53, ""},
+		{"m5", "n3", "gpdu", scenario.UpTEID4, scenario.UE4, scenario.UE5, 5000, 5000, ""},
+		{"n19in", "n9", "gpdu", scenario.N19TEID, scenario.RemoteUE, scenario.UE5, 5000, 5000, ""},
+		{"n19out", "n3", "gpdu", scenario.UpTEID4, scenario.UE4, scenario.RemoteUE, 5000, 5000, ""},
+		{"m6ul", "n3", "gpdu", scenario.UpTEID10, scenario.UE10, dataNetwork, 40000, 53, ""},
+		{"m6ul", "n3", "gpdu", scenario.UpTEID13, scenario.UE13, dataNetwork, 40000, 53, ""},
+		{"m6dl", "n9", "gpdu", scenario.CoreTEID10, dataNetwork, scenario.UE10, 5000, 53, ""},
+		{"m6t", "n9", "gpdu", scenario.CoreTEID13, dataNetwork, scenario.UE13, 5000, 53, ""},
+		{"m6fwd", "n3", "gpdu", 0, dataNetwork, scenario.UE10, 5000, 53, chosenS10},
+		{"m6fwd", "n3", "gpdu", 0, dataNetwork, scenario.UE13, 5000, 53, chosenS13},
+		{"m6gone", "n3", "gpdu", 0, dataNetwork, scenario.UE10, 5000, 53, chosenS10},
+		{"m6gone", "n3", "gpdu", 0, dataNetwork, scenario.UE13, 5000, 53, chosenS13},
+		{"m6gone", "n3", "gpdu", scenario.UpTEID10, scenario.UE10, dataNetwork, 40000, 53, ""},
+		{"m6gone", "n9", "gpdu", scenario.CoreTEID10, dataNetwork, scenario.UE10, 5000, 53, ""},
 	}
 }
 
@@ -732,7 +771,7 @@ func packets() []packet {
 //	endpoint  <name> <port> <vlan> <mac> <ip> <domain> <id> <host> <router> <gate>
 //	local     <n3|n9> <address>
 //	egress    <label> <endpoint> <host>   (the attachment a scenario's egress takes)
-//	packet    <phase> <endpoint> <gpdu|udp> <teid> <src> <dst> <sport> <dport>
+//	packet    <phase> <endpoint> <gpdu|udp> <teid|@chosen> <src> <dst> <sport> <dport>
 //	upfd      <flag> <value>
 func writeContract(path string, groups [][]string, eps []endpoint, p plan) error {
 	var b strings.Builder
@@ -749,13 +788,23 @@ func writeContract(path string, groups [][]string, eps []endpoint, p plan) error
 		{"s8dl", "n3", p.peers.GNB2},
 		{"s9dl", "n9", p.peers.UPF2},
 		{"s5dl", "n3", p.peers.GNB},
-		{"s10fwd", "n3", p.peers.GNB2},
+		{"s11n9", "n9", p.peers.UPF},
+		{"s11dl", "n9", p.peers.UPF2},
+		{"s12n19", "n9", p.peers.UPF},
+		{"s10n9", "n9", p.peers.UPF},
+		{"s10dl", "n3", p.peers.GNB},
+		{"s13dl", "n3", p.peers.GNB2},
+		{"m6fwd", "n3", p.peers.GNB2},
 	} {
 		fmt.Fprintf(&b, "egress\t%s\t%s\t%s\n", e[0], e[1], e[2])
 	}
 	for _, k := range packets() {
-		fmt.Fprintf(&b, "packet\t%s\t%s\t%s\t%d\t%s\t%s\t%d\t%d\n",
-			k.phase, k.endpoint, k.kind, k.teid, k.src, k.dst, k.sport, k.dport)
+		teid := fmt.Sprint(k.teid)
+		if k.chosen != "" {
+			teid = "@" + k.chosen
+		}
+		fmt.Fprintf(&b, "packet\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
+			k.phase, k.endpoint, k.kind, teid, k.src, k.dst, k.sport, k.dport)
 	}
 	for _, f := range upfdFlags(p) {
 		fmt.Fprintf(&b, "upfd\t%s\t%s\n", f[0], f[1])
@@ -764,8 +813,9 @@ func writeContract(path string, groups [][]string, eps []endpoint, p plan) error
 }
 
 // drive is the compiler for one layout: every permitted mode's sessions
-// first, both Routers resolved, then the shell's phases. Mode 6 runs on S10,
-// its own session, so S1 stays steady for Mode 1 throughout.
+// first, each established over N4 (scenario.Serve), both Routers resolved,
+// then the shell's phases. Mode 6 runs on S10 and S13, their own sessions, so
+// the other modes stay steady throughout.
 func drive(name, target, handshake string) error {
 	cfg, err := layoutFor(name)
 	if err != nil {
@@ -789,12 +839,17 @@ func drive(name, target, handshake string) error {
 	if err := client.Refresh(ctx); err != nil {
 		return fmt.Errorf("reading the daemon's schema: %w", err)
 	}
-	c := session.New(ccfg, client, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	smf, stop, err := scenario.Serve(session.New(ccfg, client, log), log)
+	if err != nil {
+		return err
+	}
+	defer stop()
 
 	seids := map[uint64]uint64{}
 	for _, m := range scenario.Modes(p.peers) {
 		for _, s := range m.Sessions {
-			seid, err := scenario.Establish(c, s, p.local)
+			seid, err := scenario.Establish(smf, s, p.local)
 			if err != nil {
 				return fmt.Errorf("mode %d: %w", m.Number, err)
 			}
@@ -802,40 +857,80 @@ func drive(name, target, handshake string) error {
 			fmt.Printf("vethlayout: established: Mode %d (%s): %s (SEID %d)\n", m.Number, m.Name, s.Name, seid)
 		}
 	}
-	fmt.Println("vethlayout: Mode 4 (N9-to-N9 transit) is not established by any cited procedure and is not driven")
 	if err := awaitNeighbors(ctx, client, map[string]int{
 		"rt":           1, // the N6 hop
 		"rt_transport": len(eps) - len(attachments(eps, "n6")),
 	}); err != nil {
 		return err
 	}
-	// The shell drives Modes 1, 2, 3 and 5 with every session above live.
+	// The shell drives Modes 1 to 5, N19, and Mode 6's steady state (S13's
+	// downlink held) with every session above live.
 	const within = 5 * time.Minute
 	if err := scenario.Pass(handshake, "established", within); err != nil {
 		return err
 	}
 
-	seid10 := seids[scenario.SEID10]
-	if err := scenario.Modify(c, scenario.StartForward(seid10, p.peers.GNB2), "Mode 6: creating S10's temporary forwarding FAR"); err != nil {
-		return err
+	// Mode 6 preparation (TS 23.502 4.9.1.3.2): 11b at the target UPF (S13),
+	// then 11d at the source UPF (S10), each answering the F-TEID it chose.
+	seid10, seid13 := seids[scenario.SEID10], seids[scenario.SEID13]
+	for _, f := range []struct {
+		step, chosen string
+		seid         uint64
+		teid         uint32
+	}{
+		{"11b: S13's forwarding tunnel to the target RAN", chosenS13, seid13, scenario.TargetForwardTEID},
+		{"11d: S10's forwarding tunnel to the target UPF", chosenS10, seid10, scenario.ForwardTEID},
+	} {
+		resp, err := scenario.Modify(smf, scenario.CreateForwarding(f.seid, internet, f.teid, p.peers.GNB2), "Mode 6 "+f.step)
+		if err != nil {
+			return err
+		}
+		teid, addr, err := scenario.Forwarding(resp)
+		if err != nil {
+			return fmt.Errorf("Mode 6 %s: %w", f.step, err)
+		}
+		// The forwarding PDR is typed N3 for data forwarding: its F-TEID is
+		// the N3 endpoint's, where the forwarded downlink arrives.
+		if addr != p.local.N3 {
+			return fmt.Errorf("Mode 6 %s: the UP chose an F-TEID on %s, want the N3 endpoint %s", f.step, addr, p.local.N3)
+		}
+		if handshake != "" {
+			if err := os.WriteFile(filepath.Join(handshake, "teid-"+f.chosen), []byte(fmt.Sprint(teid)), 0o644); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("vethlayout: Mode 6 %s: the UP chose F-TEID %#x on %s\n", f.step, teid, addr)
 	}
-	expiry := time.Now().Add(scenario.ForwardingTimer)
-	fmt.Printf("vethlayout: Mode 6: temporary FAR %d toward the target RAN %s; timer %s started\n",
-		scenario.ForwardFARID, p.peers.GNB2, scenario.ForwardingTimer)
+	// Execution (4.9.1.3.3): step 3b's forwarding, then 8a.
 	if err := scenario.Pass(handshake, "forward", within); err != nil {
 		return err
 	}
+	if _, err := scenario.Modify(smf, scenario.SwitchDownlink(seid13, scenario.DLTEID13, p.peers.GNB2),
+		"Mode 6 8a: S13's downlink to the target RAN"); err != nil {
+		return err
+	}
+	// Step 11: the SMF starts its indirect data forwarding timer.
+	expiry := time.Now().Add(scenario.ForwardingTimer)
+	fmt.Println("vethlayout: Mode 6 8a: S13's downlink FAR forwards to the target RAN; the forwarding timer started")
+	if err := scenario.Pass(handshake, "switched", within); err != nil {
+		return err
+	}
+	// The SMF's indirect data forwarding timer: 13a releases the source UPF's
+	// session, 15a the target UPF's forwarding resources.
 	time.Sleep(time.Until(expiry))
-	if err := scenario.Modify(c, scenario.EndForward(seid10), "Mode 6: restoring S10's steady FAR"); err != nil {
+	if err := scenario.Release(smf, seid10, "Mode 6 13a: releasing S10"); err != nil {
 		return err
 	}
-	fmt.Printf("vethlayout: Mode 6: timer expired; S10 returned to FAR 1 and temporary FAR %d was removed\n", scenario.ForwardFARID)
-	// The shell checks the cleanup and replays every earlier phase: no later
+	if _, err := scenario.Modify(smf, scenario.ReleaseForwarding(seid13), "Mode 6 15a: releasing S13's forwarding PDR and FAR"); err != nil {
+		return err
+	}
+	fmt.Println("vethlayout: Mode 6: timer expired; S10 released (13a), S13's forwarding resources removed (15a)")
+	// The shell checks the release and replays every earlier phase: no later
 	// session or modification may have overwritten an earlier one.
-	if err := scenario.Pass(handshake, "forward_cleanup", within); err != nil {
+	if err := scenario.Pass(handshake, "released", within); err != nil {
 		return err
 	}
-	fmt.Println("vethlayout: every permitted mode's sessions were held live to the end: 1, 2, 3, 5, 6")
+	fmt.Println("vethlayout: every mode's sessions were held live to the end: 1, 2, 3, 4, 5 with N19, 6")
 	return nil
 }
 
