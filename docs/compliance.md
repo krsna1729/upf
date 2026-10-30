@@ -26,34 +26,58 @@ behavior, not PMD, queue, Vif, or physical-port counts.
 |---|---|---|---|
 | 1 — PSA, N3 ↔ N6 | One ordinary PDU-session N4 context at a PSA. | N3 Access-side tunnel admission by F-TEID; N6 plain-IP path; downlink FAR toward Access carries the RAN Outer Header Creation. | **Allowed.** Ordinary PSA connectivity and N3 tunnel behavior (TS 23.501 §§6.2.3, 5.8.2.3.1, 5.8.2.10). |
 | 2 — UL CL steering to local N6 or N9 | One PDU session with an UL CL and multiple PSAs; an UL CL may also host a PSA. Co-location is conditional on SMF/operator placement. | N3 ingress; UL CL rules steer uplink traffic to a local N6 PSA or an N9 tunnel to another PSA; downlink traffic returns toward the access tunnel. | **Conditional.** The SMF inserts and controls the UL CL; there is one UPF supporting the UL CL connected to the RAN over N3 except during relocation. Co-location with a PSA is explicitly permitted (TS 23.501 §5.6.4.2; TS 23.502 §4.3.5.4). |
-| 3 — PSA receiving N9, forwarding to N6 | A PDU session traverses an N3-terminating I-UPF and a PSA; this UPF is the PSA role. These are distinct UPF roles, even when function capabilities share a process. | N9 terminates at the PSA as per-session CN Tunnel Info; N6 connects the PSA to the data network. A tunneled N9 arrival uses a Core-side PDR/F-TEID; N6 egress is plain IP. | **Allowed** as the ordinary multi-UPF PSA path. TS 23.501 §5.8.2.10 names the N9 tunnel between an N3-terminating UPF and the PSA. |
-| 4 — Cascaded N9-to-N9 transit | The project label means one intermediate UPF/session receives on one N9 tunnel and forwards on another N9 tunnel. | Two N9 peer endpoints and a Core-side tunnel PDR/F-TEID plus a tunneled Core-side FAR are implied by the label; no cited R16 procedure establishes this exact tandem role/session shape. | **Not established.** R16 defines N9 between UPFs and N19/group-level forwarding, but the pinned excerpts do not establish this N9-to-N9 transit composition. Do not report it as compliant or force it into a valid-mode fixture. |
-| 5 — 5G-VN local switching | At least two distinct member PDU-session/N4 contexts; the source and target sessions share one common PSA UPF, one 5G-VN group, and one controlling SMF. No group-level N4 session is required for local switching. | Source member PDR uses Access-side CN Tunnel Info (N3 or N9) and FAR Destination Interface 5G-VN internal. Internal-interface classification matches the target member by destination address; its FAR carries OHC to that member's N3/N9 tunnel. | **Conditional.** The same-PSA, different-PDU-session local-switch procedure is explicit. If N19 forwarding between different PSA UPFs is used instead, a group-level N4 session is required at each involved UPF (TS 23.501 §§5.8.2.13, 5.8.2.13.1, 5.29.4). |
+| 3 — PSA receiving N9, forwarding to N6 | A PDU session traverses an N3-terminating I-UPF and a PSA; this UPF is the PSA role. These are distinct UPF roles, even when function capabilities share a process. | N9 terminates at the PSA as per-session CN Tunnel Info; N6 connects the PSA to the data network. The N9 arrival is the uplink, so its PDR names Source Interface Access (TS 29.244 Table 8.2.2-1 NOTE 1) with Source Interface Type N9 (8.2.118), which puts its F-TEID on the N9 endpoint; the downlink FAR back to the I-UPF names Destination Interface Access (Table 8.2.24-1 NOTE 1) typed N9. N6 egress is plain IP. | **Allowed** as the ordinary multi-UPF PSA path. TS 23.501 §5.8.2.10 names the N9 tunnel between an N3-terminating UPF and the PSA. |
+| 4 — Cascaded N9-to-N9 transit | One PDU session's N4 context at an intermediate UPF whose upstream and downstream are both UPFs: an UL CL or Branching Point inserted behind an existing I-UPF, or a Source UL CL holding the N9 forwarding tunnel to a Target UL CL during UL CL relocation. | Uplink PDR: Source Interface Access typed N9, its F-TEID on the N9 endpoint, Outer Header Removal; FAR Core with Outer Header Creation toward the PSA. Downlink PDR: Source Interface Core on its own N9 F-TEID; FAR Access with Outer Header Creation toward the upstream UPF, typed N9 so the tunnel is sourced from the N9 endpoint. Neither PDR needs the UE address: the F-TEID identifies the session (TS 29.244 §5.2.1). | **Conditional.** The SMF updates "the existing UPF between the (R)AN and new inserted UL CL" via N4 (TS 23.502 §4.3.5.4 step 6), so the UL CL receives and sends on N9; with session continuity upon UL CL relocation, uplink traffic to PSA2 goes Target (R)AN → Target UL CL → Source UL CL and downlink the reverse (§4.3.5.7 step 3, NOTEs 2 and 4) until the N9 forwarding tunnel is released (steps 10–12). |
+| 5 — 5G-VN local switching and N19 | At least two distinct member PDU-session/N4 contexts; the source and target sessions share one common PSA UPF, one 5G-VN group, and one controlling SMF. No group-level N4 session is required for local switching. N19 forwarding to members anchored at another PSA adds one group-level N4 session at each involved UPF. | Source member PDR uses Access-side CN Tunnel Info (N3 or N9) and FAR Destination Interface 5G-VN internal. Internal-interface classification matches the target member by destination address; its FAR carries OHC to that member's N3/N9 tunnel. The group-level session's N19 PDR (Source Interface Core, its F-TEID on the N9 endpoint) forwards to 5G VN Internal, and its 5G VN Internal PDR for a remote member's address tunnels over N19 (TS 29.244 §5.23). | **Conditional.** The same-PSA, different-PDU-session local-switch procedure is explicit. If N19 forwarding between different PSA UPFs is used instead, a group-level N4 session is required at each involved UPF (TS 23.501 §§5.8.2.13, 5.8.2.13.1, 5.29.4; TS 23.502 §4.13.8.2.2). |
 | 6 — Indirect data forwarding during handover | An existing PDU session is temporarily modified at the selected S-UPF and/or T-UPF; this is handover state, not a second permanent user-plane topology. | Applies to N2-based inter-NG-RAN handover when direct forwarding is unavailable and the SMF chooses indirect forwarding. The S/T-UPF allocates or receives temporary N3 forwarding tunnel information through N4; the UPF forwards only along that procedure's endpoints. The SMF starts a timer and releases the temporary resources. | **Conditional.** This is the procedure in TS 23.502 §4.9.1.3: preparation steps 11a–11f, execution and cleanup steps 3, 11, 13a–13b, and 15a–15b. It is not a generic FAR-routing mode. |
 
-**Mode 6 fixture scope.** `ci/iface-path.sh` creates temporary FAR 9, rebinds
-uplink PDR 1, verifies the N3 tunnel, waits for the driver's local four-second
-timer (a model of the SMF timer), restores FAR 1, removes FAR 9, then verifies
-the live session sends the next packet through N6 with no N3 output.
-`ci/veth-layouts.sh` runs the same leg and cleanup on S10, a session of its
-own, while every other scenario's session stays live, on every attachment
-layout. `TestTemporaryAccessForwardFARRetainsSessionAfterCleanup` verifies the
-compiler's tunnel-record lifecycle. The fixture does not exercise N2 signaling,
-RAN endpoint allocation, or all of TS 23.502 §4.9.1.3; Mode 6 remains
-**Conditional**.
+**Fixture scope.** `ci/scenario` holds one session per scenario role and a
+stand-in SMF that sends each step as PFCP over UDP to `internal/n4`, the
+same N4 node `upfd` runs. Mode 3 is S9; Mode 4 is S11, whose two PDRs carry
+no UE address; N19 is S12, a group-level session beside its members S4 and
+S5. Mode 6 is S10 (the S-UPF, an I-UPF) and S13 (the T-UPF, whose downlink
+FAR drops until step 8a), driven through
+the TS 23.502 §4.9.1.3 N4 steps: 11b and 11d each add a forwarding PDR with a
+CHOOSE F-TEID on N3 and a FAR toward the next forwarding hop, and the UP
+function's chosen F-TEID (11c, 11e) is what the lane then sends to (step
+3b); 8a switches S13's downlink to the target RAN; the SMF's timer (four
+seconds) starts after step 11; 13a releases S10 and 15a removes S13's
+forwarding rules, after which S13 still carries its own traffic.
+`ci/iface-path.sh` checks each step's packets at the exits by byte, and
+`ci/veth-layouts.sh` runs every step on every attachment layout with exact
+gate counts, every other scenario's session live.
+`TestIndirectForwardingTunnelsFollowTheHandoverProcedure`,
+`TestCascadedN9TransitUsesTheN9EndpointBothWays`,
+`TestPSABehindAnIUPFTakesItsN9UplinkAsAccess` and
+`TestN19GroupLevelSessionBesideItsMembers` check the compiled rules. N2
+signalling and RAN behaviour are outside the UP function and not modelled;
+the target UPF and RAN are scripted peers.
+
+**Not supported.** An I-UPF, an S-UPF or a T-UPF does not relay a GTP-U End
+Marker through a transit or forwarding tunnel. TS 29.244 Table 8.2.64-1
+NOTE 2 requires the I-UPF to keep the message type of a GTP-U signalling
+message it forwards, and TS 23.502 §4.9.1.3.3 step 10b has the PSA's End
+Markers forwarded toward the target RAN. Here decap sends every received End
+Marker to the GTP-U responder, which records it for End Marker Reception
+Reports and drops it (`docs/datapath.md`). The SMF-requested End Marker the
+UP function builds itself (SNDEM) is supported. Indirect forwarding without
+UPF re-allocation, where the retained S-UPF forwards to T-RAN SM N3
+forwarding information, is not driven. The pinned text names no N4 message
+that releases the S-UPF's forwarding resources in that case (13a applies to
+a source intermediate UPF that is released, 15a to a re-allocated UPF).
 
 **Co-residence boundary.** The UPF function statement permits a process to host
 the function capabilities used by multiple specified scenarios. It does not
 override a procedure's PDU-session, group, N4-session, peer-UPF, or temporary
 tunnel requirements. The six-scenario claim is therefore limited to the
-procedure-backed cases above; Mode 4 remains unestablished by the pinned text.
+procedure-backed cases above, each under the condition its row names.
 
 **Runtime coexistence boundary.** One `upfd` process owns one `bessd` graph and
 is its only controller writer. That process can hold many independent
 PDU-session contexts at once. The Mode 5 fixture establishes S4 and S5 as
 separate CP F-SEIDs in the same compiler and common SMF/PSA (`ci/scenario`,
-driven by `ci/ifacepath` and `ci/vethlayout`); this is local switching, not an
-N19 group-level PFCP session. `internal/n4` accepts one CP-function
+driven by `ci/ifacepath` and `ci/vethlayout`); the N19 fixture adds S12, the
+group-level PFCP session, as a third F-SEID beside them. `internal/n4` accepts one CP-function
 association at a time and rejects a second (`TestSecondCPFunctionIsRejected`).
 Do not run a second `upfd` against the same `bessd`: each startup sweep erases
 shared session-owned resources, and each compiler's ID and ownership state is
@@ -75,7 +99,7 @@ property is absent.
 
 | Project | What the inspected source shows | Not shown by that source |
 |---|---|---|
-| This UPF | Endpoint-tagged ingress feeds one decap that admits by complete F-TEID key (`ci/veth-layouts.sh`: nine real-veth layouts on up to four promiscuous PMD ports, including the same TEID on two endpoints and every endpoint attached twice). Outer IPv4/IPv6 is routed per transport domain after encap with ARP/ND resolution: `ci/veth-transport.sh` shows both families resolved, the outer hop count decremented once with the inner untouched, End Markers through the same Router, a neighbor's MAC change followed, and an unreachable gateway failing closed. One compiler holds the sessions of scenarios 1, 2 (ULCL to N6 and to an N9 tunnel, and the remote PSA's N9 downlink), 3 (N9 arrival at a PSA, plain N6 egress), 5 (local switch) and 6 (temporary forward and cleanup) at once: `ci/iface-path.sh` runs the streams of 1, 2, 3 and 5 together on one daemon, and `ci/veth-layouts.sh` drives all five through the compiled pipeline on every attachment of each layout. | Mode 4 (N9-to-N9 transit) is not established by the pinned R16 text and no lane drives it. N19 group sessions and inner IPv6 UE PDRs are not supported. |
+| This UPF | Endpoint-tagged ingress feeds one decap that admits by complete F-TEID key (`ci/veth-layouts.sh`: nine real-veth layouts on up to four promiscuous PMD ports, including the same TEID on two endpoints and every endpoint attached twice). Outer IPv4/IPv6 is routed per transport domain after encap with ARP/ND resolution: `ci/veth-transport.sh` shows both families resolved, the outer hop count decremented once with the inner untouched, End Markers through the same Router, a neighbor's MAC change followed, and an unreachable gateway failing closed. One compiler holds the sessions of scenarios 1, 2 (ULCL to N6 and to an N9 tunnel, and the remote PSA's N9 downlink), 3 (N9 arrival at a PSA, plain N6 egress), 4 (N9-to-N9 transit), 5 (local switch, and N19 through a group-level session) and 6 (indirect forwarding through S-UPF and T-UPF tunnels, the downlink switch, the timer and the release) at once, each set up by PFCP over N4: `ci/iface-path.sh` runs the streams of 1–6 and N19 together on one daemon, and `ci/veth-layouts.sh` drives every scenario through the compiled pipeline on every attachment of each layout. | Received End Markers are recorded and dropped, not relayed through a transit or forwarding tunnel (TS 29.244 Table 8.2.64-1 NOTE 2). Inner IPv6 UE PDRs are not supported. |
 | [OAI UPF](https://github.com/openairinterface/oai-cn5g-upf/blob/develop/docs/FEATURE_SET.md) | N3, N4 and N6 implemented; uplink classifier listed as implemented. | N9 and N19 marked not implemented; branching point and I-UPF/PSA/ULCL marked not implemented. |
 | [Open5GS](https://github.com/open5gs/open5gs/discussions/3090) | Several GTP-U server addresses, IPv4 and IPv6, each with a `network_instance` and `source_interface` ([`upf.yaml.in`](https://github.com/open5gs/open5gs/blob/main/configs/open5gs/upf.yaml.in)). | The maintainer's accepted answer says its UPF "lacks the N9 interface", which rules out the N9-dependent scenarios. |
 | [free5GC](https://github.com/free5gc/free5gc.github.io/blob/main/docs/guide/5-install-ueransim.md) | `gtpu.ifList` entries typed N3 or N9 with listed addresses. N6 goes through host forwarding and NAT. | Not shown: all scenarios co-resident in one instance, or deployment-defined attachments beyond the address list. |
