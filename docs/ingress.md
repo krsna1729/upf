@@ -70,7 +70,8 @@ Gate 2 is connected to `GtpuResponder` in the deployment graph. It answers
 Echo Requests, answers unknown nonzero-TEID G-PDUs with Error Indications, and
 can count peer Error Indications by TEID when `track_errors` is enabled. With
 `track_end_markers` it records each received End Marker with the `endpoint_id`
-it arrived on, for the End Marker Reception Report (TS 29.244 8.2.41 EMRRE).
+it arrived on, for the End Marker Reception Report (TS 29.244 8.2.41 EMRRE)
+and for `upfd`'s relay through the tunnels that F-TEID's PDRs forward into.
 It drops message types it does not answer.
 
 ## Controller configuration

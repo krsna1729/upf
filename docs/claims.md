@@ -5,7 +5,7 @@ requirement, the evidence it cites and the last run's verdict are one record.
 Edit the JSON and re-run; never this file. Named tests and the narrative sit in
 the JSON, not here.
 
-**54 claims · 51 ok · 1 gap · 2 skip · 0 fail**
+**55 claims · 52 ok · 1 gap · 2 skip · 0 fail**
 
 `ok` proved by the evidence named · `gap` a documented missing capability ·
 `skip` needs an environment this run lacks · `FAIL` a regression.
