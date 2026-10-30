@@ -91,12 +91,12 @@ std::expected<std::any, std::string> PolicyValue(
 
 const AtsssSteer::SteeringPolicy *AtsssSteer::LookupPolicy(
     uint32_t policy_id) const noexcept {
-  return policies_ == nullptr ? nullptr : policies_->Lookup(Id(policy_id));
+  return policies_ ? policies_->Lookup(Id(policy_id)) : nullptr;
 }
 
 const AtsssSteer::AccessHealth *AtsssSteer::LookupHealth(
     uint32_t health_id) const noexcept {
-  return health_ == nullptr ? nullptr : health_->Lookup(Id(health_id));
+  return health_ ? health_->Lookup(Id(health_id)) : nullptr;
 }
 
 CommandResponse AtsssSteer::Init(const upf::pb::AtsssSteerArg &arg) {
@@ -118,9 +118,17 @@ CommandResponse AtsssSteer::Init(const upf::pb::AtsssSteerArg &arg) {
     return CommandFailure(EINVAL, "the metadata attribute names are not distinct");
   }
 
+  // Both tables are admitted and made before either is registered (D-198):
+  // a refusal throws utils::MemoryRefused, Init answers RESOURCE_EXHAUSTED,
+  // and nothing is registered yet.
+  auto &memory = init_context().memory();
+  health_ = memory.Create<dataplane::SlotTable<Id, AccessHealth>>("health",
+                                                                 capacity_);
+  policies_ = memory.Create<dataplane::SlotTable<Id, SteeringPolicy>>(
+      "policies", capacity_);
+
   // Health first: a policy references it, and the transaction engine orders a
   // referrer after its referent.
-  health_ = std::make_unique<dataplane::SlotTable<Id, AccessHealth>>(capacity_);
   health_res_ = std::make_unique<dataplane::SlotResource<Id, AccessHealth>>(
       name() + "/health", *health_);
   health_binding_ = init_context().codecs().Bind(
@@ -146,11 +154,10 @@ CommandResponse AtsssSteer::Init(const upf::pb::AtsssSteerArg &arg) {
     health_binding_.Reset();
     health_res_.reset();
     health_.reset();
+    policies_.reset();
     return CommandFailure(EEXIST, "%s", registered.error().c_str());
   }
 
-  policies_ =
-      std::make_unique<dataplane::SlotTable<Id, SteeringPolicy>>(capacity_);
   // A policy does not reference its health records: the health table is
   // deployment state, not part of a session's transaction, and a record that
   // is absent means "not monitored" rather than "unusable" -- otherwise a

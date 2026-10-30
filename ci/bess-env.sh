@@ -82,7 +82,7 @@ bessd_start() {
   if [ "${BESSD_STDBUF:-0}" = 1 ]; then
     launch=(stdbuf -oL -eL)
   fi
-  "${launch[@]}" "$STAGE/bin/bessd" -m 0 -skip_root_check -p "$BESS_PORT" -i "$pidfile" \
+  "${launch[@]}" "$STAGE/bin/bessd" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$pidfile" \
     -modules="$PLUG" -f "$@" >"$log" 2>&1 &
   BESSD_PID=$!
 }

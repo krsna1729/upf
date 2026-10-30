@@ -77,7 +77,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # start <graph.yaml>: bessd with the graph applied (paused), upfd, pfcpsim.
 start() {
-  "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" -modules="$PLUG" -f >"$WORK/bessd.log" 2>&1 &
+  "$BESSD" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" -modules="$PLUG" -f >"$WORK/bessd.log" 2>&1 &
   BESS_PID=$!
   for _ in $(seq 1 60); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 0.5; done
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 || { cat "$WORK/bessd.log" >&2; fail "bessd did not come up"; }

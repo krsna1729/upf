@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "end_marker_log.h"
+#include "framework/memory_scope.h"
 #include "module.h"
 #include "upf_datapath.pb.h"
 
@@ -77,7 +78,8 @@ class GtpuResponder final : public Module {
   std::unique_ptr<ErrorSlot[]> errors_;
   std::atomic<uint64_t> untracked_{0};
   int endpoint_attr_ = -1;  // "endpoint_id", read when End Markers are tracked
-  std::unique_ptr<upf::datapath::EndMarkerLog> end_markers_;
+  // Admitted as "end_markers" (D-198).
+  bess::framework::Sized<upf::datapath::EndMarkerLog> end_markers_;
 };
 
 #endif  // UPF_DATAPATH_GTPU_ECHO_H_

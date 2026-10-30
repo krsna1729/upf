@@ -13,9 +13,12 @@
 #include "dataplane/action_id.h"
 #include "dataplane/slot_resource.h"
 #include "dataplane/slot_table.h"
+#include "framework/memory_scope.h"
 #include "framework/resource_bindings.h"
 #include "module.h"
+#include "stats/keyed_counters.h"
 #include "stats/worker_local.h"
+#include "utils/dpdk_memory.h"
 #include "upf_datapath.pb.h"
 
 // Counts the packets and octets of the rules a URR measures: the data half of
@@ -35,8 +38,8 @@
 // relaxed load per cell (the two cells of one packet need not be seen together:
 // they are additive counters, and the design prices a URR at two additions into
 // worker-local counters). The planes hold two cells per ActionId up to the
-// graph's id space, so the memory is capacity x 2 x 8 bytes x the worker count
-// (docs/design.md, "Where a table lives" and wall 2).
+// graph's id space, so the memory is capacity x 2 x 8 bytes x worker_planes, on
+// the DPDK heap (BESS D-154 KeyedCounters; D-029/D-123 for the heap).
 //
 // The time a rule's traffic ran (TS 29.244 5.2.2.2.1) is a fact about the rule,
 // not about a worker, so it is *not* per-worker: one stamp pair per rule,
@@ -91,20 +94,14 @@ class UrrCount final : public Module {
   static const Commands cmds;
 
   std::string GetDesc() const override;
+  // Refuses a placement that runs this module on a worker id without a plane
+  // (KeyedCounters indexes planes by worker id; worker_planes bounds the ids).
+  CheckConstraintResult CheckModuleConstraints() const override;
 
  private:
   enum Cell : size_t { kPackets, kBytes };
 
   static constexpr size_t kCellsPerRule = 2;
-
-  // One cache line of cells: a worker's plane starts on a line boundary and its
-  // stride is whole lines, so no two workers share one (the reason
-  // stats/worker_slots.h exists; this module reads cells one at a time, which
-  // WorkerSlots' per-slot ReadSlot cannot do, so the layout is its own).
-  static constexpr size_t kCellsPerLine = bess::stats::kCacheLine / sizeof(uint64_t);
-  struct alignas(bess::stats::kCacheLine) Line {
-    std::atomic<uint64_t> cells[kCellsPerLine];
-  };
 
   // The stamps of one rule's counted traffic: shared, because the fact is the
   // rule's own, and written once per batch that counted a packet of it.
@@ -113,32 +110,22 @@ class UrrCount final : public Module {
     std::atomic<uint64_t> last_ns{0};
   };
 
-  // One worker's plane: its own cache lines, and only its own worker writes
-  // them, so an add is a plain load-add-store (stats/worker_slots.h's rule).
-  void Add(size_t cell, uint64_t n) noexcept {
-    std::atomic<uint64_t> &c = lines_[cell / kCellsPerLine].cells[cell % kCellsPerLine];
-    c.store(c.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
-  }
-
-  size_t offset_of(size_t action_id) const noexcept {
-    return (action_id - 1) * kCellsPerRule;
-  }
-
   size_t capacity_ = 0;  // the graph's ActionId space
-  // Cells per worker, rounded up to a whole number of cache lines so every
-  // plane is line-aligned (and its last line is nobody else's).
-  size_t cells_per_worker_ = 0;
 
-  // The planes: worker-major, one Line at a time, so a plane's base is line
-  // aligned by construction.
-  std::vector<Line> lines_;
+  // The planes (BESS D-154): one per worker id below worker_planes, each its
+  // own cache lines, on the DPDK heap; admitted as "counters" (D-198).
+  bess::framework::Sized<bess::stats::KeyedCounters> counts_;
 
   // One stamp pair per rule, indexed by ActionId - 1: module state like the
   // cells, not part of "<name>/counters" (a reading is a question, not a
-  // resource write).
-  std::vector<Stamps> stamps_;
+  // resource write). Packet-path memory from DPDK's heap on the memory node
+  // (D-029, D-123). By value, so the packet path indexes it directly; its
+  // admission ("stamps", D-198) is the lease before it, so the array is freed
+  // before the bytes are released.
+  bess::framework::MemoryLease stamps_lease_;
+  bess::utils::DpdkArray<Stamps> stamps_;
 
-  std::unique_ptr<bess::dataplane::SlotTable<ActionId, Entry>> entries_;
+  bess::framework::Sized<bess::dataplane::SlotTable<ActionId, Entry>> entries_;
   std::unique_ptr<bess::dataplane::SlotResource<ActionId, Entry>> resource_;
   bess::framework::ResourceBinding binding_;  // after resource_ (D-044)
   int action_attr_ = -1;                      // the "action_id" attribute id

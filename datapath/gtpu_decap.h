@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "dataplane/resource.h"
+#include "framework/memory_scope.h"
 #include "framework/resource_bindings.h"
 #include "module.h"
 #include "upf_datapath.pb.h"
@@ -37,8 +38,10 @@ class GtpuDecap final : public Module {
   int context_attr_ = -1;
   int qfi_attr_ = -1;
   int endpoint_attr_ = -1;
-  std::unique_ptr<upf::datapath::FteidResource> resource_;
-  std::unique_ptr<bess::flow::SharedExactIndex> fteid_table_;
+  // Admitted as "records" (D-198): each DirectionRecord chunk and mirror node.
+  bess::framework::Sized<upf::datapath::FteidResource> resource_;
+  // Admitted as "fteids" (D-198).
+  bess::framework::Sized<bess::flow::SharedExactIndex> fteid_table_;
   size_t max_fteids_ = 0;
   bess::framework::ResourceBinding binding_;
 };

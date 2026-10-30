@@ -56,7 +56,7 @@
 #
 # The plugin must be built first (see README.md); the script uses
 # datapath/build/libupf_datapath.so unless PLUG says otherwise. The daemon runs
-# with no hugepages (-m 0) and is never left running.
+# with no hugepages (--mem_backing=normal) and is never left running.
 
 set -euo pipefail
 

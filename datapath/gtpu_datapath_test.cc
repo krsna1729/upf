@@ -25,6 +25,7 @@
 #include "tunnel/tunnel.h"
 #include "utils/checksum.h"
 #include "utils/endian.h"
+#include "utils/dpdk_memory.h"
 #include "utils/ether.h"
 
 namespace {
@@ -35,7 +36,7 @@ using upf::datapath::FteidId;
 struct TestIndex {
   explicit TestIndex(size_t capacity)
       : domain(64), index(SharedExactIndex::Create(
-            sizeof(FteidId), capacity, domain, -1)) {}
+            sizeof(FteidId), capacity, domain, bess::utils::MemoryNode())) {}
   bess::rcu::RcuDomain domain;
   std::unique_ptr<SharedExactIndex> index;
 };
@@ -277,6 +278,9 @@ TEST(FteidResource, FullKeyDirectionPendingCapacityAndReuse) {
   ASSERT_NE(table.index, nullptr);
   upf::datapath::FteidResource resource("decap/fteids", *table.index,
                                         table.domain, 4);
+  EXPECT_EQ(upf::datapath::FteidResource::Bytes("decap/fteids", *table.index,
+                                                table.domain, 4),
+            resource.bytes());
   const auto first = Key(1, 4, 55, 1);
   const auto second = Key(2, 4, 55, 1);
   const auto third = Key(1, 4, 55, 2);
@@ -455,6 +459,7 @@ using upf::datapath::EndMarkerLog;
 
 TEST(EndMarkerLog, DeliversEachEventOnceInArrivalOrder) {
   EndMarkerLog log(2);
+  EXPECT_EQ(EndMarkerLog::Bytes(2), log.bytes());
   log.Record(0, {1, 0x11});
   log.Record(1, {2, 0x11});
   log.Record(0, {1, 0x22});

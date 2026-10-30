@@ -12,6 +12,7 @@
 #include "dataplane/action_id.h"
 #include "dataplane/slot_resource.h"
 #include "dataplane/slot_table.h"
+#include "framework/memory_scope.h"
 #include "framework/resource_bindings.h"
 #include "module.h"
 #include "upf_datapath.pb.h"
@@ -79,8 +80,8 @@ class AtsssSteer final : public Module {
   void RegisterPolicies(std::string name);
 
   size_t capacity_ = 0;
-  std::unique_ptr<bess::dataplane::SlotTable<Id, AccessHealth>> health_;
-  std::unique_ptr<bess::dataplane::SlotTable<Id, SteeringPolicy>> policies_;
+  bess::framework::Sized<bess::dataplane::SlotTable<Id, AccessHealth>> health_;
+  bess::framework::Sized<bess::dataplane::SlotTable<Id, SteeringPolicy>> policies_;
   std::unique_ptr<bess::dataplane::SlotResource<Id, AccessHealth>> health_res_;
   std::unique_ptr<bess::dataplane::SlotResource<Id, SteeringPolicy>> policy_res_;
   bess::framework::ResourceBinding health_binding_;

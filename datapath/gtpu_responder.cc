@@ -114,12 +114,15 @@ CommandResponse GtpuResponder::Init(const upf::pb::GtpuResponderArg &arg) {
     errors_ = std::make_unique<ErrorSlot[]>(kErrorSlots);
   }
   if (arg.track_end_markers()) {
+    // Admitted before it is made (D-198): a refusal throws
+    // utils::MemoryRefused and Init answers RESOURCE_EXHAUSTED.
+    end_markers_ = init_context().memory().Create<upf::datapath::EndMarkerLog>(
+        "end_markers", static_cast<size_t>(Worker::kMaxWorkers));
     endpoint_attr_ = AddMetadataAttr("endpoint_id", sizeof(be32_t),
                                      bess::metadata::Attribute::AccessMode::kRead);
     if (endpoint_attr_ < 0) {
       return CommandFailure(-endpoint_attr_, "add_metadata_attr() failed");
     }
-    end_markers_ = std::make_unique<upf::datapath::EndMarkerLog>(Worker::kMaxWorkers);
   }
   if (!arg.reply_gate_attr().empty()) {
     reply_gate_attr_ = AddMetadataAttr(
@@ -194,7 +197,7 @@ CommandResponse GtpuResponder::CommandGetErrors(
 CommandResponse GtpuResponder::CommandDrainEndMarkers(
     const upf::pb::GtpuResponderCommandDrainEndMarkersArg &) {
   upf::pb::GtpuResponderCommandDrainEndMarkersResponse response;
-  if (end_markers_ == nullptr) {
+  if (!end_markers_) {
     return CommandSuccess(response);
   }
   for (const auto &event : end_markers_->Drain()) {
@@ -292,7 +295,7 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     // TEID is the local one. Record it with the endpoint it came in on, never
     // reply.
     if (g[1] == kEndMarker) {
-      if (end_markers_ != nullptr && bess::metadata::IsValidOffset(endpoint_offset)) {
+      if (end_markers_ && bess::metadata::IsValidOffset(endpoint_offset)) {
         const uint32_t endpoint =
             get_attr_with_offset<be32_t>(endpoint_offset, pkt).value();
         const uint32_t teid = Get32(g + 4);

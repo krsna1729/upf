@@ -22,6 +22,7 @@
 #include "pdu_session_qfi.h"
 #include "tunnel/tunnel.h"
 #include "utils/endian.h"
+#include "utils/dpdk_memory.h"
 #include "utils/ether.h"
 #include "gtpu_admission.h"
 namespace dataplane = bess::dataplane;
@@ -46,13 +47,22 @@ CommandResponse GtpuDecap::Init(const upf::pb::GtpuDecapArg &arg) {
     return CommandFailure(EINVAL, "max_fteids exceeds exact-index limits");
   // SharedExactIndex sizes its underlying ConcurrentExactTable for the live
   // limit plus QSBR deletion headroom; max_fteids_ is the admitted live cap.
-  fteid_table_ = bess::flow::SharedExactIndex::Create(
-      static_cast<uint32_t>(sizeof(upf::datapath::FteidId)), max_fteids_,
-      init_context().rcu(), -1);
-  if (fteid_table_ == nullptr)
+  // On the memory node (BESS D-123), admitted first (D-198): a refusal throws
+  // utils::MemoryRefused and Init answers RESOURCE_EXHAUSTED. A null index
+  // (Create's std::bad_alloc) keeps its own answer.
+  auto &memory = init_context().memory();
+  try {
+    fteid_table_ = memory.Create<bess::flow::SharedExactIndex>(
+        "fteids", static_cast<uint32_t>(sizeof(upf::datapath::FteidId)),
+        max_fteids_, init_context().rcu(), memory.socket());
+  } catch (const bess::utils::MemoryRefused &) {
+    throw;
+  } catch (const std::bad_alloc &) {
     return CommandFailure(ENOMEM, "cannot create the fteids exact index");
-  resource_ = std::make_unique<upf::datapath::FteidResource>(
-      name() + "/fteids", *fteid_table_, init_context().rcu(), max_fteids_);
+  }
+  resource_ = memory.Create<upf::datapath::FteidResource>(
+      "records", name() + "/fteids", *fteid_table_, init_context().rcu(),
+      max_fteids_);
 
   binding_ = init_context().codecs().Bind(
       *resource_,
@@ -226,7 +236,7 @@ void GtpuDecap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
 }
 
 void GtpuDecap::DeInit() {
-  if (resource_ == nullptr) return;
+  if (!resource_) return;
   binding_.Reset();
   const std::string resource_name = resource_->name();
   auto unregistered = init_context().resources().Unregister(resource_name);
@@ -235,13 +245,17 @@ void GtpuDecap::DeInit() {
 }
 
 std::string GtpuDecap::GetDesc() const {
-  return std::format("{} F-TEIDs, UDP {}", resource_ == nullptr ? 0 : resource_->LiveCount(),
+  return std::format("{} F-TEIDs, UDP {}", resource_ ? resource_->LiveCount() : 0,
                      port_);
 }
 
 // One plugin descriptor for the whole library (gtpu_encap.cc carries the other
 // module; BESS_PLUGIN must appear exactly once per .so).
-BESS_PLUGIN("upf_datapath", "0.2.0");
+// The capabilities the library's modules use between them: the init context,
+// transactional resources, and the memory scope every table is admitted
+// through (D-198).
+BESS_PLUGIN_REQUIRES("upf_datapath", "0.3.0",
+                     BESS_CAP_INIT_CONTEXT | BESS_CAP_RESOURCES | BESS_CAP_MEMORY);
 
 ADD_MODULE(GtpuDecap, "gtpu_decap",
            "admits G-PDUs by endpoint/family/local-address/TEID; known UL and DL "

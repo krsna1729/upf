@@ -49,7 +49,8 @@ CommandResponse GtpuEncap::Init(const upf::pb::GtpuEncapArg &arg) {
   const size_t capacity = arg.max_tunnels() == 0
                               ? kDefaultMaxTunnels
                               : arg.max_tunnels();
-  tunnels_ = std::make_unique<dataplane::SlotTable<ActionId, Tunnel>>(capacity);
+  tunnels_ = init_context().memory().Create<dataplane::SlotTable<ActionId, Tunnel>>(
+      "tunnels", capacity);
   resource_ = std::make_unique<dataplane::SlotResource<ActionId, Tunnel>>(
       name() + "/tunnels", *tunnels_);
   binding_ = init_context().codecs().Bind(
@@ -232,7 +233,7 @@ void GtpuEncap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
 }
 
 std::string GtpuEncap::GetDesc() const {
-  return std::format("{} tunnels", tunnels_ == nullptr ? 0 : tunnels_->size());
+  return std::format("{} tunnels", tunnels_ ? tunnels_->size() : 0);
 }
 
 ADD_MODULE(GtpuEncap, "gtpu_encap",

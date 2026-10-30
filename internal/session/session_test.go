@@ -24,6 +24,7 @@ import (
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
+	"google.golang.org/grpc/codes"
 
 	"github.com/krsna1729/upf/internal/bess"
 )
@@ -3424,6 +3425,18 @@ func TestDataplaneRefusalBecomesACause(t *testing.T) {
 	c := New(testConfig(), rec, quietLogger())
 	if got := cause(t, c.Establish(establishment(0x6666, "10.45.0.7"))); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("a rejected transaction answered cause %d", got)
+	}
+
+	// A refusal for lack of memory (BESS D-198, RESOURCE_EXHAUSTED) is
+	// definite: answered "no resources", and the session's address is free
+	// again for a later attempt.
+	rec.fail = &bess.InvalidRequestError{Code: codes.ResourceExhausted, Message: "memory"}
+	if got := cause(t, c.Establish(establishment(0x6667, "10.45.0.9"))); got != ie.CauseNoResourcesAvailable {
+		t.Errorf("a refusal for lack of memory answered cause %d, want no-resources", got)
+	}
+	rec.fail = nil
+	if got := cause(t, c.Establish(establishment(0x6668, "10.45.0.9"))); got != ie.CauseRequestAccepted {
+		t.Errorf("the address of a session refused for memory answered cause %d on retry", got)
 	}
 
 	rec.fail = errors.New("transport")
