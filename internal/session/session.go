@@ -303,7 +303,8 @@ type Config struct {
 	// (TS 29.244 8.2.19) is refused when it is empty: the End Marker it asks
 	// to hear about would never be seen. With it set, an End Marker on a PDR's
 	// local F-TEID is reported as a Usage Report with the EMRRE trigger
-	// (8.2.41) for every REEMR URR the PDR names.
+	// (8.2.41) for every REEMR URR the PDR names, and, with EndMarker set too,
+	// relayed through the GTP-U tunnel that PDR's FAR forwards into (emrr.go).
 	GTPUEndMarkers string
 
 	// RouteMode is how the graph's Router decides a forward's egress. It must
@@ -350,8 +351,9 @@ type Config struct {
 	// point. TransportRouteDomain is independent of the inner route_domain.
 	FTEIDEndpoints []FTEIDEndpoint
 
-	// EndMarker is the base graph unix_port path. A marker uses the old
-	// tunnel's transport route domain as a suffix: <path>.<domain>.
+	// EndMarker is the base graph unix_port path. A marker uses its tunnel's
+	// transport route domain as a suffix: <path>.<domain>. Both the markers
+	// SNDEM asks for and the received ones relayed are written there.
 	EndMarker string
 
 	// Buffering is the graph's buffering branch (TS 29.244 7.5.2.6, 5.2.4):

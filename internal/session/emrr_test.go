@@ -3,8 +3,10 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -93,5 +95,140 @@ func TestAnEndMarkerOnThePDRsFTEIDBecomesAnEMRREUsageReport(t *testing.T) {
 
 	if reports := c.EvaluateAll(ctx, t0.Add(2*time.Second)); len(reports) != 0 {
 		t.Fatalf("a drained End Marker was reported again: %+v", reports)
+	}
+}
+
+// TestReceivedEndMarkersAreRelayedThroughTheirTunnels: an End Marker that
+// arrives on a local F-TEID whose PDR forwards into a GTP-U tunnel leaves on
+// that tunnel -- the tunnel's own TEID toward its peer, from its local
+// address, through its transport's port -- once per arrival (TS 29.244
+// Table 8.2.64-1 NOTE 2; TS 23.502 4.9.1.3.3 step 10b). The source I-UPF of
+// an indirect-forwarding handover relays the PSA's marker toward the source
+// RAN and the source RAN's marker toward the target UPF; an N9-to-N9 transit
+// relays it over N9. A PDR that ends the tunnel or drops relays nothing.
+func TestReceivedEndMarkersAreRelayedThroughTheirTunnels(t *testing.T) {
+	cfg := modesConfig(t)
+	base := endMarkerBase()
+	cfg.EndMarker = base
+	cfg.GTPUEndMarkers = "echo0"
+	n3Frames := endMarkerListener(t, base+".1")
+	n9Frames := endMarkerListener(t, base+".2")
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	t.Cleanup(func() {
+		for _, conn := range c.endMarkerConns {
+			conn.Close()
+		}
+	})
+	establish := func(req *message.SessionEstablishmentRequest) *message.SessionEstablishmentResponse {
+		t.Helper()
+		resp, ok := c.Establish(req).(*message.SessionEstablishmentResponse)
+		if !ok || cause(t, resp) != ie.CauseRequestAccepted {
+			t.Fatalf("session %#x was refused: %v", req.SEID(), resp)
+		}
+		return resp
+	}
+	accessPDR := func(id uint16, extra ...*ie.IE) *ie.IE {
+		return ie.NewCreatePDR(ie.NewPDRID(id), ie.NewPrecedence(100),
+			ie.NewPDI(append([]*ie.IE{ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				ie.NewNetworkInstance("internet"), chooseFTEID()}, extra...)...),
+			ie.NewOuterHeaderRemoval(0, 0), ie.NewFARID(uint32(id)))
+	}
+	corePDR := func(id uint16, extra ...*ie.IE) *ie.IE {
+		return ie.NewCreatePDR(ie.NewPDRID(id), ie.NewPrecedence(100),
+			ie.NewPDI(append([]*ie.IE{ie.NewSourceInterface(ie.SrcInterfaceCore),
+				ie.NewNetworkInstance("internet"), chooseFTEID()}, extra...)...),
+			ie.NewOuterHeaderRemoval(0, 0), ie.NewFARID(uint32(id)))
+	}
+	tunnel := func(teid uint32, peer string) *ie.IE {
+		return ie.NewOuterHeaderCreation(0x0100, teid, peer, "", 0, 0, 0)
+	}
+
+	// The source I-UPF (Mode 6): the PSA's downlink on its N9 F-TEID to the
+	// source RAN, then step 11d's forwarding tunnel toward the target UPF.
+	src := establish(message.NewSessionEstablishmentRequest(0, 0, 0x9401, 1, 0,
+		ie.NewFSEID(0x9401, nil, nil),
+		accessPDR(1, ie.NewUEIPAddress(0x02, "10.45.7.2", "", 0, 0)),
+		forwardTo(1, ie.DstInterfaceCore, tunnel(0x77000001, "198.51.100.5")),
+		corePDR(2, ie.NewUEIPAddress(0x06, "10.45.7.2", "", 0, 0)),
+		forwardTo(2, ie.DstInterfaceAccess, tunnel(0x77000002, "10.20.30.2"))))
+	srcDown, _ := createdFTEIDOf(t, src.CreatedPDR, 2)
+	srcSEID := upFSEID(t, src)
+	fwd, ok := c.Modify(message.NewSessionModificationRequest(0, 0, srcSEID, 2, 0,
+		accessPDR(3, ie.NewTGPPInterfaceType(ie.TGPPInterfaceTypeN3ForDataForwarding)),
+		forwardTo(3, ie.DstInterfaceAccess, tunnel(0x77000003, "198.51.100.77")))).(*message.SessionModificationResponse)
+	if !ok || cause(t, fwd) != ie.CauseRequestAccepted {
+		t.Fatalf("step 11d was refused: %v", fwd)
+	}
+	srcFwd, _ := createdFTEIDOf(t, fwd.CreatedPDR, 3)
+
+	// Mode 4: an I-UPF between an I-UPF and the PSA, N9 both ways, no UE.
+	transit := establish(message.NewSessionEstablishmentRequest(0, 0, 0x9402, 1, 0,
+		ie.NewFSEID(0x9402, nil, nil),
+		accessPDR(1, ie.NewTGPPInterfaceType(ie.TGPPInterfaceTypeN9)),
+		forwardTo(1, ie.DstInterfaceCore, tunnel(0x77000011, "198.51.100.3")),
+		corePDR(2),
+		forwardTo(2, ie.DstInterfaceAccess, tunnel(0x77000012, "198.51.100.1"),
+			ie.NewTGPPInterfaceType(ie.TGPPInterfaceTypeN9))))
+	transitDown, _ := createdFTEIDOf(t, transit.CreatedPDR, 2)
+
+	// What ends here: a PSA's uplink to N6, and a target UPF's downlink
+	// still dropped before step 8a.
+	psa := establish(message.NewSessionEstablishmentRequest(0, 0, 0x9403, 1, 0,
+		ie.NewFSEID(0x9403, nil, nil),
+		accessPDR(1, ie.NewUEIPAddress(0x02, "10.45.7.3", "", 0, 0)),
+		forwardTo(1, ie.DstInterfaceCore)))
+	psaUp, _ := createdFTEIDOf(t, psa.CreatedPDR, 1)
+	held := establish(message.NewSessionEstablishmentRequest(0, 0, 0x9404, 1, 0,
+		ie.NewFSEID(0x9404, nil, nil),
+		corePDR(2, ie.NewUEIPAddress(0x06, "10.45.7.4", "", 0, 0)),
+		ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyDrop))))
+	heldDown, _ := createdFTEIDOf(t, held.CreatedPDR, 2)
+
+	rec.endMarkers = map[string][]bess.EndMarker{"echo0": {
+		{EndpointID: 2, TEID: srcDown},
+		{EndpointID: 1, TEID: srcFwd},
+		{EndpointID: 2, TEID: transitDown},
+		{EndpointID: 1, TEID: psaUp},
+		{EndpointID: 2, TEID: heldDown},
+		{EndpointID: 1, TEID: srcDown}, // the same TEID on the other endpoint is no tunnel of it
+	}}
+	c.EvaluateAll(context.Background(), time.Unix(1_700_000_000, 0))
+
+	expect := func(frames <-chan []byte, teid uint32, peer, local string) {
+		t.Helper()
+		want, err := endMarkerFrame(teid, netip.MustParseAddr(peer), netip.MustParseAddr(local))
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-frames:
+			if !bytes.Equal(got, want) {
+				t.Errorf("the relayed End Marker is\n% x\nwant TEID %#x toward %s from %s\n% x", got, teid, peer, local, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no End Marker was relayed with TEID %#x toward %s", teid, peer)
+		}
+	}
+	expect(n3Frames, 0x77000002, "10.20.30.2", modesN3)    // step 10b: toward the source RAN
+	expect(n3Frames, 0x77000003, "198.51.100.77", modesN3) // the forwarding tunnel to the target UPF
+	expect(n9Frames, 0x77000012, "198.51.100.1", modesN9)  // N9 transit toward the upstream I-UPF
+	select {
+	case got := <-n3Frames:
+		t.Errorf("an End Marker was relayed where none is owed: % x", got)
+	case got := <-n9Frames:
+		t.Errorf("an End Marker was relayed where none is owed: % x", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if stats := c.Stats(); stats.Markers != 3 || stats.MarkerFailures != 0 {
+		t.Errorf("markers sent %d, failed %d, want 3 and 0", stats.Markers, stats.MarkerFailures)
+	}
+
+	// The drain delivered each arrival once: the next tick relays nothing.
+	c.EvaluateAll(context.Background(), time.Unix(1_700_000_001, 0))
+	select {
+	case got := <-n3Frames:
+		t.Errorf("a drained End Marker was relayed again: % x", got)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
