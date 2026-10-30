@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 # The UPF datapath as a Bess plugin (D-008: UPF-specific code stays in a
-# plugin; the codecs it needs -- core/tunnel/tunnel.h and the conntrack parse
-# types -- are installed, experimental, and header-only). Built and loaded
+# plugin; the codecs it needs -- core/tunnel/tunnel.h and the packet parse
+# types (core/packet_parse.h) -- are installed, experimental, and header-only). Built and loaded
 # against the installed `bess-dev` stage, never against BESS's source tree:
 #
 #   PKG_CONFIG="pkg-config --define-prefix" \

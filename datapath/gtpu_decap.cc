@@ -153,7 +153,7 @@ void GtpuDecap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   const size_t cnt = batch->cnt();
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   upf::datapath::FteidId keys[bess::PacketBatch::kMaxBurst]{};
-  bess::conntrack::ParsedFlowPacket outer[bess::PacketBatch::kMaxBurst]{};
+  bess::packet::ParsedFrame outer[bess::PacketBatch::kMaxBurst]{};
   bess::tunnel::GtpuInfo info[bess::PacketBatch::kMaxBurst]{};
   bool candidate[bess::PacketBatch::kMaxBurst]{};
   uint64_t values[bess::PacketBatch::kMaxBurst]{};

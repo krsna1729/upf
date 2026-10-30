@@ -21,7 +21,7 @@ placement and state locality -- is `docs/datapath.md`.
   supported hook for compiling extra sources into the daemon (no meson option
   does it; D-008 puts UPF-specific code in a plugin), and a
   plugin may use only the installed headers, of which the GTP-U codec and the
-  conntrack parse types are experimental.
+  packet parse types (`packet_parse.h`) are experimental.
 - The controller is stateless with respect to the dataplane: it can restart and
   rebuild everything from BESS's own state (pipeline + resources) plus the
   PFCP sessions the SMF replays.
