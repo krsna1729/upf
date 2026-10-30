@@ -11,8 +11,10 @@
 // data network's, 2 the access side's, 3 a tunnel out of an instance, 4 the
 // service LAN's, 5 the re-injection's), and the streams that inject each case's
 // frame. The compiler below is the deployment's own, in the compiler's terms:
-// the same egress table `upfd -instances` builds. The scenario sessions (S1,
-// S4, S5, S8, S9) are ci/scenario's, the ones ci/vethlayout drives over veths.
+// the same egress table `upfd -instances` builds, behind the UP function's N4
+// node, and every session message reaches it over PFCP from a stand-in SMF
+// (scenario.Serve). The scenario sessions (S1, S4, S5, S8 to S13) are
+// ci/scenario's, the ones ci/vethlayout drives over veths.
 //
 //	control   every stream stopped, no session: nothing may leave
 //	egress    S1 (Core, no outer header), S2 (Core, one: a tunnel out of the
@@ -26,17 +28,27 @@
 //	          FAR names Core): the data
 //	          network's frame leaves by the instance's plain hop
 //	mode1_down  the data network's answer to S1's UE leaves toward its gNB
-//	forward   Create a temporary FAR for S1; its uplink frame leaves through
-//	          the target-RAN tunnel, then a bounded local timer starts
-//	forward_cleanup  After that timer, restore FAR 1 and remove the temporary
-//	          FAR; the same stream returns to N6 (N4/data-plane fixture only)
 //	vn        S4 (an uplink PDR whose FAR names 5G VN Internal) re-injects its
 //	          packet into the subscriber-side table, where S5 (a PDR whose PDI
 //	          names 5G VN Internal) takes it and tunnels it to that UE's gNB
+//	transit_up, transit_down  S11 (Mode 4, an I-UPF between an I-UPF and the
+//	          PSA): each direction arrives on an N9 F-TEID and leaves through
+//	          a tunnel sourced from the N9 endpoint
+//	n19_in, n19_out  S12 (the 5G VN group-level session): the other PSA's
+//	          member reaches S5's UE over N19, and S4's UE reaches it back
+//	m6_*      Mode 6 (S10 the source I-UPF, S13 the target I-UPF): each steady
+//	          leg, S13's downlink held, the forwarding tunnels on the F-TEIDs
+//	          the UP chose (the stream templates rewritten to them), and the
+//	          target's downlink switch
 //	concurrent  S9 (Mode 3: N9 arrival, N6 egress) joins the others, and every
-//	          scenario's stream runs at once while all sessions are live; the
-//	          window stays open until the shell has read each session's bytes
+//	          scenario's stream -- Modes 1 to 5, N19, and Mode 6 between the
+//	          target's switch and the timer -- runs at once while all sessions
+//	          are live; the window stays open until the shell has read each
+//	          session's bytes
 //	concurrent_stop  the streams are stopped and the Dumps' last lines read
+//	m6_released, m6_target_kept  after the SMF's indirect data forwarding
+//	          timer: S10 released and S13's forwarding PDR and FAR removed
+//	          admit nothing more, and S13 still carries its downlink
 //	refuse    the values this UP does not serve (the CP function's path, the
 //	          Spare values, LI Function, and the egresses this deployment does
 //	          not declare) and the two mandatory-IE conditions: each cause
@@ -52,6 +64,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -105,6 +118,12 @@ const (
 	n3Addr = "192.0.2.1"
 	n9Addr = "192.0.2.9"
 	n6Addr = "192.0.2.2"
+
+	// gpduSource is the outer source of every G-PDU stream, and dataNetwork
+	// the far end of every subscriber's traffic, as the graph's templates
+	// spell them.
+	gpduSource  = "192.0.2.2"
+	dataNetwork = "8.8.8.8"
 )
 
 // The next hops, by id: the same numbers in rt/next_hops and in the compiler's
@@ -184,18 +203,33 @@ var streams = []struct {
 	{"src_dn1", 51},
 	{"src_arp", 42},
 	{"src_arp2", 42},
+	{"src_m4ul", 87},
+	{"src_m4dl", 87},
+	{"src_n19in", 87},
+	{"src_n19out", 87},
+	{"src_m6ul10", 87},
+	{"src_m6dl10", 87},
+	{"src_m6ul13", 87},
+	{"src_m6t", 87},
+	{"src_m6fwd10", 87},
+	{"src_m6fwd13", 87},
 }
 
 // concurrentStreams are every scenario's streams, started together: Mode 1's
 // uplink (src_up) and downlink (src_dn1), Mode 2's two branches and the remote
-// PSA's downlink, Mode 3's N9 arrival, Mode 5's re-injection, and S6's
-// subscriber-side forward.
+// PSA's downlink, Mode 3's N9 arrival, Mode 4's two directions, Mode 5's
+// re-injection and the N19 group session's two, S6's subscriber-side forward,
+// and Mode 6 as it stands between the target's switch and the SMF's timer:
+// S13's uplink and switched downlink, and the downlink each forwarding tunnel
+// carries.
 var concurrentStreams = []string{
 	"src_up", "src_dn1",
 	"src_ulcl_n6", "src_ulcl_n9", "src_ulcl_dn9",
 	"src_n9",
-	"src_vn",
+	"src_m4ul", "src_m4dl",
+	"src_vn", "src_n19in", "src_n19out",
 	"src_dn",
+	"src_m6ul13", "src_m6t", "src_m6fwd10", "src_m6fwd13",
 }
 
 func main() {
@@ -230,9 +264,14 @@ func run(target, handshake string) error {
 	}
 
 	// One compiler for every arm: it owns the deployment's id spaces, and a
-	// second one would hand out SEID 1, action 1 and meter 1 again.
-	c := session.New(config(), client, slog.New(slog.NewTextHandler(os.Stdout,
-		&slog.HandlerOptions{Level: slog.LevelInfo})))
+	// second one would hand out SEID 1, action 1 and meter 1 again. Every
+	// session message reaches it over N4, from a stand-in SMF.
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	c, stop, err := scenario.Serve(session.New(config(), client, log), log)
+	if err != nil {
+		return err
+	}
+	defer stop()
 
 	seid1, err := egress(ctx, client, c)
 	if err != nil {
@@ -265,23 +304,41 @@ func run(target, handshake string) error {
 	if err := pass(handshake, "mode1_down"); err != nil {
 		return err
 	}
-	var forwardExpiry time.Time
-	if err := forwardArm(ctx, client, c, seid1, &forwardExpiry); err != nil {
-		return err
-	}
-	if err := pass(handshake, "forward"); err != nil {
-		return err
-	}
-	if err := forwardCleanupArm(ctx, client, c, seid1, forwardExpiry); err != nil {
-		return err
-	}
-	if err := pass(handshake, "forward_cleanup"); err != nil {
-		return err
-	}
 	if err := fiveGVN(ctx, client, c); err != nil {
 		return err
 	}
 	if err := pass(handshake, "vn"); err != nil {
+		return err
+	}
+
+	// Mode 4 (S11) and N19 (S12, beside S4 and S5), one stream a window.
+	if _, err := establish(c, scenario.S11(peers)); err != nil {
+		return err
+	}
+	if err := windows(ctx, client, handshake,
+		window{"transit_up", n9Gate, accessGate, []string{"src_m4ul"},
+			"transit_up: Mode 4: the upstream I-UPF's uplink left through a tunnel to the PSA"},
+		window{"transit_down", accessGate, n9Gate, []string{"src_m4dl"},
+			"transit_down: Mode 4: the PSA's downlink left through a tunnel to the upstream I-UPF"},
+	); err != nil {
+		return err
+	}
+	if _, err := establish(c, scenario.S12(peers)); err != nil {
+		return err
+	}
+	if err := windows(ctx, client, handshake,
+		window{"n19_in", accessGate, n6Gate, []string{"src_n19in"},
+			"n19_in: the other PSA's member reached S5's UE through the group session"},
+		window{"n19_out", n9Gate, n6Gate, []string{"src_n19out"},
+			"n19_out: S4's UE reached the other PSA's member over N19"},
+	); err != nil {
+		return err
+	}
+
+	// Mode 6: S10 (the source I-UPF) and S13 (the target I-UPF) steady, then
+	// the procedure up to the target's downlink switch.
+	seid10, seid13, expiry, err := mode6(ctx, client, c, handshake)
+	if err != nil {
 		return err
 	}
 	// The streams stay live through the concurrent window: the shell reads
@@ -295,7 +352,15 @@ func run(target, handshake string) error {
 	if err := stopAll(ctx, client); err != nil {
 		return err
 	}
+	for _, d := range []string{"dump_n3", "dump_n6"} {
+		if err := setDumpInterval(ctx, client, d, 1); err != nil {
+			return err
+		}
+	}
 	if err := pass(handshake, "concurrent_stop"); err != nil {
+		return err
+	}
+	if err := mode6Release(ctx, client, c, handshake, seid10, seid13, expiry); err != nil {
 		return err
 	}
 	if err := refusals(c); err != nil {
@@ -389,7 +454,7 @@ func control(ctx context.Context, client *bess.Client) error {
 //
 // Each uplink PDR's PDI names the instance its forward leaves by, and each
 // forward is the egress the deployment declares for its value.
-func egress(ctx context.Context, client *bess.Client, c *session.Compiler) (uint64, error) {
+func egress(ctx context.Context, client *bess.Client, c scenario.N4) (uint64, error) {
 	cases := []scenario.Session{
 		scenario.S1(peers),
 		{
@@ -456,7 +521,7 @@ func egress(ctx context.Context, client *bess.Client, c *session.Compiler) (uint
 // matches 10.46.0.2:53 and is given the higher precedence, so the two frames
 // -- both on the session's one TEID -- leave by the data network's hop and by
 // a tunnel out of the instance (N9) respectively.
-func ulcl(ctx context.Context, client *bess.Client, c *session.Compiler) error {
+func ulcl(ctx context.Context, client *bess.Client, c scenario.N4) error {
 	before, err := snapshot(ctx, client)
 	if err != nil {
 		return err
@@ -484,8 +549,8 @@ func ulcl(ctx context.Context, client *bess.Client, c *session.Compiler) error {
 // subscriber-side table, and S8's PDR for it tunnels it to the gNB -- the
 // access side's exit, and never the data network's.
 func ulclN9Down(ctx context.Context, client *bess.Client) error {
-	return single(ctx, client, "src_ulcl_dn9", accessGate, n6Gate,
-		"ulcl_n9_down: the remote PSA's N9 downlink left toward the gNB")
+	return single(ctx, client, accessGate, n6Gate,
+		"ulcl_n9_down: the remote PSA's N9 downlink left toward the gNB", "src_ulcl_dn9")
 }
 
 // down establishes S6 -- a PDR whose PDI names the service LAN's interface
@@ -494,7 +559,7 @@ func ulclN9Down(ctx context.Context, client *bess.Client) error {
 // Interface Core with no outer header -- and starts the data network's frame:
 // it must leave by the instance's plain hop (gate 0), which is the N6 exit the
 // uplink's own case uses from the other direction.
-func down(ctx context.Context, client *bess.Client, c *session.Compiler) error {
+func down(ctx context.Context, client *bess.Client, c scenario.N4) error {
 	cs := scenario.Session{
 		Name:     "S6: a PDR whose PDI names Source Interface 2 (SGi-LAN/N6-LAN), forwarding to Core",
 		Instance: internet, SEID: seidS6,
@@ -526,22 +591,50 @@ func down(ctx context.Context, client *bess.Client, c *session.Compiler) error {
 // mode1Down is Mode 1's downlink: the data network's answer to S1's UE
 // arrives on N6 and leaves through the encap toward S1's gNB.
 func mode1Down(ctx context.Context, client *bess.Client) error {
-	return single(ctx, client, "src_dn1", accessGate, n6Gate,
-		"mode1_down: the data network's answer to S1's UE left toward its gNB")
+	return single(ctx, client, accessGate, n6Gate,
+		"mode1_down: the data network's answer to S1's UE left toward its gNB", "src_dn1")
 }
 
-// single starts one stream and requires its exit to move and another exit not
-// to: the arms whose session is already established.
-func single(ctx context.Context, client *bess.Client, src, want, not, done string) error {
+// window is one arm whose sessions are already established: its streams, the
+// Router exit they must leave by and one they must not, and the line the
+// driver prints. An empty `want` is an arm whose streams no exit may carry.
+type window struct {
+	name, want, not string
+	streams         []string
+	done            string
+}
+
+// windows runs each window in turn and hands it to the shell.
+func windows(ctx context.Context, client *bess.Client, handshake string, ws ...window) error {
+	for _, w := range ws {
+		var err error
+		if w.want == "" {
+			err = silent(ctx, client, w.done, w.streams...)
+		} else {
+			err = single(ctx, client, w.want, w.not, w.done, w.streams...)
+		}
+		if err != nil {
+			return err
+		}
+		if err := pass(handshake, w.name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// single starts the streams and requires their exit to move and another exit
+// not to: the arms whose session is already established.
+func single(ctx context.Context, client *bess.Client, want, not, done string, srcs ...string) error {
 	before, err := snapshot(ctx, client)
 	if err != nil {
 		return err
 	}
-	if err := inject(ctx, client, src); err != nil {
+	if err := inject(ctx, client, srcs...); err != nil {
 		return err
 	}
 	if _, err := waitFor(ctx, client, router, want, value(before, exit{module: router, gate: want})); err != nil {
-		return fmt.Errorf("%s never left by gate %s: %w", src, want, err)
+		return fmt.Errorf("%v never left by gate %s: %w", srcs, want, err)
 	}
 	if err := stopAll(ctx, client); err != nil {
 		return err
@@ -552,30 +645,23 @@ func single(ctx context.Context, client *bess.Client, src, want, not, done strin
 		return err
 	}
 	if grew := value(after, exit{module: router, gate: not}) - value(before, exit{module: router, gate: not}); grew != 0 {
-		return fmt.Errorf("%s also carried %v packets by gate %s", src, grew, not)
+		return fmt.Errorf("%v also carried %v packets by gate %s", srcs, grew, not)
 	}
 	fmt.Printf("ifacepath: %s\n", done)
 	return nil
 }
 
-// forwardArm models the temporary N3 forwarding leg of Mode 6. It creates a
-// separate FAR, rebinds only S1's uplink PDR, and starts the SMF timer when the
-// accepted N4 modification installs that leg.
-func forwardArm(ctx context.Context, client *bess.Client, c *session.Compiler, seid uint64, expiry *time.Time) error {
+// silent starts the streams and requires every exit to stay still: no rule
+// admits what they carry, or the rule that does drops it.
+func silent(ctx context.Context, client *bess.Client, done string, srcs ...string) error {
 	before, err := snapshot(ctx, client)
 	if err != nil {
 		return err
 	}
-	if err := scenario.Modify(c, scenario.StartForward(seid, peers.GNB2), "creating the temporary forwarding FAR"); err != nil {
+	if err := inject(ctx, client, srcs...); err != nil {
 		return err
 	}
-	*expiry = time.Now().Add(scenario.ForwardingTimer)
-	if err := inject(ctx, client, "src_up"); err != nil {
-		return err
-	}
-	if _, err := waitFor(ctx, client, router, accessGate, value(before, exit{module: router, gate: accessGate})); err != nil {
-		return fmt.Errorf("the temporary uplink forward toward the access side never reached it: %w", err)
-	}
+	time.Sleep(2 * time.Second)
 	if err := stopAll(ctx, client); err != nil {
 		return err
 	}
@@ -584,57 +670,119 @@ func forwardArm(ctx context.Context, client *bess.Client, c *session.Compiler, s
 	if err != nil {
 		return err
 	}
-	if grew := value(after, exit{module: router, gate: n6Gate}) - value(before, exit{module: router, gate: n6Gate}); grew != 0 {
-		return fmt.Errorf("the temporary access forward carried %v packets by the data network's exit", grew)
+	for i, e := range exits {
+		if after[i] != before[i] {
+			return fmt.Errorf("%v carried %v packets by %s gate %s, and nothing should admit them",
+				srcs, after[i]-before[i], e.module, e.gate)
+		}
 	}
-	fmt.Printf("ifacepath: forward: temporary FAR %d tunneled the uplink to the target RAN; timer %s started\n",
-		scenario.ForwardFARID, scenario.ForwardingTimer)
+	fmt.Printf("ifacepath: %s\n", done)
 	return nil
 }
 
-// forwardCleanupArm waits for the timer started by forwardArm, then models the
-// SMF's N4 cleanup: restore S1's steady FAR, remove the temporary FAR, and prove
-// the live session forwards the same uplink stream through N6 again.
-func forwardCleanupArm(ctx context.Context, client *bess.Client, c *session.Compiler, seid uint64, expiry time.Time) error {
-	if expiry.IsZero() {
-		return errors.New("the temporary forwarding timer was not started")
+// mode6 is Mode 6, an inter NG-RAN N2 handover with the intermediate UPF
+// re-allocated and indirect data forwarding (TS 23.502 4.9.1.3), with this UP
+// in both UPF roles: the source I-UPF of S10 and the target I-UPF of S13, two
+// PDU sessions. Each steady leg is a window, and so is S13's downlink, which
+// its establishment (step 6c) drops until the switch. Then the preparation's
+// N4 messages: 11b at the target UPF and 11d at the source UPF each create a
+// forwarding PDR on an F-TEID the UP chooses (scenario.CreateForwarding), and
+// the chosen TEID -- which this program cannot know before the response -- is
+// written into the forwarding stream's frame (its Rewrite template) before
+// that window. Then step 8a switches S13's downlink to the target RAN, and
+// step 11's indirect data forwarding timer starts: the answer is its expiry.
+func mode6(ctx context.Context, client *bess.Client, c scenario.N4, handshake string) (uint64, uint64, time.Time, error) {
+	seid10, err := establish(c, scenario.S10(peers))
+	if err != nil {
+		return 0, 0, time.Time{}, err
 	}
-	if remaining := time.Until(expiry); remaining > 0 {
-		timer := time.NewTimer(remaining)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
+	seid13, err := establish(c, scenario.S13(peers))
+	if err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	if err := windows(ctx, client, handshake,
+		window{"m6_source_up", n9Gate, n6Gate, []string{"src_m6ul10"},
+			"m6_source_up: S10's uplink left through its tunnel to the PSA"},
+		window{"m6_source_down", accessGate, n6Gate, []string{"src_m6dl10"},
+			"m6_source_down: the PSA's downlink to S10 left toward the source RAN"},
+		window{"m6_target_up", n9Gate, n6Gate, []string{"src_m6ul13"},
+			"m6_target_up: S13's uplink left through its tunnel to the PSA"},
+		window{"m6_held", "", "", []string{"src_m6t"},
+			"m6_held: the PSA's downlink to S13 is dropped until step 8a"},
+	); err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	for _, f := range []struct {
+		step, rewrite, ue string
+		seid              uint64
+		teid              uint32
+	}{
+		{"11b: S13's forwarding tunnel toward the target RAN", "rewrite_m6fwd13", scenario.UE13, seid13, scenario.TargetForwardTEID},
+		{"11d: S10's forwarding tunnel toward the target UPF", "rewrite_m6fwd10", scenario.UE10, seid10, scenario.ForwardTEID},
+	} {
+		resp, err := scenario.Modify(c, scenario.CreateForwarding(f.seid, internet, f.teid, peers.GNB2), "Mode 6 "+f.step)
+		if err != nil {
+			return 0, 0, time.Time{}, err
 		}
+		teid, addr, err := scenario.Forwarding(resp)
+		if err != nil {
+			return 0, 0, time.Time{}, fmt.Errorf("Mode 6 %s: %w", f.step, err)
+		}
+		// The downlink the source RAN forwards: the data network's answer to
+		// the session's UE, to the F-TEID the UP chose.
+		if err := setTemplate(ctx, client, f.rewrite, gpdu(addr, teid, dataNetwork, f.ue, 5000, 53)); err != nil {
+			return 0, 0, time.Time{}, err
+		}
+		fmt.Printf("ifacepath: Mode 6 %s: the UP chose F-TEID %#x on %s\n", f.step, teid, addr)
 	}
-	before, err := snapshot(ctx, client)
-	if err != nil {
+	if err := windows(ctx, client, handshake,
+		window{"m6_forward_source", accessGate, n6Gate, []string{"src_m6fwd10"},
+			"m6_forward_source: the downlink on S10's chosen F-TEID left through the forwarding tunnel"},
+		window{"m6_forward_target", accessGate, n6Gate, []string{"src_m6fwd13"},
+			"m6_forward_target: the downlink on S13's chosen F-TEID left through the forwarding tunnel"},
+	); err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	if _, err := scenario.Modify(c, scenario.SwitchDownlink(seid13, scenario.DLTEID13, peers.GNB2),
+		"Mode 6 8a: S13's downlink to the target RAN"); err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	expiry := time.Now().Add(scenario.ForwardingTimer)
+	fmt.Printf("ifacepath: Mode 6 8a: S13's downlink FAR forwards to the target RAN; indirect data forwarding timer %s started\n",
+		scenario.ForwardingTimer)
+	if err := windows(ctx, client, handshake,
+		window{"m6_switched", accessGate, n6Gate, []string{"src_m6t"},
+			"m6_switched: the PSA's downlink to S13 left toward the target RAN"},
+	); err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	return seid10, seid13, expiry, nil
+}
+
+// mode6Release is the end of Mode 6's indirect data forwarding: once the
+// SMF's timer expires, step 13a releases the source UPF's session (S10,
+// whose forwarding resources go with it) and step 15a removes the target
+// UPF's forwarding PDR and FAR. Nothing S10 or either forwarding F-TEID
+// admitted may leave any more, and S13 must still carry its downlink.
+func mode6Release(ctx context.Context, client *bess.Client, c scenario.N4, handshake string,
+	seid10, seid13 uint64, expiry time.Time) error {
+	if remaining := time.Until(expiry); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if err := scenario.Release(c, seid10, "Mode 6 13a: releasing S10"); err != nil {
 		return err
 	}
-	if err := scenario.Modify(c, scenario.EndForward(seid),
-		fmt.Sprintf("restoring the steady FAR and removing temporary FAR %d", scenario.ForwardFARID)); err != nil {
+	if _, err := scenario.Modify(c, scenario.ReleaseForwarding(seid13),
+		"Mode 6 15a: releasing S13's forwarding PDR and FAR"); err != nil {
 		return err
 	}
-	if err := inject(ctx, client, "src_up"); err != nil {
-		return err
-	}
-	if _, err := waitFor(ctx, client, router, n6Gate, value(before, exit{module: router, gate: n6Gate})); err != nil {
-		return fmt.Errorf("the uplink stream did not resume through N6 after timer cleanup: %w", err)
-	}
-	if err := stopAll(ctx, client); err != nil {
-		return err
-	}
-	after, err := snapshot(ctx, client)
-	if err != nil {
-		return err
-	}
-	if grew := value(after, exit{module: router, gate: accessGate}) - value(before, exit{module: router, gate: accessGate}); grew != 0 {
-		return fmt.Errorf("the removed temporary FAR still sent %v packets toward the access side", grew)
-	}
-	fmt.Printf("ifacepath: forward_cleanup: timer expired; S1 returned to FAR 1 and temporary FAR %d was removed\n",
-		scenario.ForwardFARID)
-	return nil
+	fmt.Println("ifacepath: Mode 6: timer expired; S10 released (13a), S13's forwarding PDR and FAR removed (15a)")
+	return windows(ctx, client, handshake,
+		window{"m6_released", "", "", []string{"src_m6fwd10", "src_m6fwd13", "src_m6ul10", "src_m6dl10"},
+			"m6_released: S10's F-TEIDs and both forwarding F-TEIDs admit nothing"},
+		window{"m6_target_kept", accessGate, n6Gate, []string{"src_m6t"},
+			"m6_target_kept: S13's downlink still left toward the target RAN"},
+	)
 }
 
 // fiveGVN is the 5G VN case, both steps: S4 (an uplink PDR whose FAR names
@@ -642,7 +790,7 @@ func forwardCleanupArm(ctx context.Context, client *bess.Client, c *session.Comp
 // subscriber-side table, where S5 (a PDR whose PDI names Source Interface 5G VN
 // Internal) takes it and tunnels it to the target UE's gNB. The re-injection's
 // hop is gate 4 and S5's forward is the access side's (gate 1).
-func fiveGVN(ctx context.Context, client *bess.Client, c *session.Compiler) error {
+func fiveGVN(ctx context.Context, client *bess.Client, c scenario.N4) error {
 	before, err := snapshot(ctx, client)
 	if err != nil {
 		return err
@@ -671,15 +819,24 @@ func fiveGVN(ctx context.Context, client *bess.Client, c *session.Compiler) erro
 
 // concurrent adds S9 (Mode 3: the uplink arrives on S9's N9 F-TEID, the same
 // TEID S1 holds on N3, and leaves by N6) to the sessions the earlier arms left
-// established -- S1 (Mode 1, back on its steady FAR after Mode 6's leg), S8
-// (Mode 2), S4 and S5 (Mode 5) and S6 -- and starts every scenario's stream at
-// once. Each exit a scenario names must move while all of them are live, and
-// the exits none of them names (the service LAN's, the responder's) must not.
-// The streams are left running: the shell reads each session's own bytes out
-// of the Dump its exit feeds, and the caller stops them after the window.
-func concurrent(ctx context.Context, client *bess.Client, c *session.Compiler) error {
+// established -- S1 (Mode 1), S8 (Mode 2), S11 (Mode 4), S4, S5 and the
+// group-level S12 (Mode 5 and N19), S6, and S10 and S13 with their forwarding
+// tunnels (Mode 6 between the target's switch and the SMF's timer) -- and
+// starts every scenario's stream at once. Each exit a scenario names must move
+// while all of them are live, and the exits none of them names (the service
+// LAN's, the responder's) must not. The streams are left running: the shell
+// reads each session's own bytes out of the Dump its exit feeds, and the
+// caller stops them after the window. The Dumps print one packet per
+// interval, so for this window their interval is a tenth of a second rather
+// than one: a dozen streams share the encap's Dump, and each must be printed.
+func concurrent(ctx context.Context, client *bess.Client, c scenario.N4) error {
 	if _, err := establish(c, scenario.S9(peers)); err != nil {
 		return err
+	}
+	for _, d := range []string{"dump_n3", "dump_n6"} {
+		if err := setDumpInterval(ctx, client, d, 0.1); err != nil {
+			return err
+		}
 	}
 	before, err := snapshot(ctx, client)
 	if err != nil {
@@ -718,7 +875,7 @@ func concurrent(ctx context.Context, client *bess.Client, c *session.Compiler) e
 // establishment each: the SMF must read the cause that names the fault (73 for
 // a rule it cannot carry, 66 for the IE that is missing) rather than an
 // accepted session that serves nothing.
-func refusals(c *session.Compiler) error {
+func refusals(c scenario.N4) error {
 	base := scenario.Session{Instance: internet, SEID: 0x4200,
 		Up: scenario.PDR{SrcIfc: ie.SrcInterfaceAccess, UE: "10.45.1.1", SDF: scenario.Port53Query, TEID: 0x22223344,
 			FAR: scenario.Forward(ie.DstInterfaceCore)},
@@ -777,7 +934,7 @@ func refusals(c *session.Compiler) error {
 
 // arp is the subscriber's ARP identity: the session's address is in the
 // responder's entries, and an ARP request for it is answered.
-func arp(ctx context.Context, client *bess.Client, c *session.Compiler, ue string) error {
+func arp(ctx context.Context, client *bess.Client, c scenario.N4, ue string) error {
 	if err := arpPresent(ctx, client, ue, "the session's UE address"); err != nil {
 		return err
 	}
@@ -860,7 +1017,7 @@ func arp(ctx context.Context, client *bess.Client, c *session.Compiler, ue strin
 // gone deletes the session and proves the entry went with it: the address is no
 // longer held, and an ARP request for it is not answered (the responder drops a
 // request it holds no entry for, so nothing may appear on its gate).
-func gone(ctx context.Context, client *bess.Client, c *session.Compiler, seid uint64, ue string) error {
+func gone(ctx context.Context, client *bess.Client, c scenario.N4, seid uint64, ue string) error {
 	resp, ok := c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 1, 0)).(*message.SessionDeletionResponse)
 	if !ok {
 		return errors.New("the deletion answered no session-level response")
@@ -895,7 +1052,7 @@ func gone(ctx context.Context, client *bess.Client, c *session.Compiler, seid ui
 
 // establish sends one case through ci/scenario and names it in the driver's
 // log: the shell reads what each arm established from these lines.
-func establish(c *session.Compiler, cs scenario.Session) (uint64, error) {
+func establish(c scenario.N4, cs scenario.Session) (uint64, error) {
 	seid, err := scenario.Establish(c, cs, local)
 	if err != nil {
 		return 0, err
@@ -1042,6 +1199,81 @@ func setBurst(ctx context.Context, client *bess.Client, src string, size, burst 
 		return fmt.Errorf("setting %s/settings to burst %d: %w", src, burst, err)
 	}
 	return nil
+}
+
+// setTemplate replaces a Rewrite's frames with one: the `templates`
+// singleton, which the daemon swaps in whole. Rewrite reads its templates in
+// place, so the daemon takes the change only with the workers paused.
+func setTemplate(ctx context.Context, client *bess.Client, rewrite string, frame []byte) (err error) {
+	if err := client.SDK().PauseWorkers(ctx); err != nil {
+		return fmt.Errorf("pausing the workers for %s/templates: %w", rewrite, err)
+	}
+	defer func() {
+		if rerr := client.SDK().ResumeWorkers(ctx); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("resuming the workers: %w", rerr))
+		}
+	}()
+	err = client.Apply(ctx, bess.Change{
+		Resource: rewrite + "/templates",
+		Value:    map[string]any{"templates": []any{frame}},
+	})
+	if err != nil {
+		return fmt.Errorf("setting %s/templates: %w", rewrite, err)
+	}
+	return nil
+}
+
+// setDumpInterval sets a Dump's `settings` singleton: it prints at most one
+// packet per interval, in seconds.
+func setDumpInterval(ctx context.Context, client *bess.Client, dump string, interval float64) error {
+	err := client.Apply(ctx, bess.Change{
+		Resource: dump + "/settings",
+		Value:    map[string]any{"interval": interval},
+	})
+	if err != nil {
+		return fmt.Errorf("setting %s/settings to interval %v: %w", dump, interval, err)
+	}
+	return nil
+}
+
+// gpdu is a stream's frame as deploy/iface-path.yaml's templates spell them:
+// from gpduSource to `local` on the GTP-U port, a G-PDU to `teid` holding a
+// UDP datagram from src:sport to dst:dport with the payload "hello-upf". The
+// IPv4 header checksums are computed; the UDP checksums are zero, as there.
+func gpdu(local string, teid uint32, src, dst string, sport, dport uint16) []byte {
+	inner := ipv4UDP(src, dst, sport, dport, []byte("hello-upf"))
+	g := make([]byte, 8, 8+len(inner))
+	g[0], g[1] = 0x30, 0xff // version 1, PT 1; G-PDU
+	binary.BigEndian.PutUint16(g[2:], uint16(len(inner)))
+	binary.BigEndian.PutUint32(g[4:], teid)
+	outer := ipv4UDP(gpduSource, local, 2152, 2152, append(g, inner...))
+	frame := []byte{0x02, 0, 0, 0, 0, 0x01, 0x02, 0, 0, 0, 0, 0x01, 0x08, 0x00}
+	return append(frame, outer...)
+}
+
+// ipv4UDP is an IPv4 header (identification 0x1234, TTL 64) and a UDP header
+// in front of payload.
+func ipv4UDP(src, dst string, sport, dport uint16, payload []byte) []byte {
+	b := make([]byte, 28, 28+len(payload))
+	b[0] = 0x45
+	binary.BigEndian.PutUint16(b[2:], uint16(len(b)+len(payload)))
+	binary.BigEndian.PutUint16(b[4:], 0x1234)
+	b[8], b[9] = 64, 17
+	s, d := netip.MustParseAddr(src).As4(), netip.MustParseAddr(dst).As4()
+	copy(b[12:], s[:])
+	copy(b[16:], d[:])
+	var sum uint32
+	for i := 0; i < 20; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(b[i:]))
+	}
+	for sum > 0xffff {
+		sum = sum&0xffff + sum>>16
+	}
+	binary.BigEndian.PutUint16(b[10:], ^uint16(sum))
+	binary.BigEndian.PutUint16(b[20:], sport)
+	binary.BigEndian.PutUint16(b[22:], dport)
+	binary.BigEndian.PutUint16(b[24:], uint16(8+len(payload)))
+	return append(b, payload...)
 }
 
 // gatePackets is one module's output gate, from the daemon's own metrics
