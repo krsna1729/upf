@@ -268,6 +268,20 @@ For EPC, upon receipt of an Error Indication Report, the CP function shall then 
 -	delete the PFCP session, when having to delete the PDN connection.
 For 5GC, upon receipt of an Error Indication Report, the SMF shall proceed as specified in clause 5.3 of 3GPP TS 23.527 [40].
 
+5.23	5G VN Group Communication (for 5GC)
+Stage 2 requirements for the support of 5G VN communication are specified in clauses 4.4.6 and 5.8.2.13 of 3GPP TS 23.501[28].
+The 5G VN group communication includes one to one communication and one to many communication.
+One to one communication supports forwarding of unicast traffic between two UEs within a 5G VN, or between a UE and a device on the DN.
+One to many communication supports forwarding of multicast traffic and broadcast traffic from one UE (or device on the DN) to many/all UEs within a 5G VN and devices on the DN.
+5G VN Group Communication is optional to support. The SMF may instruct the UPF to forward unicast and/or broadcast traffic as described below if the UPF has indicated support of 5G VN Group Communication (see feature GCOM in clause 8.2.25).
+There are 3 different traffic forwarding methods, i.e. UPF local switching, N6-based forwarding and N19-based forwarding, to forward traffic within the 5G VN group.
+For all methods, traffic forwarding within the 5G VN group is realized by using a UPF internal interface ("5G VN Internal") and a two-step detection and forwarding process. In the first step, the packets received from any 5G VN group member (via it's PDU Session, via N6 or via N19) are forwarded to the UPF internal interface (i.e. Destination Interface set to "5G VN Internal"). In the second step, PDRs installed at the UPF internal interface (i.e. Source Interface set to "5G VN Internal") detect the packet and forward it to the respective 5G VN group member (via it's PDU Session, via N6 or via N19). If more than one 5G VN group has to be supported, the Network Instance set to a value representing the 5G VN group is used in addition to the UPF internal interface to enable isolation of the 5G VN group communication during the packet detection and forwarding process.
+When N19-based forwarding is used, the SMF may correlate all the PDU sessions for the 5G VN Group members to generate the PDR and FAR corresponding to the group level N4-session for UPF as specified in clause 5.29.3 of 3GPP TS 23.501 [28].
+For Ethernet unicast traffic on 5G VN Group Communication, the SMF may either explicitly configure DL PDR with the MAC addresses detected by the UPF on PDU Sessions supporting a 5G VN group, or rely on MAC address learning in UPF related with a 5G VN group by setting the Ethernet PDU Session Information indication in the DL PDR of the "5G VN internal" interface as specified in clause 5.8.2.13.0 of 3GPP TS 23.501 [28].
+To enable IP or Ethernet type broadcast traffic forwarding of a 5G VN Group, the SMF may provide the PDRs related to the group level N4-session and each 5G VN group member' N4 Session to the UPF as specified in clause 5.8.2.13.3 of 3GPP TS 23.501 [28].
+The details of the PDR and FAR setting over N4 for unicast traffic forwarding within a 5G VN are specified in clauses 5.8.2.13.1 and 5.8.2.13.2 of 3GPP TS 23.501[28].
+The details of the PDR and FAR setting over N4 for broadcast traffic forwarding within a 5G VN are specified in clause 5.8.2.13.3 of 3GPP TS 23.501[28].
+
 7.5.2.2	Create PDR IE within PFCP Session Establishment Request
 The Create PDR grouped IE shall be encoded as shown in Figure 7.5.2.2-1.
 Table 7.5.2.2-1: Create PDR IE within PFCP Session Establishment Request
@@ -1129,6 +1143,28 @@ Information elements	P	Condition / Comment	Appl.	IE Type
 QER ID	M	This IE shall identify the QER being queried for its Packet Rate Status	-	X	-	X	QER ID
 
 
+8.2.2	Source Interface
+The Source Interface IE type shall be encoded as shown in Figure 8.2.2-1. It indicates the type of the interface from which an incoming packet is received.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 20 (decimal)	
+	3 to 4	Length = n	
+	5 	Spare	Interface value	
+	6 to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.2-1: Source Interface
+The Interface value shall be encoded as a 4 bits binary integer as specified in in Table 8.2.2-1.
+Table 8.2.2-1: Interface value
+Interface value	Values (Decimal)
+Access	0
+Core	1
+SGi-LAN/N6-LAN	2
+CP-function	3
+5G VN Internal	4
+Spare	5 to 15
+NOTE 1:	The "Access" and "Core" values denote an uplink and downlink traffic direction respectively.
+NOTE 2:	For indirect data forwarding, the Source Interface in the PDR and the Destination Interface in the FAR shall both be set to "Access", in the forwarding SGW(s). The Interface value does not infer any traffic direction, in PDRs and FARs set up for indirect data forwarding, i.e. with both the Source and Destination Interfaces set to Access.
+
 8.2.3	F-TEID
 The F-TEID IE type shall be encoded as shown in Figure 8.2.3-1. It indicates an F-TEID.
 
@@ -1196,6 +1232,31 @@ NOTE 1:	The details about the IPsec Security Parameter Index (SPI), the Type of 
 -	extend the packet inspection beyond the possibilities described above and look further into the packet. Such service data flow filters need to be predefined in the PGW-U, as specified in clause 5.11 of 3GPP TS 23.214 [2].
 NOTE 2:	Such filters may be used to support filtering with respect to a service data flow based on the transport and application protocols used above IP, e.g. for HTTP and WAP. Filtering for further application protocols and services can also be supported.
 The SDF Filter ID, when present, shall be encoded as an Unsigned32 binary integer value. It shall uniquely identify an SDF Filter among all the SDF Filters provisioned for a given PFCP Session. The source/destination IP address and port information, in a bidirectional SDF Filter, shall be set as for downlink IP flows. The SDF filter for the opposite direction has the same parameters, but having the source and destination address/port parameters swapped. When being provisioned with a bidirectional SDF filter in a PDR, the UP function shall apply the SDF filter as specified in clause 5.2.1A.2A.
+
+8.2.24	Destination Interface
+The Destination Interface IE type shall be encoded as shown in Figure 8.2.24-1. It indicates the type of the interface towards which an outgoing packet is sent.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 42 (decimal)	
+	3 to 4	Length = n	
+	5 	Spare	Interface value	
+	6 to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.24-1: Destination Interface
+The Interface value shall be encoded as a 4 bits binary integer as specified in Table 8.2.24-1.
+Table 8.2.24-1: Interface value
+Interface value	Values (Decimal)
+Access (NOTE 1, NOTE 3, NOTE 4)	0
+Core (see NOTE 1)	1
+SGi-LAN/N6-LAN	2
+CP- Function	3
+LI Function (see NOTE 2)	4
+5G VN Internal	5
+Spare	6 to 15
+NOTE 1:	The "Access" and "Core" values denote a downlink and uplink traffic direction respectively.
+NOTE 2:	LI Function may denote an SX3LIF or an LMISF. See clause 5.7.
+NOTE 3:	For indirect data forwarding, the Source Interface in the PDR and the Destination Interface in the FAR shall both be set to "Access", in the forwarding SGW(s). The Interface value does not infer any traffic direction, in PDRs and FARs set up for indirect data forwarding, i.e. with both the Source and Destination Interfaces set to Access.
+NOTE 4:	For a HTTP redirection, the Source Interface in the PDR to match the uplink packets to be redirected and the Destination Interface in the FAR to enable the HTTP redirection shall both be set to "Access".
 
 8.2.26	Apply Action
 The Apply Action IE indicates the action(s) the UP function is required to apply to packets. It is coded as shown in Figure 8.2.26-1.
@@ -1296,3 +1357,88 @@ The following flags are coded within Octet 5:
 Octets "m to (m+3)" or "p to (p+15)" (IPv4 address / IPv6 address fields), if present, shall contain the address value.
 Octet r, if present, shall contain the number of bits allocated for IPv6 prefix delegation (relative to the default /64 IPv6 prefix), e.g. if /60 IPv6 prefix is used, the value shall be set to "4". When using UE IP address IE in a PDI to match packets, the UP function shall only use the IPv6 prefix part and ignore the interface identifier part. When the field is set to "0", the UP function shall determine a value based on the local configuration.
 The IPv6 Prefix Length in octet s, when present, shall be encoded as an 8 bits binary integer, e.g. if /72 prefix is used, the value shall be set to to (decimal) 72, or if /56 prefix is used, the value shall be set to (decimal) 56. The prefix length value "128" indicates an individual /128 IPv6 address. When the field is set to "0", the UP function shall determine a value based on the local configuration.
+
+8.2.64	Outer Header Removal
+The Outer Header Removal IE type shall be encoded as shown in Figure 8.2.64-1. It contains the instructions to remove an Outer Header.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 95 (decimal)	
+	3 to 4	Length = n	
+	5	Outer Header Removal Description	
+	6	GTP-U Extension Header Deletion	
+	7 to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.64-1: Outer Header Removal
+The Outer Header Removal Description field, when present, shall be encoded as specified in Table 8.2.64-1.
+Table 8.2.64-1: Outer Header Removal Description
+Outer Header to be removed from the incoming packet	Value (Decimal)
+GTP-U/UDP/IPv4 (NOTE 1), (NOTE 2)	0
+GTP-U/UDP/IPv6 (NOTE 1), (NOTE 2)	1
+UDP/IPv4 (NOTE 3, NOTE 6)	2
+UDP/IPv6 (NOTE 3, NOTE 6)	3
+IPv4 (NOTE 6)	4
+IPv6 (NOTE 6)	5
+GTP-U/UDP/IP (NOTE 4)	6
+VLAN S-TAG (See NOTE 5)	7
+S-TAG and C-TAG (See NOTE 5)	8
+For future use. Shall not be sent. If received, shall be interpreted as the value "1".	9 to 255
+NOTE 1:	The SGW-U/I-UPF shall store GTP-U extension header(s) required to be forwarded for this packet (as required by the comprehension rules of Figure 5.2.1-2 of 3GPP TS 29.281 [3]) that are not requested to be deleted by the GTP-U Extension Header Deletion field.
+NOTE 2:	The SGW-U/I-UPF shall store the GTP-U message type for a GTP-U signalling message which is required to be forwarded, e.g. for an End Marker message.
+NOTE 3:	This value may apply to DL packets received by a PGW-U for non-IP PDN connections with SGi tunnelling based on UDP/IP encapsulation (see clause 4.3.17.8.3.3.2 of 3GPP TS 23.401 [14]).
+NOTE 4:	The CP function shall use this value to instruct UP function to remove the GTP-U/UDP/IP header regardless it is IPv4 or IPv6.
+NOTE 5:	This value may apply to DL packets received by a UPF over N6 for Ethernet PDU sessions over (see clause 5.8.2.11.3 of 3GPP TS 23.501 [28]).
+NOTE 6:	This value may apply e.g. to DL packets received by a UPF (PDU Session Anchor) over N6, when explicit N6 traffic routing information is provided to the SMF (see clause 5.6.7 of 3GPP TS 23.501 [28]).
+
+The GTP-U Extension Header Deletion field (octet 6) shall be present if it is required to delete GTP-U extension header(s) from incoming GTP-PDUs. Octet 6 shall be absent if all GTP-U extension headers required to be forwarded shall be stored as indicated in NOTE 1 of Table 8.2.64-1.
+The GTP-U Extension Header Deletion field, when present, shall be encoded as specified in Table 8.2.64-2. It takes the form of a bitmask where each bit provides instructions on the information to be deleted from the incoming GTP-PDU packet. Spare bits shall be ignored by the receiver.
+Table 8.2.64-2: GTP-U Extension Header Deletion
+Octet / Bit	GTP-U Extension Header to be deleted from incoming packet
+6/1	PDU Session Container (NOTE)
+NOTE:	This value shall be used for data forwarding during a 5GS to EPS handover for a UPF that supports EPS-5GS interworking (see clause 5.17.3).
+
+8.2.118	3GPP Interface Type
+The 3GPP Interface Type IE shall be encoded as shown in Figure 8.2.118-1. It indicates the 3GPP interface type of the Source Interface within the PDR IE, or the 3GPP interface type of the Destination Interface within the FAR IE.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 160 (decimal)	
+	3 to 4	Length = n	
+	5 	Spare	Interface Type value	
+	6 to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.118-1: 3GPP Interface Type
+The 3GPP Interface Type value shall be encoded as a 6 bits binary integer as specified in in Table 8.2.118-1.
+Table 8.2.118-1: Interface Type value
+Interface value	Values (Decimal)
+S1-U	0
+S5 /S8-U (NOTE 1)	1
+S4-U	2
+S11-U	3
+S12	4
+Gn/Gp-U (NOTE 2)	5
+S2a-U	6
+S2b-U	7
+eNodeB GTP-U interface for DL data forwarding	8
+eNodeB GTP-U interface for UL data forwarding	9
+SGW/UPF GTP-U interface for DL data forwarding	10
+N3 3GPP Access	11
+N3 Trusted Non-3GPP Access	12
+N3 Untrusted Non-3GPP Access	13
+N3 for data forwarding	14
+N9 (or N9 for non-roaming, see NOTE 3)	15
+SGi	16
+N6	17
+N19	18
+S8-U	19
+Gp-U	20
+N9 for roaming	21
+Iu-U	22
+N9 for data forwarding	23
+Sxa-U	24
+Sxb-U	25
+Sxc-U	26
+N4-U	27
+SGW/UPF GTP-U interface for UL data forwarding	28
+Spare	29 to 64
+NOTE 1:	If separation of roaming and non-roaming traffic is desired this value should only be used for the S5-U interface and "S8-U" (decimal 19) should be used for the S8-U interface.
+NOTE 2:	If separation of roaming and non-roaming traffic is desired this value should only be used for the Gn-U interface and "Gp-U" (decimal 20) should be used for the Gp-U interface.
+NOTE 3: If separation of roaming and non-roaming traffic is desired, this value should only be used for N9 non-roaming interfaces and (decimal value "21") should be used for N9 roaming interfaces.
