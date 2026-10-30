@@ -3395,13 +3395,13 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 	}
 
 	if len(fteidKeysOf(firstPDR)) != 1 || len(fteidKeysOf(secondPDR)) != 1 ||
-		fmt.Sprint(fteidKeysOf(firstPDR)[0]) == fmt.Sprint(fteidKeysOf(secondPDR)[0]) {
+		fteidKeysOf(firstPDR)[0] == fteidKeysOf(secondPDR)[0] {
 		t.Fatal("distinct endpoint keys collapsed despite sharing TEID 0x77")
 	}
 	c.mu.Lock()
 	c.releaseSession(first)
-	remaining := len(c.fteidTEIDKeys[0x77])
-	_, secondStillOwned := c.byFTEID[fmt.Sprint(fteidKeysOf(secondPDR)[0])]
+	remaining := c.fteidTEIDKeys[0x77]
+	_, secondStillOwned := c.byFTEID[fteidKeysOf(secondPDR)[0]]
 	freed := len(c.teids.freed)
 	c.mu.Unlock()
 	if remaining != 1 || !secondStillOwned || freed != 0 {
@@ -3409,7 +3409,7 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 	}
 	c.mu.Lock()
 	c.releaseSession(second)
-	remaining, freed = len(c.fteidTEIDKeys[0x77]), len(c.teids.freed)
+	remaining, freed = c.fteidTEIDKeys[0x77], len(c.teids.freed)
 	contexts := len(c.fteidContexts)
 	c.mu.Unlock()
 	if remaining != 0 || freed != 1 || contexts != 0 {

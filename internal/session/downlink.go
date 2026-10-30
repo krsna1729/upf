@@ -86,8 +86,11 @@ func (c *Compiler) EvaluateDownlinks(ctx context.Context) []Downlink {
 	c.mu.Lock()
 	// The rules to read, per session: the buffering PDRs whose report has not
 	// been sent yet. A flow already reported is left out -- its arrivals are no
-	// longer news -- so the RPC carries only what could change the answer.
-	asks := make([]downlinkAsk, 0, len(c.sessions))
+	// longer news -- so the RPC carries only what could change the answer. The
+	// list is not sized by the session count: it holds the sessions that are
+	// buffering, and sizing it by all of them was a million-entry allocation
+	// per tick for a handful of entries.
+	var asks []downlinkAsk
 	for seid, s := range c.sessions {
 		var ids []uint32
 		for _, p := range pdrsInOrder(s) {

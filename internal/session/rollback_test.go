@@ -74,7 +74,7 @@ func TestARefusedModificationGivesBackTheMetersAndTEIDsItTook(t *testing.T) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.fteidTEIDKeys[0x4242]) != 0 {
+	if c.fteidTEIDKeys[0x4242] != 0 {
 		t.Error("the refused request's exact F-TEID key was not released")
 	}
 	if got := len(c.meters.released) - metersBefore; got != 2 {
