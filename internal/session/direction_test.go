@@ -73,22 +73,27 @@ func TestCoreUplinkPDRMatchesUEAsSourceAndSelectsUplinkChain(t *testing.T) {
 	}
 }
 
+// TestPDRResultCarriesResolvedRouteDomain: the result writes the route domain
+// resolve chose for it -- the PDI's own, or, for a forward back into
+// classification over 5G VN Internal, the 5G VN group's -- and not the domain
+// the rule's key was built from.
 func TestPDRResultCarriesResolvedRouteDomain(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		p    *pdr
 		size int
 	}{
-		{name: "uplink", p: &pdr{domain: 7}, size: 20},
-		{name: "downlink", p: &pdr{down: true, domain: 9}, size: 24},
+		{name: "uplink", p: &pdr{domain: 7, resultDomain: 7}, size: 20},
+		{name: "downlink", p: &pdr{down: true, domain: 9, resultDomain: 9}, size: 24},
+		{name: "5G VN forward", p: &pdr{domain: 3, resultDomain: 11}, size: 20},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := pdrResult(tc.p)
 			if len(got) != tc.size {
 				t.Fatalf("result size = %d, want %d", len(got), tc.size)
 			}
-			if domain := binary.BigEndian.Uint32(got[resultRouteDomain:]); domain != tc.p.domain {
-				t.Errorf("result route_domain = %d, want %d", domain, tc.p.domain)
+			if domain := binary.BigEndian.Uint32(got[resultRouteDomain:]); domain != tc.p.resultDomain {
+				t.Errorf("result route_domain = %d, want %d", domain, tc.p.resultDomain)
 			}
 		})
 	}
