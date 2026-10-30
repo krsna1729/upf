@@ -269,6 +269,9 @@ message UrrCountCommandGetCountsArg {
   // a diagnostic read -- an operator's, a test's -- leaves it false and finds
   // the window's first packet where the last one left it.
   bool restart_window = 2;
+  // Appliance counter bank: counters_ul, counters_dl, or buffer_counters.
+  // Graph UrrCount callers omit this selector.
+  string table = 3;
 }
 
 // UrrCountCommandGetCountsResponse is one reading of the counters: every
@@ -319,3 +322,78 @@ message TunnelEntry {
   bool qfi_present = 8;
 }
 
+// One logical attachment. Transport and N6 have independent resolver id spaces.
+// Ingress first strips one VLAN tag, answers local ARP/NS, then matches MAC.
+message UpfApplianceInterface {
+  uint32 ingress_gate = 1;
+  uint32 output_gate = 2;
+  uint32 id = 3;
+  bool n6 = 4;
+  uint32 vlan = 5;
+  string mac_addr = 6;
+  string ip_addr = 7;
+  string ipv6_addr = 8;
+  repeated string addresses = 9; // resolver source addresses with prefix lengths
+  uint32 endpoint_id = 10;
+  uint32 route_domain = 11;
+  uint32 transport_route_domain = 12;
+}
+message UpfApplianceMarkerInput {
+  uint32 ingress_gate = 1;
+  uint32 interface_id = 2;
+  uint32 transport_route_domain = 3;
+}
+message UpfAppliancePdrArg {
+  uint32 max_tuples = 1; // zero: 16 UL / 8 DL
+}
+message UpfApplianceMeterArg {
+  uint32 capacity = 1; // zero: 65536
+  uint32 levels = 2; // zero or 2; PDR QER then session QER
+}
+message UpfApplianceRouterArg {
+  uint32 max_next_hops = 1;
+  uint32 max_domains = 2;
+  uint32 max_groups = 3;
+  uint32 max_ipv4_routes = 4;
+  uint32 max_ipv6_routes = 5;
+  uint32 max_neighbors = 6;
+  optional uint64 neighbor_first_probe_ms = 7;
+  optional uint64 neighbor_probe_interval_ms = 8;
+  optional uint64 neighbor_max_probe_interval_ms = 9;
+  optional uint64 neighbor_reachable_lifetime_ms = 10;
+  optional uint64 neighbor_unreachable_retry_ms = 11;
+  optional uint32 neighbor_max_probes = 12;
+}
+message UpfApplianceBufferArg {
+  uint32 max_packets = 1; // zero: 65536
+  uint32 max_packets_per_flow = 2; // zero: 64
+  optional uint64 timeout_ms = 3; // absent: 5000; zero: never expire
+  uint32 request_capacity = 4; // zero: 256
+}
+message UpfApplianceNextHopClass {
+  enum Action { OUTPUT = 0; ENCAP = 1; REINJECT_DL = 2; }
+  uint32 egress_gate = 1; // RouterNextHopValue's gate, not the module's output
+  Action action = 2;
+  uint32 output_gate = 3; // only for OUTPUT
+}
+message UpfApplianceArg {
+  GtpuDecapArg decap = 1;
+  UpfAppliancePdrArg pdr_ul = 2;
+  UpfAppliancePdrArg pdr_dl = 3;
+  UrrCountArg counters = 4; // same capacity for all three independent banks
+  UpfApplianceMeterArg meter = 5;
+  GtpuEncapArg encap = 6;
+  AtsssSteerArg atsss = 7; // capacity only; no packet metadata used
+  UpfArpResponderArg arp = 8;
+  UpfApplianceBufferArg buffer = 9;
+  UpfApplianceRouterArg router = 10;
+  UpfApplianceRouterArg transport_router = 11;
+  repeated UpfApplianceInterface interfaces = 12;
+  repeated UpfApplianceMarkerInput marker_inputs = 13;
+  repeated UpfApplianceNextHopClass next_hop_classes = 14;
+  uint64 recovery_time_stamp = 15; // zero: this module's start, NTP seconds
+}
+message UpfApplianceCommandGetDropsResponse {
+  message DropCount { string reason = 1; uint64 count = 2; }
+  repeated DropCount drops = 1;
+}

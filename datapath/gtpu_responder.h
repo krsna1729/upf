@@ -3,12 +3,12 @@
 #ifndef UPF_DATAPATH_GTPU_ECHO_H_
 #define UPF_DATAPATH_GTPU_ECHO_H_
 
-#include <atomic>
 #include <cstddef>
 #include <memory>
 
 #include "end_marker_log.h"
 #include "framework/memory_scope.h"
+#include "gtpu_control.h"
 #include "module.h"
 #include "upf_datapath.pb.h"
 
@@ -21,14 +21,9 @@
 // Indications for Session Report generation, and records End Markers as events
 // for End Marker Reception Reports. Other control types are dropped.
 //
-// Both replies are the request with its Ethernet, IPv4 and UDP addresses
-// swapped, the type replaced, and the lengths recomputed. An Echo Response
-// keeps the S-flag field (5.1: an echo sets it), sends TEID 0, and carries the
-// two IEs 7.2.2 names: the mandatory Recovery IE with a zero restart counter,
-// and this node's Recovery Time Stamp -- 17 bytes after the header. An Error
-// Indication has S clear, TEID 0 (the peer knows no tunnel toward this node),
-// and one TEID IE naming the TEID it used -- 5 bytes after the header. Both
-// copy nothing but their tail, allocate nothing, and read no session state.
+// The packet path is upf::datapath::AnswerGtpuControl (gtpu_control.h, which
+// carries the wire format), shared with UpfAppliance; this module owns the
+// counts and the log and sends a reply on its reply gate.
 class GtpuResponder final : public Module {
  public:
   static const gate_idx_t kNumOGates = MAX_GATES;
@@ -59,24 +54,13 @@ class GtpuResponder final : public Module {
       const upf::pb::GtpuResponderCommandDrainEndMarkersArg &arg);
 
  private:
-  // One entry: 0 is empty (an Error Indication never names TEID 0 -- that is
-  // the echo path), and the count only grows.
-  struct ErrorSlot {
-    std::atomic<uint32_t> teid{0};
-    std::atomic<uint64_t> count{0};
-  };
-  // Small on purpose: a flood of distinct TEIDs is a scan, not a tunnel loss.
-  // 64 slots are 1 KiB, and a full table is counted rather than dropped
-  // silently.
-  static constexpr size_t kErrorSlots = 64;
-
-  void RecordError(uint32_t teid);
-
   uint16_t port_ = 0;  // the UDP port the messages must arrive on
   uint32_t stamp_ = 0; // seconds from 1900 to this entity's start (8.7)
   int reply_gate_attr_ = -1;  // optional ingress BE32 output gate
-  std::unique_ptr<ErrorSlot[]> errors_;
-  std::atomic<uint64_t> untracked_{0};
+  // Peer Error Indications, when tracked. A fixed size no argument scales
+  // (GtpuErrorCounts::kDefaultSlots), so it is not admitted through memory()
+  // (D-198 admits what arguments size).
+  std::unique_ptr<upf::datapath::GtpuErrorCounts> errors_;
   int endpoint_attr_ = -1;  // "endpoint_id", read when End Markers are tracked
   // Admitted as "end_markers" (D-198).
   bess::framework::Sized<upf::datapath::EndMarkerLog> end_markers_;

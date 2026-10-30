@@ -23,6 +23,15 @@ inline void PutWire16(uint8_t *p, uint16_t value) noexcept {
 inline uint16_t GetWire16(const uint8_t *p) noexcept {
   return static_cast<uint16_t>((uint16_t{p[0]} << 8) | p[1]);
 }
+inline void PutWire32(uint8_t *p, uint32_t value) noexcept {
+  p[0] = static_cast<uint8_t>(value >> 24);
+  p[1] = static_cast<uint8_t>(value >> 16);
+  p[2] = static_cast<uint8_t>(value >> 8);
+  p[3] = static_cast<uint8_t>(value);
+}
+inline uint32_t GetWire32(const uint8_t *p) noexcept {
+  return uint32_t{p[0]} << 24 | uint32_t{p[1]} << 16 | uint32_t{p[2]} << 8 | p[3];
+}
 
 inline void WriteOuterIpv6(uint8_t *ip, const uint8_t src[16],
                            const uint8_t dst[16], uint16_t payload_length,
