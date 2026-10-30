@@ -25,11 +25,11 @@ The archive and excerpt hashes make the copies checkable:
 
 | Specification | Archive SHA-256 | Excerpt SHA-256 |
 |---|---|---|
-| TS 29.244 V16.9.1 | `88c0e4d30643bb49403214c09c749bd4c70da0ecbd32f6c9eb182b995da4dac7` | `7c94676f9eac29022a3436a5daeac8dd15478145715fa5f91640c69a890dec8e` |
+| TS 29.244 V16.9.1 | `88c0e4d30643bb49403214c09c749bd4c70da0ecbd32f6c9eb182b995da4dac7` | `f91969b3733832536a3992bf32a0176ecb4e90618b3a9382d3964700d54b7a70` |
 | TS 29.281 V16.2.0 | `1cd5d70ebbe60393c215cf259196e7ac18622bea540c8c12d80fefceb10fdece` | `83849f824e84a8c4aa513fdfd43e3b64d7f123b678b496eb60840d45179d0edc` |
 | TS 38.415 V16.6.0 | `0a54fa84efb85eb7c377160e4458cb8cf90f91cce57f5598fd5f06da4c7c9f6f` | `e81aac78132d777a6c3d58f8648a3012ea382917c361bd1789101be5780a3d84` |
 | TS 23.501 V16.9.0 | `c88a8dbc0d7cfb36b9c77140a5133649fcd02834c7b91a6943e5b58a7c086052` | `5c1cb69106a95154fa6d94ae7f6a21a12aec338389c865d90bac731cf7c2ae51` |
-| TS 23.502 V16.9.0 | `8a4ac102596e64fda6251c3af0b8a54cdbb61c35f4c48d852bf7413b9ea13e1e` | `c156df958d49e7d9050ec03ab933dcfbfe8a568675c57670695056ad94330412` |
+| TS 23.502 V16.9.0 | `8a4ac102596e64fda6251c3af0b8a54cdbb61c35f4c48d852bf7413b9ea13e1e` | `7e1fb731941745d3aa622332b4ad334e3612fd7be39b77a243b30cc419a0dea1` |
 
 The `.txt` files are excerpts: the cited clause headings and body text, cut
 from the official 3GPP `.docx`/`.doc` archives converted to UTF-8 with
@@ -53,7 +53,9 @@ already enforces the new requirement: an uplink PDR must name the F-TEID the
 decap writes, and a downlink PDR is keyed by the session's UE address (see
 `status-25` and `status-37`). The remaining specifications are pinned at
 their latest Release 16 revision, so there is no later revision in the
-released baseline to audit.
+released baseline to audit. The TS 29.244 clauses excerpted later for the
+N9, N19 and indirect-forwarding scenarios (5.23, 8.2.2, 8.2.24, 8.2.64 and
+8.2.118) are cited from V16.9.1 only and were not part of that comparison.
 
 **Newer releases, not claimed.** The newest published revisions on 2026-10-20
 are TS 29.244 V20.1.0, TS 29.281 V19.2.0, TS 38.415 V19.1.0, TS 23.501

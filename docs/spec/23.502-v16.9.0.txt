@@ -15,6 +15,24 @@ NOTE 1: If the Branching Point or UL CL and the PSA2 are co-located in a single 
 NOTE 2: If the Branching Point or UL CL and the PSA1 are co-located in a single UPF then steps 3 and 4 can be merged.
 5. The SMF updates PSA2 via N4. It provides the Branching Point or UL CL CN Tunnel Info for down-link traffic.
 NOTE 3: If the Branching Point or UL CL and the PSA2 are co-located in a single UPF then step 5 is not needed.
+6. The SMF updates (R)AN via N2 SM information over N11. It provides the new CN Tunnel Info corresponding to the UPF (Branching Point or UL CL). In the case of UL CL, if there is an existing UPF between the (R)AN and new inserted UL CL, the SMF updates the existing UPF via N4 instead of updating the (R)AN.
+
+4.3.5.7 Simultaneous change of Branching Point or UL CL and additional PSA for a PDU Session
+Simultaneous change of UL CL or Branching Point and additional PSA can be performed after Xn based handover, N2 based handover and Service Request procedures.
+The following procedure is triggered by SMF in order to change the Branching Point or the UL CL and additional PSA serving a PDU Session for a UE.
+UE has an established PDU Session with a UPF including the PDU Session Anchor (Remote UPF). The PDU Session user plane involves at least the Source (R)AN, Source Branching Point or Source UL CL, local Source UPF (PSA2) and the Remote UPF (PDU Session Anchor, PSA1), where Source Branching Point or Source UL CL and PSA2 can be co-located.
+3. The SMF selects a UPF and using N4 establishes the Target Branching Point or Target UL CL for the PDU Session. SMF provides the necessary uplink forwarding rules towards the PSA3 and PSA1 including the Tunnel Info for each UPF. If session continuity upon UL CL relocation is used, the SMF also uses N4 to establish an N9 forwarding tunnel between the Source UL CL and Target UL CL, including the Tunnel Info for each UPF. In addition, the AN Tunnel Info to target (R)AN is provided for downlink forwarding. In the case of UL CL, the SMF provides traffic filters indicating what traffic shall be forwarded towards PSA3, PSA1 and Source UL CL, respectively. In the case of IPv6 multi-homing, the SMF also provides traffic filters for the IPv6 prefixes corresponding to PSA3 and PSA1 indicating what traffic shall be forwarded towards PSA3 and PSA1 respectively. Target Branching Point or Target UL CL provides the CN Tunnel Info for downlink traffic.
+NOTE 1: If the Target Branching Point or Target UL CL and the PSA3 are co-located in a single UPF then steps 2 and 3 can be merged.
+NOTE 2: When session continuity upon UL CL relocation is used, the downlink traffic at this point goes through Source UL CL, Target UL CL and Target (R)AN.
+4. The SMF updates the PSA1 via N4. It provides the PDU Session CN Tunnel Info for the downlink traffic.
+5. The SMF updates the PSA3. It provides the CN Tunnel Info for downlink traffic.
+NOTE 3: If the Target Branching Point or the Target UL CL and the PSA3 are co-located in a single UPF then step 5 is not needed.
+6. In the case of PDU session with UL CL, if the runtime coordination between 5GC and AF is enabled based on local configuration, according to the indication of "AF acknowledgment to be expected" included in AF subscription to SMF events, the SMF sends a late notification to the AF and waits for a notification response from the AF. If the SMF receives a negative notification response from the AF, the SMF may stop the procedure and remove the Target Branching Point or Target UL CL and PSA3.
+The SMF updates (R)AN via N2 SM information over N11. It provides the new CN Tunnel Info corresponding to the Target Branching Point or the Target UL CL. If there is an existing UPF between the Target (R)AN and Target Branching Point or Target UL CL, the SMF updates the existing UPF via N4 instead of updating the (R)AN.
+NOTE 4: When session continuity upon UL CL relocation is used, the uplink traffic destined to PSA2 at this point goes through Target (R)AN, Target UL CL and Source UL CL.
+10. When session continuity upon UL CL relocation is used, detection of no active traffic over the N9 forwarding tunnel is performed during a time interval provisioned by the SMF for User Plane inactivity report in order to release the N9 forwarding tunnel. The detection can be done by Source UL CL, which notifies the SMF of no active traffic over the N9 forwarding tunnel.
+11. The SMF releases via N4 the PSA2.
+12. The SMF releases the Source Branching Point or the Source UL CL.
 
 4.9.1.3 Inter NG-RAN node N2 based handover
 4.9.1.3.1 General
@@ -55,6 +73,9 @@ If new T-UPF is inserted or an existing intermediate S-UPF is re-allocated, the 
 If UPF is not re-allocated, the SMF shall send N4 Session Modification Request indicating DL AN Tunnel Info of T-RAN to the S-UPF.
 10a. [Conditional] SMF to UPF (PSA): N4 Session Modification Request.
 For non-roaming or local breakout roaming scenario, the SMF sends N4 Session Modification Request message to PDU Session Anchor UPF, UPF (PSA), providing N3 AN Tunnel Info of T-RAN or the DL CN Tunnel Info of T-UPF if a new T-UPF is inserted or an existing intermediate S-UPF is re-allocated.
+10b. [Conditional] UPF (PSA) to SMF: N4 Session Modification Response.
+The UPF (PSA) sends N4 Session Modification Response message to SMF. In order to assist the reordering function in the T-RAN, the UPF (PSA) sends one or more "end marker" packets for each N3 tunnel on the old path immediately after switching the path, the source NG-RAN shall forward the "end marker" packets to the target NG-RAN. At this point, UPF (PSA) starts sending downlink packets to the T-RAN, via T-UPF if a new T-UPF is inserted or an existing intermediate S-UPF is re-allocated. In the case of home routed roaming scenario, the H-SMF responds with the Nsmf_PDUSession_Update Response service operation to V-SMF once the H-UPF (PDU Session Anchor) is updated with the UL Tunnel Info of the T-UPF.
+When there are multiple UPFs(PSA), step 10a and step 10b are performed for each UPFs(PSA).
 11. SMF to T-AMF: Nsmf_PDUSession_UpdateSMContext Response (PDU Session ID).
 SMF confirms reception of Handover Complete.
 If indirect data forwarding applies, the SMF starts an indirect data forwarding timer, to be used to release the resource of indirect data forwarding tunnel.
@@ -67,3 +88,10 @@ In the case of indirect data forwarding, the resource of indirect data forwardin
 If indirect forwarding applies and UPF is re-allocated, after timer of indirect data forwarding expires, the SMF sends N4 Session Modification Request to T-UPF to release the indirect data forwarding resource.
 15b. [Conditional] T-UPF to SMF: N4 Session Modification Response.
 The T-UPF acknowledges with an N4 Session Modification Response message to confirm the release of indirect data forwarding resources.
+
+4.13.8.2.2 group-level N4 session management procedures
+The SMF shall create an group-level N4 session on the UPF for a 5G VN group when N19-based forwarding is applied. The group-level N4 Session management procedures enable the SMF to create, update or delete the group-level N4 Session, e.g. add or delete N4 rules, allocate or release the N19 tunnel resources.
+In the case of N19-based forwarding is applied, the followings apply for the PDU Sessions targeting the (DNN, S-NSSAI) associated with a 5G VN group:
+- If the PDU Sessions targeting the same 5G VN group are anchored at different UPFs, the SMF shall create the group-level N4 Session in each involved UPF via N4 Session Establishment procedure (clause 4.4.1.2) in order to establish N19 tunnel(s) between the UPFs and install the N4 rules.
+- If the last PDU Session for this 5G VN group is released on a UPF, the SMF may delete the group-level N4 Session in the UPF via N4 Session Release procedure (clause 4.4.1.4) and release the N19 tunnel(s) between this UPF and other UPF(s) serving the 5G VN group via update of the corresponding N4 rules.
+- If an address of the UE within the 5G VN group is allocated or released, the SMF may update the N4 rules(e.g. PDRs and FARs) related to the UE address into the group-level N4 Session context via N4 Session Modification procedure (clause 4.4.1.3).
