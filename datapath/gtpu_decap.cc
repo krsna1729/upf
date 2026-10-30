@@ -171,8 +171,9 @@ void GtpuDecap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     upf::datapath::ParsedGtpu parsed;
     const auto kind = upf::datapath::ParseGtpuAdmission(
         frame, pkt.total_len(), port_, endpoint_id, &parsed);
-    if (kind == upf::datapath::GtpuParseKind::kControl) {
-      ogates[i] = 2;
+    if (kind != upf::datapath::GtpuParseKind::kGpdu) {
+      // Control frames go to the responder; malformed frames drop here.
+      if (kind == upf::datapath::GtpuParseKind::kControl) ogates[i] = 2;
       continue;
     }
     outer[i] = parsed.outer;
