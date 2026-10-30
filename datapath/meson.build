@@ -48,9 +48,11 @@ upf_datapath = shared_module(
   'upf_datapath',
   ['arp_responder.cc', 'atsss_steer.cc', 'gtpu_decap.cc', 'gtpu_responder.cc', 'gtpu_encap.cc',
    'urr_count.cc',
-   # UpfAppliance: the whole user plane in one module.
+   # UpfAppliance: the whole user plane in one module; PDRs as per-anchor
+   # FirewallScan policies (pdr_scan.cc), installed classifier API only.
    'upf_appliance.cc', 'upf_appliance_resources.cc', 'upf_appliance_path.cc',
    'upf_appliance_slow.cc', 'upf_appliance_buffer.cc', 'upf_appliance_selftest.cc',
+   'pdr_scan.cc',
    upf_proto[0], upf_proto[1]],
   include_directories: include_directories('.'),
   dependencies: [bess_dep, protobuf_dep],
@@ -59,8 +61,9 @@ upf_datapath = shared_module(
 )
 
 # Focused parser, admission-key, F-TEID resource and outer-wire unit tests,
-# and the per-packet helpers the modules and UpfAppliance share
-# (packet_helpers_test.cc: GTP-U control, ATSSS selection, ARP proxy). The
+# the per-packet helpers the modules and UpfAppliance share
+# (packet_helpers_test.cc: GTP-U control, ATSSS selection, ARP proxy), and the
+# scan PDR resource against the installed masked table (pdr_scan_test.cc). The
 # test links bess-dev-static for the RcuDomain and SharedExactIndex the resource
 # wraps; the plugin never links those archives (bessd provides the symbols).
 gtest_dep = dependency('gtest', required: false)
@@ -71,7 +74,8 @@ if gtest_dep.found() and bess_static_dep.found()
   # librte_telemetry, ...) from the same unexported directory.
   gtpu_datapath_test = executable(
     'gtpu_datapath_test',
-    ['gtpu_datapath_test.cc', 'packet_helpers_test.cc', 'upf_appliance_frame_test.cc'],
+    ['gtpu_datapath_test.cc', 'packet_helpers_test.cc', 'upf_appliance_frame_test.cc',
+     'pdr_scan_test.cc', 'pdr_scan.cc'],
     include_directories: include_directories('.'),
     dependencies: [bess_static_dep, protobuf_dep, gtest_dep],
     link_args: ['-Wl,--disable-new-dtags'],

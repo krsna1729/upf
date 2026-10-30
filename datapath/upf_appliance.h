@@ -16,9 +16,7 @@
 #include "atsss_select.h"
 #include "fteid_resource.h"
 #include "gtpu_control.h"
-#include "classifier/concurrent_masked.h"
-#include "classifier/masked_rule_resource.h"
-#include "classifier/record_arena.h"
+#include "pdr_scan.h"
 #include "dataplane/action_id.h"
 #include "dataplane/slot_resource.h"
 #include "dataplane/slot_table.h"
@@ -52,11 +50,11 @@ struct Counters {
   bess::utils::DpdkArray<Stamps> stamps;
   std::unique_ptr<bess::dataplane::SlotResource<Id, CounterEntry>> resource;
 };
+// A direction's PDRs: per-anchor FirewallScan policies (pdr_scan.h). The
+// anchor index is declared first: the resource points into it.
 struct Pdr {
-  bess::framework::MemoryLease table_lease, records_lease;
-  std::shared_ptr<bess::classifier::ConcurrentMaskedTable> table;
-  std::shared_ptr<bess::classifier::RecordArena> records;
-  std::unique_ptr<bess::classifier::MaskedRuleResource> resource;
+  bess::framework::Sized<bess::flow::SharedExactIndex> anchors;
+  bess::framework::Sized<PdrScanResource> resource;
 };
 struct Interface {
   uint16_t ingress_gate = 0, output_gate = 0, vlan = 0, id = 0;

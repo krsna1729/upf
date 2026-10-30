@@ -2,14 +2,13 @@
 //
 // `self_test`: the module's own tables, driven without frames or a graph (the
 // R4 pattern). It writes one UL PDR through the engine exactly as a
-// controller's transaction does (Reserve/Publish via ApplyOwned), classifies
-// keys built by the packet path's own BuildPdrKey from a synthetic frame
-// through the installed masked table, reads the result record back, and
+// controller's transaction does (Reserve/Prepare/Publish via ApplyOwned),
+// classifies keys built by the packet path's own BuildPdrKey from a synthetic
+// frame through the per-anchor scan policies, reads the result back, and
 // erases the rule. Run it on an idle appliance with workers paused (the
 // command is THREAD_UNSAFE): it uses action id 0x7e57 and context 0x7e57.
 // The frame-level lanes (decap, meters, ATSSS, router, encap, transport) are
 // checked by upf_appliance_frame_test.cc and the live harness.
-
 #include <cstring>
 #include <string>
 
@@ -19,9 +18,8 @@
 
 CommandResponse UpfAppliance::CommandSelfTest(const bess::pb::EmptyArg &) {
   namespace dp = bess::dataplane;
-  using bess::classifier::ConstBytes;
-  using bess::classifier::MaskedRuleResource;
-  if (!pdr_ul_.resource || !pdr_ul_.table) return CommandFailure(EINVAL, "not initialised");
+  using upf::appliance::PdrScanResource;
+  if (!pdr_ul_.resource) return CommandFailure(EINVAL, "not initialised");
 
   std::array<uint8_t, 64> frame{};
   frame[12] = 0x08;
@@ -49,33 +47,31 @@ CommandResponse UpfAppliance::CommandSelfTest(const bess::pb::EmptyArg &) {
     return CommandFailure(EINVAL, "usage octets: non-IPv4 length must fall back to the frame");
 
   const size_t len = 18;
-  std::vector<std::byte> mask(len, std::byte{0xff});
-  ConstBytes value(key.data(), len);
-  MaskedRuleResource::Value rule{.priority = 100, .gate = 0,
-                                  .result = std::vector<std::byte>(20, std::byte{0})};
+  std::vector<uint8_t> mask(len, 0xff);
+  upf::appliance::PdrValue rule{.priority = 100, .gate = 0,
+                                .result = std::vector<std::byte>(20, std::byte{0})};
   rule.result[2] = std::byte{0x7e};
   rule.result[3] = std::byte{0x57};  // action_id, big endian
-  const dp::ResourceKey rule_key = MaskedRuleResource::Key(ConstBytes(mask.data(), len), value);
+  const dp::ResourceKey rule_key = PdrScanResource::EncodeKey(
+      mask, std::span(reinterpret_cast<const uint8_t *>(key.data()), len), {});
   const dp::Resource *const owned[] = {pdr_ul_.resource.get()};
   const auto applied = init_context().resources().ApplyOwned(
       owned, std::array{dp::Op::Upsert(pdr_ul_.resource->name(), rule_key, std::any(rule))});
   if (applied.outcome != dp::ResourceRegistry::OwnedApplyResult::Outcome::kApplied)
     return CommandFailure(EINVAL, "PDR upsert refused: %s", applied.error.c_str());
 
-  bess::classifier::ConcurrentMaskedTable::Match hit[2];
-  std::array<std::byte, 36> keys{};
-  std::memcpy(keys.data(), key.data(), 18);
-  std::memcpy(keys.data() + 18, key.data(), 18);
-  keys[18 + 16] = std::byte{0x01};  // a different admission context: must miss
-  const uint64_t found = pdr_ul_.table->LookupBatch(ConstBytes(keys.data(), keys.size()), 18, hit, 2);
+  PdrScanResource::Key keys[2]{};
+  std::memcpy(keys[0].data(), key.data(), len);
+  std::memcpy(keys[1].data(), key.data(), len);
+  keys[1][16] = std::byte{0x01};  // a different admission context: must miss
+  const upf::appliance::PdrRule *hit[2];
+  pdr_ul_.resource->Classify(keys, 2, hit);
   std::string failure;
-  if (found != 1) failure = "batch lookup: want hit for the rule's key and a miss for another context";
-  else if (hit[0].gate != 0) failure = "rule gate was not returned";
-  else {
-    const auto record = pdr_ul_.records->Lookup(pdr_ul_.table->RuleAt(hit[0].rule_id).result_id);
-    if (static_cast<uint8_t>(record[2]) != 0x7e || static_cast<uint8_t>(record[3]) != 0x57)
-      failure = "result record did not round-trip";
-  }
+  if (hit[0] == nullptr || hit[1] != nullptr)
+    failure = "lookup: want a hit for the rule's key and a miss for another context";
+  else if (hit[0]->gate != 0) failure = "rule gate was not returned";
+  else if (hit[0]->result[2] != 0x7e || hit[0]->result[3] != 0x57)
+    failure = "result record did not round-trip";
 
   const auto erased = init_context().resources().ApplyOwned(
       owned, std::array{dp::Op::Erase(pdr_ul_.resource->name(), rule_key)});

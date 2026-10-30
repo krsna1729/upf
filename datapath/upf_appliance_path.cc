@@ -15,7 +15,6 @@ using namespace upf::appliance;
 namespace gtpu = upf::datapath;
 namespace route = bess::route;
 namespace meter = bess::meter;
-namespace classifier = bess::classifier;
 namespace {
 constexpr size_t kBurst = bess::PacketBatch::kMaxBurst;
 bool Active(const FrameState &s) { return s.lane == Lane::kUl || s.lane == Lane::kDl; }
@@ -142,9 +141,10 @@ void UpfAppliance::ControlGtpu(Context *ctx, bess::PacketRef p, State &s) {
 
 void UpfAppliance::ClassifyPdr(bess::PacketBatch *batch, State *states, size_t n, bool dl) {
   auto &pdr = dl ? pdr_dl_ : pdr_ul_;
-  std::byte keys[kBurst][22];
+  const size_t key_len = dl ? 22 : 18;
+  PdrScanResource::Key keys[kBurst];
   uint8_t positions[kBurst];
-  classifier::ConcurrentMaskedTable::Match matches[kBurst];
+  const PdrRule *winners[kBurst];
   size_t count = 0;
   for (size_t i = 0; i < n; ++i) {
     auto &s = states[i];
@@ -152,24 +152,23 @@ void UpfAppliance::ClassifyPdr(bess::PacketBatch *batch, State *states, size_t n
     if (!BuildPdrKey(Bytes(batch->packet(i)), dl, s.route_domain, s.fteid_context, s.qfi, keys[count])) {
       Drop(s, Reason::kPdrShort); continue;
     }
+    std::fill(keys[count].begin() + key_len, keys[count].end(), std::byte{0});
     positions[count++] = i;
   }
-  const uint64_t hits = count ? pdr.table->LookupBatch(
-      classifier::ConstBytes(&keys[0][0], sizeof(keys)), sizeof(keys[0]), matches, count) : 0;
+  if (count) pdr.resource->Classify(keys, count, winners);
   for (size_t k = 0; k < count; ++k) {
     auto &s = states[positions[k]];
-    if (!(hits & (uint64_t{1} << k))) { Drop(s, Reason::kPdrMiss); continue; }
-    const auto &match = matches[k];
-    if (match.gate == DROP_GATE) { Drop(s, Reason::kPdrDrop); continue; }
-    if (match.gate != 0 && match.gate != 1) { Drop(s, Reason::kPdrGate); continue; }
-    const auto r = pdr.records->Lookup(pdr.table->RuleAt(match.rule_id).result_id);
-    const auto *b = reinterpret_cast<const uint8_t *>(r.data());
+    const PdrRule *rule = winners[k];
+    if (rule == nullptr) { Drop(s, Reason::kPdrMiss); continue; }
+    if (rule->gate == DROP_GATE) { Drop(s, Reason::kPdrDrop); continue; }
+    if (rule->gate != 0 && rule->gate != 1) { Drop(s, Reason::kPdrGate); continue; }
+    const uint8_t *b = rule->result.data();
     s.action_id = gtpu::GetWire32(b);
     s.meters[0] = gtpu::GetWire32(b + 4); s.meters[1] = gtpu::GetWire32(b + 8);
     s.next_hop_id = gtpu::GetWire32(b + 12); s.route_domain = gtpu::GetWire32(b + 16);
     s.policy_id = dl ? gtpu::GetWire32(b + 20) : 0;
     s.direction = dl ? 1 : 0;
-    if (match.gate == 1) s.lane = Lane::kBuffer;
+    if (rule->gate == 1) s.lane = Lane::kBuffer;
   }
 }
 

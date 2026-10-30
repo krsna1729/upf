@@ -13,8 +13,8 @@ namespace upb = upf::pb;
 
 const ResourceTables UpfAppliance::resource_tables = {
     ResourceTable::Map<upb::FteidKey, upb::FteidEntry>("fteids"),
-    ResourceTable::Map<bess::pb::WildcardMatchRuleKey, bess::pb::WildcardMatchRuleValue>("pdr_ul"),
-    ResourceTable::Map<bess::pb::WildcardMatchRuleKey, bess::pb::WildcardMatchRuleValue>("pdr_dl"),
+    ResourceTable::Map<bess::pb::WildcardMatchRuleKey, bess::pb::WildcardMatchRuleValue>("pdr_ul").Rebuilds(),
+    ResourceTable::Map<bess::pb::WildcardMatchRuleKey, bess::pb::WildcardMatchRuleValue>("pdr_dl").Rebuilds(),
     ResourceTable::Map<bess::pb::MeterIdKey, bess::pb::MeterPolicyValue>("meters").Rebuilds(),
     ResourceTable::Map<upb::CounterKey, upb::CounterEntry>("counters_ul"),
     ResourceTable::Map<upb::CounterKey, upb::CounterEntry>("counters_dl"),
@@ -224,6 +224,7 @@ std::string UpfAppliance::GetDesc() const {
   uint64_t drops = 0;
   for (const auto &n : reasons_) drops += n.load(std::memory_order_relaxed);
   return std::format("{} interfaces, {} UL / {} DL PDRs, {} counted outcomes", interfaces_.size(),
-      pdr_ul_.table ? pdr_ul_.table->size() : 0, pdr_dl_.table ? pdr_dl_.table->size() : 0, drops);
+      pdr_ul_.resource ? pdr_ul_.resource->LiveCount() : 0,
+      pdr_dl_.resource ? pdr_dl_.resource->LiveCount() : 0, drops);
 }
 ADD_MODULE(UpfAppliance, "upf_appliance", "owns the complete UPF user plane; no graph or fallback")

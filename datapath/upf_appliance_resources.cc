@@ -114,7 +114,7 @@ std::expected<dataplane::ResourceKey, std::string> PdrKey(
   if (key.values_size() != static_cast<int>(widths.size()) ||
       key.masks_size() != static_cast<int>(widths.size()))
     return std::unexpected("incorrect number of PDR values or masks");
-  std::vector<std::byte> value, mask;
+  std::vector<uint8_t> value, mask;
   std::vector<size_t> offsets;
   for (size_t i = 0; i < widths.size(); ++i) {
     offsets.push_back(value.size());
@@ -126,11 +126,11 @@ std::expected<dataplane::ResourceKey, std::string> PdrKey(
     for (size_t j = 0; j < widths[i]; ++j) {
       if ((v[j] & static_cast<uint8_t>(~m[j])) != 0)
         return std::unexpected("invalid pair of value and mask");
-      value.push_back(std::byte(v[j])); mask.push_back(std::byte(m[j]));
+      value.push_back(v[j]); mask.push_back(m[j]);
     }
   }
   std::vector<bool> ranged(widths.size(), false);
-  std::vector<bess::classifier::ConcurrentMaskedTable::KeyRange> ranges;
+  std::vector<PdrRange> ranges;
   for (const auto &r : key.ranges()) {
     const size_t f = r.field();
     if (f >= widths.size() || ranged[f])
@@ -140,19 +140,19 @@ std::expected<dataplane::ResourceKey, std::string> PdrKey(
     if (r.low() > r.high() || r.high() > max)
       return std::unexpected("range is empty or wider than its field");
     for (size_t j = 0; j < widths[f]; ++j)
-      if (mask[offsets[f] + j] != std::byte{0})
+      if (mask[offsets[f] + j] != 0)
         return std::unexpected("range field has a nonzero mask");
     if (r.low() == 0 && r.high() == max) continue;
     ranges.push_back({static_cast<uint32_t>(offsets[f]),
                       static_cast<uint32_t>(widths[f]), r.low(), r.high()});
   }
-  std::ranges::sort(ranges, {}, &bess::classifier::ConcurrentMaskedTable::KeyRange::offset);
-  return bess::classifier::MaskedRuleResource::Key(mask, value, ranges);
+  std::ranges::sort(ranges, {}, &PdrRange::offset);
+  return PdrScanResource::EncodeKey(mask, value, ranges);
 }
-uint32_t Read32(const std::vector<std::byte> &v, size_t off) {
+uint32_t Read32(std::span<const uint8_t> v, size_t off) {
   uint32_t n = 0;
   for (size_t i = off; i < off + 4; ++i)
-    n = (n << 8) | (i < v.size() ? std::to_integer<uint8_t>(v[i]) : 0);
+    n = (n << 8) | (i < v.size() ? v[i] : 0);
   return n;
 }
 }  // namespace
@@ -254,53 +254,40 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
   bindings_.push_back(init_context().codecs().Bind(*meters_, bess::meter::MakeMeterResourceCodec(*meters_)));
   if (auto r = enroll(meters_.get()); !r)
     return CommandFailure(EEXIST, "%s", r.error().c_str());
-  auto init_pdr = [&](Pdr &pdr, const char *table_name, bool dl, size_t tuples)
+  // Anchors (UL contexts, DL UE addresses) are bounded like the sessions the
+  // counters are sized for; the index keeps its own headroom for erased keys.
+  auto init_pdr = [&](Pdr &pdr, const char *table_name, bool dl)
       -> std::expected<void, std::string> {
-    using Table = bess::classifier::ConcurrentMaskedTable;
-    using Resource = bess::classifier::MaskedRuleResource;
-    const size_t key_len = dl ? 22 : 18;
     const size_t record_size = dl ? 24 : 20;
-    pdr.table_lease = memory.LeaseFor<Table>(table_name, static_cast<uint32_t>(key_len), tuples, init_context().rcu());
-    auto table = Table::Create(key_len, tuples, init_context().rcu());
-    if (!table) return std::unexpected(table.error());
-    // Retire callbacks can retain the table beyond teardown; its admission
-    // must travel with that final owner, as in WildcardMatch.
-    auto table_owner = std::make_shared<bess::framework::Sized<Table>>(
-        bess::framework::MemoryScope::Adopt(std::move(pdr.table_lease), std::move(*table)));
-    Table *table_raw = table_owner->get();
-    pdr.table = std::shared_ptr<Table>(std::move(table_owner), table_raw);
-    pdr.records_lease = memory.LeaseFor<bess::classifier::RecordArena>(
-        std::string(table_name) + "_results", record_size, init_context().rcu());
-    auto records_owner = std::make_shared<bess::framework::Sized<bess::classifier::RecordArena>>(
-        bess::framework::MemoryScope::Adopt(std::move(pdr.records_lease),
-          std::make_unique<bess::classifier::RecordArena>(record_size, init_context().rcu())));
-    auto *records_raw = records_owner->get();
-    pdr.records = std::shared_ptr<bess::classifier::RecordArena>(std::move(records_owner), records_raw);
-    auto check = [record_size](const Resource::Value &v) -> Resource::Result {
+    pdr.anchors = memory.Create<bess::flow::SharedExactIndex>(
+        std::string(table_name) + "_anchors", uint32_t{4}, capacity_, init_context().rcu(),
+        memory.socket());
+    auto check = [record_size](const PdrValue &v) -> std::expected<void, std::string> {
       if (!bess::IsValidGateValue(v.gate)) return std::unexpected("invalid gate");
       if (v.result.size() > record_size) return std::unexpected("PDR result too large");
       return {};
     };
-    pdr.resource = std::make_unique<Resource>(name() + "/" + table_name, Resource::Hooks{
-      .table = [&pdr] { return pdr.table; },
+    auto lease = memory.Lease(table_name, sizeof(PdrScanResource), sizeof(PdrScanResource));
+    pdr.resource = bess::framework::MemoryScope::Adopt(std::move(lease),
+        std::make_unique<PdrScanResource>(name() + "/" + table_name, dl, record_size,
+            *pdr.anchors, init_context().rcu(), PdrScanResource::Hooks{
       .check_value = check,
-      .references = [this](const Resource::Value &v) {
+      .references = [this](std::span<const uint8_t> result) {
         std::vector<dataplane::Reference> refs;
         for (size_t offset : {size_t{4}, size_t{8}, size_t{12}}) {
-          const uint32_t id = Read32(v.result, offset);
+          const uint32_t id = Read32(result, offset);
           if (id) refs.push_back({name() + (offset == 12 ? "/next_hops" : "/meters"),
                                  dataplane::EncodeKey(Id(id))});
         }
         return refs;
       },
-      .records = pdr.records,
-      .may_reference = {name() + "/meters", name() + "/next_hops"}});
+      .may_reference = {name() + "/meters", name() + "/next_hops"}}));
     bindings_.push_back(init_context().codecs().Bind(*pdr.resource,
       std::make_shared<bess::framework::TypedCodec<bess::pb::WildcardMatchRuleKey, bess::pb::WildcardMatchRuleValue>>(
         [dl](const auto &key) { return PdrKey(key, dl); },
         [check](const bess::pb::WildcardMatchRuleValue &v) -> std::expected<std::any, std::string> {
           if (!bess::IsValidGateValue(v.gate())) return std::unexpected("invalid gate");
-          Resource::Value value{v.priority(), static_cast<uint16_t>(v.gate()),
+          PdrValue value{v.priority(), static_cast<uint16_t>(v.gate()),
             std::vector<std::byte>(reinterpret_cast<const std::byte *>(v.result().data()),
                                   reinterpret_cast<const std::byte *>(v.result().data()) + v.result().size())};
           if (auto ok = check(value); !ok) return std::unexpected(ok.error());
@@ -308,14 +295,18 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
         },
         [&pdr, dl](const auto &visit) {
           const auto widths = Widths(dl);
-          pdr.table->ForEach([&](auto mask, auto bytes, const auto &r, auto ranges) {
+          const size_t len = dl ? 22 : 18;
+          pdr.resource->ForEach([&](const dataplane::ResourceKey &k, const PdrRule &r) {
             bess::pb::WildcardMatchRuleKey key;
             bess::pb::WildcardMatchRuleValue value;
+            std::vector<PdrRange> ranges((k.size() - 2 * len) / sizeof(PdrRange));
+            if (!ranges.empty())
+              std::memcpy(ranges.data(), k.data() + 2 * len, ranges.size() * sizeof(PdrRange));
             size_t pos = 0;
             auto range = ranges.begin();
             for (size_t i = 0; i < widths.size(); ++i) {
-              key.add_values()->set_value_bin(reinterpret_cast<const char *>(bytes.data() + pos), widths[i]);
-              key.add_masks()->set_value_bin(reinterpret_cast<const char *>(mask.data() + pos), widths[i]);
+              key.add_values()->set_value_bin(k.data() + len + pos, widths[i]);
+              key.add_masks()->set_value_bin(k.data() + pos, widths[i]);
               if (range != ranges.end() && range->offset == pos) {
                 auto *out = key.add_ranges();
                 out->set_field(i); out->set_low(range->low); out->set_high(range->high); ++range;
@@ -323,16 +314,15 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
               pos += widths[i];
             }
             value.set_priority(r.priority); value.set_gate(r.gate);
-            const auto record = pdr.records->Lookup(r.result_id);
-            value.set_result(reinterpret_cast<const char *>(record.data()), record.size());
+            value.set_result(reinterpret_cast<const char *>(r.result.data()), pdr.resource->record_size());
             visit(key, value);
           });
         })));
     return enroll(pdr.resource.get());
   };
-  if (auto r = init_pdr(pdr_ul_, "pdr_ul", false, arg.pdr_ul().max_tuples() ? arg.pdr_ul().max_tuples() : 16); !r)
+  if (auto r = init_pdr(pdr_ul_, "pdr_ul", false); !r)
     return CommandFailure(EINVAL, "%s", r.error().c_str());
-  if (auto r = init_pdr(pdr_dl_, "pdr_dl", true, arg.pdr_dl().max_tuples() ? arg.pdr_dl().max_tuples() : 8); !r)
+  if (auto r = init_pdr(pdr_dl_, "pdr_dl", true); !r)
     return CommandFailure(EINVAL, "%s", r.error().c_str());
   auto init_counter = [&](Counters &bank, const char *table) -> std::expected<void, std::string> {
     bank.cells = memory.Create<bess::stats::KeyedCounters>(std::string(table) + "_cells", capacity_, 2, planes);
@@ -552,10 +542,7 @@ void UpfAppliance::ReleaseResources() {
   for (auto &binding : bindings_) binding.Reset();
   bindings_.clear();
   pdr_ul_.resource.reset(); pdr_dl_.resource.reset();
-  pdr_ul_.table.reset(); pdr_dl_.table.reset();
-  pdr_ul_.records.reset(); pdr_dl_.records.reset();
-  pdr_ul_.table_lease.reset(); pdr_dl_.table_lease.reset();
-  pdr_ul_.records_lease.reset(); pdr_dl_.records_lease.reset();
+  pdr_ul_.anchors.reset(); pdr_dl_.anchors.reset();
   policy_resource_.reset(); health_resource_.reset(); tunnel_resource_.reset();
   policies_.reset(); health_.reset(); tunnels_.reset();
   for (auto *bank : {&counters_ul_, &counters_dl_, &buffer_counters_}) {
