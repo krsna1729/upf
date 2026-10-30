@@ -25,7 +25,7 @@
 #                    enc, and -- for the egresses a deployment adds with
 #                    -instances -- 2 toward enc again (a tunnel out of an
 #                    instance: N9, or indirect forwarding, hop 3) and 4 into
-#                    pdr_dl (the 5G VN re-injection, hop 5). The Router's gate
+#                    tag_vn -> pdr_dl (the 5G VN re-injection, hop 5). The Router's gate
 #                    is interface - 1 (D-049), so hop 4 would be a service-LAN
 #                    port's; this file declares none, so a deployment whose
 #                    -instances names sgi-lan-next-hop adds that port and hop.
@@ -122,6 +122,17 @@ modules:
         - {name: qfi, size: 1, value_int: 255}
         - {name: action_id, size: 4, value_int: 0}
         - {name: next_hop_id, size: 4, value_int: 0}
+
+  # The 5G VN re-injection's tag (rt gate 4 -> pdr_dl): a re-injected packet
+  # is classified again only by the 5G VN Internal PDRs (TS 23.501
+  # 5.8.2.13.0's second step), which name no F-TEID. Clearing the admission
+  # context keeps the PDR that took it off the N19 tunnel -- keyed by that
+  # tunnel's context alone -- from taking it again.
+  - name: tag_vn
+    mclass: SetMetadata
+    arg:
+      attrs:
+        - {name: fteid_context, size: 4, value_int: 0}
 
   # The N6 ingress' first stop: every frame's EtherType, so the ARP branch is
   # taken before any interface sees the frame. An ARP request names the
@@ -431,7 +442,8 @@ connections:
   - {upstream: atsss, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: rt, downstream: enc, ogate: 2}
-  - {upstream: rt, downstream: pdr_dl, ogate: 4}
+  - {upstream: rt, downstream: tag_vn, ogate: 4}
+  - {upstream: tag_vn, downstream: pdr_dl}
   - {upstream: enc, downstream: rt_transport}
   - {upstream: rt_transport, downstream: n3_out}
   - {upstream: rt_transport, downstream: n3_out, ogate: 1}
