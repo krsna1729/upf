@@ -22,6 +22,7 @@
 package session
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
 
@@ -29,27 +30,27 @@ import (
 )
 
 // arpEntry is one address a session answers for, as the module's resource
-// spells it: the responder module, the IPv4 address, and the Ethernet address
-// the reply carries (the interface's own, not the UE's).
+// spells it: the responder's table (Target.Entries), the IPv4 address, and the
+// Ethernet address the reply carries (the interface's own, not the UE's).
 type arpEntry struct {
-	module string
-	addr   netip.Addr
-	mac    [6]byte
+	resource string
+	addr     netip.Addr
+	mac      [6]byte
 }
 
 // claim is the compiler's own name for this entry: the resource's key, spelled
 // the way the module's key is (the address in dotted decimal). Two sessions
-// whose subscriber-side PDRs name one address on one interface would each
-// answer for the other's traffic, so the second is refused exactly as two
-// sessions naming one rule key are.
+// whose subscriber-side PDRs name one address in one table would each answer
+// for the other's traffic, so the second is refused exactly as two sessions
+// naming one rule key are.
 func (e arpEntry) claim() string {
-	return e.module + "/entries\x00" + e.addr.String()
+	return e.resource + "\x00" + e.addr.String()
 }
 
 // change is the write that puts the entry in the responder's table.
 func (e arpEntry) change() bess.Change {
 	return bess.Change{
-		Resource: e.module + "/entries",
+		Resource: e.resource,
 		Key:      map[string]any{"ip": e.addr.String()},
 		Value:    map[string]any{"mac_addr": macString(e.mac)},
 	}
@@ -57,7 +58,7 @@ func (e arpEntry) change() bess.Change {
 
 // erasure is the change that takes the entry out.
 func (e arpEntry) erasure() bess.Change {
-	return bess.Change{Resource: e.module + "/entries", Key: map[string]any{"ip": e.addr.String()}}
+	return bess.Change{Resource: e.resource, Key: map[string]any{"ip": e.addr.String()}}
 }
 
 // arpEntryOf is the entry one PDR's address is answered by: a subscriber-side
@@ -73,27 +74,31 @@ func (c *Compiler) arpEntryOf(p *pdr) (arpEntry, bool) {
 	if err != nil || ifc.ARP == "" {
 		return arpEntry{}, false
 	}
-	return arpEntry{module: ifc.ARP, addr: p.ueIP.Unmap(), mac: ifc.ARPMAC}, true
+	return arpEntry{resource: c.target.Entries(ifc.ARP), addr: p.ueIP.Unmap(), mac: ifc.ARPMAC}, true
 }
 
 // arpEntries is every entry a session's subscriber-side PDRs name, in the PDRs'
 // order and without repeats: a session whose downlink PDRs sit on two instances
 // answers on both, and one whose two PDRs name one address answers once.
-func (c *Compiler) arpEntries(s *Session) []arpEntry {
+func (c *Compiler) arpEntries(s *Session) ([]arpEntry, error) {
 	var out []arpEntry
-	seen := map[string]bool{}
+	seen := map[string][6]byte{}
 	for _, p := range pdrsInOrder(s) {
 		e, ok := c.arpEntryOf(p)
 		if !ok {
 			continue
 		}
-		if seen[e.claim()] {
+		if mac, exists := seen[e.claim()]; exists {
+			if c.cfg.Appliance != "" && mac != e.mac {
+				return nil, fmt.Errorf("%w: address %s in %s requires two ARP identities",
+					errNotExpressible, e.addr, e.resource)
+			}
 			continue
 		}
-		seen[e.claim()] = true
+		seen[e.claim()] = e.mac
 		out = append(out, e)
 	}
-	return out
+	return out, nil
 }
 
 // macString is an Ethernet address as the fork's ArpResponder reads it back:

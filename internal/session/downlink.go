@@ -157,9 +157,9 @@ func (c *Compiler) EvaluateDownlinks(ctx context.Context) []Downlink {
 // of a report whose send failed.
 func (c *Compiler) peekBuffering(ctx context.Context, ids []uint32) ([]bess.RuleCount, error) {
 	if c.peek != nil {
-		return c.peek.PeekRuleCounts(ctx, c.cfg.Buffering.Counter, ids...)
+		return c.peek.PeekRuleCounts(ctx, c.target.Counts(BufferCounters), ids...)
 	}
-	return c.counters.RuleCounts(ctx, c.cfg.Buffering.Counter, ids...)
+	return c.counters.RuleCounts(ctx, c.target.Counts(BufferCounters), ids...)
 }
 
 // ConfirmDownlinks marks the reports a caller has delivered, which is what stops
@@ -191,7 +191,7 @@ func (c *Compiler) ConfirmDownlinks(ctx context.Context, seid uint64, pdrs []uin
 	}
 	c.mu.Unlock()
 	if c.counters != nil && len(ids) > 0 {
-		if _, err := c.counters.RuleCounts(ctx, c.cfg.Buffering.Counter, ids...); err != nil {
+		if _, err := c.counters.RuleCounts(ctx, c.target.Counts(BufferCounters), ids...); err != nil {
 			// The stamps stay where they are, so this flow's report is offered
 			// again: a duplicate report is better than one nobody took.
 			c.log.Warn("session: the buffering counters were not read back", "seid", seid, "error", err)
@@ -301,7 +301,7 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 			if f := s.FARs[p.farID]; f == nil || !f.hasBAR || f.barID != b.id {
 				continue
 			}
-			changes = append(changes, writeFlowEntry(c.cfg.Buffering, s.BARs[b.id], p)...)
+			changes = append(changes, c.writeFlowEntry(s.BARs[b.id], p)...)
 		}
 	}
 	c.mu.Unlock()
@@ -360,7 +360,7 @@ func (c *Compiler) releaseFlows(ctx context.Context, seid uint64, ids []uint32) 
 		return
 	}
 	for _, id := range ids {
-		err := c.store.ReleaseFlow(ctx, c.cfg.Buffering.Store, id)
+		err := c.store.ReleaseFlow(ctx, c.target.Store(), id)
 		if err != nil {
 			c.stats.bufferFailures.Add(1)
 			c.log.Warn("session: a buffering flow was not released", "seid", seid, "flow", id, "error", err)
@@ -381,7 +381,7 @@ func (c *Compiler) dropFlows(ctx context.Context, seid uint64, ids []uint32) {
 		return
 	}
 	for _, id := range ids {
-		err := c.store.DropFlow(ctx, c.cfg.Buffering.Store, id)
+		err := c.store.DropFlow(ctx, c.target.Store(), id)
 		if err != nil {
 			c.stats.bufferFailures.Add(1)
 			c.log.Warn("session: a buffering flow was not dropped", "seid", seid, "flow", id, "error", err)

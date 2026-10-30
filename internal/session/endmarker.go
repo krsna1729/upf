@@ -264,8 +264,7 @@ func (c *Compiler) sendTunnelEndMarker(tunnel tunnelEndMarker) error {
 	if err != nil {
 		return err
 	}
-	path := fmt.Sprintf("%s.%d", c.cfg.EndMarker, tunnel.transportRouteDomain)
-	return c.sendEndMarkerAt(path, frame)
+	return c.sendEndMarkerAt(c.target.EndMarkerSocket(tunnel.transportRouteDomain), frame)
 }
 
 // leavingTunnels snapshots the tunnels a modification moves away from before

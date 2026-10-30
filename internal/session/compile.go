@@ -1903,7 +1903,7 @@ func (c *Compiler) resolve(s *Session) error {
 			}
 			p.tunnelLocalAddress = local
 			p.transportRouteDomain = endpoint.TransportRouteDomain
-			p.tunnels = []string{tunnelsRes(dir)}
+			p.tunnels = []string{c.res(tunnelTable(p.downlink()))}
 		}
 		for _, uid := range p.urrIDs {
 			if s.URRs[uid] == nil {
@@ -2356,12 +2356,12 @@ func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
 // entry is the whole test, keyed by the ActionId the rule carries, and its
 // existence follows the PDR -- a rule that drops keeps it too, so that an erase
 // always finds it (the engine refuses an erase of a key that is not there).
-func writeCounter(p *pdr, dir Direction) []bess.Change {
-	if dir.Counters == "" || len(p.urrIDs) == 0 || p.actionID == 0 {
+func (c *Compiler) writeCounter(p *pdr) []bess.Change {
+	if c.direction(p).Counters == "" || len(p.urrIDs) == 0 || p.actionID == 0 {
 		return nil
 	}
 	return []bess.Change{{
-		Resource: countersRes(dir),
+		Resource: c.res(counterTable(p.downlink())),
 		Key:      map[string]any{"action_id": p.actionID},
 		Value:    map[string]any{},
 	}}
@@ -2407,13 +2407,6 @@ func sessionHasCHIDTEID(s *Session, teid uint32) bool {
 	return false
 }
 
-// bufferCountersRes is the BUFF branch's counting module's counter resource.
-func bufferCountersRes(b *Buffering) string { return b.Counter + "/counters" }
-
-// flowRes is the store's per-flow resource: what the SMF's BAR asks this flow to
-// hold (8.2.29's duration and 8.2.30's count), keyed by the rule's ActionId.
-func flowsRes(b *Buffering) string { return b.Store + "/flows" }
-
 // barOf is the BAR a PDR's FAR names, or nil when the FAR names none: the
 // buffering instruction this flow's packets live under (TS 29.244 5.2.4.1,
 // 8.2.55). A FAR that names no BAR has no SMF numbers of its own, and the
@@ -2440,8 +2433,8 @@ func barOf(s *Session, far *far) *bar {
 // entry carries whatever the model holds and nothing more. The entry itself is
 // written with the rule either way, so its life follows the PDR's (compile and
 // a deletion erase it with the branch's counter).
-func writeFlowEntry(b *Buffering, bar *bar, p *pdr) []bess.Change {
-	if b == nil || b.Store == "" || p.actionID == 0 {
+func (c *Compiler) writeFlowEntry(bar *bar, p *pdr) []bess.Change {
+	if b := c.cfg.Buffering; b == nil || b.Store == "" || p.actionID == 0 {
 		return nil
 	}
 	value := map[string]any{}
@@ -2452,7 +2445,7 @@ func writeFlowEntry(b *Buffering, bar *bar, p *pdr) []bess.Change {
 		value["max_packets_per_flow"] = bar.count
 	}
 	return []bess.Change{{
-		Resource: flowsRes(b),
+		Resource: c.res(Flows),
 		Key:      map[string]any{"id": p.actionID},
 		Value:    value,
 	}}
@@ -2464,12 +2457,12 @@ func writeFlowEntry(b *Buffering, bar *bar, p *pdr) []bess.Change {
 // reporting side (TS 29.244 5.2.4.1) -- the direction's URR counter is a
 // different instance, and a buffered packet leaves the chain at the rule's gate
 // without ever reaching it.
-func writeBufferCounter(b *Buffering, p *pdr) []bess.Change {
-	if b == nil || b.Counter == "" || p.actionID == 0 {
+func (c *Compiler) writeBufferCounter(p *pdr) []bess.Change {
+	if b := c.cfg.Buffering; b == nil || b.Counter == "" || p.actionID == 0 {
 		return nil
 	}
 	return []bess.Change{{
-		Resource: bufferCountersRes(b),
+		Resource: c.res(BufferCounters),
 		Key:      map[string]any{"action_id": p.actionID},
 		Value:    map[string]any{},
 	}}
@@ -2552,7 +2545,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		dir := c.direction(p)
 		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
 			for _, key := range keys {
-				live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
+				live[c.res(pdrTable(p.downlink()))+"\x00"+fmt.Sprint(key)] = true
 			}
 		}
 	}
@@ -2581,7 +2574,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// deletable (the drop branch below writes the entry for the same
 		// reason).
 		if dir.Counters != "" && len(p.urrIDs) > 0 && p.actionID != 0 {
-			liveCounters[countersRes(dir)+"\x00"+strconv.FormatUint(uint64(p.actionID), 10)] = true
+			liveCounters[c.res(counterTable(p.downlink()))+"\x00"+strconv.FormatUint(uint64(p.actionID), 10)] = true
 		}
 	}
 	// PDRs a modification removed are erased by the same transaction that
@@ -2619,10 +2612,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if dir.Counters == "" || len(p.urrIDs) == 0 || p.actionID == 0 {
 			return
 		}
-		if liveCounters[countersRes(dir)+"\x00"+strconv.FormatUint(uint64(p.actionID), 10)] {
+		if liveCounters[c.res(counterTable(p.downlink()))+"\x00"+strconv.FormatUint(uint64(p.actionID), 10)] {
 			return
 		}
-		erase(bess.Change{Resource: countersRes(dir), Key: map[string]any{"action_id": p.actionID}})
+		erase(bess.Change{Resource: c.res(counterTable(p.downlink())), Key: map[string]any{"action_id": p.actionID}})
 	}
 	// liveBuffering is the set of ActionIds a live PDR of this session buffers
 	// under: the entries of both the BUFF branch's counter and the store's
@@ -2647,7 +2640,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if liveBuffering[p.actionID] {
 			return
 		}
-		erase(bess.Change{Resource: bufferCountersRes(c.cfg.Buffering),
+		erase(bess.Change{Resource: c.res(BufferCounters),
 			Key: map[string]any{"action_id": p.actionID}})
 	}
 	// flowEntryErase is the same for the store's "flows" entry: it holds the
@@ -2662,7 +2655,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if liveBuffering[p.actionID] {
 			return
 		}
-		erase(bess.Change{Resource: flowsRes(c.cfg.Buffering),
+		erase(bess.Change{Resource: c.res(Flows),
 			Key: map[string]any{"id": p.actionID}})
 	}
 	for _, p := range s.removed {
@@ -2672,8 +2665,8 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return nil, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
 		}
 		for _, key := range keys {
-			if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
-				erase(bess.Change{Resource: rulesRes(dir), Key: key})
+			if !live[c.res(pdrTable(p.downlink()))+"\x00"+fmt.Sprint(key)] {
+				erase(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: key})
 			}
 		}
 		if e, ok := c.arpEntryOf(p); ok && !liveARP[e.claim()] {
@@ -2702,7 +2695,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		prev := uint32(0)
 		for _, id := range []uint32{p.meterID, p.ownMeterID} {
 			if id != 0 && id != prev && !qerHoldsMeter(s, id) {
-				erase(bess.Change{Resource: metersRes(dir), Key: map[string]any{"id": id}})
+				erase(bess.Change{Resource: c.res(meterTable(p.downlink())), Key: map[string]any{"id": id}})
 			}
 			prev = id
 		}
@@ -2726,11 +2719,11 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			continue
 		}
 		if c.BufferingConfigured() && id != 0 {
-			erase(bess.Change{Resource: bufferCountersRes(c.cfg.Buffering),
+			erase(bess.Change{Resource: c.res(BufferCounters),
 				Key: map[string]any{"action_id": id}})
 		}
 		if c.cfg.Buffering != nil && c.cfg.Buffering.Store != "" && id != 0 {
-			erase(bess.Change{Resource: flowsRes(c.cfg.Buffering),
+			erase(bess.Change{Resource: c.res(Flows),
 				Key: map[string]any{"id": id}})
 		}
 	}
@@ -2741,8 +2734,8 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return nil, nil, fmt.Errorf("PDR %d: %w", old.id, err)
 		}
 		for _, key := range keys {
-			if !live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] {
-				erase(bess.Change{Resource: rulesRes(dir), Key: key})
+			if !live[c.res(pdrTable(old.downlink()))+"\x00"+fmt.Sprint(key)] {
+				erase(bess.Change{Resource: c.res(pdrTable(old.downlink())), Key: key})
 			}
 		}
 		if e, ok := c.arpEntryOf(old); ok && !liveARP[e.claim()] {
@@ -2775,10 +2768,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// module refuses a zero committed rate), and a direction with no cap
 		// is exactly that -- nothing to enforce.
 		if q.meterUL != 0 && q.mbUL != 0 {
-			changes = append(changes, meterChange(metersRes(c.cfg.Up), q.meterUL, q.gbUL, q.mbUL, q.window))
+			changes = append(changes, meterChange(c.res(MetersUplink), q.meterUL, q.gbUL, q.mbUL, q.window))
 		}
 		if q.meterDL != 0 && q.mbDL != 0 {
-			changes = append(changes, meterChange(metersRes(c.cfg.Down), q.meterDL, q.gbDL, q.mbDL, q.window))
+			changes = append(changes, meterChange(c.res(MetersDownlink), q.meterDL, q.gbDL, q.mbDL, q.window))
 		}
 	}
 
@@ -2813,7 +2806,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
 		}
 		for _, key := range keys {
-			rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
+			rkey := c.res(pdrTable(p.downlink())) + "\x00" + fmt.Sprint(key)
 			if writtenRules[rkey] {
 				// The rule table knows PDR ids no better than the SMF's filters do:
 				// one key is one rule, and the engine would reject the second
@@ -2872,7 +2865,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				// the record the release path reads: the store's gate 0
 				// re-enters the action path, and the modification that stops
 				// buffering updates this same key in place.
-				gate = uint64(c.cfg.Buffering.Gate)
+				gate = uint64(c.target.BufferGate())
 				if p.actionID == 0 {
 					id, err := c.actions.alloc()
 					if err != nil {
@@ -2888,7 +2881,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			}
 			for _, key := range keys {
 				changes = append(changes, bess.Change{
-					Resource: rulesRes(dir),
+					Resource: c.res(pdrTable(p.downlink())),
 					Key:      key,
 					Value: map[string]any{
 						"priority": rulePriority(p.precedence),
@@ -2902,10 +2895,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// its existence must follow the PDR rather than the rule's effect,
 			// so that a later erase has something to erase. The counter counts
 			// nothing while the rule drops: no packet reaches the action.
-			changes = append(changes, writeCounter(p, dir)...)
+			changes = append(changes, c.writeCounter(p)...)
 			if p.buffer {
-				changes = append(changes, writeBufferCounter(c.cfg.Buffering, p)...)
-				changes = append(changes, writeFlowEntry(c.cfg.Buffering, barOf(s, s.FARs[p.farID]), p)...)
+				changes = append(changes, c.writeBufferCounter(p)...)
+				changes = append(changes, c.writeFlowEntry(barOf(s, s.FARs[p.farID]), p)...)
 			}
 			continue
 		}
@@ -2921,7 +2914,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// ActionId: the module counts what the chain forwards for that rule,
 		// and the reporting side sums the entries of the URR's PDRs. The entry
 		// is what keeps a session without a URR off the counting module's cost.
-		changes = append(changes, writeCounter(p, dir)...)
+		changes = append(changes, c.writeCounter(p)...)
 
 		// An outer GTP-U tunnel is routed by the post-encap Router. The
 		// record carries only the local/peer IP endpoints and the transport
@@ -2970,7 +2963,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// Precedence and its one action.
 		for _, key := range keys {
 			changes = append(changes, bess.Change{
-				Resource: rulesRes(dir),
+				Resource: c.res(pdrTable(p.downlink())),
 				Key:      key,
 				Value: map[string]any{
 					// The table's own output gate: one chain per direction.
@@ -3005,11 +2998,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// than written -- the second write would take the first session's traffic,
 	// and by the time the mistake showed, the SMF would have been told both
 	// sessions stand.
-	for _, e := range c.arpEntries(s) {
+	entries, err := c.arpEntries(s)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, e := range entries {
 		claim := e.claim()
 		if owner, taken := c.rules[claim]; taken && owner != s.LocalSEID {
 			return nil, nil, fmt.Errorf(
-				"%w: the subscriber address %s on %s is session %d's", errNotExpressible, e.addr, e.module, owner)
+				"%w: the subscriber address %s on %s is session %d's", errNotExpressible, e.addr, e.resource, owner)
 		}
 		if _, held := c.rules[claim]; !held {
 			claimed = append(claimed, claim)
@@ -3042,7 +3039,7 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 		seen[key] = true
 		changes = append(changes, ch)
 	}
-	policyRes := c.cfg.Atsss + "/policies"
+	policyRes := c.res(Policies)
 	for _, id := range idsOf(s.MARs) {
 		m := s.MARs[id]
 		accesses := make([]map[string]any, 0, 2)
@@ -3084,7 +3081,7 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 				value["marking"] = uint32(far.marking)
 			}
 			add(bess.Change{
-				Resource: tunnelsRes(c.cfg.Down),
+				Resource: c.res(TunnelsDownlink),
 				Key:      map[string]any{"action_id": m.tunnelIDs[which]},
 				Value:    value,
 			})
@@ -3105,12 +3102,12 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 		}
 		for _, id := range m.tunnelIDs {
 			if id != 0 {
-				add(bess.Change{Resource: tunnelsRes(c.cfg.Down), Key: map[string]any{"action_id": id}})
+				add(bess.Change{Resource: c.res(TunnelsDownlink), Key: map[string]any{"action_id": id}})
 			}
 		}
 	}
 	for _, id := range s.retiredTunnels {
-		add(bess.Change{Resource: tunnelsRes(c.cfg.Down), Key: map[string]any{"action_id": id}})
+		add(bess.Change{Resource: c.res(TunnelsDownlink), Key: map[string]any{"action_id": id}})
 	}
 	return changes, nil
 }

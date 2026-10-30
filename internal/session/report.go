@@ -401,9 +401,9 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	// reports are still decided, and the same counts are read again next tick.
 	var indications map[uint32]uint64
 	if readsErrors {
-		read, err := errorReader.ErrorCounts(ctx, c.cfg.GTPUErrors)
+		read, err := errorReader.ErrorCounts(ctx, c.target.Errors())
 		if err != nil {
-			c.log.Warn("session: error indications", "module", c.cfg.GTPUErrors, "error", err)
+			c.log.Warn("session: error indications", "module", c.target.Errors(), "error", err)
 		} else {
 			indications = make(map[uint32]uint64, len(read))
 			for _, e := range read {
@@ -418,12 +418,12 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	// next one.
 	var markers map[endMarkerKey]bool
 	if readsMarkers {
-		read, dropped, err := markerReader.DrainEndMarkers(ctx, c.cfg.GTPUEndMarkers)
+		read, dropped, err := markerReader.DrainEndMarkers(ctx, c.target.EndMarkers())
 		if err != nil {
-			c.log.Warn("session: end markers", "module", c.cfg.GTPUEndMarkers, "error", err)
+			c.log.Warn("session: end markers", "module", c.target.EndMarkers(), "error", err)
 		} else {
 			if dropped > c.markersDropped {
-				c.log.Warn("session: end markers lost to a full ring", "module", c.cfg.GTPUEndMarkers,
+				c.log.Warn("session: end markers lost to a full ring", "module", c.target.EndMarkers(),
 					"lost", dropped-c.markersDropped)
 				c.markersDropped = dropped
 			}
@@ -578,7 +578,7 @@ func readingsOf(read []bess.RuleCount) map[uint32]reading {
 	return cells
 }
 
-// countedModule is the counting module that holds this PDR's counters, when the
+// countedModule is where this PDR's counters are read (Target.Counts), when the
 // PDR has any: one entry per measured PDR is what compile.go writes, and a
 // PDR a used-up quota already stopped is compiled as a drop with nothing to
 // report. It is the one predicate measuredRules and measuredModules walk the
@@ -587,8 +587,10 @@ func (c *Compiler) countedModule(p *pdr) (string, bool) {
 	if len(p.urrIDs) == 0 || p.actionID == 0 || p.drop {
 		return "", false
 	}
-	dir := c.direction(p)
-	return dir.Counters, dir.Counters != ""
+	if c.direction(p).Counters == "" {
+		return "", false
+	}
+	return c.target.Counts(counterTable(p.downlink())), true
 }
 
 // measuredRules is the rules a session's URRs measure, by the module that
@@ -844,7 +846,7 @@ func (c *Compiler) countsOf(s *Session, uid uint32, counts map[string]map[uint32
 		if dir.Counters == "" {
 			continue
 		}
-		cell := counts[dir.Counters][p.actionID]
+		cell := counts[c.target.Counts(counterTable(p.downlink()))][p.actionID]
 		if !p.downlink() {
 			up = up.add(cell.Usage)
 		} else {

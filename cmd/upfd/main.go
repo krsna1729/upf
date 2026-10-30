@@ -146,6 +146,17 @@ func run() error {
 			"Recovery Time Stamp the SMF knows; empty: every start is a clean slate")
 	endMarker := flag.String("end-marker", "",
 		"the base graph unix_port path for End Markers; upfd appends .<transport_route_domain> to select the old routed tunnel")
+	target := flag.String("target", "graph",
+		"what the session compiler writes to: graph (the default) is the module graph, every "+
+			"table \"<module>/<table>\" of the module its flag names; appliance is one module "+
+			"(-appliance) that runs the whole user plane and owns every table. With appliance the "+
+			"module flags (-gtpu-decap, -pdr-table-*, -meters-*, -counters-*, -tunnels*, -atsss, "+
+			"-buffer-store, -buffer-counter, -buffer-gate, -gtpu-errors, -gtpu-end-markers) are not "+
+			"read: the appliance has every table and buffers, steers and tracks errors and End "+
+			"Markers, so -urr-interval must be positive. A nonempty -instances arp= enables "+
+			"the appliance's subscriber ARP proxy for that interface")
+	applianceModule := flag.String("appliance", "upf",
+		"the appliance module's name, with -target appliance")
 	// The config file's own flag: its value is read back from the flag set
 	// (applyLayers), because it must be layered like any other flag before the
 	// file it names is read.
@@ -246,14 +257,9 @@ func run() error {
 			return err
 		}
 		defer client.Close()
-		// A buffering deployment must say how often its counters are read, and it
-		// is refused before anything is swept, replayed or listened on: the
-		// guard is a fact about the flags, so it belongs before the first effect.
-		if *bufferStore != "" && *urrInterval <= 0 {
-			return fmt.Errorf("-buffer-store %q needs a positive -urr-interval: the Downlink Data Report is what that loop's reading of the buffering counters owes the SMF",
-				*bufferStore)
-		}
 		graph, err := graphConfig(graphArgs{
+			target:         *target,
+			appliance:      *applianceModule,
 			fteidAddresses: fteidAddresses,
 			capacity:       uint32(*capacity),
 			n6NextHop:      uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
@@ -274,6 +280,13 @@ func run() error {
 		})
 		if err != nil {
 			return err
+		}
+		// A buffering deployment must say how often its counters are read, and it
+		// is refused before anything is swept, replayed or listened on: the
+		// guard is a fact about the flags, so it belongs before the first effect.
+		if graph.Buffering != nil && *urrInterval <= 0 {
+			return fmt.Errorf("buffering (the %q store) needs a positive -urr-interval: the Downlink Data Report is what that loop's reading of the buffering counters owes the SMF",
+				graph.Buffering.Store)
 		}
 		graph.NodeID = id
 		if a, err := netip.ParseAddr(id); err == nil {
@@ -345,7 +358,7 @@ func run() error {
 			cfg.UPFunctionFeatures[1] |= n4.EMPU
 		}
 		ready := []any{"bess", *bessAddr, "bess_version", client.Version(),
-			"daemon_epoch", client.Epoch(), "fteid_endpoints", graph.FTEIDEndpoints,
+			"daemon_epoch", client.Epoch(), "fteid_endpoints", graph.FTEIDEndpoints, "target", *target,
 			"uplink", graph.Up.PDRTable,
 			"downlink", graph.Down.PDRTable}
 		if graph.Instances != nil {
@@ -688,6 +701,8 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 
 // graphArgs is the flag set graphConfig turns into a session.Config.
 type graphArgs struct {
+	target         string
+	appliance      string
 	fteidAddresses entryList
 	capacity       uint32
 	n6NextHop      uint32
@@ -716,8 +731,12 @@ type graphArgs struct {
 	endMarker      string
 }
 
-// graphConfig is the deployed graph's shape, from the flags.
+// graphConfig is the deployed dataplane's shape, from the flags: the module
+// graph's, or the appliance's (-target).
 func graphConfig(a graphArgs) (session.Config, error) {
+	if a.target != "graph" && a.target != "appliance" {
+		return session.Config{}, fmt.Errorf("-target %q is graph or appliance", a.target)
+	}
 	fteidEndpoints, err := parseFTEIDAddresses(a.fteidAddresses, a.instances != "")
 	if err != nil {
 		return session.Config{}, fmt.Errorf("-fteid-address: %w", err)
@@ -815,6 +834,9 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		AccessNextHop: a.accessNextHop,
 		Atsss:         a.atsss,
 	}
+	if a.target == "appliance" {
+		return applianceConfig(graph, a.appliance)
+	}
 	if a.bufferStore != "" {
 		// The buffering branch is all three names or none: a store collects the
 		// packets, the counter in front of it is what the Downlink Data Report
@@ -833,4 +855,22 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		}
 	}
 	return graph, nil
+}
+
+// applianceConfig is cfg compiled for one appliance module (-target
+// appliance): every table is the module's (session.Config.Appliance), and
+// every one is in use -- the appliance has them all, so it is the owner each
+// module field names, and the flags that say which modules a graph has are not
+// read.
+func applianceConfig(cfg session.Config, module string) (session.Config, error) {
+	if module == "" {
+		return session.Config{}, fmt.Errorf("-appliance: -target appliance needs the module's name")
+	}
+	cfg.Appliance = module
+	cfg.GTPUDecap, cfg.GTPUErrors, cfg.GTPUEndMarkers, cfg.Atsss = module, module, module, module
+	for _, d := range []*session.Direction{&cfg.Up, &cfg.Down} {
+		d.PDRTable, d.Meters, d.Counters, d.Tunnels = module, module, module, module
+	}
+	cfg.Buffering = &session.Buffering{Store: module, Counter: module, Gate: session.ApplianceBufferGate}
+	return cfg, nil
 }

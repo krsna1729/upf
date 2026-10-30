@@ -13,6 +13,7 @@ import (
 // has a value, so a test can change one at a time.
 func validArgs() graphArgs {
 	return graphArgs{
+		target: "graph",
 		fteidAddresses: entryList{
 			"endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.9",
 		},
@@ -231,6 +232,23 @@ func TestGraphConfigRejectsInvalidTransportEndpoint(t *testing.T) {
 			if _, err := graphConfig(args); err == nil ||
 				!strings.Contains(err.Error(), "-fteid-address") {
 				t.Fatalf("invalid endpoint %q produced error %v", entry, err)
+			}
+		})
+	}
+}
+
+func TestGraphConfigRefusesWhatNoTargetIs(t *testing.T) {
+	for name, change := range map[string]func(*graphArgs){
+		"unknown target": func(a *graphArgs) { a.target = "fused" },
+		"no appliance module": func(a *graphArgs) {
+			a.target, a.appliance = "appliance", ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := validArgs()
+			change(&args)
+			if _, err := graphConfig(args); err == nil {
+				t.Fatal("graphConfig accepted it")
 			}
 		})
 	}
