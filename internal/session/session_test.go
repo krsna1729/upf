@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1979,6 +1980,96 @@ func TestThePrecedenceIsInvertedIntoTheClassifiersPriority(t *testing.T) {
 	}
 	if got, _ := teid.Value["direction"].(uint32); got != 0 {
 		t.Errorf("the admission direction is %v, want UL (0)", got)
+	}
+}
+
+// TestAnUpdatePDRWithoutPrecedenceKeepsTheMatchingOrder: the Precedence IE of
+// an Update PDR is there only when the precedence changes (Table 7.5.4.2-1),
+// and the UP function keeps the stored value of an IE the update leaves out
+// (NOTE 1). Read as 0, the session's general rule would outrank the flow's
+// and take its packets.
+func TestAnUpdatePDRWithoutPrecedenceKeepsTheMatchingOrder(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x9108, "10.45.0.2")
+	req.CreatePDR[0] = uplinkPDR(1, 10, "10.45.0.2", 0x11223344, "", 9)
+	req.CreatePDR = append(req.CreatePDR, uplinkPDR(3, 20, "10.45.0.2", 0x11223344, "", 0))
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(3),
+			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+				testFTEID(0x11223344),
+				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+			ie.NewFARID(1)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the update answered cause %d", got)
+	}
+	if got := sessionOf(t, c, upFSEID(t, resp)).PDRs[3].precedence; got != 20 {
+		t.Errorf("the updated PDR's precedence is %d, want the stored 20", got)
+	}
+	general, ok := ruleWithQFI(rec.last(), qfiField(t), []byte{0}, []byte{0})
+	if !ok {
+		t.Fatal("the update did not rewrite the general PDR's rule")
+	}
+	if want := int64(math.MaxUint32) - 20; general.priority() != want {
+		t.Errorf("the general rule carries priority %d, want %d: it now outranks the flow's (%d)",
+			general.priority(), want, int64(math.MaxUint32)-10)
+	}
+}
+
+// TestAnUpdatePDRKeepsWhatItLeavesOut: every IE of an Update PDR is there only
+// when its value changes (Table 7.5.4.2-1: Outer Header Removal, Precedence,
+// PDI, FAR ID, URR ID, QER ID), and the UP function keeps the stored value of
+// an IE the update leaves out (NOTE 1).
+func TestAnUpdatePDRKeepsWhatItLeavesOut(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := establishment(0x9109, "10.45.0.2")
+	req.CreatePDR[0] = ie.NewCreatePDR(ie.NewPDRID(1), ie.NewPrecedence(100),
+		ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+			testFTEID(0x11223344),
+			ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
+		ie.NewFARID(1), ie.NewQERID(1), ie.NewURRID(7))
+	req.CreateURR = append(req.CreateURR, fullURR(7))
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+
+	mod := message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(50)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("an Update PDR naming only the precedence answered cause %d", got)
+	}
+	p := sessionOf(t, c, seid).PDRs[1]
+	if p.srcIfc != ie.SrcInterfaceAccess || p.ueIP != netip.MustParseAddr("10.45.0.2") || p.teid != 0x11223344 {
+		t.Errorf("the PDI read as interface %d, UE %v, TEID %#x; want the stored Access, 10.45.0.2, 0x11223344",
+			p.srcIfc, p.ueIP, p.teid)
+	}
+	if p.farID != 1 || !slices.Equal(p.qerIDs, []uint32{1}) || !slices.Equal(p.urrIDs, []uint32{7}) {
+		t.Errorf("the PDR names FAR %d, QERs %v, URRs %v; want the stored 1, [1], [7]", p.farID, p.qerIDs, p.urrIDs)
+	}
+	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	if want := int64(math.MaxUint32) - 50; r.priority() != want {
+		t.Errorf("the updated rule carries priority %d, want %d", r.priority(), want)
+	}
+
+	// The URR the update left out is still the PDR's: removing it is refused
+	// as for any URR a PDR names.
+	mod = message.NewSessionModificationRequest(0, 0, seid, 3, 0, ie.NewRemoveURR(ie.NewURRID(7)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("removing the URR the PDR kept answered cause %d, want a rule failure", got)
+	}
+
+	// An Update PDR for a PDR the session does not hold has nothing to keep.
+	mod = message.NewSessionModificationRequest(0, 0, seid, 4, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(9), ie.NewPrecedence(50)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("an Update PDR for an unknown PDR answered cause %d, want a rule failure", got)
 	}
 }
 
@@ -4742,7 +4833,7 @@ func TestZeroIsALegalRuleID(t *testing.T) {
 func TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown(t *testing.T) {
 	// 7.5.4.6: a Remove QER takes the QER out of the session, and a PDR's QER
 	// ID is a reference to it. The order is the SMF's: it re-points the PDRs
-	// first (an Update PDR that does not name the QER), and the removal then
+	// first (an Update PDR whose QER ID list leaves it out), and the removal then
 	// takes the QER and the meters it was given.
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
@@ -4765,9 +4856,9 @@ func TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown(t *
 		t.Error("the refused removal took the QER or its meter with it")
 	}
 
-	// The SMF re-points PDR 1 and removes the QER in one message: the PDR is
-	// the request's new form (its QER list is what the message carries), and
-	// the removal then finds nothing that names the QER.
+	// The SMF re-points PDR 1 to a gate-only QER and removes QER 1 in one
+	// message: the Update PDR's QER ID list replaces the stored one (Table
+	// 7.5.4.2-1), and the removal then finds nothing that names QER 1.
 	mod = message.NewSessionModificationRequest(0, 0, seid, 3, 0,
 		ie.NewUpdatePDR(
 			ie.NewPDRID(1),
@@ -4777,7 +4868,9 @@ func TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown(t *
 				ie.NewUEIPAddress(0x02, "10.45.0.7", "", 0, 0),
 			),
 			ie.NewFARID(1),
+			ie.NewQERID(2),
 		),
+		ie.NewCreateQER(ie.NewQERID(2), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen)),
 		ie.NewRemoveQER(ie.NewQERID(1)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
@@ -4896,14 +4989,15 @@ func TestRemoveURRNeedsThePDRsToGoFirst(t *testing.T) {
 		t.Fatal("the refused removal took the URR out of the model")
 	}
 
-	// The Update PDR is the PDR's whole new form: without the URR ID the PDR no
-	// longer measures anything.
+	// The Update PDR's URR ID list replaces the stored one (Table 7.5.4.2-1):
+	// naming URR 9 alone, the PDR no longer measures by URR 7.
 	mod = message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 3, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewFTEID(0x01, 0x1000, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
-			ie.NewFARID(1)),
+			ie.NewFARID(1), ie.NewURRID(9)),
+		fullURR(9),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the PDR update answered cause %d", got)

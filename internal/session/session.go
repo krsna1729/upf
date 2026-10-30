@@ -822,10 +822,10 @@ type pdr struct {
 	srcIfc     uint8
 	// down says the PDR's packets come from the side toward the subscriber:
 	// the Source Interface value is not Access (downSide). It is set where the
-	// value is parsed -- the value cannot change later, an Update PDR being the
-	// PDR's whole new form -- and read wherever a PDR is put in a chain (the
-	// direction), keyed for a look-up (the downlink selector) or proxied for
-	// (the subscriber ARP answer).
+	// value is parsed -- an Update PDR that changes it carries the whole PDI,
+	// and one without a PDI keeps the stored one -- and read wherever a PDR
+	// is put in a chain (the direction), keyed for a look-up (the downlink
+	// selector) or proxied for (the subscriber ARP answer).
 	down bool
 	ueIP netip.Addr
 	// hasUEIP records that this PDI carried the UE IP Address IE; an address

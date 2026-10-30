@@ -2643,6 +2643,52 @@
    "message_spec": "TS 29.244",
    "message_spec_version": "16.9.1",
    "message_clause": "7.5.2"
+  },
+  {
+   "id": "status-42",
+   "scope": "status",
+   "evidence": [
+    "TestAnUpdatePDRWithoutPrecedenceKeepsTheMatchingOrder",
+    "TestAnUpdatePDRKeepsWhatItLeavesOut"
+   ],
+   "result": {
+    "state": "ok",
+    "evidence": {
+     "TestAnUpdatePDRWithoutPrecedenceKeepsTheMatchingOrder": {
+      "state": "ok"
+     },
+     "TestAnUpdatePDRKeepsWhatItLeavesOut": {
+      "state": "ok"
+     }
+    }
+   },
+   "clause": "7.5.4.2",
+   "part": "messages",
+   "title": "an Update PDR keeps the stored value of every IE it leaves out",
+   "declared": "",
+   "spec": "TS 29.244",
+   "messages": [
+    "Session Modification"
+   ],
+   "message": "Session Modification",
+   "statement": "Table 7.5.4.2-1 NOTE 1: \"The IEs which do not need to be modified shall not be included in the Update PDR IE. The UP function shall continue to behave according to the values previously received for IEs not present in the Update PDR IE.\" Precedence, PDI, FAR ID, URR ID and QER ID are each present only when they change; a URR ID or QER ID list, when present, is the whole new list",
+   "detail": "`parsePDR` records which of Precedence and PDI an Update PDR carried, and `merge` fills each one the update left out -- the precedence, the whole PDI, the FAR or MAR reference, the URR and QER lists -- from the stored PDR. An Update PDR for a PDR the session does not hold is refused (cause 73): there is nothing to keep. Outer Header Removal is not read from any PDR, so there is no stored value to keep",
+   "effect": "before the fix an Update PDR without Precedence reset it to 0, so the updated rule outranked every other PDR of the session and took their packets; one without a FAR ID was refused (cause 66); one without a PDI, URR ID or QER ID dropped them. A consequence of the spec reading: a PDR's last URR or QER cannot be dissociated by an Update PDR (an empty list has no encoding), and Remove URR/QER is still refused while a PDR names it",
+   "extra": [
+    {
+     "name": "evidence",
+     "value": "code"
+    }
+   ],
+   "kind": "conformance",
+   "block": 4,
+   "claim": "an Update PDR keeps the precedence, PDI, FAR, URR and QER it leaves out",
+   "spec_version": "16.9.1",
+   "release": "16",
+   "file": "docs/spec/29.244-v16.9.1.txt",
+   "message_spec": "TS 29.244",
+   "message_spec_version": "16.9.1",
+   "message_clause": "7.5.4"
   }
  ],
  "aliases": {

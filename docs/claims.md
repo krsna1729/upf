@@ -5,7 +5,7 @@ requirement, the evidence it cites and the last run's verdict are one record.
 Edit the JSON and re-run; never this file. Named tests and the narrative sit in
 the JSON, not here.
 
-**52 claims · 49 ok · 1 gap · 2 skip · 0 fail**
+**53 claims · 50 ok · 1 gap · 2 skip · 0 fail**
 
 `ok` proved by the evidence named · `gap` a documented missing capability ·
 `skip` needs an environment this run lacks · `FAIL` a regression.
@@ -53,12 +53,13 @@ The code is not in question.
 - **status-41** · TS 29.244 V16.9.1 §7.5.2.3 — post-encap transport routes both outer families by resolved neighbor and never invents a MAC · lane
 - **status-38** · TS 29.244 V16.9.1 §7.5.2.8 — a MAR's two access actions are compiled to one steering policy and selected by health · test ×7 · lane
 
-### Session Modification · TS 29.244 V16.9.1 §7.5.4 · 5 claims (1 gap, 4 ok)
+### Session Modification · TS 29.244 V16.9.1 §7.5.4 · 6 claims (1 gap, 5 ok)
 
 - **status-15** · TS 29.244 V16.9.1 §5.2.1A — an uplink SDF filter is left as provisioned, not swapped · test
 - **status-18** · TS 29.244 V16.9.1 §5.2.1A — an SDF Filter IE with no Flow Description is refused (cause 64) · test ×2
 - **status-36** · TS 29.244 V16.9.1 §5.4.15 — Packet Rate: a QER capping packets per time unit, and its queryable status · **gap**
 - **status-33** · TS 29.244 V16.9.1 §7.5.4 — Remove QER is applied; rule IDs may number from 0 · test ×2
+- **status-42** · TS 29.244 V16.9.1 §7.5.4.2 — an Update PDR keeps the precedence, PDI, FAR, URR and QER it leaves out · test ×2
 - **status-31** · TS 29.244 V16.9.1 · no clause — a refused modification leaves the session exactly as it was · test ×2
 
 ### Session Deletion · TS 29.244 V16.9.1 §7.5.6 · 1 claim (1 ok)
