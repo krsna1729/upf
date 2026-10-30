@@ -74,4 +74,12 @@ if __name__ == '__main__':
                  lambda m: m.group(1) + tpl + '\n', src)
     assert new != src, 'deploy/session-path.yaml no longer has the rewrite_up block this script replaces'
     new = new.replace('arg: {pkt_size: 87, burst: 32}', 'arg: {pkt_size: 100, burst: 32}', 1)
+    # decap0 also takes session-path's Error Indication and End Marker frames
+    # (src_err, src_em), which leave by its gate 2 as control frames do. Silenced
+    # here, so gate 2 counts the variant's own frames only, and a malformed
+    # variant's drop check reads 0 exactly when the decap dropped it.
+    for name in ('src_err', 'src_em'):
+        new, n = re.subn(r'(  - name: %s\n    mclass: Source\n    arg: \{pkt_size: \d+, burst: )\d+\}' % name,
+                         r'\g<1>0}', new)
+        assert n == 1, 'deploy/session-path.yaml no longer has the %s Source this script silences' % name
     open(out, 'w').write(new)
