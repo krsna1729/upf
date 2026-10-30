@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Command vethlayout is the Go half of ci/veth-layouts.sh. For one attachment
-// layout it generates the production-shaped BESS graph -- decap0, the two PDR
-// tables and chains, rt, enc and rt_transport -- with the layout's PMD ports
-// spliced in front, and writes the shell's contract: every attachment, the
-// logical endpoints' local addresses, the egress each scenario's tunnel
-// takes, the packets each scenario phase sends, and the upfd flags that
+// layout it generates the production-shaped BESS graph -- decap0 and its GTP-U
+// responder, the two PDR tables and chains, rt, enc, rt_transport and the End
+// Marker ports -- with the layout's PMD ports spliced in front, and writes the
+// shell's contract: every attachment, the logical endpoints' local addresses,
+// the egress each scenario's tunnel takes, the packets each scenario phase
+// sends, the End Markers that must leave relayed, and the upfd flags that
 // configure a compiler for the same graph.
 //
 // With -drive it is that compiler: one session.Compiler over the BESS SDK,
@@ -18,8 +19,9 @@
 // established until the shell has replayed every scenario after Mode 6.
 //
 // It also sends the lane's packets: -send-gpdu for G-PDUs to a local endpoint,
-// -send-udp for plain IP toward N6, both bound to one device, and -sink-udp
-// absorbs the GTP-U the graph tunnels back to the host.
+// -send-end-marker for End Markers to one, -send-udp for plain IP toward N6,
+// all bound to one device, and -sink-udp absorbs the GTP-U the graph tunnels
+// back to the host, printing the End Markers among it.
 package main
 
 import (
@@ -248,6 +250,9 @@ type plan struct {
 	local  scenario.Local
 	peers  scenario.Peers
 	n6Peer string
+	// endMarker is the End Marker ports' base path (upfd -end-marker): the
+	// compiler relays a received End Marker to <base>.<transport domain>.
+	endMarker string
 }
 
 // planFor names each side's first and last attachment's host as the
@@ -314,6 +319,10 @@ func compilerConfig(p plan) (session.Config, error) {
 		},
 		Instances:     instances,
 		AccessNextHop: hopAccess,
+		// The responder's End Marker log, drained by the report tick, and
+		// the ports the relays leave by.
+		GTPUEndMarkers: "echo0",
+		EndMarker:      p.endMarker,
 		FTEIDEndpoints: []session.FTEIDEndpoint{
 			{ID: 1, ReferencePoint: "n3", TransportRouteDomain: 1, SourceInterface: ie.SrcInterfaceAccess, IPv4: n3},
 			{ID: 2, ReferencePoint: "n9", TransportRouteDomain: 2, SourceInterface: ie.SrcInterfaceCore,
@@ -328,6 +337,9 @@ func compilerConfig(p plan) (session.Config, error) {
 func upfdFlags(p plan) [][2]string {
 	return [][2]string{
 		{"gtpu-decap", "decap0"},
+		{"gtpu-end-markers", "echo0"},
+		{"end-marker", p.endMarker},
+		{"urr-interval", "100ms"},
 		{"max-domains", fmt.Sprint(maxDomains)},
 		{"n6-next-hop", fmt.Sprint(hopN6)},
 		{"n3-next-hop", fmt.Sprint(hopAccess)},
@@ -619,11 +631,34 @@ func graphFor(cfg layout, eps []endpoint, p plan, ifaces []string) (map[string]a
 			"interfaces":                     transportIfaces,
 			"neighbor_reachable_lifetime_ms": 0,
 		}),
+		// The GTP-U responder behind decap gate 2, as deploy/upf.yaml's echo0:
+		// it records the End Markers the report tick drains and relays. Its
+		// replies (Error Indications for the unknown G-PDUs) end in
+		// sink_unknown, as the unknown path did before it.
+		module("echo0", "GtpuResponder", map[string]any{"track_end_markers": true}),
 	)
 	for _, name := range []string{"sink_unclassified", "sink_other", "sink_bad", "sink_unknown"} {
 		modules = append(modules, module(name, "Sink", map[string]any{}))
 	}
-
+	// The End Marker ports, as deploy/upf.yaml's cp_marker_n3/cp_marker_n9:
+	// one per transport domain (the endpoint id here), at <base>.<domain>,
+	// tagged with the domain and its first attachment's Router interface and
+	// routed by rt_transport like the encap's tunnels.
+	for _, name := range []string{"n3", "n9"} {
+		first := attachments(eps, name)[0]
+		port, in, tag := "cp_marker_"+name, "cp_in_"+name, "set_marker_"+name
+		ports = append(ports, map[string]any{
+			"name": port, "driver": "UnixSocketPort",
+			"arg": map[string]any{"path": fmt.Sprintf("%s.%d", p.endMarker, first.id)},
+		})
+		modules = append(modules,
+			module(in, "PortInc", map[string]any{"port": port}),
+			module(tag, "SetMetadata", map[string]any{"attrs": []map[string]any{
+				{"name": "transport_route_domain", "size": 4, "value_int": first.id},
+				{"name": "vif_id", "size": 4, "value_int": first.egress + 1},
+			}}))
+		connections = append(connections, wire(in, tag, nil), wire(tag, "rt_transport", nil))
+	}
 	connections = append(connections,
 		wire("route_check", "sink_bad", gate(0)),
 		wire("route_check", "decap0", gate(endpointGate["n3"])),
@@ -632,7 +667,8 @@ func graphFor(cfg layout, eps []endpoint, p plan, ifaces []string) (map[string]a
 		wire("route_check_n6", "pdr_dl", gate(endpointGate["n6"])),
 		wire("decap0", "endpoint_check", gate(0)),
 		wire("decap0", "endpoint_check_dl", gate(1)),
-		wire("decap0", "sink_unknown", gate(2)),
+		wire("decap0", "echo0", gate(2)),
+		wire("echo0", "sink_unknown", nil),
 		wire("endpoint_check", "sink_bad", gate(0)),
 		wire("endpoint_check", "mt_md", gate(1)),
 		wire("endpoint_check", "mt_md", gate(2)),
@@ -736,6 +772,11 @@ const (
 //	m6t      Mode 6: S13's downlink from the PSA (held, then to the target RAN)
 //	m6fwd    Mode 6: forwarded downlink on S10's and S13's chosen F-TEIDs
 //	m6gone   Mode 6: S10's and the forwarding F-TEIDs after the release
+//	m6em     End Markers (kind em, TS 29.281 7.3.2), between the target's
+//	         switch and the timer: the PSA's on S10's N9 F-TEID, the source
+//	         RAN's and the source UPF's on the two forwarding F-TEIDs, the
+//	         PSA's on S11's N9 downlink F-TEID (Mode 4), and one on S1's
+//	         uplink F-TEID, whose FAR ends at N6
 func packets() []packet {
 	return []packet{
 		{"unknown", "n3", "gpdu", unknownTEID, scenario.UE1, dataNetwork, 40000, 53, ""},
@@ -761,7 +802,29 @@ func packets() []packet {
 		{"m6gone", "n3", "gpdu", 0, dataNetwork, scenario.UE13, 5000, 53, chosenS13},
 		{"m6gone", "n3", "gpdu", scenario.UpTEID10, scenario.UE10, dataNetwork, 40000, 53, ""},
 		{"m6gone", "n9", "gpdu", scenario.CoreTEID10, dataNetwork, scenario.UE10, 5000, 53, ""},
+		{"m6em", "n9", "em", scenario.CoreTEID10, "-", "-", 0, 0, ""},
+		{"m6em", "n3", "em", 0, "-", "-", 0, 0, chosenS10},
+		{"m6em", "n3", "em", 0, "-", "-", 0, 0, chosenS13},
+		{"m6em", "n9", "em", scenario.CoreTEID11, "-", "-", 0, 0, ""},
+		{"m6em", "n3", "em", scenario.UpTEID1, "-", "-", 0, 0, ""},
 	}
+}
+
+// relays are the End Markers the m6em phase must see leave relayed: the
+// endpoint the marker arrives on, the outgoing tunnel's TEID, the local
+// endpoint that tunnel is sourced from, and the egress it takes to its peer
+// (TS 23.502 4.9.1.3.3 step 10b; TS 29.244 Table 8.2.64-1 NOTE 2). S1's
+// marker has none.
+var relays = []struct {
+	in    string
+	teid  uint32
+	local string
+	label string
+}{
+	{"n9", scenario.DLTEID10, "n3", "s10dl"},          // the PSA's, from S10 toward the source RAN
+	{"n3", scenario.ForwardTEID, "n3", "m6fwd"},       // S10's forwarding tunnel, toward the target UPF
+	{"n3", scenario.TargetForwardTEID, "n3", "m6fwd"}, // S13's, toward the target RAN
+	{"n9", scenario.DLTEID11, "n9", "s11dl"},          // Mode 4, toward the upstream I-UPF over N9
 }
 
 // writeContract is the shell's view of the layout, one tab-separated row
@@ -771,7 +834,8 @@ func packets() []packet {
 //	endpoint  <name> <port> <vlan> <mac> <ip> <domain> <id> <host> <router> <gate>
 //	local     <n3|n9> <address>
 //	egress    <label> <endpoint> <host>   (the attachment a scenario's egress takes)
-//	packet    <phase> <endpoint> <gpdu|udp> <teid|@chosen> <src> <dst> <sport> <dport>
+//	packet    <phase> <endpoint> <gpdu|udp|em> <teid|@chosen> <src> <dst> <sport> <dport>
+//	relay     <arrival endpoint> <teid> <local endpoint> <egress label>
 //	upfd      <flag> <value>
 func writeContract(path string, groups [][]string, eps []endpoint, p plan) error {
 	var b strings.Builder
@@ -806,6 +870,9 @@ func writeContract(path string, groups [][]string, eps []endpoint, p plan) error
 		fmt.Fprintf(&b, "packet\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
 			k.phase, k.endpoint, k.kind, teid, k.src, k.dst, k.sport, k.dport)
 	}
+	for _, r := range relays {
+		fmt.Fprintf(&b, "relay\t%s\t%#x\t%s\t%s\n", r.in, r.teid, r.local, r.label)
+	}
 	for _, f := range upfdFlags(p) {
 		fmt.Fprintf(&b, "upfd\t%s\t%s\n", f[0], f[1])
 	}
@@ -816,7 +883,7 @@ func writeContract(path string, groups [][]string, eps []endpoint, p plan) error
 // first, each established over N4 (scenario.Serve), both Routers resolved,
 // then the shell's phases. Mode 6 runs on S10 and S13, their own sessions, so
 // the other modes stay steady throughout.
-func drive(name, target, handshake string) error {
+func drive(name, target, handshake, endMarker string) error {
 	cfg, err := layoutFor(name)
 	if err != nil {
 		return err
@@ -826,6 +893,7 @@ func drive(name, target, handshake string) error {
 		return err
 	}
 	p := planFor(cfg, eps)
+	p.endMarker = endMarker
 	ccfg, err := compilerConfig(p)
 	if err != nil {
 		return err
@@ -1124,25 +1192,77 @@ func sendUDP(device, local, dst string, sport, dport uint16, count int) error {
 	return sendCount(conn, payload, count)
 }
 
+// sendEndMarker sends End Markers (TS 29.281 7.3.2) on teid to a local
+// endpoint, as the old path's sender ends its tunnel.
+func sendEndMarker(device, local, remote string, teid uint32, count int) error {
+	conn, err := dialFrom(device, local, 0, remote, 2152)
+	if err != nil {
+		return err
+	}
+	return sendCount(conn, scenario.EndMarker(teid), count)
+}
+
 // sinkUDP holds the GTP-U port open on the host: the graph tunnels every
 // scenario's egress to the peers' addresses, and a port with no socket would
 // answer each with an ICMP error that re-enters the graph's unknown path. A
-// port another process already holds is absorbed by that process.
+// port another process already holds is absorbed by that process. Beside it,
+// printGTPU prints the End Markers the graph relays.
 func sinkUDP(port int) error {
+	errc := make(chan error, 2)
+	go func() { errc <- printGTPU(port) }()
 	conn, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", port))
 	if errors.Is(err, syscall.EADDRINUSE) {
 		fmt.Fprintf(os.Stderr, "vethlayout: UDP %d is already bound; its owner absorbs the lane's tunnels\n", port)
-		return nil
+		return <-errc
 	}
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			if _, _, err := conn.ReadFrom(buf); err != nil {
+				errc <- err
+				return
+			}
+		}
+	}()
+	return <-errc
+}
+
+// printGTPU prints every GTP-U message other than a G-PDU that arrives
+// addressed to the host on port -- the End Markers the graph relays -- with its
+// type, TEID and outer addresses, one line each, for the shell to count. It
+// reads an IPv4 packet socket, ahead of the host's firewall, which may drop
+// the datagram before the UDP socket sees it; frames the host sends are not
+// delivered to it.
+func printGTPU(port int) error {
+	const ethPIP = syscall.ETH_P_IP>>8 | syscall.ETH_P_IP&0xff<<8 // network order
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_DGRAM, ethPIP)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
 	buf := make([]byte, 65536)
 	for {
-		if _, _, err := conn.ReadFrom(buf); err != nil {
+		n, from, err := syscall.Recvfrom(fd, buf, 0)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
 			return err
 		}
+		ll, ok := from.(*syscall.SockaddrLinklayer)
+		if !ok || ll.Pkttype != syscall.PACKET_HOST || n < 20 || buf[0]>>4 != 4 || buf[9] != syscall.IPPROTO_UDP {
+			continue
+		}
+		ihl := int(buf[0]&0x0f) * 4
+		if n < ihl+16 || binary.BigEndian.Uint16(buf[ihl+2:]) != uint16(port) || buf[ihl+9] == 0xff {
+			continue
+		}
+		fmt.Printf("vethlayout: sink: GTP-U type %d TEID %#x from %s to %s\n",
+			buf[ihl+9], binary.BigEndian.Uint32(buf[ihl+12:]), net.IP(buf[12:16]), net.IP(buf[16:20]))
 	}
 }
 
@@ -1156,7 +1276,9 @@ func run() error {
 	handshake := flag.String("handshake", "", "directory of the phase handshake with the shell, for -drive")
 	send := flag.Bool("send-gpdu", false, "send G-PDUs instead of generating a graph")
 	sendPlain := flag.Bool("send-udp", false, "send plain UDP datagrams instead of generating a graph")
-	sink := flag.Int("sink-udp", 0, "hold this UDP port open and discard what arrives")
+	sendMarker := flag.Bool("send-end-marker", false, "send End Markers on -teid to -remote instead of generating a graph")
+	sink := flag.Int("sink-udp", 0, "hold this UDP port open and print every GTP-U message that is not a G-PDU")
+	endMarker := flag.String("end-marker", "", "the End Marker ports' base path (upfd -end-marker), for the graph and -drive")
 	device := flag.String("device", "", "interface the sends are bound to")
 	local := flag.String("local", "", "local IPv4 address of the sends")
 	remote := flag.String("remote", "", "outer IPv4 destination of -send-gpdu (a local endpoint)")
@@ -1172,10 +1294,12 @@ func run() error {
 		return sendGPDU(*device, *local, *remote, *ue, *dst, uint32(*teid), uint16(*sport), uint16(*dport), *count)
 	case *sendPlain:
 		return sendUDP(*device, *local, *dst, uint16(*sport), uint16(*dport), *count)
+	case *sendMarker:
+		return sendEndMarker(*device, *local, *remote, uint32(*teid), *count)
 	case *sink != 0:
 		return sinkUDP(*sink)
 	case *driveMode:
-		return drive(*layoutName, *target, *handshake)
+		return drive(*layoutName, *target, *handshake, *endMarker)
 	}
 	cfg, err := layoutFor(*layoutName)
 	if err != nil {
@@ -1190,6 +1314,7 @@ func run() error {
 		return err
 	}
 	p := planFor(cfg, eps)
+	p.endMarker = *endMarker
 	ifaces := strings.Split(*ifacesFlag, ",")
 	if len(ifaces) == 1 && ifaces[0] == "" {
 		ifaces = nil

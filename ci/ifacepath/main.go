@@ -40,6 +40,10 @@
 //	          leg, S13's downlink held, the forwarding tunnels on the F-TEIDs
 //	          the UP chose (the stream templates rewritten to them), and the
 //	          target's downlink switch
+//	m6_end_markers  the old path's End Markers (TS 23.502 4.9.1.3.3 step
+//	          10b) on S10's N9 and forwarding F-TEIDs, S13's forwarding F-TEID
+//	          and S11's N9 downlink F-TEID each leave relayed through that
+//	          rule's tunnel; the one on S1's F-TEID, which ends at N6, does not
 //	concurrent  S9 (Mode 3: N9 arrival, N6 egress) joins the others, and every
 //	          scenario's stream -- Modes 1 to 5, N19, and Mode 6 between the
 //	          target's switch and the timer -- runs at once while all sessions
@@ -70,6 +74,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"os"
 	"slices"
@@ -185,6 +190,12 @@ var (
 
 const waitWithin = 30 * time.Second
 
+// sockets is the prefix of the graph's unix socket paths, as ci/iface-path.sh
+// renders deploy/iface-path.yaml: the End Marker port the compiler writes
+// relays to (-end-marker's base, plus ".1") and the two the lane writes
+// received End Markers to.
+var sockets = "/tmp/upf-iface-path-"
+
 // The graph's Sources and the sizes their `settings` carry: burst 0 stops a
 // stream, so each arm injects exactly the streams its case is about.
 var streams = []struct {
@@ -235,6 +246,7 @@ var concurrentStreams = []string{
 func main() {
 	target := flag.String("target", "127.0.0.1:10514", "bessd's control_v2 gRPC address")
 	handshake := flag.String("handshake", "", "directory to signal each arm's end in (empty: run straight through)")
+	flag.StringVar(&sockets, "sockets", sockets, "the prefix of the graph's unix socket paths")
 	flag.Parse()
 
 	if err := run(*target, *handshake); err != nil {
@@ -712,6 +724,7 @@ func mode6(ctx context.Context, client *bess.Client, c scenario.N4, handshake st
 	); err != nil {
 		return 0, 0, time.Time{}, err
 	}
+	chosen := map[string]uint32{}
 	for _, f := range []struct {
 		step, rewrite, ue string
 		seid              uint64
@@ -734,6 +747,7 @@ func mode6(ctx context.Context, client *bess.Client, c scenario.N4, handshake st
 			return 0, 0, time.Time{}, err
 		}
 		fmt.Printf("ifacepath: Mode 6 %s: the UP chose F-TEID %#x on %s\n", f.step, teid, addr)
+		chosen[f.rewrite] = teid
 	}
 	if err := windows(ctx, client, handshake,
 		window{"m6_forward_source", accessGate, n6Gate, []string{"src_m6fwd10"},
@@ -756,7 +770,111 @@ func mode6(ctx context.Context, client *bess.Client, c scenario.N4, handshake st
 	); err != nil {
 		return 0, 0, time.Time{}, err
 	}
+	if err := endMarkers(ctx, client, chosen["rewrite_m6fwd10"], chosen["rewrite_m6fwd13"]); err != nil {
+		return 0, 0, time.Time{}, err
+	}
+	if err := pass(handshake, "m6_end_markers"); err != nil {
+		return 0, 0, time.Time{}, err
+	}
 	return seid10, seid13, expiry, nil
+}
+
+// endMarkers is the old path's End Markers (TS 23.502 4.9.1.3.3 step 10b) at
+// both UPFs, and Mode 4's transit of the same message (TS 29.244 Table
+// 8.2.64-1 NOTE 2): one End Marker, written once to the N3 or N9 input, on
+// each F-TEID whose rule forwards into a tunnel -- S10's N9 downlink F-TEID and
+// its forwarding one, S13's forwarding one, S11's N9 downlink one -- and one on
+// S1's uplink F-TEID, which ends at N6. Every marker must reach the responder
+// (decap0 gate 2), the four relays the marker port once each (cp_in), and
+// none a Router exit. One marker a second, so the Dump prints each relay.
+func endMarkers(ctx context.Context, client *bess.Client, fwd10, fwd13 uint32) error {
+	n3, err := dialPort(sockets + "em-n3.sock")
+	if err != nil {
+		return err
+	}
+	defer n3.Close()
+	n9, err := dialPort(sockets + "em-n9.sock")
+	if err != nil {
+		return err
+	}
+	defer n9.Close()
+	sends := []struct {
+		port  *net.UnixConn
+		local string
+		teid  uint32
+		relay bool
+	}{
+		{n9, n9Addr, scenario.CoreTEID10, true}, // the PSA's, to the source I-UPF
+		{n3, n3Addr, fwd10, true},               // the source RAN's, into S10's forwarding tunnel
+		{n3, n3Addr, fwd13, true},               // the source UPF's, into S13's
+		{n9, n9Addr, scenario.CoreTEID11, true}, // Mode 4's transit
+		{n3, n3Addr, scenario.UpTEID1, false},   // S1's uplink ends at N6
+	}
+	before, err := snapshot(ctx, client)
+	if err != nil {
+		return err
+	}
+	received0, err := gatePackets(ctx, client, "decap0", "2")
+	if err != nil {
+		return err
+	}
+	relayed0, err := gatePackets(ctx, client, "cp_in", "0")
+	if err != nil {
+		return err
+	}
+	relays := 0
+	for _, s := range sends {
+		if _, err := s.port.Write(endMarker(s.local, s.teid)); err != nil {
+			return fmt.Errorf("writing the End Marker on TEID %#x: %w", s.teid, err)
+		}
+		if s.relay {
+			relays++
+			if _, err := waitFor(ctx, client, "cp_in", "0", relayed0+float64(relays-1)); err != nil {
+				return fmt.Errorf("the End Marker on TEID %#x was never relayed: %w", s.teid, err)
+			}
+		}
+		time.Sleep(1100 * time.Millisecond)
+	}
+	after, err := snapshot(ctx, client)
+	if err != nil {
+		return err
+	}
+	received, err := gatePackets(ctx, client, "decap0", "2")
+	if err != nil {
+		return err
+	}
+	relayed, err := gatePackets(ctx, client, "cp_in", "0")
+	if err != nil {
+		return err
+	}
+	var exited float64
+	for i := range exits {
+		exited += after[i] - before[i]
+	}
+	if received-received0 != float64(len(sends)) || relayed-relayed0 != float64(relays) || exited != 0 {
+		return fmt.Errorf("m6_end_markers: %v End Markers received, %v relayed, %v by a Router exit; want %d, %d and 0",
+			received-received0, relayed-relayed0, exited, len(sends), relays)
+	}
+	fmt.Printf("ifacepath: m6_end_markers: %d End Markers received, %d relayed through their tunnels, 0 by a Router exit\n",
+		len(sends), relays)
+	return nil
+}
+
+// dialPort connects to one of the graph's unix_ports (SOCK_SEQPACKET: one
+// write is one frame).
+func dialPort(path string) (*net.UnixConn, error) {
+	conn, err := net.DialUnix("unixpacket", nil, &net.UnixAddr{Name: path, Net: "unixpacket"})
+	if err != nil {
+		return nil, fmt.Errorf("connecting to %s: %w", path, err)
+	}
+	return conn, nil
+}
+
+// endMarker is a peer's End Marker frame to `local` on `teid`, from
+// gpduSource, with the streams' MACs.
+func endMarker(local string, teid uint32) []byte {
+	frame := []byte{0x02, 0, 0, 0, 0, 0x01, 0x02, 0, 0, 0, 0, 0x01, 0x08, 0x00}
+	return append(frame, ipv4UDP(gpduSource, local, 2152, 2152, scenario.EndMarker(teid))...)
 }
 
 // mode6Release is the end of Mode 6's indirect data forwarding: once the
@@ -1383,5 +1501,9 @@ func config() session.Config {
 			SourceInterface: ie.SrcInterfaceCore, Instance: internet,
 			IPv4: netip.MustParseAddr(n9Addr),
 		}},
+		// The received End Markers' log, and the port the relays leave by
+		// (both endpoints are transport route domain 1 here).
+		GTPUEndMarkers: "echo_em",
+		EndMarker:      sockets + "end-marker.sock",
 	}
 }

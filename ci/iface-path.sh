@@ -34,9 +34,12 @@
 # the source I-UPF of S10 and the target I-UPF of S13: the steady legs, S13's
 # downlink dropped until step 8a, the forwarding tunnels of steps 11b and 11d
 # on the F-TEIDs the UP chose (the driver rewrites the two streams' frames to
-# them), the switch, and -- after the SMF's timer -- 13a and 15a, after which
-# nothing S10 or a forwarding F-TEID admitted leaves and S13 still does. The
-# stand-in SMF sends every message over PFCP; there is no RAN or N2 here.
+# them), the switch, the old path's End Markers (step 10b: each one sent to
+# S10's N9 or forwarding F-TEID, S13's forwarding F-TEID or S11's N9 downlink
+# F-TEID leaves relayed through that rule's tunnel, with its TEID), and --
+# after the SMF's timer -- 13a and 15a, after which nothing S10 or a
+# forwarding F-TEID admitted leaves and S13 still does. The stand-in SMF
+# sends every message over PFCP; there is no RAN or N2 here.
 # The `concurrent` window adds Mode 3 (a PSA receiving N9: the uplink arrives on
 # an N9 F-TEID carrying the same TEID S1 holds on N3, and leaves by N6) and then
 # holds every Release 16 scenario this UP serves -- Modes 1 to 5, N19, and
@@ -99,8 +102,12 @@ if ! bessd_wait 30 1; then
   exit 1
 fi
 
-bc validate "$GRAPH" >/dev/null
-bessd_apply "$GRAPH"
+# The graph's unix sockets live in this run's directory: BESS unlinks a path
+# when it binds, so a fixed one would be taken by another run's daemon.
+RENDERED=$WORK/iface-path.yaml
+sed "s|/tmp/upf-iface-path-|$WORK/|" "$GRAPH" >"$RENDERED"
+bc validate "$RENDERED" >/dev/null
+bessd_apply "$RENDERED"
 
 # The driver's handshake: it writes <arm>.done when an arm is over and waits for
 # <arm>.go before the next one, so the shell reads a window's dump lines -- which
@@ -137,7 +144,7 @@ slice_more() { # slice_more <file>: append the log written since the last slice
 (
   cd "$ROOT"
   MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} GOWORK=off \
-    $GO run ./ci/ifacepath -target "$SERVER" -handshake "$WORK"
+    $GO run ./ci/ifacepath -target "$SERVER" -handshake "$WORK" -sockets "$WORK/"
 ) >"$WORK/driver.log" 2>&1 &
 DRIVER=$!
 
@@ -231,6 +238,7 @@ window m6_held
 window m6_forward_source
 window m6_forward_target
 window m6_switched
+window m6_end_markers
 concurrent_window
 window m6_released
 window m6_target_kept
@@ -448,6 +456,33 @@ empty "m6_released: nothing S10 or a forwarding F-TEID admitted left" \
       "$(n3_of m6_released)$(n6_of m6_released)"
 contains "m6_target_kept: S13's downlink still left toward the target RAN" \
       "$(n3_of m6_target_kept)" "55 66 77 91"
+
+# --- Mode 6 and transit: the old path's End Markers, relayed ---------------
+# TS 23.502 4.9.1.3.3 step 10b: the PSA's End Marker reaches S10 (the source
+# I-UPF) on its N9 F-TEID and leaves toward the source RAN; the source RAN's
+# reaches S10's forwarding F-TEID and leaves toward the target UPF, whose
+# forwarding F-TEID (S13's) sends it on to the target RAN; and S11 (Mode 4)
+# relays the PSA's over N9 toward the upstream I-UPF (TS 29.244 Table
+# 8.2.64-1 NOTE 2). Each leaves with the outgoing tunnel's TEID, from that
+# tunnel's local endpoint, to its peer: 30 fe is version 1 and type 254, the
+# length is 0. S1's uplink ends at N6, so the one on its F-TEID is recorded and
+# relayed nowhere. The driver required exact counts: every marker reached the
+# responder, the four relays the marker port and none a Router exit.
+EM=$(dump_hex dump_em "$WORK/m6_end_markers.log")
+contains "m6_end_markers: the driver counted every marker and every relay" \
+      "$DRIVER" "m6_end_markers: 5 End Markers received, 4 relayed through their tunnels, 0 by a Router exit"
+contains "m6_end_markers: the PSA's marker left S10 toward the source RAN" \
+      "$EM" "c0 00 02 01 0a 14 1e 09 08 68 08 68 00 10 00 00 30 fe 00 00 55 66 77 8b"
+contains "m6_end_markers: the source RAN's marker left S10's forwarding tunnel toward the target UPF" \
+      "$EM" "c0 00 02 01 0a 14 1e 09 08 68 08 68 00 10 00 00 30 fe 00 00 55 aa 55 aa"
+contains "m6_end_markers: the source UPF's marker left S13's forwarding tunnel toward the target RAN" \
+      "$EM" "c0 00 02 01 0a 14 1e 09 08 68 08 68 00 10 00 00 30 fe 00 00 55 aa 55 ab"
+contains "m6_end_markers: Mode 4 relayed the PSA's marker over N9 toward the upstream I-UPF" \
+      "$EM" "c0 00 02 09 0a 14 1e 09 08 68 08 68 00 10 00 00 30 fe 00 00 55 66 77 8d"
+absent "m6_end_markers: S1's marker, which ends at N6, was not relayed" "$EM" "30 fe 00 00 11 22 33 44"
+absent "m6_end_markers: no marker left with the TEID it arrived on" "$EM" "30 fe 00 00 11 22 33 51"
+empty "m6_end_markers: nothing left by a session exit" \
+      "$(n3_of m6_end_markers)$(n6_of m6_end_markers)"
 
 # --- every scenario at once -------------------------------------------------
 # Modes 1 to 5, the N19 group session, S6 and Mode 6 between the switch and

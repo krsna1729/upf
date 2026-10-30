@@ -20,6 +20,8 @@
 #             src_dn1 -> rewrite_dn1 -/ (Mode 1's downlink)
 #             src_arp -> rewrite_arp -> l2_sort -> arp_n6 -> dump_arp -> merge_n6 -> dump_n6 -> sink_n6
 #             (src_arp2 -> rewrite_arp2, the pair of addresses one session holds)
+#   End Marker em_n3 -> tag_n3, em_n9 -> tag_n9 -> decap0 (ogate 2) -> echo_em -> sink_em
+#             cp_in (the relayed markers) -> dump_em -> sink_em
 #
 # The exits are the deployment's egress table, one hop id each (rt/next_hops
 # below), and the driver's session.Config names the same numbers: hop 1 is the
@@ -82,19 +84,36 @@
 #                below is 0 because the UP function chooses each forwarding
 #                F-TEID, and ci/ifacepath rewrites both templates (rewrite_*/templates)
 #                to the TEID the Created PDR names
+#   em_in_n3, em_in_n9  End Markers (type 254, TS 29.281 7.3.2) a peer sends to
+#                an F-TEID on the N3 or N9 endpoint: ci/ifacepath writes each
+#                one to the port, so the count is exact
 #   rewrite_arp  an ARP request for 10.45.0.2 from 192.0.2.2
 #   rewrite_arp2 the same for 10.44.0.2 (the sibling of 10.46.0.2: one
 #                session's two addresses, one transaction, one probe slot)
 #
+# Received End Markers: decap0 sends control messages to gate 2, where echo_em
+# records each (track_end_markers); the driver's report tick drains the log and
+# relays every marker on a forwarding or transit F-TEID through its tunnel, as
+# upfd does: a frame written to cp_marker (the -end-marker base path plus
+# ".1", the transport route domain both endpoints use here), read at dump_em.
+#
 # Metadata attributes are laid out in module registration order: the reader makes
 # decap and endpoint metadata real before the PDR tables consume them.
+#
+# The socket paths are ci/iface-path.sh's to render: it replaces the
+# /tmp/upf-iface-path- prefix with the run's own directory.
 
 ports:
-  # No NIC: the streams are Sources and the exits are Dumps. The port exists so
-  # the file matches the deployment's shape (deploy/upf.yaml binds a real one).
+  # No NIC: the streams are Sources and the exits are Dumps.
   - name: cp_marker
     driver: UnixSocketPort
-    arg: {path: /tmp/upf-iface-path-end-marker.sock}
+    arg: {path: /tmp/upf-iface-path-end-marker.sock.1}
+  - name: em_in_n3
+    driver: UnixSocketPort
+    arg: {path: /tmp/upf-iface-path-em-n3.sock}
+  - name: em_in_n9
+    driver: UnixSocketPort
+    arg: {path: /tmp/upf-iface-path-em-n9.sock}
 
 modules:
   - name: decap0
@@ -332,6 +351,29 @@ modules:
       attrs:
         - {name: fteid_context, size: 4, value_int: 0}
 
+  # -- End Markers -------------------------------------------------------------
+  # Received: written by the driver, tagged like the streams, recorded by the
+  # responder behind decap0 gate 2 (its replies, Error Indications for the
+  # unknown G-PDUs of m6_released, end in sink_em).
+  - name: em_n3
+    mclass: PortInc
+    arg: {port: em_in_n3}
+  - name: em_n9
+    mclass: PortInc
+    arg: {port: em_in_n9}
+  - name: echo_em
+    mclass: GtpuResponder
+    arg: {track_end_markers: true}
+  # Relayed: what the driver's compiler writes to the -end-marker port.
+  - name: cp_in
+    mclass: PortInc
+    arg: {port: cp_marker}
+  - name: dump_em
+    mclass: Dump
+    arg: {interval: 1}
+  - name: sink_em
+    mclass: Sink
+
   # -- the downlink ingress ----------------------------------------------------
   - name: src_dn
     mclass: Source
@@ -477,9 +519,13 @@ connections:
   - {upstream: rewrite_m6dl10, downstream: tag_n9}
   - {upstream: src_m6t, downstream: rewrite_m6t}
   - {upstream: rewrite_m6t, downstream: tag_n9}
+  - {upstream: em_n3, downstream: tag_n3}
+  - {upstream: em_n9, downstream: tag_n9}
   - {upstream: tag_n9, downstream: decap0}
   - {upstream: decap0, downstream: mt_md, ogate: 0}
   - {upstream: decap0, downstream: pdr_dl, ogate: 1}
+  - {upstream: decap0, downstream: echo_em, ogate: 2}
+  - {upstream: echo_em, downstream: sink_em}
   - {upstream: mt_md, downstream: pdr_ul}
   - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
@@ -501,6 +547,8 @@ connections:
   - {upstream: enc, downstream: mt_transport}
   - {upstream: mt_transport, downstream: dump_n3}
   - {upstream: dump_n3, downstream: sink_n3}
+  - {upstream: cp_in, downstream: dump_em}
+  - {upstream: dump_em, downstream: sink_em}
 
   - {upstream: src_dn, downstream: rewrite_dn}
   - {upstream: rewrite_dn, downstream: l2_sort}

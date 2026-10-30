@@ -20,10 +20,15 @@
 # the port's PortOut for the attachment each scenario egresses by must move
 # by at least as many: the resolvers' ARP shares them. Mode 6's indirect
 # forwarding procedure (the forwarding tunnels on F-TEIDs the UP chooses, the
-# target's downlink switch, the releases after the timer) runs between the
-# phases, and every earlier phase is replayed after it, all remaining
-# sessions still live: no later session or modification may have overwritten
-# an earlier one. A TEID no session admits reaches the
+# target's downlink switch, the old path's End Markers, the releases after the
+# timer) runs between the phases, and every earlier phase is replayed after
+# it, all remaining sessions still live: no later session or modification may
+# have overwritten an earlier one. The End Markers -- sent to S10's N9 and
+# forwarding F-TEIDs, S13's forwarding F-TEID, S11's N9 downlink F-TEID and
+# S1's uplink F-TEID -- reach decap0's unknown/control gate and no chain, and
+# the host's sink must see each relayed exactly once per marker sent, with the
+# outgoing tunnel's TEID from its local endpoint to its peer, and none for
+# S1's, which ends at N6. A TEID no session admits reaches the
 # unknown path and nothing else. The one-VLAN case gives N3 and N9 the same
 # local address, and Mode 3's F-TEID is Mode 1's TEID: only the endpoint id
 # tells the two admissions apart.
@@ -79,6 +84,7 @@ A_NAME=() A_PORT=() A_VLAN=() A_MAC=() A_IP=() A_SRC=() A_DEV=() A_ROUTER=() A_G
 # phase's packets.
 declare -A LOCAL EGRESS_EP EGRESS_HOST
 P_PHASE=() P_EP=() P_KIND=() P_TEID=() P_SRC=() P_DST=() P_SPORT=() P_DPORT=()
+R_IN=() R_TEID=() R_LOCAL=() R_LABEL=()
 DRIVER_PID=
 SINK_PID=
 HS=
@@ -175,6 +181,7 @@ read_contract() {
   A_NAME=() A_PORT=() A_VLAN=() A_MAC=() A_IP=() A_SRC=() A_DEV=() A_ROUTER=() A_GATE=()
   LOCAL=() EGRESS_EP=() EGRESS_HOST=()
   P_PHASE=() P_EP=() P_KIND=() P_TEID=() P_SRC=() P_DST=() P_SPORT=() P_DPORT=()
+  R_IN=() R_TEID=() R_LOCAL=() R_LABEL=()
   while IFS=$'\t' read -r kind f1 f2 f3 f4 f5 f6 f7 f8 f9 f10; do
     case "$kind" in
       ports) PORTS=$f1 ;;
@@ -189,6 +196,8 @@ read_contract() {
         P_PHASE+=("$f1") P_EP+=("$f2") P_KIND+=("$f3") P_TEID+=("$f4")
         P_SRC+=("$f5") P_DST+=("$f6") P_SPORT+=("$f7") P_DPORT+=("$f8")
         ;;
+      # relay <arrival endpoint> <teid> <local endpoint> <egress label>
+      relay) R_IN+=("$f1") R_TEID+=("$f2") R_LOCAL+=("$f3") R_LABEL+=("$f4") ;;
       # upfd rows are the same deployment as `upfd -config` flags: the driver
       # is the compiler here, and the rows are for a daemon run against the
       # same graph.
@@ -350,6 +359,9 @@ send_phase() {
         sudo "$WORK/vethlayout" -send-gpdu -device "${A_DEV[$k]}" -local "${A_SRC[$k]}" \
           -remote "${LOCAL[${P_EP[$r]}]}" -teid "$teid" -ue "${P_SRC[$r]}" \
           -dst "${P_DST[$r]}" -sport "${P_SPORT[$r]}" -dport "${P_DPORT[$r]}" -count "$count"
+      elif [ "${P_KIND[$r]}" = em ]; then
+        sudo "$WORK/vethlayout" -send-end-marker -device "${A_DEV[$k]}" -local "${A_SRC[$k]}" \
+          -remote "${LOCAL[${P_EP[$r]}]}" -teid "$teid" -count "$count"
       else
         sudo "$WORK/vethlayout" -send-udp -device "${A_DEV[$k]}" -local "${A_SRC[$k]}" \
           -dst "${P_DST[$r]}" -sport "${P_SPORT[$r]}" -dport "${P_DPORT[$r]}" -count "$count"
@@ -523,6 +535,60 @@ mode6_released() {
     rt/0/out=0 rt/1/out=0 rt/2/out=0 rt/4/out=0 enc/0/out=0
 }
 
+# The old path's End Markers between the switch and the timer (TS 23.502
+# 4.9.1.3.3 step 10b; TS 29.244 Table 8.2.64-1 NOTE 2): the PSA's on S10's N9
+# F-TEID, the source RAN's and the source UPF's on the two forwarding
+# F-TEIDs, the PSA's on S11's N9 downlink F-TEID, and one on S1's uplink
+# F-TEID, whose FAR ends at N6. Each reaches the responder on decap0 gate 2
+# and no session chain; the driver's report tick relays every one but S1's
+# through rt_transport onto the attachment its tunnel's peer is on.
+mode6_end_markers() {
+  local r ex=()
+  for r in "${!R_IN[@]}"; do
+    # shellcheck disable=SC2207 # egress prints two expectations
+    ex+=($(egress "${R_LABEL[$r]}" "$(($(attachments "${R_IN[$r]}") * PINGS))"))
+  done
+  phase "Mode 6 and Mode 4 End Markers (every N3 and N9 attachment)" m6em \
+    route_check/1/out=$((3 * A)) route_check/2/out=$((2 * B)) \
+    decap0/0/out=0 decap0/1/out=0 decap0/2/out=$((3 * A + 2 * B)) \
+    endpoint_check/1/out=0 endpoint_check/2/out=0 endpoint_check_dl/1/out=0 endpoint_check_dl/2/out=0 \
+    rt/0/out=0 rt/1/out=0 rt/2/out=0 rt/4/out=0 enc/0/out=0 "${ex[@]}"
+  relayed
+}
+
+# relayed: the host's sink saw each contract relay exactly once per End Marker
+# sent -- the outgoing tunnel's TEID, from that tunnel's local endpoint, to
+# its egress's peer -- and no End Marker from a local endpoint besides.
+relayed() {
+  local r line want got total expect=0
+  for r in "${!R_IN[@]}"; do expect=$((expect + $(attachments "${R_IN[$r]}") * PINGS)); done
+  from_local() {
+    grep -F ' type 254 ' "$WORK/sink.log" | grep -cF -e " from ${LOCAL[n3]} to " -e " from ${LOCAL[n9]} to " || true
+  }
+  for _ in $(seq 1 50); do
+    total=$(from_local)
+    [ "$total" -ge "$expect" ] && break
+    sleep 0.1
+  done
+  sleep 0.3
+  for r in "${!R_IN[@]}"; do
+    want=$(($(attachments "${R_IN[$r]}") * PINGS))
+    line="vethlayout: sink: GTP-U type 254 TEID ${R_TEID[$r]} from ${LOCAL[${R_LOCAL[$r]}]} to ${EGRESS_HOST[${R_LABEL[$r]}]}"
+    got=$(grep -cxF "$line" "$WORK/sink.log" || true)
+    if [ "$got" = "$want" ]; then
+      echo "ok: $LAYOUT End Marker relayed on TEID ${R_TEID[$r]} from ${LOCAL[${R_LOCAL[$r]}]} to ${EGRESS_HOST[${R_LABEL[$r]}]}: $got (want $want)"
+    else
+      fail "$LAYOUT: the host saw '$line' $got times, want $want"
+    fi
+  done
+  total=$(from_local)
+  if [ "$total" = "$expect" ]; then
+    echo "ok: $LAYOUT End Markers on the wire: $total (want $expect, none for S1's)"
+  else
+    fail "$LAYOUT: $total End Markers reached the host, want $expect"
+  fi
+}
+
 # await <file>: the driver's handshake, failing at once if the driver has gone.
 await() {
   for _ in $(seq 1 600); do
@@ -542,7 +608,9 @@ run_layout() {
   LAYOUT=$1
   new_names "$("$WORK/vethlayout" -layout "$LAYOUT" -port-count)"
   iface_csv=$(IFS=,; echo "${VETHS[*]}")
-  "$WORK/vethlayout" -layout "$LAYOUT" -ifaces "$iface_csv" \
+  # The End Marker ports' base path: the graph binds <base>.1 and <base>.2,
+  # and the driver's compiler writes its relays there.
+  "$WORK/vethlayout" -layout "$LAYOUT" -ifaces "$iface_csv" -end-marker "$WORK/em.sock" \
     -contract "$WORK/contract.tsv" >"$WORK/graph.json"
   read_contract
   create_veths
@@ -562,7 +630,8 @@ run_layout() {
   # One compiler holds every session, each sent to it over N4 by the driver's
   # stand-in SMF: it establishes all of them, waits for both Routers'
   # neighbors, and only then signals.
-  "$WORK/vethlayout" -drive -layout "$LAYOUT" -target "$SERVER" -handshake "$HS" >"$WORK/driver.log" 2>&1 &
+  "$WORK/vethlayout" -drive -layout "$LAYOUT" -target "$SERVER" -handshake "$HS" \
+    -end-marker "$WORK/em.sock" >"$WORK/driver.log" 2>&1 &
   DRIVER_PID=$!
   await established.done
   for m in 1 2 3 4 5 6; do
@@ -596,8 +665,9 @@ run_layout() {
   mode6_held
 
   # Mode 6's procedure: the forwarding tunnels (11b, 11d), forwarding (3b),
-  # the target's downlink switch (8a), and the releases after the timer (13a,
-  # 15a), each checked while every other session stays live.
+  # the target's downlink switch (8a), the old path's End Markers relayed
+  # (10b), and the releases after the timer (13a, 15a), each checked while
+  # every other session stays live.
   : >"$HS/established.go"
   await forward.done
   mode6_forward
@@ -606,6 +676,7 @@ run_layout() {
   await switched.done
   mode6_switched
   mode6_forward
+  mode6_end_markers
   : >"$HS/switched.go"
   await released.done
   mode6_released
@@ -637,4 +708,4 @@ for layout in one-mac one-vlan one-hybrid two-n3n9-n6 two-n3n6-n9 two-n6n9-n3 th
   run_layout "$layout"
 done
 
-echo "veth-layouts: ok (9 attachment layouts, up to 4 promiscuous PMD ports; Modes 1 to 6 and N19 over N4 through the compiled pipeline on every attachment, endpoint-scoped GTP-U admission, unknown-TEID separation)"
+echo "veth-layouts: ok (9 attachment layouts, up to 4 promiscuous PMD ports; Modes 1 to 6 and N19 over N4 through the compiled pipeline on every attachment, End Markers relayed through transit and forwarding tunnels, endpoint-scoped GTP-U admission, unknown-TEID separation)"
