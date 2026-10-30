@@ -8,6 +8,7 @@
 #include "dataplane/action_id.h"
 #include "dataplane/slot_resource.h"
 #include "dataplane/slot_table.h"
+#include "framework/memory_scope.h"
 #include "framework/resource_bindings.h"
 #include "module.h"
 #include "upf_datapath.pb.h"
@@ -49,7 +50,7 @@ class GtpuEncap final : public Module {
   int tunnel_attr_ = -1;
   int domain_attr_ = -1;
   bool has_tunnel_ = false;
-  std::unique_ptr<bess::dataplane::SlotTable<ActionId, Tunnel>> tunnels_;
+  bess::framework::Sized<bess::dataplane::SlotTable<ActionId, Tunnel>> tunnels_;
   std::unique_ptr<bess::dataplane::SlotResource<ActionId, Tunnel>> resource_;
   bess::framework::ResourceBinding binding_;
 };

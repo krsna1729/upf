@@ -266,10 +266,14 @@ which keeps a session without a URR off the module's cost (one lookup) — and o
 instance serves two purposes in two places: a direction's counters for URRs, and
 the arrival signal the Downlink Data Report is decided from on the BUFF branch.
 
-* **Locality.** Cells are worker-local: one plane per worker, whole cache lines
-  apart, written with a relaxed load-add-store and never a locked instruction
-  (`stats/worker_slots.h`'s rule). A reading sums the planes, so it is exact per
-  cell, not one global instant; the memory is `capacity × 2 × 8 B × workers`.
+* **Locality.** Cells are worker-local: BESS's `stats::KeyedCounters` (D-154),
+  one plane per worker id below `worker_planes` (default 64, every worker id),
+  whole cache lines apart, written with a relaxed load-add-store and never a
+  locked instruction. A reading sums the planes, a rule's packet and octet cell
+  together per plane, so it is exact per cell, not one global instant; the
+  memory is `capacity × 2 × 8 B × worker_planes` on the DPDK heap. Placing the
+  module on a worker id at or above `worker_planes` is refused
+  (`CheckModuleConstraints`).
 * **The one shared write.** A rule's stamp pair is the rule's own fact, not a
   worker's, so it is shared and written once per batch that counted a packet —
   never once per packet, and by design a store lost to a concurrent reader costs
@@ -375,6 +379,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | `ListMetrics` (D-116) | per-gate counters: how an unwired gate's drops (store eviction, overflow) and a chain's throughput are read. What it does *not* show is a command's effect on the packets a module holds: `packet_store`'s `drop` frees them with `bess::PacketFree` and only decrements `total_packets_` (visible in `GetDesc`, not in metrics), `EvictExpired` (and the owner's per-run sweep, `EvictExpiredBounded`) frees an aged flow's packets the same way (its own timeout, no counter at all), while `release` moves them to the release queue, which does reach a gate — and only once the store's owner task has applied the request, since the command is *accepted* when the call returns. That is why the session layer counts the *accepted* commands it issued (`Stats.BuffersReleased`/`BuffersDropped`/`BufferFailures`) rather than reading drops back out of the daemon |
 | `tunnel/tunnel.h`, `packet_parse.h` | header-only, experimental: the GTP-U codec and the parse types, installed by `bess-dev` |
 | `utils/{ip,ether,checksum,endian,time,logging}.h`, `dataplane/action_id.h`, `framework/{resource_codec,resource_registry,resource_bindings}.h`, `commands.h`, `pb/module_msg.pb.h` | the rest of the plugin's includes; no module reaches past these into BESS internals |
+| memory scope (D-198: `framework/memory_scope.h`, `utils/dpdk_memory.h`, `utils/dpdk_slab.h`, `stats/keyed_counters.h`) | every table a module argument sizes is admitted through `init_context().memory()` before it is made (`Create`/`Lease`, named per module: `fteids`/`records`, `tunnels`, `counters`/`stamps`/`rules`, `entries`, `health`/`policies`, `end_markers`); a refusal fails `Init` with `RESOURCE_EXHAUSTED`. Tables that grow per entry (F-TEID records and their control mirror, ARP entries) admit each growth step, and a refused step refuses that transaction, which `upfd` answers with cause 75 (No resources available). The plugin declares `BESS_PLUGIN_REQUIRES(INIT_CONTEXT, RESOURCES, MEMORY)`; `bessd` runs with `--mem_backing=normal` in every lane |
 
 ## Placement, queues and state locality
 

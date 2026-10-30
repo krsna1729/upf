@@ -252,10 +252,13 @@ message AtsssAccessHealth {
 message UrrCountArg {
   // How many rules the counters hold -- the graph's ActionId space, i.e. the
   // ActionTable's capacity. A rule's counter is two cells (packets and octets)
-  // per worker, so this is also the module's memory: capacity x 2 x 8 bytes x
-  // 64 (kMaxWorkers, whether or not that many workers run: 64 MiB at the
-  // default capacity). 0 means 65536.
+  // per worker plane, so the module's memory is capacity x 2 x 8 bytes x
+  // worker_planes, on the DPDK heap. 0 means 65536.
   uint32 capacity = 1;
+  // One plane per worker id below this bound (BESS D-154 KeyedCounters):
+  // placement on a worker id at or above it is refused. 0 means 64
+  // (kMaxWorkers, every worker id).
+  uint32 worker_planes = 2;
 }
 
 // CounterKey is the key of the counting module's "<module>/counters" table: the

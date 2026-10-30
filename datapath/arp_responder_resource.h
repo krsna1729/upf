@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "dataplane/resource.h"
+#include "utils/dpdk_memory.h"
+#include "utils/dpdk_slab.h"
 #include "utils/ether.h"
 
 namespace upf {
@@ -39,10 +41,34 @@ struct Entry {
 // pointer with one acquire load, a transaction claims a slot and installs its
 // value under the engine's lock, and the value a reader may still hold is
 // retired, not freed, when it is replaced.
+//
+// Memory (BESS D-198): the slot array is glibc memory (a std::vector) made by
+// the constructor, sized from max_entries and never grown; Bytes/GlibcBytes is
+// what the constructor allocates, for framework::MemoryCost. The entries a
+// worker reads come from an ObjectSlab (DPDK heap on the memory node, 1024
+// entries per chunk rather than one malloc each); each new chunk is growth,
+// admitted through set_memory_growth before Reserve allocates it, so a refused
+// chunk refuses that transaction.
 class EntriesResource final : public bess::dataplane::Resource {
  public:
   EntriesResource(std::string name, size_t max_entries);
   ~EntriesResource() override;
+
+  static size_t Bytes(const std::string &name, size_t max_entries) noexcept {
+    return GlibcBytes(name, max_entries) + bess::utils::ObjectSlab<Entry>::Bytes();
+  }
+  static size_t GlibcBytes(const std::string & /*name*/,
+                           size_t max_entries) noexcept {
+    return SlotCount(max_entries) * sizeof(Slot);
+  }
+  // The slot array plus the entry chunks made so far.
+  size_t bytes() const noexcept {
+    return slots_.size() * sizeof(Slot) + slab_->bytes();
+  }
+  // The admission each new entry chunk asks first (D-198).
+  void set_memory_growth(bess::utils::MemoryGrowth *growth) noexcept {
+    slab_->set_memory_growth(growth);
+  }
 
   // The entry for an address, or nullptr: the packet path's whole lookup (one
   // acquire load of a published pointer).
@@ -75,6 +101,17 @@ class EntriesResource final : public bess::dataplane::Resource {
  private:
   static constexpr size_t kNoSlot = ~size_t{0};
 
+  using Owned = bess::utils::SlabUnique<const Entry>;
+
+  // The smallest power of two at least max(2, 2 x max_entries).
+  static size_t SlotCount(size_t max_entries) noexcept {
+    size_t slots = 2;
+    while (slots < max_entries * 2) {
+      slots <<= 1;
+    }
+    return slots;
+  }
+
   struct Slot {
     // 0 is never an address this resource holds (the codec refuses it): a slot
     // no key has used.
@@ -101,8 +138,7 @@ class EntriesResource final : public bess::dataplane::Resource {
 
   class UpsertOp final : public bess::dataplane::StagedOp {
    public:
-    UpsertOp(EntriesResource &owner, uint32_t ip,
-             std::unique_ptr<const Entry> entry)
+    UpsertOp(EntriesResource &owner, uint32_t ip, Owned entry)
         : owner_(owner), ip_(ip), entry_(std::move(entry)) {}
 
     void Publish(bess::dataplane::Retirer &retirer) noexcept override {
@@ -131,14 +167,14 @@ class EntriesResource final : public bess::dataplane::Resource {
       // and a later erase would retire the same pointer twice.
       if (const Entry *old = owner_.Publish(slot, entry_.release());
           old != nullptr) {
-        retirer.Retire(std::unique_ptr<const Entry>(old));
+        retirer.Retire(owner_.Own(old));
       }
     }
 
    private:
     EntriesResource &owner_;
     uint32_t ip_;
-    std::unique_ptr<const Entry> entry_;
+    Owned entry_;
   };
 
   class EraseOp final : public bess::dataplane::StagedOp {
@@ -147,7 +183,7 @@ class EntriesResource final : public bess::dataplane::Resource {
 
     void Publish(bess::dataplane::Retirer &retirer) noexcept override {
       if (const Entry *old = owner_.Clear(ip_); old != nullptr) {
-        retirer.Retire(std::unique_ptr<const Entry>(old));
+        retirer.Retire(owner_.Own(old));
       }
     }
 
@@ -155,6 +191,11 @@ class EntriesResource final : public bess::dataplane::Resource {
     EntriesResource &owner_;
     uint32_t ip_;
   };
+
+  // An entry this table's slab made, owned again (to retire it).
+  Owned Own(const Entry *entry) noexcept {
+    return Owned(entry, bess::utils::SlabDelete<const Entry>(slab_.get()));
+  }
 
   // The slot's own install, called by UpsertOp under the engine's lock.
   const Entry *Publish(size_t slot, const Entry *entry) noexcept {
@@ -166,6 +207,9 @@ class EntriesResource final : public bess::dataplane::Resource {
     return old;
   }
 
+  // Released after the destructor body has destroyed the live entries; the
+  // retired ones may outlive the table, and the slab goes with the last.
+  bess::utils::ObjectSlab<Entry>::Owner slab_;
   std::vector<Slot> slots_;
   size_t mask_ = 0;
   // Control side, under the engine's lock: the slots that hold a value. A slot
@@ -180,19 +224,17 @@ inline EntriesResource::~EntriesResource() {
   // -- ReleaseForTeardown is the path that tolerates them -- so what a
   // retirement would have freed is freed here.
   for (const Slot &slot : slots_) {
-    delete slot.value.load(std::memory_order_relaxed);
+    if (const Entry *entry = slot.value.load(std::memory_order_relaxed)) {
+      slab_->Destroy(entry);
+    }
   }
 }
 
 inline EntriesResource::EntriesResource(std::string name, size_t max_entries)
-    : Resource(std::move(name)) {
-  size_t slots = 2;
-  while (slots < max_entries * 2) {
-    slots <<= 1;
-  }
-  slots_ = std::vector<Slot>(slots);
-  mask_ = slots - 1;
-}
+    : Resource(std::move(name)),
+      slab_(bess::utils::ObjectSlab<Entry>::Create()),
+      slots_(SlotCount(max_entries)),
+      mask_(slots_.size() - 1) {}
 
 inline const Entry *EntriesResource::Lookup(uint32_t ip) const noexcept {
   if (ip == 0) {
@@ -327,7 +369,10 @@ EntriesResource::Reserve(const bess::dataplane::Op &op) {
   }
   const bool existed =
       slots_[slot].value.load(std::memory_order_acquire) != nullptr;
-  auto entry = std::make_unique<const Entry>(Entry{ip, *mac});
+  // From the table's slab: may add a chunk, admitted first (a refusal throws
+  // utils::MemoryRefused and refuses the transaction; the claim above stays a
+  // tombstone, which a later claim reuses).
+  Owned entry = slab_->Make(Entry{ip, *mac});
   // Room for one replacement, always: what an upsert publishes over is only
   // known when it publishes (a sibling op of the same transaction may have put
   // a value under this key first), and a transaction that retires more than it

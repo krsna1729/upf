@@ -106,7 +106,7 @@ export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 UPFD_ARGS=(-n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -log-level "${UPFD_LOG:-warn}")
 if [ "$MODE" = full ]; then
   echo "== the datapath: bessd with the plugin, then the graph"
-  "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" \
+  "$BESSD" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" \
     -modules="$PLUG" -f >"$WORK/bessd.log" 2>&1 &
   DAEMON_PID=$!
   for _ in $(seq 1 60); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 0.5; done
