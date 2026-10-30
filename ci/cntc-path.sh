@@ -6,8 +6,9 @@
 # without CNTC's own Python harness:
 #
 #   N4  OMEC's pfcpsim -- the PFCP simulator CNTC's suites drive, so the messages
-#       are CNTC's -- against a live upfd: association, a session's establishment,
-#       modification and deletion (CF-01..04), and three sessions with a QFI.
+#       are CNTC's, but for one bit corrected below -- against a live upfd:
+#       association, a session's establishment, modification and deletion
+#       (CF-01..04), and three sessions with a QFI.
 #       CF-05 is NOT exercised here: pfcpsim refuses an unknown session on its own
 #       side ("Not enough active sessions") and sends nothing, so CNTC's CF-05
 #       passes without the UPF being asked; the unknown-SEID answer is tested in
@@ -54,9 +55,22 @@ if [ ! -d "$CNTC_DIR/.git" ]; then
   mkdir -p "$(dirname "$CNTC_DIR")"
   git clone -q --depth 1 https://github.com/TOSSI-Foundation/CNTC.git "$CNTC_DIR"
 fi
-for b in pfcpsim pfcpctl; do
-  [ -x "$PS/$b" ] || (cd "$PS" && $GO build -o "$b" "./cmd/$b")
-done
+[ -x "$PS/pfcpctl" ] || (cd "$PS" && $GO build -o pfcpctl ./cmd/pfcpctl)
+# pfcpsim codes the downlink PDR's UE IP Address with S/D=0, a source address
+# (TS 29.244 8.2.62), while that PDR's own SDF filter ("to assigned") makes the
+# UE the destination; upfd refuses the contradiction (Cause 69), and CF-02 with
+# it. pfcpsim is built here with S/D set (0x6: V4 and S/D), the coding an SMF
+# gives a downlink PDR, by a build overlay that leaves the CNTC checkout as is.
+# Reported: https://github.com/omec-project/pfcpsim/issues/363 and, for CNTC's
+# vendored copy, https://github.com/TOSSI-Foundation/CNTC/issues/1.
+PDRB=$PS/pkg/pfcpsim/session/pdr_builder.go
+OVERLAY=()
+if grep -q 'NewUEIPAddress(0x2, b.ueAddress' "$PDRB"; then
+  sed 's/NewUEIPAddress(0x2, b\.ueAddress/NewUEIPAddress(0x6, b.ueAddress/' "$PDRB" >"$WORK/pdr_builder.go"
+  printf '{"Replace":{"%s":"%s"}}\n' "$PDRB" "$WORK/pdr_builder.go" >"$WORK/overlay.json"
+  OVERLAY=(-overlay "$WORK/overlay.json")
+fi
+(cd "$PS" && $GO build "${OVERLAY[@]}" -o "$WORK/pfcpsim" ./cmd/pfcpsim)
 echo "cntc-path: CNTC $(git -C "$CNTC_DIR" rev-parse --short HEAD)"
 
 (cd "$ROOT" && $GO build -o "$WORK/upfd" ./cmd/upfd)
@@ -88,7 +102,7 @@ start() {
   for _ in $(seq 1 40); do grep -q 'n4 listening' "$WORK/upfd.log" 2>/dev/null && break; sleep 0.25; done
   kill -0 "$UPFD_PID" 2>/dev/null || { cat "$WORK/upfd.log" >&2; fail "upfd exited"; }
   GRPC=$(free_port)
-  "$PS/pfcpsim" -p "$GRPC" -i lo >"$WORK/pfcpsim.log" 2>&1 &
+  "$WORK/pfcpsim" -p "$GRPC" -i lo >"$WORK/pfcpsim.log" 2>&1 &
   SIM_PID=$!
   sleep 1
   CTL=("$PS/pfcpctl" -s "localhost:$GRPC")
