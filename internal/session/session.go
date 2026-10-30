@@ -850,6 +850,9 @@ type pdr struct {
 	// sends the forward out.
 	instance string
 	domain   uint32
+	// resultDomain is the route domain the rule's result writes: domain,
+	// or a 5G VN forward's own instance's (resolve).
+	resultDomain uint32
 
 	// sdfs and qfis are what the PDI named (TS 29.244 8.2.89 and the SDF
 	// Filter IE): the SDF filters and QoS flows this rule selects, any of
@@ -885,10 +888,19 @@ type pdr struct {
 	fteidContext                 uint32 // the admission context the decap writes for this PDR's F-TEID
 	endpointIPv4, endpointIPv6   netip.Addr
 	endpointFamilies             []uint8
-	tunnelLocalAddress           netip.Addr
-	transportRouteDomain         uint32
-	actionID                     uint32 // the ActionId carried in this PDR rule's result
-	meterID                      uint32 // the meter record a QER resolved to, in this chain's Meter
+	// reference is the GTP-U reference point the PDI's Source Interface Type
+	// named for the F-TEID ("" for the Source Interface's own: n3 for Access,
+	// n9 for Core); see pdrReferencePoint.
+	reference string
+	// relay says the PDR carries another node's packets on through this UP:
+	// it names a local F-TEID and no UE address, and its FAR forwards into
+	// another tunnel or back into classification (resolve). Its F-TEID
+	// alone identifies it, and the IP fields of its key stay open.
+	relay                bool
+	tunnelLocalAddress   netip.Addr
+	transportRouteDomain uint32
+	actionID             uint32 // the ActionId carried in this PDR rule's result
+	meterID              uint32 // the meter record a QER resolved to, in this chain's Meter
 	// ownMeterID and sharedMeterID are that choice's halves: the PDR's own
 	// last rate-bearing QER, and the session's shared QER (0 when the PDR
 	// names none). The PDR result writes the own meter ID first and the shared
@@ -961,6 +973,11 @@ type far struct {
 	// packet's own class (the TunnelEntry's "marking" field).
 	hasMarking bool
 	marking    uint16
+
+	// reference is the GTP-U reference point the Destination Interface Type
+	// named for the outer header's local end ("" for the Destination
+	// Interface's own); see tunnelEndpoint.
+	reference string
 }
 
 // mar is one compiled Multi-Access Rule (TS 29.244 7.5.2.8): the steering
@@ -1472,7 +1489,7 @@ func pdrResult(p *pdr) []byte {
 	binary.BigEndian.PutUint32(b[resultMeterID:], own)
 	binary.BigEndian.PutUint32(b[resultMeterID+4:], shared)
 	binary.BigEndian.PutUint32(b[resultNextHopID:], p.nextHop)
-	binary.BigEndian.PutUint32(b[resultRouteDomain:], p.domain)
+	binary.BigEndian.PutUint32(b[resultRouteDomain:], p.resultDomain)
 	if p.downlink() {
 		steering := uint32(0)
 		if p.hasMAR && !p.drop && !p.buffer {

@@ -251,6 +251,16 @@ type pdrReq struct {
 	wantIPv4, wantIPv6   bool
 	hasCHID              bool
 	chid                 uint8
+
+	// reference is the GTP-U reference point the PDI's Source Interface Type
+	// (TS 29.244 8.2.118, Table 7.5.2.2-2) names for the local F-TEID: "n3"
+	// or "n9" (an N9 or N19 tunnel between UPFs), empty when the PDI carried
+	// none or a type that names no GTP-U endpoint of this UP.
+	reference string
+
+	// hasPDI says the PDI IE was there. An Update PDR carries it only when
+	// the PDI changes (Table 7.5.4.2-1); without it the stored PDI stands.
+	hasPDI bool
 }
 
 // marReq is one Create MAR or Update MAR (TS 29.244 7.5.2.8): the access
@@ -326,6 +336,12 @@ type farReq struct {
 	// session has, the way the instance's does.
 	hasMarking bool
 	marking    uint16
+
+	// reference is the GTP-U reference point the forwarding parameters'
+	// Destination Interface Type (8.2.118) names for the outer header's local
+	// end, as for pdrReq.reference: an Update FAR that names none keeps the
+	// value the session has (Table 7.5.4.3-2 sends it when it changes).
+	reference string
 }
 
 // barReq is a Create BAR or Update BAR as the message carried it (TS 29.244
@@ -1002,6 +1018,10 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// Update FAR that names none keeps the value the session has.
 			entry.hasMarking, entry.marking = true, f.marking
 		}
+		if f.reference != "" {
+			// The Destination Interface Type merges like the marking.
+			entry.reference = f.reference
+		}
 	}
 	// What a FAR that forwards must carry (Tables 7.5.2.3-1 and 7.5.2.3-2),
 	// read from the merged record: an Update FAR carries what changed, so a FAR
@@ -1220,7 +1240,19 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			instance: p.instance, qfis: p.qfis,
 			hasFTEID: p.hasFTEID, hasChoose: p.hasChoose, hasCHID: p.hasCHID, chid: p.chid,
 			fteidIPv4: p.fteidIPv4, fteidIPv6: p.fteidIPv6,
-			wantIPv4: p.wantIPv4, wantIPv6: p.wantIPv6,
+			wantIPv4: p.wantIPv4, wantIPv6: p.wantIPv6, reference: p.reference,
+		}
+		if old != nil && !p.hasPDI {
+			// An Update PDR with no PDI keeps the one the UP function stored
+			// (Table 7.5.4.2-1): only a PDI it carries replaces it. The
+			// F-TEID is carried over below, as for an update that names none.
+			pdr.srcIfc, pdr.ueIPDst, pdr.instance, pdr.reference =
+				old.srcIfc, old.ueIPDst, old.instance, old.reference
+			if old.hasUEIP {
+				pdr.ueIP, pdr.hasUEIP = old.ueIP, true
+			}
+			pdr.sdfs, pdr.qfis = slices.Clone(old.sdfs), slices.Clone(old.qfis)
+			pdr.fteidIPv4, pdr.fteidIPv6 = old.fteidIPv4, old.fteidIPv6
 		}
 		var err error
 		pdr.down, err = pdrDownlink(pdr.srcIfc, pdr.hasUEIP, pdr.ueIPDst, pdr.sdfs)
@@ -1268,6 +1300,9 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 					}
 					if endpoint.ID == 0 {
 						return fmt.Errorf("%w: CHOOSE ID %d references an unavailable endpoint", errNotExpressible, p.chid)
+					}
+					if ref, _ := pdrReferencePoint(pdr); endpoint.ReferencePoint != ref {
+						return fmt.Errorf("%w: CHOOSE ID %d was reused with a different endpoint or family set", errNotExpressible, p.chid)
 					}
 				} else {
 					endpoint, err = c.fteidEndpoint(pdr)
@@ -1695,7 +1730,7 @@ func (c *Compiler) resolve(s *Session) error {
 		if err != nil {
 			return err
 		}
-		p.domain = ifc.Domain
+		p.domain, p.resultDomain = ifc.Domain, ifc.Domain
 		wasBuffering := p.buffer
 		if p.hasMAR {
 			// A MAR PDR has no FAR of its own: the MAR's selected access is
@@ -1728,6 +1763,17 @@ func (c *Compiler) resolve(s *Session) error {
 				return err
 			}
 			p.nextHop = hop
+			// The route domain the result writes is the PDI's, except for a
+			// forward back into classification over 5G VN Internal, where it
+			// is the forward's own instance -- the 5G VN group (TS 29.244 5.23),
+			// which the second step's PDRs are keyed by. An N19 arrival's PDI
+			// names the instance of its F-TEID's address (Table 7.5.2.2-2
+			// NOTE 2) and its FAR the group's.
+			if far != nil && far.destIfc == ie.DstInterface5GVNInternal {
+				if egress, err := c.forwardEgress(far, ifc); err == nil {
+					p.resultDomain = egress.Domain
+				}
+			}
 			// A FAR that asks for buffering and not for forwarding (Apply Action
 			// BUFF, 8.2.26) is the idle-UE downlink case: the packets are held and
 			// the SMF is told they arrived. Where the deployment has a store
@@ -1912,7 +1958,21 @@ func (c *Compiler) resolve(s *Session) error {
 				p.drop = true
 			}
 		}
-		if !p.ueIP.IsValid() {
+		// A PDR that names a local F-TEID and no address of its own, and
+		// whose FAR hands the packet on -- into another GTP-U tunnel, or back
+		// to classification over 5G VN Internal -- relays that tunnel: the
+		// indirect data forwarding tunnel of an N2 handover (TS 23.502
+		// 4.9.1.3.2 steps 11b and 11d), an N19 tunnel of a group-level N4
+		// session (TS 23.501 5.8.2.13.1). The F-TEID identifies it (TS 29.244
+		// 5.2.1), and what arrives on it is not this session's subscriber's
+		// own uplink -- forwarded downlink, or another member's traffic -- so
+		// the session's address is not keyed in (matchValue leaves the
+		// fields open; the admission context is exact).
+		p.relay = !p.hasUEIP && p.teid != 0 && far != nil && far.apply&applyForw != 0 &&
+			(far.hasOuter || far.destIfc == ie.DstInterface5GVNInternal)
+		if p.relay {
+			p.ueIP = netip.Addr{}
+		} else if !p.ueIP.IsValid() {
 			// The PDI names no address of its own, so the session's is the one
 			// an SMF means (it may send the address on one direction only). An
 			// uplink rule with the address masked out instead would match every
@@ -3251,6 +3311,17 @@ func (p *pdr) ueIPIsDestination() bool {
 	return p.downlink()
 }
 
+// hostKey is the PDR's own address field: host of its address, except that a
+// relay PDR (resolve) with none leaves the field open -- its F-TEID's exact
+// admission context is its key, so the rule matches only that tunnel's
+// packets.
+func (p *pdr) hostKey() (match, bool, error) {
+	if p.relay && !p.ueIP.IsValid() {
+		return match{}, false, nil
+	}
+	return host(p.ueIP)
+}
+
 // host is a field constrained to one IPv4 address: the UE's, where a PDI names
 // it. Both ways of not having one are inexpressible. An address the table's
 // four bytes cannot carry would otherwise be *unconstrained*, and a masked-out
@@ -3334,7 +3405,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 				// address belongs in the other field.
 				return match{}, false, nil
 			}
-			return host(p.ueIP)
+			return p.hostKey()
 		}
 		if sd != nil && sd.srcAssigned {
 			if p.ueIPIsDestination() {
@@ -3349,7 +3420,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 			return m, err == nil, err
 		}
 		if !p.ueIPIsDestination() {
-			return host(p.ueIP)
+			return p.hostKey()
 		}
 		return match{}, false, nil
 	case DstIP:
@@ -3394,7 +3465,7 @@ func (p *pdr) matchValue(f Field) (match, bool, error) {
 			return m, err == nil, err
 		}
 		if p.ueIPIsDestination() {
-			return host(p.ueIP)
+			return p.hostKey()
 		}
 		return match{}, false, nil
 	case Proto:
@@ -4056,6 +4127,17 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 				p.hasCHID = true
 				p.chid = fields.ChooseID
 			}
+		case ie.TGPPInterfaceType:
+			// The Source Interface Type (Table 7.5.2.2-2): the interface the
+			// packet arrives on. The Source Interface is the direction (Table
+			// 8.2.2-1 NOTE 1), so an uplink arriving over N9 from an upstream
+			// UPF -- an UL CL behind an I-UPF (TS 23.502 4.3.5.4 step 6) -- is
+			// Access, and this is what puts its F-TEID on the N9 endpoint.
+			v, err := c.TGPPInterfaceType()
+			if err != nil {
+				return fmt.Errorf("Source Interface Type: %w", err)
+			}
+			p.reference = interfaceTypeReference(v)
 		case ie.UEIPAddress:
 			fields, err := c.UEIPAddress()
 			if err != nil {
@@ -4403,6 +4485,15 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 				return fmt.Errorf("Transport Level Marking: %w", err)
 			}
 			f.hasMarking, f.marking = true, marking
+		case ie.TGPPInterfaceType:
+			// The Destination Interface Type (Table 7.5.2.3-2): a downlink
+			// toward an upstream UPF is Destination Interface Access and
+			// leaves over N9 (TS 23.502 4.3.5.7 NOTE 2).
+			v, err := fp.TGPPInterfaceType()
+			if err != nil {
+				return fmt.Errorf("Destination Interface Type: %w", err)
+			}
+			f.reference = interfaceTypeReference(v)
 		}
 	}
 	return nil

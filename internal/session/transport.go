@@ -33,7 +33,7 @@ func requestedFTEIDFamilies(p *pdr) []uint8 {
 // entire requested family set.
 func (c *Compiler) fteidEndpoint(p *pdr) (FTEIDEndpoint, error) {
 	families := requestedFTEIDFamilies(p)
-	referencePoint, ok := fteidReferencePoint(p.srcIfc)
+	referencePoint, ok := pdrReferencePoint(p)
 	if !ok {
 		return FTEIDEndpoint{}, fmt.Errorf("%w: source interface %d has no supported GTP-U endpoint",
 			errNotExpressible, p.srcIfc)
@@ -45,7 +45,7 @@ func (c *Compiler) fteidEndpoint(p *pdr) (FTEIDEndpoint, error) {
 	var chosen FTEIDEndpoint
 	candidates := 0
 	for _, endpoint := range c.cfg.FTEIDEndpoints {
-		if endpoint.SourceInterface != p.srcIfc || endpoint.ReferencePoint != referencePoint ||
+		if endpoint.ReferencePoint != referencePoint ||
 			(endpoint.Instance != "" && endpoint.Instance != instance) {
 			continue
 		}
@@ -76,6 +76,47 @@ func (c *Compiler) fteidEndpoint(p *pdr) (FTEIDEndpoint, error) {
 		errNotExpressible, referencePoint)
 }
 
+// interfaceTypeReference is the GTP-U endpoint a 3GPP Interface Type value
+// (TS 29.244 8.2.118, Table 8.2.118-1) names: the N3 values are the access
+// network's, and N9 -- with its roaming and data-forwarding variants -- and N19
+// are tunnels between UPFs, which an n9 endpoint terminates (TS 23.501
+// 5.29.4: N19 is a user plane tunnel between PSA UPFs). Every other value
+// names no GTP-U endpoint of this UP and leaves the default.
+func interfaceTypeReference(v uint8) string {
+	switch v {
+	case ie.TGPPInterfaceTypeN33GPPAccess, ie.TGPPInterfaceTypeN3TrustedNon3GPPAccess,
+		ie.TGPPInterfaceTypeN3UnTrustedNon3GPPAccess, ie.TGPPInterfaceTypeN3ForDataForwarding:
+		return "n3"
+	case ie.TGPPInterfaceTypeN9, ie.TGPPInterfaceTypeN19, tgppInterfaceTypeN9Roaming,
+		tgppInterfaceTypeN9ForDataForwarding:
+		return "n9"
+	}
+	return ""
+}
+
+// The Table 8.2.118-1 values the library names no constant for.
+const (
+	tgppInterfaceTypeN9Roaming           uint8 = 21
+	tgppInterfaceTypeN9ForDataForwarding uint8 = 23
+)
+
+// pdrReferencePoint is the endpoint a PDR's local F-TEID belongs on: the one
+// its Source Interface Type names, else its Source Interface's own. An Access
+// PDR may name either (an uplink over N3, or one from an upstream UPF over
+// N9); a Core PDR's arrival is always from another UPF.
+func pdrReferencePoint(p *pdr) (string, bool) {
+	def, ok := fteidReferencePoint(p.srcIfc)
+	switch {
+	case !ok:
+		return "", false
+	case p.reference == "":
+		return def, true
+	case p.srcIfc == ie.SrcInterfaceCore && p.reference != "n9":
+		return "", false
+	}
+	return p.reference, true
+}
+
 func fteidReferencePoint(sourceInterface uint8) (string, bool) {
 	switch sourceInterface {
 	case ie.SrcInterfaceAccess:
@@ -104,6 +145,13 @@ func tunnelReferencePoint(destinationInterface uint8) (string, bool) {
 // endpoint takes precedence over an unscoped endpoint.
 func (c *Compiler) tunnelEndpoint(far *far, ifc routing.Interface) (FTEIDEndpoint, netip.Addr, error) {
 	referencePoint, ok := tunnelReferencePoint(far.destIfc)
+	if ok && far.reference != "" {
+		// The Destination Interface Type names the reference point: a
+		// downlink (Access) toward an upstream UPF leaves over N9, and a
+		// Core-side tunnel is always to another UPF.
+		ok = far.destIfc == ie.DstInterfaceAccess || far.reference == "n9"
+		referencePoint = far.reference
+	}
 	if !ok {
 		return FTEIDEndpoint{}, netip.Addr{}, fmt.Errorf(
 			"%w: Destination Interface %d has no configured GTP-U reference point",
