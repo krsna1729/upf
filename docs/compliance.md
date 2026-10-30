@@ -143,6 +143,24 @@ through N4, and timer-based resource release. A generic FAR with an outer
 header does not prove that lifecycle or make arbitrary tunnelling an indirect
 forwarding procedure.
 
+## Update PDR (TS 29.244 Table 7.5.4.2-1)
+
+An Update PDR carries only the IEs that change, and the UPF keeps the stored
+value of every IE it leaves out (NOTE 1):
+
+| IE | Row | Absent | Present |
+|---|---|---|---|
+| Precedence | present "if there is a change in the PDR's precedence" | kept | replaces |
+| PDI | present "if there is a change within the PDI" | kept | replaces the whole stored PDI; an F-TEID it leaves out is kept |
+| FAR ID | present "if it needs to be changed" | kept (with a MAR the PDR names) | replaces; a MAR ID in its place replaces it the same way |
+| URR ID, QER ID | present "if ... applied or no longer applied"; the list of all IDs | kept | the list replaces the stored list |
+| Outer Header Removal | present "if it needs to be changed" | not read from any PDR | not read |
+
+An Update PDR for a PDR the session does not hold is cause 73. An empty URR or
+QER list has no encoding, so a PDR's last URR or QER is not dissociated by an
+Update PDR, and Remove URR / Remove QER stay refused (cause 73) while a PDR
+names them.
+
 ## The subscriber's ARP answer
 
 An N6 segment is Ethernet: before a downlink packet addressed to a UE can be

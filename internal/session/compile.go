@@ -196,6 +196,13 @@ func sharedRateQER(s *Session) (uint32, bool) {
 
 // pdrReq is a Create PDR or an Update PDR, as the SMF sent it.
 type pdrReq struct {
+	// create says the IE was a Create PDR. An Update PDR carries only the IEs
+	// that change, and merge keeps the stored value of one it leaves out
+	// (Table 7.5.4.2-1 NOTE 1): hasPrecedence and hasPDI say which were
+	// there, and a nil qerIDs or urrIDs is a list the update did not name.
+	create        bool
+	hasPrecedence bool
+	hasPDI        bool
 	// hasID says the PDR ID IE was there: 0 is a legal PDR ID (8.2.73's
 	// sixteen-bit field has no reserved value), so the flag and the value are
 	// two fields, the way the PDR's FAR reference is below.
@@ -1175,6 +1182,33 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	}
 	for _, p := range pdrs {
 		old := s.PDRs[p.id]
+		if !p.create {
+			if old == nil {
+				return fmt.Errorf("%w: Update PDR names PDR %d, which the session does not hold",
+					errNotExpressible, p.id)
+			}
+			// An Update PDR carries the IEs that change, and the UP function
+			// keeps the stored value of one it leaves out (Table 7.5.4.2-1
+			// NOTE 1). A PDI the update names replaces the stored one whole
+			// (its row); the F-TEID it does not name is kept below.
+			if !p.hasPrecedence {
+				p.precedence = old.precedence
+			}
+			if !p.hasPDI {
+				p.srcIfc, p.ueIP, p.hasUEIP, p.ueIPDst = old.srcIfc, old.ueIP, old.hasUEIP, old.ueIPDst
+				p.sdfs, p.instance, p.qfis = slices.Clone(old.sdfs), old.instance, old.qfis
+				p.fteidIPv4, p.fteidIPv6 = old.fteidIPv4, old.fteidIPv6
+			}
+			if !p.hasFarID && !p.hasMAR {
+				p.farID, p.hasMAR, p.marID = old.farID, old.hasMAR, old.marID
+			}
+			if p.qerIDs == nil {
+				p.qerIDs = old.qerIDs
+			}
+			if p.urrIDs == nil {
+				p.urrIDs = old.urrIDs
+			}
+		}
 		// A request may remove a PDR and create it again; the removal folded in
 		// above then says nothing about the PDR that is live now.
 		s.forgetRemoval(p.id)
@@ -1337,7 +1371,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		if qerHeldByAPDR(s, id) {
 			// A PDR of the session names this QER, so its traffic is gated and
 			// metered by it: the CP function disassociates the PDRs first (an
-			// Update PDR that does not name the QER), the order the URR removal
+			// Update PDR whose QER ID list leaves it out), the order the URR removal
 			// takes below and a dangling reference is refused in (resolve).
 			return fmt.Errorf("%w: the QER %d is still named by a PDR of the session",
 				errNotExpressible, id)
@@ -1357,7 +1391,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// The URR measures the traffic of the PDRs that name it, and a
 			// report for a URR whose PDRs are still programmed would name a
 			// URR the SMF has removed. The CP function disassociates the PDRs
-			// first (an Update PDR that does not name the URR), which is the
+			// first (an Update PDR whose URR ID list leaves it out), which is the
 			// order a modification takes.
 			return fmt.Errorf("%w: the URR %d is still named by a PDR of the session",
 				errNotExpressible, id)
@@ -3728,7 +3762,7 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 	if err != nil {
 		return pdrReq{}, fmt.Errorf("%s: %w", what, err)
 	}
-	p := pdrReq{}
+	p := pdrReq{create: i.Type == ie.CreatePDR}
 	for _, c := range children {
 		switch c.Type {
 		case ie.PDRID:
@@ -3737,7 +3771,7 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 			}
 		case ie.Precedence:
 			if v, err := c.Precedence(); err == nil {
-				p.precedence = v
+				p.precedence, p.hasPrecedence = v, true
 			}
 		case ie.FARID:
 			if id, err := c.FARID(); err == nil {
@@ -3756,12 +3790,12 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 			}
 		case ie.URRID:
 			// The URRs this PDR's traffic is measured by (7.5.2.2). An Update
-			// PDR replaces the list, like every other field it carries: the
-			// request is the PDR's whole new form.
+			// PDR that names any replaces the list (Table 7.5.4.2-1).
 			if id, err := c.URRID(); err == nil {
 				p.urrIDs = append(p.urrIDs, id)
 			}
 		case ie.PDI:
+			p.hasPDI = true
 			pdiChildren, err := c.PDI()
 			if err != nil {
 				return pdrReq{}, fmt.Errorf("PDI: %w", err)
@@ -3786,7 +3820,7 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 		}
 		return p, nil
 	}
-	if !p.hasFarID {
+	if p.create && !p.hasFarID {
 		// The PDR's FAR ID is mandatory (Table 7.5.2.2-1), and it is read as a
 		// flag because FAR 0 is a legal FAR: a PDR that carried none would
 		// otherwise resolve to the session's FAR 0 and forward, drop or buffer

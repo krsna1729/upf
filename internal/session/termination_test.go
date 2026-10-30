@@ -264,7 +264,8 @@ func TestRemovingAURRReportsItsLastWindowAsATerminationReport(t *testing.T) {
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewFTEID(0x01, 0x1000, net.ParseIP("192.0.2.1"), nil, 0),
 				ie.NewUEIPAddress(0x02, "10.45.0.2", "", 0, 0)),
-			ie.NewFARID(1)),
+			ie.NewFARID(1), ie.NewURRID(9)),
+		fullURR(9),
 		ie.NewRemoveURR(ie.NewURRID(7)))
 	urr, _, trig, up := reportOf(t, c.Modify(mod))
 	if urr != 7 || up != 900 {
