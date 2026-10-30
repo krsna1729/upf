@@ -326,11 +326,13 @@ std::string GtpuDecap::GetDesc() const {
 
 // One plugin descriptor for the whole library (gtpu_encap.cc carries the other
 // module; BESS_PLUGIN must appear exactly once per .so).
-// The capabilities the library's modules use between them: the init context,
-// transactional resources, and the memory scope every table is admitted
-// through (D-198).
+// The capabilities every module of the library uses between them: UpfAppliance
+// reaches the runtime (init context, codecs/resources), the periodic tick, the
+// owner-applied transactions for its two routers, and the memory scope; the
+// graph modules use the first, second and fourth already.
 BESS_PLUGIN_REQUIRES("upf_datapath", "0.3.0",
-                     BESS_CAP_INIT_CONTEXT | BESS_CAP_RESOURCES | BESS_CAP_MEMORY);
+                     BESS_CAP_INIT_CONTEXT | BESS_CAP_RESOURCES | BESS_CAP_TICKS |
+                         BESS_CAP_OWNED_APPLY | BESS_CAP_MEMORY);
 
 ADD_MODULE(GtpuDecap, "gtpu_decap",
            "admits G-PDUs by endpoint/family/local-address/TEID; known UL and DL "

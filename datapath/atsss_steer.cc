@@ -18,6 +18,9 @@
 #include "utils/endian.h"
 
 using bess::utils::be32_t;
+using upf::atsss::AccessAction;
+using upf::atsss::AccessHealth;
+using upf::atsss::SteeringPolicy;
 
 namespace dataplane = bess::dataplane;
 
@@ -42,7 +45,7 @@ std::expected<dataplane::ResourceKey, std::string> HealthKey(
 
 std::expected<std::any, std::string> HealthValue(
     const upf::pb::AtsssAccessHealth &value) {
-  return std::any(AtsssSteer::AccessHealth{.available = value.available()});
+  return std::any(AccessHealth{.available = value.available()});
 }
 
 std::expected<std::any, std::string> PolicyValue(
@@ -58,7 +61,7 @@ std::expected<std::any, std::string> PolicyValue(
   if (value.preferred() > 1) {
     return std::unexpected("'preferred' must be 0 or 1");
   }
-  AtsssSteer::SteeringPolicy policy;
+  SteeringPolicy policy;
   policy.mode = static_cast<uint8_t>(value.mode());
   policy.preferred = value.preferred();
   for (int i = 0; i < value.access_size(); i++) {
@@ -66,7 +69,7 @@ std::expected<std::any, std::string> PolicyValue(
     if (in.next_hop_id() == 0 && in.health_id() == 0) {
       // An access the SMF did not provision (active/standby allows one
       // access and no standby): the selection loop skips it.
-      policy.access[static_cast<size_t>(i)] = AtsssSteer::AccessAction{};
+      policy.access[static_cast<size_t>(i)] = AccessAction{};
       continue;
     }
     if (in.next_hop_id() == 0) {
@@ -77,7 +80,7 @@ std::expected<std::any, std::string> PolicyValue(
       return std::unexpected(std::format(
           "access {} names health id 0, which no access record answers", i));
     }
-    policy.access[static_cast<size_t>(i)] = AtsssSteer::AccessAction{
+    policy.access[static_cast<size_t>(i)] = AccessAction{
         .next_hop_id = in.next_hop_id(),
         .tunnel_id = in.tunnel_id(),
         .accounting_id = in.accounting_id(),
@@ -89,12 +92,12 @@ std::expected<std::any, std::string> PolicyValue(
 
 }  // namespace
 
-const AtsssSteer::SteeringPolicy *AtsssSteer::LookupPolicy(
+const SteeringPolicy *AtsssSteer::LookupPolicy(
     uint32_t policy_id) const noexcept {
   return policies_ ? policies_->Lookup(Id(policy_id)) : nullptr;
 }
 
-const AtsssSteer::AccessHealth *AtsssSteer::LookupHealth(
+const AccessHealth *AtsssSteer::LookupHealth(
     uint32_t health_id) const noexcept {
   return health_ ? health_->Lookup(Id(health_id)) : nullptr;
 }
@@ -287,54 +290,40 @@ void AtsssSteer::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   for (int i = 0; i < batch->cnt(); i++) {
     bess::PacketRef pkt = batch->packet(i);
     ogates[i] = DROP_GATE;
-    const uint32_t policy_id =
-        get_attr_with_offset<be32_t>(policy_offset, pkt).value();
-    if (policy_id == 0) {
-      // Not steered: the action table's next hop and tunnel stand. Clear the
-      // override sentinels explicitly: packet metadata is reused storage, and
-      // a zero tunnel id is what makes GtpuEncap fall back to action_id.
-      if (bess::metadata::IsValidOffset(tunnel_offset)) {
-        _set_attr_with_offset<be32_t>(tunnel_offset, pkt, be32_t(0));
-      }
-      if (bess::metadata::IsValidOffset(accounting_offset)) {
-        _set_attr_with_offset<be32_t>(accounting_offset, pkt, be32_t(0));
-      }
-      ogates[i] = 0;
-      continue;
-    }
-    const SteeringPolicy *policy = LookupPolicy(policy_id);
-    if (policy == nullptr) {
-      continue;
-    }
-    const AccessAction *selected = nullptr;
-    for (size_t n = 0; n < policy->access.size(); n++) {
-      const size_t index = (policy->preferred + n) % policy->access.size();
-      const AccessAction &access = policy->access[index];
-      if (access.health_id == 0) {
-        continue;
-      }
-      const AccessHealth *health = LookupHealth(access.health_id);
-      if (health == nullptr || health->available) {
-        // No record is "not monitored", not "unusable": a deployment that
-        // has not written the health table still steers by its preference.
-        selected = &access;
+    const upf::atsss::Steering steering = upf::atsss::Steer(
+        get_attr_with_offset<be32_t>(policy_offset, pkt).value(),
+        [this](uint32_t id) { return LookupPolicy(id); },
+        [this](uint32_t id) { return LookupHealth(id); });
+    switch (steering.verdict) {
+      case upf::atsss::SteerVerdict::kNotSteered:
+        // The action table's next hop and tunnel stand. Clear the override
+        // sentinels explicitly: packet metadata is reused storage, and a zero
+        // tunnel id is what makes GtpuEncap fall back to action_id.
+        if (bess::metadata::IsValidOffset(tunnel_offset)) {
+          _set_attr_with_offset<be32_t>(tunnel_offset, pkt, be32_t(0));
+        }
+        if (bess::metadata::IsValidOffset(accounting_offset)) {
+          _set_attr_with_offset<be32_t>(accounting_offset, pkt, be32_t(0));
+        }
+        ogates[i] = 0;
         break;
-      }
+      case upf::atsss::SteerVerdict::kSteered:
+        _set_attr_with_offset<be32_t>(hop_offset, pkt,
+                                      be32_t(steering.access->next_hop_id));
+        if (bess::metadata::IsValidOffset(tunnel_offset)) {
+          _set_attr_with_offset<be32_t>(tunnel_offset, pkt,
+                                        be32_t(steering.access->tunnel_id));
+        }
+        if (bess::metadata::IsValidOffset(accounting_offset)) {
+          _set_attr_with_offset<be32_t>(accounting_offset, pkt,
+                                        be32_t(steering.access->accounting_id));
+        }
+        ogates[i] = 0;
+        break;
+      case upf::atsss::SteerVerdict::kNoPolicy:
+      case upf::atsss::SteerVerdict::kNoAccess:
+        break;  // ogates[i] stays DROP_GATE
     }
-    if (selected == nullptr) {
-      continue;
-    }
-    _set_attr_with_offset<be32_t>(hop_offset, pkt,
-                                  be32_t(selected->next_hop_id));
-    if (bess::metadata::IsValidOffset(tunnel_offset)) {
-      _set_attr_with_offset<be32_t>(tunnel_offset, pkt,
-                                    be32_t(selected->tunnel_id));
-    }
-    if (bess::metadata::IsValidOffset(accounting_offset)) {
-      _set_attr_with_offset<be32_t>(accounting_offset, pkt,
-                                    be32_t(selected->accounting_id));
-    }
-    ogates[i] = 0;
   }
   EmitBatch(ctx, batch, ogates);
 }

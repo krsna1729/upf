@@ -26,7 +26,8 @@
 // carries the reasoning), so a session's entry is one live transaction and the
 // packet path pays one acquire load.
 //
-// The packet path drops what it cannot answer for: a packet that is not an ARP
+// The packet path is upf::arp::AnswerProxyRequest (arp_proxy.h), shared with
+// UpfAppliance. It drops what it cannot answer for: a packet that is not an ARP
 // request, and a request whose target address the table does not hold. Every
 // other packet is the graph's business -- the module belongs on the ARP branch
 // of the ingress (deploy/upf.yaml's l2_sort), and a deployment that sent it the

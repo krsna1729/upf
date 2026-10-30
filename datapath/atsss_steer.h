@@ -3,12 +3,12 @@
 #ifndef UPF_DATAPATH_ATSSS_STEER_H_
 #define UPF_DATAPATH_ATSSS_STEER_H_
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 
+#include "atsss_select.h"
 #include "dataplane/action_id.h"
 #include "dataplane/slot_resource.h"
 #include "dataplane/slot_table.h"
@@ -32,35 +32,14 @@
 // references its two health records; the transaction engine refuses a health
 // erase while a live policy names it.
 //
-// Selection is active/standby: the preferred access if its health record says
-// available, else the other access if it does, else the packet is dropped. A
-// missing *policy* is fail-closed. A missing *health* record means "not
-// monitored" and counts as available: health is deployment state, not a
-// session's, and a deployment that never writes the table must still steer.
-// Policy id 0 is the exception -- it means "not steered", and the packet passes
-// through with the action table's own next hop and tunnel.
+// Selection is upf::atsss::Steer (atsss_select.h, which states the rule),
+// shared with UpfAppliance: active/standby by health, fail-closed on a missing
+// policy, and policy id 0 passes through unsteered.
 class AtsssSteer final : public Module {
  public:
   static const gate_idx_t kNumOGates = 1;
 
   using Id = bess::dataplane::ActionId;
-
-  struct AccessAction {
-    uint32_t next_hop_id = 0;
-    uint32_t tunnel_id = 0;
-    uint32_t accounting_id = 0;
-    uint32_t health_id = 0;
-  };
-
-  struct SteeringPolicy {
-    uint8_t mode = 0;       // upf::pb::ATSSS_ACTIVE_STANDBY
-    uint32_t preferred = 0; // index into access
-    std::array<AccessAction, 2> access{};
-  };
-
-  struct AccessHealth {
-    bool available = false;
-  };
 
   // "<module>/policies" and "<module>/health".
   static const ResourceTables resource_tables;
@@ -72,18 +51,18 @@ class AtsssSteer final : public Module {
 
   void ProcessBatch(Context *ctx, bess::PacketBatch *batch) override;
 
-  const SteeringPolicy *LookupPolicy(uint32_t policy_id) const noexcept;
-  const AccessHealth *LookupHealth(uint32_t health_id) const noexcept;
+  const upf::atsss::SteeringPolicy *LookupPolicy(uint32_t policy_id) const noexcept;
+  const upf::atsss::AccessHealth *LookupHealth(uint32_t health_id) const noexcept;
 
  private:
   void RegisterHealth(std::string name);
   void RegisterPolicies(std::string name);
 
   size_t capacity_ = 0;
-  bess::framework::Sized<bess::dataplane::SlotTable<Id, AccessHealth>> health_;
-  bess::framework::Sized<bess::dataplane::SlotTable<Id, SteeringPolicy>> policies_;
-  std::unique_ptr<bess::dataplane::SlotResource<Id, AccessHealth>> health_res_;
-  std::unique_ptr<bess::dataplane::SlotResource<Id, SteeringPolicy>> policy_res_;
+  bess::framework::Sized<bess::dataplane::SlotTable<Id, upf::atsss::AccessHealth>> health_;
+  bess::framework::Sized<bess::dataplane::SlotTable<Id, upf::atsss::SteeringPolicy>> policies_;
+  std::unique_ptr<bess::dataplane::SlotResource<Id, upf::atsss::AccessHealth>> health_res_;
+  std::unique_ptr<bess::dataplane::SlotResource<Id, upf::atsss::SteeringPolicy>> policy_res_;
   bess::framework::ResourceBinding health_binding_;
   bess::framework::ResourceBinding policy_binding_;  // after its resources (D-044)
 

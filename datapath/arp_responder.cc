@@ -2,8 +2,10 @@
 
 #include "arp_responder.h"
 
+#include <cstdint>
 #include <format>
 #include <memory>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -11,16 +13,14 @@
 // in this translation unit (docs/plugin-api.md, "Logging").
 #include "utils/logging.h"
 
+#include "arp_proxy.h"
 #include "dataplane/resource_registry.h"
 #include "framework/resource_codec.h"
-#include "utils/arp.h"
 #include "utils/endian.h"
 #include "utils/ether.h"
 #include "utils/ip.h"
 
-using bess::utils::Arp;
 using bess::utils::Ethernet;
-using bess::utils::be16_t;
 
 namespace dataplane = bess::dataplane;
 namespace arp = upf::arp;
@@ -114,36 +114,12 @@ void UpfArpResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
 
   for (size_t i = 0; i < cnt; i++) {
     bess::PacketRef pkt = batch->packet(i);
-    ogates[i] = DROP_GATE;
-
-    if (pkt.head_len() < sizeof(Ethernet) + sizeof(Arp)) {
-      continue;  // a frame too short to hold the request it claims to be
-    }
-    Ethernet *eth = pkt.head_data<Ethernet *>();
-    if (eth->ether_type != be16_t(Ethernet::Type::kArp)) {
-      continue;  // not this module's: the graph sends it only ARP
-    }
-    Arp *req = reinterpret_cast<Arp *>(eth + 1);
-    if (req->opcode != be16_t(Arp::Opcode::kRequest)) {
-      continue;  // a reply, or an opcode this UP answers nothing for
-    }
-    // One acquire load: the entry the session's transaction published.
-    const arp::Entry *entry = resource_->Lookup(req->target_ip_addr.value());
-    if (entry == nullptr) {
-      continue;  // no session holds this address
-    }
-
-    // The reply, built in place: the request's fields hold everything the
-    // answer needs (the requester's addresses become the reply's target, this
-    // interface's MAC and the entry's address become its sender).
-    req->opcode = be16_t(Arp::Opcode::kReply);
-    eth->dst_addr = eth->src_addr;
-    eth->src_addr = entry->mac;
-    req->target_hw_addr = req->sender_hw_addr;
-    req->sender_hw_addr = entry->mac;
-    req->target_ip_addr = req->sender_ip_addr;
-    req->sender_ip_addr = bess::utils::be32_t(entry->ip);
-    ogates[i] = 0;
+    // One acquire load per request: the entry the session's transaction
+    // published.
+    const arp::ProxyVerdict verdict = arp::AnswerProxyRequest(
+        std::span<uint8_t>(pkt.head_data<uint8_t *>(), pkt.head_len()),
+        [this](uint32_t ip) { return resource_->Lookup(ip); });
+    ogates[i] = verdict == arp::ProxyVerdict::kReply ? 0 : DROP_GATE;
   }
 
   EmitBatch(ctx, batch, ogates);
