@@ -108,7 +108,7 @@ func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 	// their erases are the ones a session's lifetime walks.
 	touched := map[string]bool{}
 	for i, ch := range changes {
-		if !strings.HasSuffix(ch.Resource, "/counters") {
+		if !strings.Contains(ch.Resource, "counters") {
 			continue
 		}
 		key := ch.Resource + "\x00" + fmt.Sprint(ch.Key)

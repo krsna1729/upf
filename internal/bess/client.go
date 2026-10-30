@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -247,8 +248,13 @@ type RuleCount struct {
 // (datapath/upf_datapath.proto), so a graph without that module -- or one built
 // against another schema -- is an error here and not an empty reading: a
 // reporter that read silence as zero usage would report nothing forever.
-func (c *Client) RuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]RuleCount, error) {
-	return c.ruleCounts(ctx, module, true, actionIDs...)
+//
+// counters is a module whose one counter table the command reads (UrrCount,
+// "cnt_ul"), or "<module>/<table>" for a module that owns several (the
+// appliance's "upf/counters_ul"): the table is then the argument's `table`
+// field, which a one-table module's argument does not carry at all.
+func (c *Client) RuleCounts(ctx context.Context, counters string, actionIDs ...uint32) ([]RuleCount, error) {
+	return c.ruleCounts(ctx, counters, true, actionIDs...)
 }
 
 // PeekRuleCounts is RuleCounts without opening the next window: the module keeps
@@ -257,31 +263,38 @@ func (c *Client) RuleCounts(ctx context.Context, module string, actionIDs ...uin
 // a report the SMF never took must be offered again, and a reading that cleared
 // the stamp would lose it -- and clears it by reading the ordinary way once the
 // report is delivered (ConfirmDownlinks).
-func (c *Client) PeekRuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]RuleCount, error) {
-	return c.ruleCounts(ctx, module, false, actionIDs...)
+func (c *Client) PeekRuleCounts(ctx context.Context, counters string, actionIDs ...uint32) ([]RuleCount, error) {
+	return c.ruleCounts(ctx, counters, false, actionIDs...)
 }
 
-// ruleCounts is both readings: restart says whether the first-packet stamp of
-// each rule asked for is cleared by the reading (the module's get_counts
-// argument), which is the difference between "this window" and "not yet
-// acknowledged".
-func (c *Client) ruleCounts(ctx context.Context, module string, restart bool,
+// countRequest builds the command's module and argument. Graph requests omit
+// table entirely so their wire encoding and old daemon schemas stay unchanged.
+func (c *Client) countRequest(counters string, restart bool, actionIDs []uint32) (string, proto.Message, error) {
+	module, table, _ := strings.Cut(counters, "/")
+	argFields := map[string]any{"action_ids": actionIDs, "restart_window": restart}
+	if table != "" {
+		argFields["table"] = table
+	}
+	arg, err := c.Message("upf.pb.UrrCountCommandGetCountsArg", argFields)
+	return module, arg, err
+}
+
+func (c *Client) ruleCounts(ctx context.Context, counters string, restart bool,
 	actionIDs ...uint32) ([]RuleCount, error) {
-	arg, err := c.Message("upf.pb.UrrCountCommandGetCountsArg",
-		map[string]any{"action_ids": actionIDs, "restart_window": restart})
+	module, arg, err := c.countRequest(counters, restart, actionIDs)
 	if err != nil {
 		return nil, err
 	}
 	result, err := c.sdk.InvokeAction(ctx, module, "get_counts", arg)
 	if err != nil {
-		return nil, fmt.Errorf("bess: %s get_counts: %w", module, err)
+		return nil, fmt.Errorf("bess: %s get_counts: %w", counters, err)
 	}
 	response, err := c.Message("upf.pb.UrrCountCommandGetCountsResponse", nil)
 	if err != nil {
 		return nil, err
 	}
 	if err := result.UnmarshalTo(response); err != nil {
-		return nil, fmt.Errorf("bess: %s get_counts answered %s: %w", module, result.GetTypeUrl(), err)
+		return nil, fmt.Errorf("bess: %s get_counts answered %s: %w", counters, result.GetTypeUrl(), err)
 	}
 	fields := response.ProtoReflect().Descriptor().Fields()
 	counts := response.ProtoReflect().Get(fields.ByName("counts")).List()
