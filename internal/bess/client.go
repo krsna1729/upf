@@ -160,9 +160,12 @@ func (c *Client) Message(typ string, fields map[string]any) (proto.Message, erro
 		return nil, fmt.Errorf("bess: %s is not a message", typ)
 	}
 	m := dynamicpb.NewMessage(md)
-	if fields == nil {
+	if fields == nil || fill(m, fields) {
 		return m, nil
 	}
+	// The JSON path decides whatever fill does not convert exactly, on a
+	// message of its own: fill may have set part of m.
+	m = dynamicpb.NewMessage(md)
 	raw, err := json.Marshal(fields)
 	if err != nil {
 		return nil, fmt.Errorf("bess: %s fields: %w", typ, err)
