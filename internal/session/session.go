@@ -52,9 +52,10 @@ type Applier interface {
 // It is a capability of its own rather than another method of Applier because a
 // dataplane without counters (a graph that charges nothing, or a stand-in in a
 // test) is a plain fact about that graph, and only a session that has a URR
-// ever asks.
+// ever asks. counters is where the target says the table is read
+// (Target.Counts): a module, or "<module>/<table>".
 type CounterReader interface {
-	RuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error)
+	RuleCounts(ctx context.Context, counters string, actionIDs ...uint32) ([]bess.RuleCount, error)
 }
 
 // WindowReader is CounterReader without opening the next window: the same
@@ -64,7 +65,7 @@ type CounterReader interface {
 // as "nothing arrived" -- and a dataplane that cannot do it falls back to the
 // ordinary reading, which loses at most the retry of one report.
 type WindowReader interface {
-	PeekRuleCounts(ctx context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error)
+	PeekRuleCounts(ctx context.Context, counters string, actionIDs ...uint32) ([]bess.RuleCount, error)
 }
 
 // ErrorReader is the GTP-U responder's error table as a dataplane capability:
@@ -374,6 +375,13 @@ type Config struct {
 	// engine's retirement is asynchronous, so this is a generous margin rather
 	// than a synchronisation; the pool hands out fresh ids while it has them.
 	IDReuseDelay time.Duration
+
+	// Appliance is the one module that runs the whole user plane
+	// (UpfAppliance, upfd's -target appliance): every table is that module's
+	// (target.go), and the module fields above say only which of them this
+	// deployment uses. Empty is the module graph, whose tables are
+	// "<module>/<table>" of the modules those fields name.
+	Appliance string
 }
 
 // downlink is whether this PDR's packets travel toward the UE. Source
@@ -422,7 +430,10 @@ func (c Config) withDefaults() Config {
 // session handler (internal/n4.SessionHandler).
 type Compiler struct {
 	cfg Config
-	ap  Applier
+	// target names every table and command module the compilation uses
+	// (target.go): the graph's, or the appliance's.
+	target Target
+	ap     Applier
 	// contents is the same dataplane as a reader, when it can be read back at
 	// all: a restarted controller sweeps an earlier run's sessions out of it
 	// (sweep.go), and a test's applier may not offer the reading.
@@ -520,6 +531,7 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	cfg = cfg.withDefaults()
 	c := &Compiler{
 		cfg:           cfg,
+		target:        newTarget(cfg),
 		ap:            ap,
 		log:           log,
 		sessions:      map[uint64]*Session{},
@@ -1451,11 +1463,10 @@ func (p *idPool) release(id uint32) {
 	p.freed = append(p.freed, freedID{id: id, at: p.now()})
 }
 
-// resource names, as the deployed graph spells them.
-func rulesRes(d Direction) string { return d.PDRTable + "/rules" }
+// res is the resource table t is, as the compiler's target names it.
+func (c *Compiler) res(t Table) string { return c.target.Resource(t) }
 
-func (c *Compiler) teidRes() string { return c.cfg.GTPUDecap + "/fteids" }
-func metersRes(d Direction) string  { return d.Meters + "/meters" }
+func (c *Compiler) teidRes() string { return c.res(FTEIDs) }
 func fteidKey(endpointID, family uint32, address []byte, teid uint32) map[string]any {
 	return map[string]any{
 		"endpoint_id": endpointID, "address_family": family,
@@ -1520,9 +1531,6 @@ func meterSlots(p *pdr) (uint32, uint32) {
 	return p.ownMeterID, p.sharedMeterID
 }
 
-func tunnelsRes(d Direction) string  { return d.Tunnels + "/tunnels" }
-func countersRes(d Direction) string { return d.Counters + "/counters" }
-
 func fteidKeysOf(p *pdr) []map[string]any {
 	families := p.endpointFamilies
 	if len(families) == 0 {
@@ -1583,7 +1591,7 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			return fmt.Errorf("PDR %d: %w", p.id, err)
 		}
 		for _, key := range keys {
-			add(bess.Change{Resource: rulesRes(dir), Key: key})
+			add(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: key})
 		}
 	}
 	// And the ARP entries the session's subscriber addresses hold: the address
@@ -1607,7 +1615,7 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			}
 		}
 		if dir.Counters != "" && len(p.urrIDs) > 0 && p.actionID != 0 {
-			add(bess.Change{Resource: countersRes(dir), Key: map[string]any{"action_id": p.actionID}})
+			add(bess.Change{Resource: c.res(counterTable(p.downlink())), Key: map[string]any{"action_id": p.actionID}})
 		}
 		// A PDR that buffers is counted by a *second* module, in front of the
 		// store, and compile writes its entry too (writeBufferCounter). The
@@ -1618,7 +1626,7 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		// (ci/buffer-path.sh's second test, "cnt_buf already measures 1 rules
 		// before any session exists").
 		if p.buffer && p.actionID != 0 && c.cfg.Buffering != nil && c.cfg.Buffering.Counter != "" {
-			add(bess.Change{Resource: bufferCountersRes(c.cfg.Buffering), Key: map[string]any{"action_id": p.actionID}})
+			add(bess.Change{Resource: c.res(BufferCounters), Key: map[string]any{"action_id": p.actionID}})
 		}
 		// The store's per-flow "flows" entry is the session's too: compile
 		// writes the SMF's own numbers there (writeFlowEntry), and it is
@@ -1626,7 +1634,7 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		// A deletion that left the entry would hand a later session that reuses
 		// the ActionId a timeout and a cap the SMF never sent it.
 		if p.buffer && p.actionID != 0 && c.cfg.Buffering != nil && c.cfg.Buffering.Store != "" {
-			add(bess.Change{Resource: flowsRes(c.cfg.Buffering), Key: map[string]any{"id": p.actionID}})
+			add(bess.Change{Resource: c.res(Flows), Key: map[string]any{"id": p.actionID}})
 		}
 	}
 	// A MAR's policy and the two tunnel records its accesses name are the
@@ -1636,18 +1644,18 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 	if c.cfg.Atsss != "" {
 		for _, m := range append(marsInOrder(s), s.removedMARs...) {
 			if m.policyID != 0 {
-				add(bess.Change{Resource: c.cfg.Atsss + "/policies",
+				add(bess.Change{Resource: c.res(Policies),
 					Key: map[string]any{"policy_id": m.policyID}})
 			}
 			for _, id := range m.tunnelIDs {
 				if id != 0 {
-					add(bess.Change{Resource: tunnelsRes(c.cfg.Down),
+					add(bess.Change{Resource: c.res(TunnelsDownlink),
 						Key: map[string]any{"action_id": id}})
 				}
 			}
 		}
 		for _, id := range s.retiredTunnels {
-			add(bess.Change{Resource: tunnelsRes(c.cfg.Down),
+			add(bess.Change{Resource: c.res(TunnelsDownlink),
 				Key: map[string]any{"action_id": id}})
 		}
 	}
@@ -1663,10 +1671,10 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			continue
 		}
 		if q.meterUL != 0 {
-			add(bess.Change{Resource: metersRes(c.cfg.Up), Key: map[string]any{"id": q.meterUL}})
+			add(bess.Change{Resource: c.res(MetersUplink), Key: map[string]any{"id": q.meterUL}})
 		}
 		if q.meterDL != 0 {
-			add(bess.Change{Resource: metersRes(c.cfg.Down), Key: map[string]any{"id": q.meterDL}})
+			add(bess.Change{Resource: c.res(MetersDownlink), Key: map[string]any{"id": q.meterDL}})
 		}
 	}
 	if len(changes) != 0 {
@@ -1719,7 +1727,7 @@ func (c *Compiler) settle(s *Session) {
 		dir := c.direction(p)
 		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
 			for _, key := range keys {
-				live[rulesRes(dir)+"\x00"+fmt.Sprint(key)] = true
+				live[c.res(pdrTable(p.downlink()))+"\x00"+fmt.Sprint(key)] = true
 			}
 		}
 	}
@@ -1737,7 +1745,7 @@ func (c *Compiler) settle(s *Session) {
 			continue
 		}
 		for _, key := range keys {
-			rkey := rulesRes(dir) + "\x00" + fmt.Sprint(key)
+			rkey := c.res(pdrTable(p.downlink())) + "\x00" + fmt.Sprint(key)
 			if !live[rkey] && c.rules[rkey] == s.LocalSEID {
 				delete(c.rules, rkey)
 				s.forgetRuleKey(rkey)

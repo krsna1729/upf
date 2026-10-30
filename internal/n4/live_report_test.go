@@ -96,26 +96,35 @@ func TestLiveUsageReportReachesTheSMF(t *testing.T) {
 	// The report: upfd's reporting tick reads the counters once for the
 	// baseline and then reports what the window holds, so the report arrives a
 	// tick or two after the session exists.
-	m := recvMsg(t, conn, 20*time.Second)
-	report, ok := m.(*message.SessionReportRequest)
-	if !ok {
-		t.Fatalf("the UP function sent a %s, want a Session Report Request", m.MessageTypeName())
+	var report *message.SessionReportRequest
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		left := time.Until(deadline)
+		if left <= 0 {
+			t.Fatal("no usage report before the reporting deadline")
+		}
+		m := recvMsg(t, conn, left)
+		var ok bool
+		report, ok = m.(*message.SessionReportRequest)
+		if !ok {
+			t.Fatalf("the UP function sent a %s, want a Session Report Request", m.MessageTypeName())
+		}
+		// Reports name the SMF's CP F-SEID, not the UPF's local SEID.
+		if report.SEID() != 0x9001 {
+			t.Fatalf("the report names SEID %#x, want the CP F-SEID 0x9001", report.SEID())
+		}
+		sendMsg(t, conn, message.NewSessionReportResponse(0, 0, report.SEID(), report.Sequence(), 0,
+			ie.NewCause(ie.CauseRequestAccepted)))
+		if report.ReportType != nil && report.ReportType.HasUSAR() {
+			break
+		}
+		// An appliance also tracks the fixture's peer Error Indications.
+		// A real SMF acknowledges those independently of its pending URR.
+		if report.ReportType == nil || !report.ReportType.HasERIR() {
+			t.Fatalf("unexpected report while waiting for usage: %+v", report.ReportType)
+		}
 	}
-	// The acknowledgement: the SMF's own answer, which is what makes the report
-	// delivered (upfd logs "usage report acknowledged" when this arrives).
-	sendMsg(t, conn, message.NewSessionReportResponse(0, 0, report.SEID(), report.Sequence(), 0,
-		ie.NewCause(ie.CauseRequestAccepted)))
 
-	// The report is addressed to the SMF, so the header names the session the
-	// way *the SMF* knows it: the CP F-SEID this test allocated (0x9001, the
-	// value in its own F-SEID IE). A report under our own F-SEID would be a
-	// session the SMF cannot find (TS 29.244 7.2.2.4.2).
-	if report.SEID() != 0x9001 {
-		t.Errorf("the report names SEID %#x, want the CP F-SEID 0x9001", report.SEID())
-	}
-	if !report.ReportType.HasUSAR() {
-		t.Errorf("the report's type is not a usage report: %+v", report.ReportType)
-	}
 	if len(report.UsageReport) != 1 {
 		t.Fatalf("the report carries %d usage reports, want one", len(report.UsageReport))
 	}

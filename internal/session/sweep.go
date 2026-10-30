@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 
 	"github.com/krsna1729/upf/internal/bess"
 )
@@ -32,53 +33,9 @@ type ContentReader interface {
 // transaction.
 const sweepBatch = 1000
 
-// resources is every resource the compiler writes, as the deployed graph
-// spells them ("<module>/<table>"): the names a sweep reads and erases. A
-// module name the graph does not declare (a graph that charges nothing
-// declares no counter module) writes nothing and names nothing, so it is left
-// out rather than read as "/counters".
-func (c *Compiler) resources() []string {
-	var names []string
-	add := func(name string) {
-		if name == "" || name[0] == '/' {
-			return
-		}
-		for _, have := range names {
-			if have == name {
-				return
-			}
-		}
-		names = append(names, name)
-	}
-	add(c.teidRes())
-	for _, d := range []Direction{c.cfg.Up, c.cfg.Down} {
-		if d.PDRTable != "" {
-			add(rulesRes(d))
-		}
-		if d.Meters != "" {
-			add(metersRes(d))
-		}
-		if d.Counters != "" {
-			add(countersRes(d))
-		}
-	}
-	for _, d := range []Direction{c.cfg.Up, c.cfg.Down} {
-		if d.Tunnels != "" {
-			add(tunnelsRes(d))
-		}
-	}
-	if c.BufferingConfigured() {
-		// The BUFF branch's counter entries are the session layer's too: an
-		// earlier run's flow would otherwise keep counting into a rule this
-		// process does not know about.
-		add(countersRes(Direction{Counters: c.cfg.Buffering.Counter}))
-		// And so are the store's per-flow "flows" entries: each carries the
-		// SMF's own numbers (8.2.29, 8.2.30) for a flow an earlier run held, and
-		// a later session that reuses the ActionId must not inherit them.
-		add(flowsRes(c.cfg.Buffering))
-	}
-	return names
-}
+// resources is the target's startup reset list. ARP entries are handled
+// separately because deployment-owned addresses share their table.
+func (c *Compiler) resources() []string { return c.target.SweepResources() }
 
 // inPools reports whether an address is one the interface's pools serve: the
 // pool's own containment, with the mapped form of an IPv4-in-IPv6 address
@@ -112,19 +69,34 @@ type arpSweep struct {
 	pools    []netip.Prefix
 }
 
-// arpSweeps lists the ARP tables the deployment declared, one per interface.
+// arpSweeps names ARP tables and subscriber pools. Graph mode preserves the
+// historical first-interface-per-responder behavior. Appliance mode combines
+// every enabled interface's pools because all entries share one table.
 func (c *Compiler) arpSweeps() []arpSweep {
 	if c.cfg.Instances == nil {
 		return nil
 	}
-	seen := map[string]bool{}
+	index := map[string]int{}
 	var out []arpSweep
 	for _, ifc := range c.cfg.Instances.Interfaces() {
-		if ifc.ARP == "" || seen[ifc.ARP] {
+		if ifc.ARP == "" {
 			continue
 		}
-		seen[ifc.ARP] = true
-		out = append(out, arpSweep{resource: ifc.ARP + "/entries", pools: ifc.Pool})
+		resource := c.target.Entries(ifc.ARP)
+		i, seen := index[resource]
+		switch {
+		case !seen:
+			index[resource] = len(out)
+			out = append(out, arpSweep{resource: resource, pools: slices.Clone(ifc.Pool)})
+		case c.cfg.Appliance == "":
+			// Graph mode keeps the first interface's pool.
+		case len(out[i].pools) == 0:
+			// Already every address.
+		case len(ifc.Pool) == 0:
+			out[i].pools = nil
+		default:
+			out[i].pools = append(out[i].pools, ifc.Pool...)
+		}
 	}
 	return out
 }
@@ -163,11 +135,11 @@ func (c *Compiler) Sweep(ctx context.Context) error {
 	// emptied whether or not this dataplane can be read back -- a store left
 	// holding packets would hand a later session the previous one's.
 	if c.store != nil && c.BufferingConfigured() {
-		if err := c.store.ClearStore(ctx, c.cfg.Buffering.Store); err != nil {
+		if err := c.store.ClearStore(ctx, c.target.Store()); err != nil {
 			// A store that will not clear is a warning: the packets age out by
 			// its own timeout, which is the same bound every other held packet
 			// has, and refusing to serve PFCP over it would take the node down.
-			c.log.Warn("session: the packet store was not cleared", "module", c.cfg.Buffering.Store, "error", err)
+			c.log.Warn("session: the packet store was not cleared", "module", c.target.Store(), "error", err)
 		}
 	}
 	if c.contents == nil {

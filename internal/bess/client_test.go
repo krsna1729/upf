@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 )
@@ -75,5 +76,77 @@ func TestPacketTimePlacesAStampOnTheWallClock(t *testing.T) {
 				t.Errorf("packetTime(%d) = %v, want %v", c.stamp, got, c.want)
 			}
 		})
+	}
+}
+
+// A graph's get_counts argument is byte-identical without table and works with
+// the old schema. An appliance request selects exactly one of its counter
+// tables; a daemon lacking that field must refuse it, never silently read a
+// different table.
+func TestCounterCommandTableSelection(t *testing.T) {
+	for _, withTable := range []bool{false, true} {
+		fields := []*descriptorpb.FieldDescriptorProto{
+			{Name: proto.String("action_ids"), Number: proto.Int32(1),
+				Label: descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(),
+				Type:  descriptorpb.FieldDescriptorProto_TYPE_UINT32.Enum()},
+			{Name: proto.String("restart_window"), Number: proto.Int32(2),
+				Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:  descriptorpb.FieldDescriptorProto_TYPE_BOOL.Enum()},
+		}
+		if withTable {
+			fields = append(fields, &descriptorpb.FieldDescriptorProto{
+				Name: proto.String("table"), Number: proto.Int32(3),
+				Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:  descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+			})
+		}
+		file, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+			Name: proto.String("counts.proto"), Package: proto.String("upf.pb"), Syntax: proto.String("proto3"),
+			MessageType: []*descriptorpb.DescriptorProto{{
+				Name: proto.String("UrrCountCommandGetCountsArg"), Field: fields,
+			}},
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		registry := new(protoregistry.Files)
+		if err := registry.RegisterFile(file); err != nil {
+			t.Fatal(err)
+		}
+		client := &Client{files: registry}
+		for _, restart := range []bool{false, true} {
+			module, got, err := client.countRequest("cnt_ul", restart, []uint32{7, 9})
+			if err != nil || module != "cnt_ul" {
+				t.Fatalf("graph command: module %q, error %v", module, err)
+			}
+			want, err := client.Message("upf.pb.UrrCountCommandGetCountsArg",
+				map[string]any{"action_ids": []uint32{7, 9}, "restart_window": restart})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !proto.Equal(got, want) {
+				t.Errorf("graph argument changed: got %v, want %v", got, want)
+			}
+			for _, table := range []string{"counters_ul", "counters_dl", "buffer_counters"} {
+				module, arg, err := client.countRequest("upf/"+table, restart, []uint32{7, 9})
+				if !withTable {
+					if err == nil {
+						t.Error("appliance command accepted by a schema without table")
+					}
+					continue
+				}
+				if err != nil || module != "upf" {
+					t.Fatalf("appliance command: module %q, error %v", module, err)
+				}
+				m := arg.ProtoReflect()
+				if got := m.Get(m.Descriptor().Fields().ByName("table")).String(); got != table {
+					t.Errorf("selected table %q, want %q", got, table)
+				}
+				m.Clear(m.Descriptor().Fields().ByName("table"))
+				if !proto.Equal(arg, want) {
+					t.Errorf("appliance changed other arguments: got %v, want %v", arg, want)
+				}
+			}
+		}
 	}
 }

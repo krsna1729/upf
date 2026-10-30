@@ -65,6 +65,22 @@ func TestLiveGBRSplitsTheMeter(t *testing.T) {
 			t.Fatalf("reading the daemon's metrics: %v", err)
 		}
 		for _, s := range samples {
+			if cfg.Appliance != "" {
+				l := s.GetLabels()
+				if s.GetName() != "bess_upf_meter_packets_total" ||
+					l["module"] != cfg.Appliance || l["direction"] != "ul" {
+					continue
+				}
+				switch l["color"] {
+				case "green":
+					green += s.GetValue()
+				case "yellow":
+					yellow += s.GetValue()
+				case "red":
+					red += s.GetValue()
+				}
+				continue
+			}
 			if s.GetName() != "bess_gate_packets_total" {
 				continue
 			}

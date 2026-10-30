@@ -18,6 +18,9 @@ import (
 // exactly as a deployment spells them.
 func liveConfig() Config {
 	cfg := testConfig()
+	if os.Getenv("UPF_TARGET") == "appliance" {
+		cfg.Appliance = "upf"
+	}
 	cfg.GTPUDecap = "decap0"
 	cfg.Up = Direction{
 		PDRTable: "pdr_ul",

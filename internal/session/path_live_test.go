@@ -313,6 +313,14 @@ func gatePackets(t *testing.T, ctx context.Context, client *bess.Client, module 
 // fan out (the router's two exits) is read by which gate carried what.
 func gatePacketsAt(t *testing.T, ctx context.Context, client *bess.Client, module, gate string) float64 {
 	t.Helper()
+	if os.Getenv("UPF_TARGET") == "appliance" && gate == "0" {
+		switch module {
+		case "rt", "mt_ul":
+			module, gate = "upf", "0"
+		case "enc":
+			module, gate = "n3_data", "0"
+		}
+	}
 	samples, err := client.SDK().Metrics(ctx)
 	if err != nil {
 		t.Fatalf("reading metrics: %v", err)
@@ -542,7 +550,13 @@ func octetsOf(t *testing.T, ctx context.Context, client *bess.Client, module str
 // module does not declare fails here rather than reporting zero.
 func countersOf(t *testing.T, ctx context.Context, client *bess.Client, module string) map[uint32][2]uint64 {
 	t.Helper()
-	arg, err := client.Message("upf.pb.UrrCountCommandGetCountsArg", nil)
+	fieldsArg := map[string]any(nil)
+	if os.Getenv("UPF_TARGET") == "appliance" {
+		table := map[string]string{"cnt_ul": "counters_ul", "cnt_dl": "counters_dl"}[module]
+		fieldsArg = map[string]any{"table": table}
+		module = "upf"
+	}
+	arg, err := client.Message("upf.pb.UrrCountCommandGetCountsArg", fieldsArg)
 	if err != nil {
 		t.Fatalf("building the %s command argument: %v", module, err)
 	}
@@ -684,7 +698,8 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 	for id := range measured {
 		ids = append(ids, id)
 	}
-	rules, err := client.RuleCounts(ctx, "cnt_ul", ids...)
+	counter := newTarget(liveConfig()).Counts(CountersUplink)
+	rules, err := client.RuleCounts(ctx, counter, ids...)
 	if err != nil {
 		t.Fatalf("reading cnt_ul with its stamps: %v", err)
 	}
