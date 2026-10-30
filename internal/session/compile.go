@@ -1394,14 +1394,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// removed and created again is not a removal (forgetRemoval).
 			continue
 		}
-		if qerHeldByAPDR(s, id) {
-			// A PDR of the session names this QER, so its traffic is gated and
-			// metered by it: the CP function disassociates the PDRs first (an
-			// Update PDR whose QER ID list leaves it out), the order the URR removal
-			// takes below and a dangling reference is refused in (resolve).
-			return fmt.Errorf("%w: the QER %d is still named by a PDR of the session",
-				errNotExpressible, id)
-		}
+		unlinkFromPDRs(s, id, func(p *pdr) *[]uint32 { return &p.qerIDs })
 		if entry := s.QERs[id]; entry != nil {
 			// The QER goes, and its meters go with the session's other ids at
 			// teardown (releaseSession): releasing them here would hand an id
@@ -1413,23 +1406,14 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 	}
 	for _, id := range rm.urrs {
-		if urrHeldByAPDR(s, id) {
-			// The URR measures the traffic of the PDRs that name it, and a
-			// report for a URR whose PDRs are still programmed would name a
-			// URR the SMF has removed. The CP function disassociates the PDRs
-			// first (an Update PDR whose URR ID list leaves it out), which is the
-			// order a modification takes.
-			return fmt.Errorf("%w: the URR %d is still named by a PDR of the session",
-				errNotExpressible, id)
-		}
 		if urrLinkedByAnotherURR(s, id) {
 			// Another URR of the session still links to this one (8.2.55):
 			// removing it would leave that link dangling and the group's report
-			// short a URR. The SMF updates the linking URR first, the way it
-			// disassociates a PDR before removing the URR the PDR names.
+			// short a URR. The SMF updates the linking URR first.
 			return fmt.Errorf("%w: the URR %d is still linked by another URR of the session",
 				errNotExpressible, id)
 		}
+		unlinkFromPDRs(s, id, func(p *pdr) *[]uint32 { return &p.urrIDs })
 		delete(s.URRs, id)
 	}
 	if err := resolveSDFIDs(s); err != nil {
@@ -2266,33 +2250,23 @@ func egressName(ifc routing.Interface, d *routing.Domains) string {
 	return fmt.Sprintf("the network instance %q", ifc.Instance)
 }
 
-// qerHeldByAPDR reports whether a PDR the session still has names this QER.
-// Removing a QER the traffic of a live PDR is gated and metered by would leave
-// that PDR with no gate and no meter -- enforcement the SMF asked for and
-// silently did not get.
-func qerHeldByAPDR(s *Session, id uint32) bool {
-	for _, p := range s.PDRs {
-		for _, qid := range p.qerIDs {
-			if qid == id {
-				return true
-			}
+// unlinkFromPDRs takes a removed QER or URR out of the list (ids) each PDR of
+// the session names it in: the UP function stops applying a removed rule to
+// the PDRs that referenced it (TS 29.244 5.2.2.3.1, 5.4.5). Each changed
+// PDR's previous form joins the replaced ones, so compile erases the records
+// (its counter entry, for one) that the new form no longer writes.
+func unlinkFromPDRs(s *Session, id uint32, ids func(*pdr) *[]uint32) {
+	for _, pid := range idsOf(s.PDRs) {
+		p := s.PDRs[pid]
+		list := ids(p)
+		if !slices.Contains(*list, id) {
+			continue
 		}
+		old := *p
+		old.sdfs = slices.Clone(p.sdfs)
+		s.stale = append(s.stale, &old)
+		*list = slices.DeleteFunc(slices.Clone(*list), func(v uint32) bool { return v == id })
 	}
-	return false
-}
-
-// urrHeldByAPDR reports whether a PDR the session still has names this URR.
-// Removing a URR the session's PDRs still measure would leave those PDRs
-// counted by a rule the SMF has taken away.
-func urrHeldByAPDR(s *Session, id uint32) bool {
-	for _, p := range s.PDRs {
-		for _, uid := range p.urrIDs {
-			if uid == id {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // urrLinkedByAnotherURR reports whether another URR of the session links to

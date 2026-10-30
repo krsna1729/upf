@@ -2058,11 +2058,10 @@ func TestAnUpdatePDRKeepsWhatItLeavesOut(t *testing.T) {
 		t.Errorf("the updated rule carries priority %d, want %d", r.priority(), want)
 	}
 
-	// The URR the update left out is still the PDR's: removing it is refused
-	// as for any URR a PDR names.
-	mod = message.NewSessionModificationRequest(0, 0, seid, 3, 0, ie.NewRemoveURR(ie.NewURRID(7)))
-	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
-		t.Errorf("removing the URR the PDR kept answered cause %d, want a rule failure", got)
+	// The URR the update left out still measures the PDR: its counter entry
+	// stays in the dataplane.
+	if n := len(rec.entries); n != 1 {
+		t.Errorf("%d counter entries after the update, want the one URR 7 measures by", n)
 	}
 
 	// An Update PDR for a PDR the session does not hold has nothing to keep.
@@ -4830,11 +4829,11 @@ func TestZeroIsALegalRuleID(t *testing.T) {
 	}
 }
 
-func TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown(t *testing.T) {
+func TestARemovedQERsMeterReturnsAtTeardown(t *testing.T) {
 	// 7.5.4.6: a Remove QER takes the QER out of the session, and a PDR's QER
-	// ID is a reference to it. The order is the SMF's: it re-points the PDRs
-	// first (an Update PDR whose QER ID list leaves it out), and the removal then
-	// takes the QER and the meters it was given.
+	// ID is a reference to it. Here the SMF re-points the PDR first (an Update
+	// PDR whose QER ID list leaves it out), and the removal then takes the QER
+	// and the meters it was given.
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(establishment(0x5f1e, "10.45.0.7")).(*message.SessionEstablishmentResponse)
@@ -4847,19 +4846,10 @@ func TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown(t *
 		t.Fatal("the QER of the establishment has no uplink meter")
 	}
 
-	// PDR 1 still names QER 1: the removal is refused and the session stands.
-	mod := message.NewSessionModificationRequest(0, 0, seid, 2, 0, ie.NewRemoveQER(ie.NewQERID(1)))
-	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
-		t.Errorf("a QER a PDR still names answered cause %d, want a rule failure", got)
-	}
-	if c.sessions[seid].QERs[1] == nil || c.meters.released[meter] {
-		t.Error("the refused removal took the QER or its meter with it")
-	}
-
 	// The SMF re-points PDR 1 to a gate-only QER and removes QER 1 in one
 	// message: the Update PDR's QER ID list replaces the stored one (Table
 	// 7.5.4.2-1), and the removal then finds nothing that names QER 1.
-	mod = message.NewSessionModificationRequest(0, 0, seid, 3, 0,
+	mod := message.NewSessionModificationRequest(0, 0, seid, 3, 0,
 		ie.NewUpdatePDR(
 			ie.NewPDRID(1),
 			ie.NewPrecedence(100),
@@ -4905,6 +4895,43 @@ func TestARemovedQERIsRefusedUnderALiveReferenceAndItsMeterReturnsAtTeardown(t *
 	}
 	if !c.meters.released[meter] {
 		t.Error("the removed QER's meter was not returned to the pool with the session")
+	}
+}
+
+// TestRemovingAQERAPDRStillNamesUnlinksIt: TS 29.244 5.4.5 has the CP function
+// stop a QER's function "by removing the related QER", and the UP function
+// "shall then stop such function consequently". A Remove QER while PDR 1 still
+// names the QER is accepted, and the PDR goes on forwarding without the QER's
+// meter.
+func TestRemovingAQERAPDRStillNamesUnlinksIt(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(establishment(0x5f1f, "10.45.0.8")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	meterOf := func() uint32 {
+		r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 8})
+		if r.gate() == dropGate {
+			t.Error("the PDR's rule drops")
+		}
+		v, _ := actionFields(t, rec.last(), testConfig().Up, r.actionID())["meter_id"].(uint32)
+		return v
+	}
+	if meterOf() == 0 {
+		t.Fatal("the QER's MBR put no meter on the PDR")
+	}
+
+	mod := message.NewSessionModificationRequest(0, 0, seid, 2, 0, ie.NewRemoveQER(ie.NewQERID(1)))
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("removing the QER PDR 1 names answered cause %d", got)
+	}
+	if m := meterOf(); m != 0 {
+		t.Errorf("the PDR still meters under %d after its QER was removed", m)
+	}
+	if s := sessionOf(t, c, seid); s.QERs[1] != nil || len(s.PDRs[1].qerIDs) != 0 {
+		t.Errorf("the session holds QER 1 (%v) or PDR 1 still names %v", s.QERs[1] != nil, s.PDRs[1].qerIDs)
 	}
 }
 
@@ -4968,11 +4995,9 @@ func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
 	}
 }
 
-func TestRemoveURRNeedsThePDRsToGoFirst(t *testing.T) {
-	// A URR is what measures the traffic of the PDRs that name it: removing it
-	// while they still do leaves them counted by a rule the SMF has taken away.
-	// The order a modification takes is the PDR first (an Update PDR without the
-	// URR ID), then the URR.
+func TestRemoveURRAfterAnUpdatePDRDropsIt(t *testing.T) {
+	// The SMF takes the URR off the PDR first (an Update PDR whose URR ID list
+	// leaves it out), then removes it.
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(urrEstablishment(0x3005, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
@@ -4980,18 +5005,9 @@ func TestRemoveURRNeedsThePDRsToGoFirst(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 
-	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
-		ie.NewRemoveURR(ie.NewURRID(7)))
-	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
-		t.Errorf("removing a URR a PDR still names answered cause %d, want a rule failure", got)
-	}
-	if s := sessionOf(t, c, upFSEID(t, resp)); s.URRs[7] == nil {
-		t.Fatal("the refused removal took the URR out of the model")
-	}
-
 	// The Update PDR's URR ID list replaces the stored one (Table 7.5.4.2-1):
 	// naming URR 9 alone, the PDR no longer measures by URR 7.
-	mod = message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 3, 0,
+	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 3, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 				ie.NewFTEID(0x01, 0x1000, net.ParseIP("192.0.2.1"), nil, 0),
