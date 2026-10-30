@@ -413,7 +413,8 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	}
 
 	// The End Markers since the last tick (TS 29.281 7.3.2), each delivered
-	// once by the drain: the keys a REEMR URR's PDRs are judged against. A
+	// once by the drain: relayed on through the tunnels their F-TEIDs forward
+	// into (emrr.go), and the keys a REEMR URR's PDRs are judged against. A
 	// drain that fails loses nothing -- the events stay in the ring for the
 	// next one.
 	var markers map[endMarkerKey]bool
@@ -431,6 +432,7 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 			for _, m := range read {
 				markers[endMarkerKey{endpoint: m.EndpointID, teid: m.TEID}] = true
 			}
+			c.relayEndMarkers(read)
 		}
 	}
 

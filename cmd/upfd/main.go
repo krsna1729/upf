@@ -132,7 +132,9 @@ func run() error {
 		"the GtpuResponder module whose End Marker log is drained once per -urr-interval "+
 			"tick (its track_end_markers argument). An End Marker on a PDR's local F-TEID is "+
 			"reported as a Usage Report with the EMRRE trigger for each URR of that PDR that "+
-			"asks for REEMR (TS 29.244 8.2.19, 8.2.41). Empty: a URR that asks for REEMR is refused")
+			"asks for REEMR (TS 29.244 8.2.19, 8.2.41), and, with -end-marker, relayed through "+
+			"the GTP-U tunnel that PDR's FAR forwards into (TS 29.244 Table 8.2.64-1 NOTE 2) "+
+			"on that tick. Empty: a URR that asks for REEMR is refused and no End Marker is relayed")
 	metricsAddr := flag.String("metrics", "",
 		"serve this node's own numbers (Prometheus text format) on host:port; "+
 			"empty: no endpoint")
@@ -145,7 +147,8 @@ func run() error {
 			"replays it before the PFCP socket opens, keeping the sessions and the "+
 			"Recovery Time Stamp the SMF knows; empty: every start is a clean slate")
 	endMarker := flag.String("end-marker", "",
-		"the base graph unix_port path for End Markers; upfd appends .<transport_route_domain> to select the old routed tunnel")
+		"the base graph unix_port path for End Markers, the ones SNDEM asks for and the received ones "+
+			"relayed; upfd appends .<transport_route_domain> to select the tunnel's routed transport")
 	// The config file's own flag: its value is read back from the flag set
 	// (applyLayers), because it must be layered like any other flag before the
 	// file it names is read.
