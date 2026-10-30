@@ -75,17 +75,22 @@ sleep 15
 # a URR report is built from.
 if [ -n "$DATAPLANE" ]; then
   log "stage b2: packets through bessd (UE -> data network)"
-  ul0=$(dp_pkts cnt_ul); dl0=$(dp_pkts cnt_dl)
+  ul0=$(dp_pkts cnt_ul) && dl0=$(dp_pkts cnt_dl) || {
+    log "stage b2 FAILED: reading the UPF's initial counters"; RC=1; finish
+  }
   "$D/ue.sh" traffic 20 >"$LOGS/ping.out" 2>&1 || true
-  ul1=$(dp_pkts cnt_ul); dl1=$(dp_pkts cnt_dl)
+  ul1=$(dp_pkts cnt_ul) && dl1=$(dp_pkts cnt_dl) || {
+    log "stage b2 FAILED: reading the UPF's final counters"; RC=1; finish
+  }
   loss=$(grep -o '[0-9]*% packet loss' "$LOGS/ping.out" | tail -1 | tr -dc '0-9')
   log "ping: loss=${loss:-?}%, cnt_ul +$((ul1 - ul0)) packets, cnt_dl +$((dl1 - dl0)) packets"
   if [ "${loss:-100}" != 0 ]; then
     log "stage b2 FAILED: the echo did not come back ($(tail -3 "$LOGS/ping.out" | tr '\n' ' '))"
     RC=1; finish
   fi
-  if [ $((ul1 - ul0)) -le 0 ] || [ $((dl1 - dl0)) -le 0 ]; then
-    log "stage b2 FAILED: the UPF's counters did not move (uplink $((ul1 - ul0)), downlink $((dl1 - dl0)))"
+  # Twenty echoes without loss are twenty packets each way through the chain.
+  if [ $((ul1 - ul0)) -lt 20 ] || [ $((dl1 - dl0)) -lt 20 ]; then
+    log "stage b2 FAILED: the UPF's counters did not count twenty echoes (uplink $((ul1 - ul0)), downlink $((dl1 - dl0)))"
     RC=1; finish
   fi
   STAGE_REACHED=b2
@@ -96,5 +101,8 @@ log "stage c: PDU session release"
 "$D/ue.sh" release || true
 sleep 10
 smflog=$(dk logs "$PREFIX-smf" 2>&1)
-grep -q "Received PFCP Session Deletion Accepted Response" <<<"$smflog" && STAGE_REACHED=c
+if ! grep -q "Received PFCP Session Deletion Accepted Response" <<<"$smflog"; then
+  log "stage c FAILED: the SMF has no accepted PDU session deletion"; RC=1; finish
+fi
+STAGE_REACHED=c
 finish

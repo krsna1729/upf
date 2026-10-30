@@ -118,7 +118,7 @@ flowchart LR
 | `ci/interop/ue.sh start\|release\|status\|stop` | gNB + UE containers; `release` = `nr-cli … ps-release 1` |
 | `ci/interop/down.sh` | removes exactly those, saves container logs, stops upfd/bessd with SIGTERM and fails on a non-zero exit status (as `ci/n4-path.sh` does); idempotent |
 | `ci/interop/report.sh <label>` | evidence into `build/run/interop/runs/<label>/`: pcap, decoded IE tree (`n4.txt`), one-line view (`n4.summary`), every log |
-| `ci/interop/run.sh` | down, up, stage a, b, c, report, down; prints `stage reached: x` |
+| `ci/interop/run.sh` | down, up, stage a, b, (b2 with `DATAPLANE=1`), c, report, down; prints `stage reached: x` and exits non-zero unless every stage passed (b2: twenty echoes back and at least twenty packets on each of `cnt_ul`/`cnt_dl`) |
 | `ci/interop/pfcpdump/` | pcap -> PFCP IE tree (tshark is not installed; `go-pfcp` decodes, the common UPF IEs are decoded bit by bit, every leaf also in hex) |
 | `ci/interop/n4shim/` | **diagnostic** relay used only with `SHIM=1` (below) |
 | `deploy/interop/free5gc/*.yaml`, `subscriber*.json` | NF configs, the subscriber |

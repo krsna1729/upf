@@ -70,11 +70,12 @@ IF_N6=upfi-n6    # bessd's N6 port; its peer is eth0 inside $DN_NS
 BESSCTL=$STAGE/bin/bessctl
 export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-# dp_pkts <module>: packets the module sent out, from the daemon's own metrics.
+# dp_pkts <module>: packets the module sent out, from the daemon's own metrics;
+# fails (pipefail) when the daemon cannot be read or the module has no sample.
 # The graph's counting modules (cnt_ul, cnt_dl) are what a URR report is built
 # from, so their movement is the dataplane proof the traffic stage reads.
 dp_pkts() {
-  "$BESSCTL" -s "127.0.0.1:$(cat "$STATE/bess_port")" metrics 2>/dev/null |
+  "$BESSCTL" -s "127.0.0.1:$(cat "$STATE/bess_port")" metrics |
     grep bess_gate_packets_total | grep "module=\"$1\"" | grep 'direction="out"' |
     awk '{s += $NF} END {print s + 0}'
 }
