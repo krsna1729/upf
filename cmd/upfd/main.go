@@ -136,6 +136,10 @@ func run() error {
 	metricsAddr := flag.String("metrics", "",
 		"serve this node's own numbers (Prometheus text format) on host:port; "+
 			"empty: no endpoint")
+	sessionWorkers := flag.Int("session-workers", 1,
+		"how many PFCP session messages are handled at once, each session's in the order "+
+			"they arrived (1: one at a time, in the socket's read loop). More lets the "+
+			"dataplane transactions of different sessions overlap")
 	urrInterval := flag.Duration("urr-interval", 0,
 		"how often to read every session's usage counters and report what each URR owes "+
 			"over N4 (0: never, so URRs measure and report nothing)")
@@ -211,6 +215,7 @@ func run() error {
 		return fmt.Errorf("log level %q: %w", *level, err)
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+	applyMemoryLimit(log)
 
 	id := *nodeID
 	if id == "" {
@@ -228,7 +233,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg := n4.Config{NodeID: id, Listen: *n4Addr, Logger: log}
+	cfg := n4.Config{NodeID: id, Listen: *n4Addr, Logger: log, SessionWorkers: *sessionWorkers}
 	// The checkpoint (docs/design.md's restart wall). It is opened first: the
 	// Recovery Time Stamp it carries decides what the association answer tells
 	// the SMF, and that answer is built before the socket opens.
