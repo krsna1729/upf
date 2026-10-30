@@ -29,7 +29,7 @@ behavior, not PMD, queue, Vif, or physical-port counts.
 | 3 — PSA receiving N9, forwarding to N6 | A PDU session traverses an N3-terminating I-UPF and a PSA; this UPF is the PSA role. These are distinct UPF roles, even when function capabilities share a process. | N9 terminates at the PSA as per-session CN Tunnel Info; N6 connects the PSA to the data network. The N9 arrival is the uplink, so its PDR names Source Interface Access (TS 29.244 Table 8.2.2-1 NOTE 1) with Source Interface Type N9 (8.2.118), which puts its F-TEID on the N9 endpoint; the downlink FAR back to the I-UPF names Destination Interface Access (Table 8.2.24-1 NOTE 1) typed N9. N6 egress is plain IP. | **Allowed** as the ordinary multi-UPF PSA path. TS 23.501 §5.8.2.10 names the N9 tunnel between an N3-terminating UPF and the PSA. |
 | 4 — Cascaded N9-to-N9 transit | One PDU session's N4 context at an intermediate UPF whose upstream and downstream are both UPFs: an UL CL or Branching Point inserted behind an existing I-UPF, or a Source UL CL holding the N9 forwarding tunnel to a Target UL CL during UL CL relocation. | Uplink PDR: Source Interface Access typed N9, its F-TEID on the N9 endpoint, Outer Header Removal; FAR Core with Outer Header Creation toward the PSA. Downlink PDR: Source Interface Core on its own N9 F-TEID; FAR Access with Outer Header Creation toward the upstream UPF, typed N9 so the tunnel is sourced from the N9 endpoint. Neither PDR needs the UE address: the F-TEID identifies the session (TS 29.244 §5.2.1). | **Conditional.** The SMF updates "the existing UPF between the (R)AN and new inserted UL CL" via N4 (TS 23.502 §4.3.5.4 step 6), so the UL CL receives and sends on N9; with session continuity upon UL CL relocation, uplink traffic to PSA2 goes Target (R)AN → Target UL CL → Source UL CL and downlink the reverse (§4.3.5.7 step 3, NOTEs 2 and 4) until the N9 forwarding tunnel is released (steps 10–12). |
 | 5 — 5G-VN local switching and N19 | At least two distinct member PDU-session/N4 contexts; the source and target sessions share one common PSA UPF, one 5G-VN group, and one controlling SMF. No group-level N4 session is required for local switching. N19 forwarding to members anchored at another PSA adds one group-level N4 session at each involved UPF. | Source member PDR uses Access-side CN Tunnel Info (N3 or N9) and FAR Destination Interface 5G-VN internal. Internal-interface classification matches the target member by destination address; its FAR carries OHC to that member's N3/N9 tunnel. The group-level session's N19 PDR (Source Interface Core, its F-TEID on the N9 endpoint) forwards to 5G VN Internal, and its 5G VN Internal PDR for a remote member's address tunnels over N19 (TS 29.244 §5.23). | **Conditional.** The same-PSA, different-PDU-session local-switch procedure is explicit. If N19 forwarding between different PSA UPFs is used instead, a group-level N4 session is required at each involved UPF (TS 23.501 §§5.8.2.13, 5.8.2.13.1, 5.29.4; TS 23.502 §4.13.8.2.2). |
-| 6 — Indirect data forwarding during handover | An existing PDU session is temporarily modified at the selected S-UPF and/or T-UPF; this is handover state, not a second permanent user-plane topology. | Applies to N2-based inter-NG-RAN handover when direct forwarding is unavailable and the SMF chooses indirect forwarding. The S/T-UPF allocates or receives temporary N3 forwarding tunnel information through N4; the UPF forwards only along that procedure's endpoints. The SMF starts a timer and releases the temporary resources. | **Conditional.** This is the procedure in TS 23.502 §4.9.1.3: preparation steps 11a–11f, execution and cleanup steps 3, 11, 13a–13b, and 15a–15b. It is not a generic FAR-routing mode. |
+| 6 — Indirect data forwarding during handover | An existing PDU session is temporarily modified at the selected S-UPF and/or T-UPF; this is handover state, not a second permanent user-plane topology. | Applies to N2-based inter-NG-RAN handover when direct forwarding is unavailable and the SMF chooses indirect forwarding. The S/T-UPF allocates or receives temporary N3 forwarding tunnel information through N4; the UPF forwards only along that procedure's endpoints. The SMF starts a timer and releases the temporary resources. | **Conditional.** This is the procedure in TS 23.502 §4.9.1.3: preparation steps 11a–11f, execution and cleanup steps 3, 10b (the old path's End Markers), 11, 13a–13b, and 15a–15b. It is not a generic FAR-routing mode. |
 
 **Fixture scope.** `ci/scenario` holds one session per scenario role and a
 stand-in SMF that sends each step as PFCP over UDP to `internal/n4`, the
@@ -40,9 +40,10 @@ FAR drops until step 8a), driven through
 the TS 23.502 §4.9.1.3 N4 steps: 11b and 11d each add a forwarding PDR with a
 CHOOSE F-TEID on N3 and a FAR toward the next forwarding hop, and the UP
 function's chosen F-TEID (11c, 11e) is what the lane then sends to (step
-3b); 8a switches S13's downlink to the target RAN; the SMF's timer (four
-seconds) starts after step 11; 13a releases S10 and 15a removes S13's
-forwarding rules, after which S13 still carries its own traffic.
+3b); 8a switches S13's downlink to the target RAN; the old path's End
+Markers (10b) are sent to S10's and S13's F-TEIDs and relayed (below); the
+SMF's timer (four seconds) starts after step 11; 13a releases S10 and 15a
+removes S13's forwarding rules, after which S13 still carries its own traffic.
 `ci/iface-path.sh` checks each step's packets at the exits by byte, and
 `ci/veth-layouts.sh` runs every step on every attachment layout with exact
 gate counts, every other scenario's session live.
@@ -53,18 +54,36 @@ gate counts, every other scenario's session live.
 signalling and RAN behaviour are outside the UP function and not modelled;
 the target UPF and RAN are scripted peers.
 
-**Not supported.** An I-UPF, an S-UPF or a T-UPF does not relay a GTP-U End
-Marker through a transit or forwarding tunnel. TS 29.244 Table 8.2.64-1
-NOTE 2 requires the I-UPF to keep the message type of a GTP-U signalling
-message it forwards, and TS 23.502 §4.9.1.3.3 step 10b has the PSA's End
-Markers forwarded toward the target RAN. Here decap sends every received End
-Marker to the GTP-U responder, which records it for End Marker Reception
-Reports and drops it (`docs/datapath.md`). The SMF-requested End Marker the
-UP function builds itself (SNDEM) is supported. Indirect forwarding without
-UPF re-allocation, where the retained S-UPF forwards to T-RAN SM N3
-forwarding information, is not driven. The pinned text names no N4 message
-that releases the S-UPF's forwarding resources in that case (13a applies to
-a source intermediate UPF that is released, 15a to a re-allocated UPF).
+**End Markers through transit and forwarding tunnels.** A received GTP-U End
+Marker is relayed through the GTP-U tunnel its F-TEID's PDR forwards into. TS
+29.244 Table 8.2.64-1 NOTE 2 has the I-UPF keep the message type of a GTP-U
+signalling message it forwards, and TS 23.502 §4.9.1.3.3 step 10b has the
+PSA's End Markers forwarded toward the target RAN. Decap sends every received
+End Marker to the GTP-U responder, which records it with the endpoint it
+arrived on. `upfd`'s report tick (`-gtpu-end-markers`, `-urr-interval`)
+drains that record once: it reports the marker to REEMR URRs and, for each
+PDR on that F-TEID whose FAR forwards with an Outer Header Creation, writes
+one End Marker with the FAR's TEID toward its peer, from the tunnel's local
+address, to the End Marker port of the tunnel's transport (`-end-marker`),
+which routes it like the encap's tunnels. A PDR whose FAR ends the tunnel (N6,
+5G VN Internal), drops or buffers relays nothing. The relay leaves up to one
+`-urr-interval` tick after the marker arrived, never ahead of the G-PDUs that
+preceded it on its tunnel. `ci/iface-path.sh` (`m6_end_markers`) and
+`ci/veth-layouts.sh` (every attachment of every layout) send the PSA's marker
+to S10's N9 F-TEID, the source RAN's and the source UPF's to the two
+forwarding F-TEIDs, and the PSA's to S11's N9 F-TEID (Mode 4): each leaves
+once per marker sent, with the outgoing tunnel's TEID, from its local endpoint
+to its peer, and no session chain counts it. The one sent to S1's uplink
+F-TEID, whose FAR ends at N6, is relayed nowhere.
+`TestReceivedEndMarkersAreRelayedThroughTheirTunnels` checks the frames. The
+End Marker the UP function builds itself when the SMF asks (SNDEM) is
+unchanged.
+
+**Not supported.** Indirect forwarding without UPF re-allocation, where the
+retained S-UPF forwards to T-RAN SM N3 forwarding information, is not driven.
+The pinned text names no N4 message that releases the S-UPF's forwarding
+resources in that case (13a applies to a source intermediate UPF that is
+released, 15a to a re-allocated UPF).
 
 **Co-residence boundary.** The UPF function statement permits a process to host
 the function capabilities used by multiple specified scenarios. It does not

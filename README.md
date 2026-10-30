@@ -71,13 +71,16 @@ ci/smoke-gtpu.sh
 ./upfd -bess 127.0.0.1:10514 -n4 0.0.0.0:8805 -node-id 10.0.0.1 \
   -fteid-address 'endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.1' \
   -fteid-address 'endpoint=2,reference=n9,transport-domain=2,source=core,ipv4=192.0.2.3' \
-  -gtpu-decap decap0
+  -gtpu-decap decap0 -gtpu-end-markers echo0 -end-marker /tmp/upf-end-marker.sock \
+  -urr-interval 1s
 ```
 
 The sample maps endpoint 1 to N3 and endpoint 2 to N9. Each endpoint binds an
 ingress F-TEID identity and a transport route domain; N9 may be omitted when the
 deployment does not serve it. The graph's post-encap Router resolves the peer
-MAC from ARP/ND.
+MAC from ARP/ND. `-gtpu-end-markers`, `-end-marker` and `-urr-interval` let
+the report tick relay a received End Marker through the transit or forwarding
+tunnel its F-TEID forwards into, within one interval.
 
 `ci/session-path.sh` exercises a PFCP-programmed session on both synthetic
 packet chains and checks the End Marker. `ci/veth-port.sh` exercises a
@@ -113,10 +116,10 @@ Run the lane that proves the path you touched:
 | `ci/n4-path.sh` | PFCP message → compiler → one transaction → packets; restart and checkpoint replay |
 | `ci/session-report.sh` | URR reports — period, threshold, quota — over PFCP |
 | `ci/buffer-path.sh` | BAR buffering, DDN, and the duration's expiry |
-| `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names; a ULCL session's two uplink PDRs take the data network's hop and an N9 tunnel, and its remote PSA's downlink arrives on N9; Mode 4's N9 transit, N19 through a group-level session, and Mode 6's indirect forwarding step by step; Modes 1 to 6 and N19 live together with every stream at once, each session's bytes at its own exit |
+| `ci/iface-path.sh` | every Source/Destination Interface value and the exit it names; a ULCL session's two uplink PDRs take the data network's hop and an N9 tunnel, and its remote PSA's downlink arrives on N9; Mode 4's N9 transit, N19 through a group-level session, and Mode 6's indirect forwarding step by step, End Markers relayed through its tunnels and Mode 4's; Modes 1 to 6 and N19 live together with every stream at once, each session's bytes at its own exit |
 | `ci/veth-port.sh` | one PMD port split into N3/N6/N9; the post-encap Router resolves its outer next hop on the veth (needs root) |
 | `ci/veth-transport.sh` | the outer transport Router on a veth, byte-checked on the peer: ARP and ND resolution, outer TTL/hop limit decremented once and the inner TTL only by the inner hop (IPv4 and IPv6 tunnels), routed End Markers, a neighbor MAC change followed, an unreachable gateway failing closed (needs root) |
-| `ci/veth-layouts.sh` | nine real-veth layouts: all five 1–3-PMD partitions, MAC/VLAN demux, direct per-port tags, four-port fan-in; each the production-shaped graph with Modes 1 to 6 and N19 established together over N4 and driven on every attachment, same N3/N9 local IPv4+TEID, and unknown-TEID handling (needs root) |
+| `ci/veth-layouts.sh` | nine real-veth layouts: all five 1–3-PMD partitions, MAC/VLAN demux, direct per-port tags, four-port fan-in; each the production-shaped graph with Modes 1 to 6 and N19 established together over N4 and driven on every attachment, End Markers relayed through transit and forwarding tunnels to the peer, same N3/N9 local IPv4+TEID, and unknown-TEID handling (needs root) |
 | `ci/session-instances.sh` | one subscriber address served by two network instances, each with its own F-TEID and exit |
 | `ci/atsss-steer.sh` | a MAR's two accesses, the health table, policy update and erase; every window byte-checked |
 | `ci/bench-n4.sh` | the N4 envelope: establish / modify / delete rates |

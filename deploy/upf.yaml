@@ -266,9 +266,11 @@ modules:
 
   - name: echo0
     mclass: GtpuResponder
-    arg: {track_errors: true}
-    # No argument: the standard GTP-U port 2152. It declares no metadata
-    # attribute, so it does not move the layout of the ones above.
+    arg: {track_errors: true, track_end_markers: true}
+    # No port argument: the standard GTP-U port 2152. track_end_markers reads
+    # the endpoint_id the tags above write: the End Markers it records are what
+    # upfd -gtpu-end-markers drains, reports (REEMR) and relays through the
+    # tunnel the F-TEID's PDR forwards into, by the cp_marker ports.
 
   # -- the two PDR tables ------------------------------------------------------
   # Each direction has its own WildcardMatch table and result schema. A match
