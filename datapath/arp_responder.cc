@@ -37,8 +37,10 @@ const ResourceTables UpfArpResponder::resource_tables = {
 CommandResponse UpfArpResponder::Init(const upf::pb::UpfArpResponderArg &arg) {
   const size_t max_entries =
       arg.max_entries() == 0 ? kDefaultMaxEntries : arg.max_entries();
-  resource_ =
-      std::make_unique<arp::EntriesResource>(name() + "/entries", max_entries);
+  // Admitted before it is made (D-198): a refusal throws
+  // utils::MemoryRefused and Init answers RESOURCE_EXHAUSTED.
+  resource_ = init_context().memory().Create<arp::EntriesResource>(
+      "entries", name() + "/entries", max_entries);
 
   // Typed keys and values (D-025), the wire shape the fork's ArpResponder
   // declares: the controller writes {"ip": "10.45.0.2"} ->
@@ -95,7 +97,7 @@ CommandResponse UpfArpResponder::Init(const upf::pb::UpfArpResponderArg &arg) {
 }
 
 void UpfArpResponder::DeInit() {
-  if (resource_ == nullptr) {
+  if (!resource_) {
     return;
   }
   const std::string resource_name = resource_->name();
@@ -149,7 +151,7 @@ void UpfArpResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
 
 std::string UpfArpResponder::GetDesc() const {
   return std::format("{} entries, live",
-                     resource_ == nullptr ? 0 : resource_->LiveCount());
+                     resource_ ? resource_->LiveCount() : 0);
 }
 
 ADD_MODULE(UpfArpResponder, "upf_arp_responder",

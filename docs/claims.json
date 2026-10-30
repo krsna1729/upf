@@ -272,7 +272,7 @@
    ],
    "message": "Cross-cutting (no message)",
    "statement": "",
-   "detail": "in",
+   "detail": "in: a transaction the daemon rejects is cause 73 (Rule creation/modification failure); one it refuses for lack of memory or capacity (BESS D-198, RESOURCE_EXHAUSTED) is cause 75 (No resources available); an outcome the controller cannot know is cause 64 (Request rejected). Nothing of the session is left programmed, and a refused session's claims are released for a retry",
    "effect": "",
    "extra": [
     {

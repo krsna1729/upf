@@ -73,17 +73,26 @@ uint64_t Octets(bess::PacketRef pkt) {
 
 CommandResponse UrrCount::Init(const upf::pb::UrrCountArg &arg) {
   capacity_ = arg.capacity() == 0 ? kDefaultCapacity : arg.capacity();
-  // A whole number of cache lines per worker, so every plane starts on a line
-  // and no two workers share one: capacity x 2 cells, rounded up.
-  const size_t cells = capacity_ * kCellsPerRule;
-  cells_per_worker_ = (cells + kCellsPerLine - 1) / kCellsPerLine * kCellsPerLine;
-  lines_ = std::vector<Line>(static_cast<size_t>(bess::dataplane::kMaxWorkers) *
-                             (cells_per_worker_ / kCellsPerLine));
-  // One stamp pair per rule: 16 bytes x capacity (1 MiB at the default), and
-  // nothing per worker -- the stamps are the rule's own fact.
-  stamps_ = std::vector<Stamps>(capacity_);
+  const size_t planes = arg.worker_planes() == 0 ? bess::dataplane::kMaxWorkers
+                                                 : arg.worker_planes();
+  if (planes > bess::dataplane::kMaxWorkers)
+    return CommandFailure(EINVAL, "worker_planes is at most %zu", bess::dataplane::kMaxWorkers);
+  // Each allocation below is admitted first (D-198): a refusal throws
+  // utils::MemoryRefused, Init answers RESOURCE_EXHAUSTED, and the module's
+  // destruction frees and releases what was already made.
+  auto &memory = init_context().memory();
+  // capacity x 2 cells x 8 bytes per plane, one plane per worker id below
+  // worker_planes (BESS D-154), on the DPDK heap.
+  counts_ = memory.Create<bess::stats::KeyedCounters>("counters", capacity_,
+                                                      kCellsPerRule, planes);
+  // One stamp pair per rule: 16 bytes x capacity, nothing per worker -- the
+  // stamps are the rule's own fact.
+  stamps_lease_ = memory.Lease(
+      "stamps", bess::utils::DpdkArray<Stamps>::Bytes(capacity_, memory.socket()));
+  stamps_ = bess::utils::DpdkArray<Stamps>(capacity_, memory.socket());
+  stamps_lease_.Track(stamps_);
 
-  entries_ = std::make_unique<dataplane::SlotTable<ActionId, Entry>>(capacity_);
+  entries_ = memory.Create<dataplane::SlotTable<ActionId, Entry>>("rules", capacity_);
   resource_ = std::make_unique<dataplane::SlotResource<ActionId, Entry>>(
       name() + "/counters", *entries_);
 
@@ -151,7 +160,7 @@ void UrrCount::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   // One offset load per batch: the layout does not change under a batch.
   const auto action_offset = attr_offset(action_attr_);
   // This worker's plane, once per batch rather than once per packet.
-  const size_t base = static_cast<size_t>(ctx->wid.value()) * cells_per_worker_;
+  const bess::stats::KeyedCounters::Plane plane = counts_->ForWorker(ctx->wid);
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
   // The rules this batch counted, in arrival order and each once: what the
@@ -172,9 +181,8 @@ void UrrCount::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       // them.
       continue;
     }
-    const size_t cell = base + offset_of(id.value());
-    Add(cell + kPackets, 1);
-    Add(cell + kBytes, Octets(pkt));
+    plane.Add(id.value() - 1, kPackets, 1);
+    plane.Add(id.value() - 1, kBytes, Octets(pkt));
     // This batch counted the rule: remember it, once, and stamp it after the
     // loop. The stamps are shared state, so a batch writes them once per rule
     // and never once per packet.
@@ -211,18 +219,30 @@ std::pair<uint64_t, uint64_t> UrrCount::Counts(ActionId id) const noexcept {
   if (id.value() == 0 || id.value() > capacity_) {
     return {0, 0};
   }
-  const size_t offset = offset_of(id.value());
+  // Plane by plane, a rule's two cells one after the other: the pair a
+  // worker added together is read as close together as the reading allows.
+  const size_t key = id.value() - 1;
   uint64_t packets = 0;
   uint64_t octets = 0;
-  for (size_t w = 0; w < bess::dataplane::kMaxWorkers; w++) {
-    const size_t cell = w * cells_per_worker_ + offset;
-    packets += lines_[cell / kCellsPerLine].cells[cell % kCellsPerLine].load(
-        std::memory_order_relaxed);
-    octets += lines_[(cell + kBytes) / kCellsPerLine]
-                  .cells[(cell + kBytes) % kCellsPerLine]
-                  .load(std::memory_order_relaxed);
+  for (size_t w = 0; w < counts_->workers(); w++) {
+    const bess::dataplane::WorkerId worker(static_cast<uint16_t>(w));
+    packets += counts_->Read(worker, key, kPackets);
+    octets += counts_->Read(worker, key, kBytes);
   }
   return {packets, octets};
+}
+
+CheckConstraintResult UrrCount::CheckModuleConstraints() const {
+  CheckConstraintResult result = Module::CheckModuleConstraints();
+  const std::vector<bool> &active = active_workers();
+  for (size_t wid = counts_->workers(); wid < active.size(); wid++) {
+    if (active[wid]) {
+      LOG(ERROR) << name() << ": runs on worker " << wid << " but has worker_planes "
+                 << counts_->workers() << " (planes are indexed by worker id)";
+      return CHECK_FATAL_ERROR;
+    }
+  }
+  return result;
 }
 
 std::pair<uint64_t, uint64_t> UrrCount::ReadTimes(ActionId id, bool restart) noexcept {
@@ -285,7 +305,7 @@ CommandResponse UrrCount::CommandGetCounts(
 }
 
 std::string UrrCount::GetDesc() const {
-  return std::format("{} rules counted of {}", entries_ == nullptr ? 0 : entries_->size(),
+  return std::format("{} rules counted of {}", entries_ ? entries_->size() : 0,
                      capacity_);
 }
 

@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "arp_responder_resource.h"
+#include "framework/memory_scope.h"
 #include "framework/resource_bindings.h"
 #include "module.h"
 #include "upf_datapath.pb.h"
@@ -47,7 +48,8 @@ class UpfArpResponder final : public Module {
   std::string GetDesc() const override;
 
  private:
-  std::unique_ptr<upf::arp::EntriesResource> resource_;
+  // Admitted as "entries" (D-198): the slot array, then each entry chunk.
+  bess::framework::Sized<upf::arp::EntriesResource> resource_;
   bess::framework::ResourceBinding binding_;  // after resource_ (D-044)
 };
 

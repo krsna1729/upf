@@ -25,6 +25,7 @@ import (
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
+	"google.golang.org/grpc/codes"
 
 	"github.com/krsna1729/upf/internal/bess"
 	"github.com/krsna1729/upf/internal/routing"
@@ -5116,7 +5117,13 @@ func compileCause(err error) uint8 {
 // dataplane is all-or-nothing, so nothing of the session is in place when one
 // of these returns.
 func causeOf(err error) uint8 {
+	var invalid *bess.InvalidRequestError
 	switch {
+	case errors.As(err, &invalid) && invalid.Code == codes.ResourceExhausted:
+		// The daemon refused for lack of memory or capacity (BESS D-198): a
+		// definite refusal, nothing was applied, and TS 29.244 has a cause
+		// for it.
+		return ie.CauseNoResourcesAvailable
 	case definiteRefusal(err):
 		return ie.CauseRuleCreationModificationFailure
 	default:

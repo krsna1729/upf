@@ -4,7 +4,8 @@
 # halves of GTP-U working, with the plugin loaded from the installed bess-dev
 # stage (never from BESS's source tree).
 #
-#   bessd -m 512 --no-huge -- -f deploy/smoke-gtpu.yaml --modules=<plugin dir>
+#   bessd -f --mem_backing=normal --modules=<plugin dir>
+#   bessctl apply deploy/smoke-gtpu.yaml && bessctl resume
 #
 # Uplink: Sources rewrite frames into G-PDUs, tag endpoint 1, and let
 # GtpuDecap admit the complete (endpoint, outer family, local address, TEID)

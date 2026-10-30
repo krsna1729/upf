@@ -309,7 +309,7 @@ start_bessd() {
   fi
   export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
   sudo -E env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
-    "$BESSD" -m 0 -p "$BESS_PORT" -i "$WORK/bessd.pid" -modules="$PLUG" -f >"$LOG" 2>&1 &
+    "$BESSD" --mem_backing=normal -p "$BESS_PORT" -i "$WORK/bessd.pid" -modules="$PLUG" -f >"$LOG" 2>&1 &
   BESSD_PID=$!
   BESSD_STARTED=1
   for _ in $(seq 1 60); do

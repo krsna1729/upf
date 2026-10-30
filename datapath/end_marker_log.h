@@ -31,12 +31,20 @@ struct EndMarkerEvent {
 // Events rather than counters: a counter table keyed by (endpoint, TEID) never
 // learns when a key is gone, fills as TEIDs churn, and hands a reused TEID the
 // count of its last holder. A drained event has no history to go stale.
+//
+// Memory (BESS D-198): the rings are glibc memory (aligned new), one per
+// worker slot, made by the constructor and never grown; Bytes/GlibcBytes is
+// what the constructor allocates, for framework::MemoryCost.
 class EndMarkerLog {
  public:
   static constexpr size_t kRingSize = 256;  // per worker; a power of two
 
   explicit EndMarkerLog(size_t workers)
       : rings_(std::make_unique<Ring[]>(workers)), workers_(workers) {}
+
+  static size_t Bytes(size_t workers) noexcept { return workers * sizeof(Ring); }
+  static size_t GlibcBytes(size_t workers) noexcept { return Bytes(workers); }
+  size_t bytes() const noexcept { return Bytes(workers_); }
 
   // Record is the worker's half: one event into its own ring.
   void Record(size_t worker, EndMarkerEvent event) noexcept {

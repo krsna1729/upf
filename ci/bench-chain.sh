@@ -241,7 +241,7 @@ measure() { # measure <variant>
 trap 'kill "$DAEMON" 2>/dev/null; rm -f "$MANIFEST" "$PIDFILE"' EXIT
 
 echo "bench: cores $CORES, $ROUNDS rounds of ${SECONDS_RUN}s each, worker core ${CORES%%-*}"
-taskset -c "$CORES" "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
+taskset -c "$CORES" "$BESSD" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$PIDFILE" -modules="$PLUG" -f >"$LOG" 2>&1 &
 DAEMON=$!
 for _ in $(seq 1 30); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 1; done
 

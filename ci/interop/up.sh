@@ -99,9 +99,9 @@ else
       "$N3_IP" "$N3_MAC" "$GNB_IP" "$N6_MAC" "$DN_IP" "$DN_GW" "$STATE/end-marker.sock" || die "building the dataplane graph failed"
     GRAPH=$STATE/graph.yaml
     detach bessd sudo -n -E env "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
-      "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$STATE/bessd-own.pid" -modules="$PLUG" -f
+      "$BESSD" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$STATE/bessd-own.pid" -modules="$PLUG" -f
   else
-    detach bessd "$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$STATE/bessd-own.pid" -modules="$PLUG" -f
+    detach bessd "$BESSD" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$STATE/bessd-own.pid" -modules="$PLUG" -f
   fi
   for _ in $(seq 1 60); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 0.5; done
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 || { cat "$LOGS/bessd.log" >&2; die "bessd did not come up"; }

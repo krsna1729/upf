@@ -69,7 +69,7 @@ echo "graph:  $GRAPH"
 echo "rounds: $ROUNDS x $SECONDS_RUN s, one worker core"
 echo "uptime: $(uptime | sed 's/.*load average/load average/')"
 
-"$BESSD" -m 0 -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" \
+"$BESSD" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$WORK/bessd.pid" \
   -modules="$PLUG" -f >"$LOG" 2>&1 &
 DAEMON_PID=$!
 for _ in $(seq 1 60); do "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 && break; sleep 0.5; done
