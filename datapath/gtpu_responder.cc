@@ -13,7 +13,7 @@
 #include "utils/logging.h"
 
 #include "commands.h"
-#include "conntrack/packet_parse.h"
+#include "packet_parse.h"
 #include "framework/plugin.h"
 #include "tunnel/tunnel.h"
 #include "utils/checksum.h"
@@ -230,7 +230,7 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       continue;
     }
 
-    bess::conntrack::ParsedFlowPacket outer;
+    bess::packet::ParsedFrame outer;
     bess::tunnel::GtpuInfo info{};
     const auto status = bess::tunnel::DecapGtpu(
         std::span<const uint8_t>(pkt.head_data<const uint8_t *>(), pkt.head_len()),
@@ -239,7 +239,7 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
         status != bess::tunnel::DecapError::kNotTunnel) [[unlikely]] {
       continue;
     }
-    if (outer.l4 != bess::conntrack::L4Kind::kUdp || outer.dst_port != port_) [[unlikely]] {
+    if (outer.l4 != bess::packet::L4Kind::kUdp || outer.dst_port != port_) [[unlikely]] {
       continue;
     }
 
@@ -333,7 +333,7 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     // tail. IPv4 options are unsupported by the no-options checksum helper.
     const size_t udp_length = bess::tunnel::kUdpBytes +
                               bess::tunnel::kGtpuBaseBytes + tailLen;
-    if (outer.l3 == bess::conntrack::L3Kind::kIpv4) {
+    if (outer.l3 == bess::packet::L3Kind::kIpv4) {
       auto *ip = reinterpret_cast<bess::utils::Ipv4 *>(
           pkt.head_data<uint8_t *>() + outer.l3_offset);
       if (ip->version != 4 || ip->header_length != 5) [[unlikely]] {
@@ -343,7 +343,7 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       ip->length = be16_t(static_cast<uint16_t>(
           bess::tunnel::kIpv4Bytes + udp_length));
       ip->checksum = bess::utils::CalculateIpv4NoOptChecksum(*ip);
-    } else if (outer.l3 == bess::conntrack::L3Kind::kIpv6) {
+    } else if (outer.l3 == bess::packet::L3Kind::kIpv6) {
       if (outer.l4_offset < outer.l3_offset + 40) [[unlikely]] continue;
       uint8_t *ip6 = pkt.head_data<uint8_t *>() + outer.l3_offset;
       if ((ip6[0] >> 4) != 6) [[unlikely]] continue;
@@ -367,7 +367,7 @@ void GtpuResponder::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
     Put16(udp + 4, static_cast<uint16_t>(udp_length));
     Put16(udp + 6, 0);
     auto finish_ipv6_checksum = [&] {
-      if (outer.l3 != bess::conntrack::L3Kind::kIpv6) return;
+      if (outer.l3 != bess::packet::L3Kind::kIpv6) return;
       uint8_t *frame = pkt.head_data<uint8_t *>();
       const uint8_t *ip6 = frame + outer.l3_offset;
       uint8_t *reply_udp = frame + outer.l4_offset;

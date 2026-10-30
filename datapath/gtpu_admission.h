@@ -10,7 +10,7 @@
 #include <cstring>
 #include <span>
 
-#include "conntrack/packet_parse.h"
+#include "packet_parse.h"
 #include "fteid_resource.h"
 #include "pdu_session_qfi.h"
 #include "tunnel/tunnel.h"
@@ -19,7 +19,7 @@ namespace upf::datapath {
 
 enum class GtpuParseKind : uint8_t { kMalformed, kControl, kGpdu };
 struct ParsedGtpu {
-  bess::conntrack::ParsedFlowPacket outer{};
+  bess::packet::ParsedFrame outer{};
   bess::tunnel::GtpuInfo info{};
   FteidId key{};
   uint8_t family = 0;
@@ -61,7 +61,7 @@ inline GtpuParseKind ParseGtpuAdmission(std::span<const uint8_t> frame,
   const auto status = bess::tunnel::DecapGtpu(
       frame, parsed->outer, parsed->info, port, total_length);
   if (status == bess::tunnel::DecapError::kNotTunnel &&
-      parsed->outer.l4 == bess::conntrack::L4Kind::kUdp &&
+      parsed->outer.l4 == bess::packet::L4Kind::kUdp &&
       parsed->outer.dst_port == port &&
       parsed->info.message_type != bess::tunnel::kGtpuGpdu &&
       parsed->info.message_type != 0)
@@ -69,7 +69,7 @@ inline GtpuParseKind ParseGtpuAdmission(std::span<const uint8_t> frame,
   if (status != bess::tunnel::DecapError::kOk)
     return GtpuParseKind::kMalformed;
 
-  parsed->family = parsed->outer.l3 == bess::conntrack::L3Kind::kIpv4 ? 4 : 6;
+  parsed->family = parsed->outer.l3 == bess::packet::L3Kind::kIpv4 ? 4 : 6;
   auto &key = parsed->key;
   key[0] = static_cast<uint8_t>(endpoint_id >> 24);
   key[1] = static_cast<uint8_t>(endpoint_id >> 16);
