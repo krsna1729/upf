@@ -610,6 +610,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 
 	c.mu.Lock()
 	c.sessions[local] = s
+	c.byCP[cpSEID] = s
 	c.mu.Unlock()
 	c.stats.established.Add(1)
 	c.checkpoint(kindEstablish, local, req)
@@ -2301,16 +2302,13 @@ func chosenNamed(s *Session, chosen chosenFTEID) bool {
 
 // fteidKeyNamed reports whether any live PDR in the session still references an
 // exact family/address/endpoint/TEID admission key.
-func fteidKeyNamed(s *Session, key map[string]any) bool {
-	identity := fmt.Sprint(key)
+func fteidKeyNamed(s *Session, key fteidKey) bool {
 	for _, p := range s.PDRs {
 		if p.teid == 0 {
 			continue
 		}
-		for _, owned := range fteidKeysOf(p) {
-			if fmt.Sprint(owned) == identity {
-				return true
-			}
+		if slices.Contains(fteidKeysOf(p), key) {
+			return true
 		}
 	}
 	return false
@@ -2318,10 +2316,8 @@ func fteidKeyNamed(s *Session, key map[string]any) bool {
 
 func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
 	keys := fteidKeysOf(p)
-	identities := make([]string, len(keys))
-	for i, key := range keys {
-		identities[i] = fmt.Sprint(key)
-		if owner, ok := c.byFTEID[identities[i]]; ok &&
+	for _, key := range keys {
+		if owner, ok := c.byFTEID[key]; ok &&
 			(owner.session != s || owner.down != p.down) {
 			return fmt.Errorf("%w: F-TEID endpoint key is already owned", errNoResources)
 		}
@@ -2336,16 +2332,13 @@ func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
 		ctx = &fteidContext{id: id}
 		c.fteidContexts[ctxKey] = ctx
 	}
-	for _, key := range identities {
+	for _, key := range keys {
 		if _, exists := c.byFTEID[key]; exists {
 			continue
 		}
 		c.byFTEID[key] = fteidOwner{session: s, down: p.down}
 		ctx.keys++
-		if c.fteidTEIDKeys[p.teid] == nil {
-			c.fteidTEIDKeys[p.teid] = map[string]bool{}
-		}
-		c.fteidTEIDKeys[p.teid][key] = true
+		c.fteidTEIDKeys[p.teid]++
 	}
 	p.fteidContext = ctx.id
 	c.teids.reserve(p.teid)
@@ -2372,16 +2365,15 @@ func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
 	}
 	removed := false
 	for _, key := range fteidKeysOf(p) {
-		identity := fmt.Sprint(key)
 		if !force && fteidKeyNamed(s, key) {
 			continue
 		}
-		owner, ok := c.byFTEID[identity]
+		owner, ok := c.byFTEID[key]
 		if !ok || owner.session != s {
 			continue
 		}
-		delete(c.byFTEID, identity)
-		delete(c.fteidTEIDKeys[p.teid], identity)
+		delete(c.byFTEID, key)
+		c.fteidTEIDKeys[p.teid]--
 		removed = true
 		ctxKey := fteidContextKey{session: s, down: owner.down, endpoint: p.endpointID, teid: p.teid}
 		if ctx := c.fteidContexts[ctxKey]; ctx != nil {
@@ -2391,7 +2383,7 @@ func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
 			}
 		}
 	}
-	if removed && len(c.fteidTEIDKeys[p.teid]) == 0 {
+	if removed && c.fteidTEIDKeys[p.teid] == 0 {
 		delete(c.fteidTEIDKeys, p.teid)
 		if !sessionHasCHIDTEID(s, p.teid) {
 			c.teids.release(p.teid)
@@ -2524,7 +2516,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// Admission is keyed by the complete endpoint/family/local-address/TEID
 	// tuple. PDRs in one session that share that F-TEID write one resource row;
 	// direction is its only value.
-	writtenFTEIDs := map[string]bool{}
+	writtenFTEIDs := map[fteidKey]bool{}
 	// Two PDRs whose filters compile to one rule key are one rule the dataplane
 	// cannot tell apart -- precedence is part of the rule's value, not its key,
 	// so differing precedence does not separate them. Writing both would be
@@ -2545,7 +2537,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		dir := c.direction(p)
 		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
 			for _, key := range keys {
-				live[c.res(pdrTable(p.downlink()))+"\x00"+fmt.Sprint(key)] = true
+				live[c.res(pdrTable(p.downlink()))+"\x00"+ruleID(key)] = true
 			}
 		}
 	}
@@ -2665,7 +2657,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return nil, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
 		}
 		for _, key := range keys {
-			if !live[c.res(pdrTable(p.downlink()))+"\x00"+fmt.Sprint(key)] {
+			if !live[c.res(pdrTable(p.downlink()))+"\x00"+ruleID(key)] {
 				erase(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: key})
 			}
 		}
@@ -2684,7 +2676,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if p.teid != 0 {
 			for _, key := range fteidKeysOf(p) {
 				if !fteidKeyNamed(s, key) {
-					erase(bess.Change{Resource: c.teidRes(), Key: key})
+					erase(bess.Change{Resource: c.teidRes(), Key: key.entry()})
 				}
 			}
 		}
@@ -2734,7 +2726,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return nil, nil, fmt.Errorf("PDR %d: %w", old.id, err)
 		}
 		for _, key := range keys {
-			if !live[c.res(pdrTable(old.downlink()))+"\x00"+fmt.Sprint(key)] {
+			if !live[c.res(pdrTable(old.downlink()))+"\x00"+ruleID(key)] {
 				erase(bess.Change{Resource: c.res(pdrTable(old.downlink())), Key: key})
 			}
 		}
@@ -2746,7 +2738,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if old.teid != 0 {
 			for _, key := range fteidKeysOf(old) {
 				if !fteidKeyNamed(s, key) {
-					erase(bess.Change{Resource: c.teidRes(), Key: key})
+					erase(bess.Change{Resource: c.teidRes(), Key: key.entry()})
 				}
 			}
 		}
@@ -2786,16 +2778,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				direction = 1
 			}
 			for _, key := range fteidKeysOf(p) {
-				keyID := fmt.Sprint(key)
-				if writtenFTEIDs[keyID] {
+				if writtenFTEIDs[key] {
 					continue
 				}
-				writtenFTEIDs[keyID] = true
+				writtenFTEIDs[key] = true
 				value := map[string]any{"direction": direction, "context_id": p.fteidContext}
 				if relays := endMarkerRelays(s, p.endpointID, p.teid); relays != nil {
 					value["end_marker_relays"] = relays
 				}
-				changes = append(changes, bess.Change{Resource: c.teidRes(), Key: key, Value: value})
+				changes = append(changes, bess.Change{Resource: c.teidRes(), Key: key.entry(), Value: value})
 			}
 			created = append(created, ie.NewCreatedPDR(
 				ie.NewPDRID(p.id), c.createdFTEID(p)))
@@ -2806,7 +2797,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
 		}
 		for _, key := range keys {
-			rkey := c.res(pdrTable(p.downlink())) + "\x00" + fmt.Sprint(key)
+			rkey := c.res(pdrTable(p.downlink())) + "\x00" + ruleID(key)
 			if writtenRules[rkey] {
 				// The rule table knows PDR ids no better than the SMF's filters do:
 				// one key is one rule, and the engine would reject the second
@@ -3209,7 +3200,7 @@ func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		id := fmt.Sprint(key)
+		id := ruleID(key)
 		if seen[id] {
 			continue
 		}
@@ -3217,6 +3208,26 @@ func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 		keys = append(keys, key)
 	}
 	return keys, nil
+}
+
+// ruleID is a rule key's identity, compact enough to be held per rule for the
+// life of a session: the masks, the values and then the ranges, as bytes. Every
+// field of a table has the table's fixed width, so within one table (the caller
+// prefixes the resource) two keys have one identity only if they are one key.
+func ruleID(key map[string]any) string {
+	var b []byte
+	for _, list := range [...]string{"masks", "values"} {
+		for _, f := range key[list].([]map[string]any) {
+			b = append(b, f["value_bin"].([]byte)...)
+		}
+	}
+	ranges, _ := key["ranges"].([]map[string]any)
+	for _, r := range ranges {
+		b = binary.BigEndian.AppendUint32(b, r["field"].(uint32))
+		b = binary.BigEndian.AppendUint64(b, r["low"].(uint64))
+		b = binary.BigEndian.AppendUint64(b, r["high"].(uint64))
+	}
+	return string(b)
 }
 
 // match is one field's constraint: the bits a PDI fixes, and the mask that says

@@ -472,9 +472,10 @@ type Compiler struct {
 
 	mu            sync.Mutex
 	sessions      map[uint64]*Session
+	byCP          map[uint64]*Session // sessions by CP F-SEID: an establishment's retransmission, found without a walk
 	nextSEID      uint64
-	byFTEID       map[string]fteidOwner
-	fteidTEIDKeys map[uint32]map[string]bool
+	byFTEID       map[fteidKey]fteidOwner
+	fteidTEIDKeys map[uint32]int // byFTEID keys per TEID: the TEID is released when none is left
 	actions       *idPool
 	policies      *idPool
 	meters        *idPool
@@ -535,9 +536,10 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		ap:            ap,
 		log:           log,
 		sessions:      map[uint64]*Session{},
+		byCP:          map[uint64]*Session{},
 		rules:         map[string]uint64{},
-		byFTEID:       map[string]fteidOwner{},
-		fteidTEIDKeys: map[uint32]map[string]bool{},
+		byFTEID:       map[fteidKey]fteidOwner{},
+		fteidTEIDKeys: map[uint32]int{},
 		fteidContexts: map[fteidContextKey]*fteidContext{},
 		nextSEID:      1,
 		actions:       newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
@@ -563,12 +565,7 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 
 // findByCP is the session the SMF's F-SEID names; the caller holds the lock.
 func (c *Compiler) findByCP(cpSEID uint64) *Session {
-	for _, s := range c.sessions {
-		if s.CPSEID == cpSEID {
-			return s
-		}
-	}
-	return nil
+	return c.byCP[cpSEID]
 }
 
 type chosenFTEID struct {
@@ -1275,14 +1272,40 @@ func (c *Compiler) AssociationEnded(reason string) {
 	}
 	c.mu.Unlock()
 
-	for _, s := range sessions {
-		if err := c.remove(context.Background(), s); err != nil {
-			c.log.Warn("session: dropping a session after the association ended",
-				"seid", s.LocalSEID, "reason", reason, "error", err)
-			continue
+	// The sessions leave in transactions of up to sweepBatch changes rather
+	// than one each: the end runs in the N4 read loop, and a million sessions
+	// at one round trip each held it -- the SMF's heartbeats unanswered -- for
+	// as long as a million round trips take. A batch the daemon refuses is
+	// taken again one session at a time, so a session that cannot go costs
+	// only itself, as it did.
+	ctx := context.Background()
+	for next := 0; next < len(sessions); {
+		var batch []*Session
+		var changes []bess.Change
+		for ; next < len(sessions); next++ {
+			s := sessions[next]
+			ch, err := c.removal(s)
+			if err != nil {
+				c.endedWith(s, reason, err)
+				continue
+			}
+			if len(batch) > 0 && len(changes)+len(ch) > sweepBatch {
+				break
+			}
+			batch, changes = append(batch, s), append(changes, ch...)
 		}
-		c.log.Info("session: removed after the association ended",
-			"seid", s.LocalSEID, "reason", reason)
+		if len(changes) != 0 {
+			if err := c.ap.Apply(ctx, changes...); err != nil {
+				for _, s := range batch {
+					c.endedWith(s, reason, c.remove(ctx, s))
+				}
+				continue
+			}
+		}
+		for _, s := range batch {
+			c.forget(s)
+			c.endedWith(s, reason, nil)
+		}
 	}
 	if c.journal != nil {
 		// The sessions the journal describes went with the association: a later
@@ -1292,6 +1315,17 @@ func (c *Compiler) AssociationEnded(reason string) {
 			c.log.Warn("session: could not clear the checkpoint", "reason", reason, "error", err)
 		}
 	}
+}
+
+// endedWith logs what became of one session when its association ended.
+func (c *Compiler) endedWith(s *Session, reason string, err error) {
+	if err != nil {
+		c.log.Warn("session: dropping a session after the association ended",
+			"seid", s.LocalSEID, "reason", reason, "error", err)
+		return
+	}
+	c.log.Info("session: removed after the association ended",
+		"seid", s.LocalSEID, "reason", reason)
 }
 
 // Checkpoint gives the session layer its journal (docs/design.md's restart
@@ -1467,10 +1501,23 @@ func (p *idPool) release(id uint32) {
 func (c *Compiler) res(t Table) string { return c.target.Resource(t) }
 
 func (c *Compiler) teidRes() string { return c.res(FTEIDs) }
-func fteidKey(endpointID, family uint32, address []byte, teid uint32) map[string]any {
+
+// fteidKey is one exact F-TEID admission key: the endpoint, the address family
+// and local address, and the TEID. It is comparable, so it is its own identity
+// in the ownership maps; entry is the key as the decap's resource spells it.
+type fteidKey struct {
+	endpointID, family, teid uint32
+	address                  [16]byte // the first 4 bytes for family 4
+}
+
+func (k fteidKey) entry() map[string]any {
+	n := 4
+	if k.family == 6 {
+		n = 16
+	}
 	return map[string]any{
-		"endpoint_id": endpointID, "address_family": family,
-		"local_address": slices.Clone(address), "teid": teid,
+		"endpoint_id": k.endpointID, "address_family": k.family,
+		"local_address": slices.Clone(k.address[:n]), "teid": k.teid,
 	}
 }
 
@@ -1531,22 +1578,21 @@ func meterSlots(p *pdr) (uint32, uint32) {
 	return p.ownMeterID, p.sharedMeterID
 }
 
-func fteidKeysOf(p *pdr) []map[string]any {
+func fteidKeysOf(p *pdr) []fteidKey {
 	families := p.endpointFamilies
 	if len(families) == 0 {
 		families = []uint8{p.endpointFamily}
 	}
-	keys := make([]map[string]any, 0, len(families))
+	keys := make([]fteidKey, 0, len(families))
 	for _, family := range families {
-		var address []byte
+		k := fteidKey{endpointID: p.endpointID, family: uint32(family), teid: p.teid}
 		if family == 6 {
-			v := p.endpointIPv6.As16()
-			address = v[:]
+			k.address = p.endpointIPv6.As16()
 		} else {
 			v := p.endpointIPv4.As4()
-			address = v[:]
+			copy(k.address[:], v[:])
 		}
-		keys = append(keys, fteidKey(p.endpointID, uint32(family), address, p.teid))
+		keys = append(keys, k)
 	}
 	return keys
 }
@@ -1557,6 +1603,33 @@ func fteidKeysOf(p *pdr) []map[string]any {
 // record whose resources are gone (the engine's own reference checks are the
 // backstop, docs/design.md).
 func (c *Compiler) remove(ctx context.Context, s *Session) error {
+	changes, err := c.removal(s)
+	if err != nil {
+		return err
+	}
+	if len(changes) != 0 {
+		if err := c.ap.Apply(ctx, changes...); err != nil {
+			return err
+		}
+	}
+	c.forget(s)
+	return nil
+}
+
+// forget drops a session whose records the dataplane no longer holds, and
+// frees its ids.
+func (c *Compiler) forget(s *Session) {
+	c.mu.Lock()
+	delete(c.sessions, s.LocalSEID)
+	if c.byCP[s.CPSEID] == s {
+		delete(c.byCP, s.CPSEID)
+	}
+	c.releaseSession(s)
+	c.mu.Unlock()
+}
+
+// removal is the transaction that erases a session's records (remove).
+func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	changes := make([]bess.Change, 0, 4*len(s.PDRs)+2)
 	// One erase per (resource, key): a session's PDRs name the same records --
 	// the meter of a QER in each direction, and one F-TEID when two uplink PDRs
@@ -1588,7 +1661,7 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			// The session's rules were written with these keys, so this is a
 			// PDI that changed under a live session: fail the deletion rather
 			// than leave the rule behind.
-			return fmt.Errorf("PDR %d: %w", p.id, err)
+			return nil, fmt.Errorf("PDR %d: %w", p.id, err)
 		}
 		for _, key := range keys {
 			add(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: key})
@@ -1611,7 +1684,7 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		}
 		if p.teid != 0 {
 			for _, key := range fteidKeysOf(p) {
-				add(bess.Change{Resource: c.teidRes(), Key: key})
+				add(bess.Change{Resource: c.teidRes(), Key: key.entry()})
 			}
 		}
 		if dir.Counters != "" && len(p.urrIDs) > 0 && p.actionID != 0 {
@@ -1677,17 +1750,7 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 			add(bess.Change{Resource: c.res(MetersDownlink), Key: map[string]any{"id": q.meterDL}})
 		}
 	}
-	if len(changes) != 0 {
-		if err := c.ap.Apply(ctx, changes...); err != nil {
-			return err
-		}
-	}
-
-	c.mu.Lock()
-	delete(c.sessions, s.LocalSEID)
-	c.releaseSession(s)
-	c.mu.Unlock()
-	return nil
+	return changes, nil
 }
 
 // settle forgets the removals a transaction carried out, once the dataplane has
@@ -1710,7 +1773,7 @@ func (c *Compiler) settle(s *Session) {
 	for chid, chosen := range s.chids {
 		if !chosenNamed(s, chosen) {
 			delete(s.chids, chid)
-			if len(c.fteidTEIDKeys[chosen.TEID]) == 0 {
+			if c.fteidTEIDKeys[chosen.TEID] == 0 {
 				c.teids.release(chosen.TEID)
 			}
 		}
@@ -1727,7 +1790,7 @@ func (c *Compiler) settle(s *Session) {
 		dir := c.direction(p)
 		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
 			for _, key := range keys {
-				live[c.res(pdrTable(p.downlink()))+"\x00"+fmt.Sprint(key)] = true
+				live[c.res(pdrTable(p.downlink()))+"\x00"+ruleID(key)] = true
 			}
 		}
 	}
@@ -1745,7 +1808,7 @@ func (c *Compiler) settle(s *Session) {
 			continue
 		}
 		for _, key := range keys {
-			rkey := c.res(pdrTable(p.downlink())) + "\x00" + fmt.Sprint(key)
+			rkey := c.res(pdrTable(p.downlink())) + "\x00" + ruleID(key)
 			if !live[rkey] && c.rules[rkey] == s.LocalSEID {
 				delete(c.rules, rkey)
 				s.forgetRuleKey(rkey)
@@ -1831,7 +1894,7 @@ func (c *Compiler) releaseSession(s *Session) {
 		}
 	}
 	for _, chosen := range s.chids {
-		if len(c.fteidTEIDKeys[chosen.TEID]) == 0 {
+		if c.fteidTEIDKeys[chosen.TEID] == 0 {
 			c.teids.release(chosen.TEID)
 		}
 	}
