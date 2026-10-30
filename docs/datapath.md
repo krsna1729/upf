@@ -17,6 +17,128 @@ plugs into. It is deliberately narrower than the other files:
 | `docs/interop.md` | the real-SMF interoperability record (free5GC v4.3.0) |
 | `README.md` | how to build, run and prove |
 
+## Compiler targets
+
+`upfd -target graph` (the default) preserves the module graph's flags and
+`<module>/<table>` resource names. `-target appliance -appliance upf` addresses
+one `UpfAppliance` module between input and output port modules, not dummy
+modules or a hidden graph. PFCP parsing, session compilation, key/value types
+and PDR result records are shared. `internal/session/target.go` owns resource
+names, command destinations, the startup reset list and End Marker sockets.
+
+`deploy/appliance.yaml` is the port-only production composition. From the
+repository root, create `build/run`, apply that manifest, and run:
+
+```sh
+upfd -target appliance -appliance upf -urr-interval 1s \
+  -end-marker build/run/upf-end-marker.sock \
+  -fteid-address 'endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.1' \
+  -fteid-address 'endpoint=2,reference=n9,transport-domain=2,source=core,ipv4=192.0.2.3'
+```
+
+The behavioral lanes choose `UPF_TARGET=graph` (default) or `UPF_TARGET=appliance`:
+`ci/session-path.sh`, `ci/n4-path.sh`, and `ci/session-report.sh`. `STAGE`,
+`PLUG`, `DPDK_LIB`, `GO`, and `TMPDIR` remain overrides. The appliance arm
+applies `deploy/session-path-appliance.yaml`, whose Sources, Rewrites, Dumps
+and Sinks are external test instrumentation, not appliance internals.
+Both arms assert external packet bytes and counters; only the graph exposes
+the intermediate pre-routing decap frame. The appliance arm checks the
+complete preserved UDP payload at N6 instead. The GBR color-split assertion
+reads the owned module's `bess_upf_meter_packets_total` with `direction=ul`
+and `color=green|yellow|red`; the graph arm retains its meter gate counters.
+Both test manifests include the production outer transport Router. This
+intentionally changes the old graph lane's outer IPv4 TTL expectation from
+64 to 63; the exact DSCP/header byte assertion is identical for both targets.
+
+
+| logical table | graph resource | appliance resource (`-appliance upf`) |
+|---|---|---|
+| F-TEIDs | `<gtpu-decap>/fteids` | `upf/fteids` |
+| UL / DL PDRs | `<pdr-table-ul|dl>/rules` | `upf/pdr_ul`, `upf/pdr_dl` |
+| UL / DL QER meters | `<meters-ul|dl>/meters` | `upf/meters` |
+| UL / DL URR counters | `<counters-ul|dl>/counters` | `upf/counters_ul`, `upf/counters_dl` |
+| buffering arrival counters | `<buffer-counter>/counters` | `upf/buffer_counters` |
+| UL / DL / MAR tunnels | `<tunnels-ul|tunnels>/tunnels` | `upf/tunnels` |
+| ATSSS policies / health | `<atsss>/policies`, `<atsss>/health` | `upf/policies`, `upf/health` |
+| subscriber ARP entries | `<instances arp=...>/entries` | `upf/entries` |
+| buffering flow configuration | `<buffer-store>/flows` | `upf/flows` |
+
+The action-id pool is shared by UL, DL and MAR tunnel allocations, but **UL
+and DL counter cells must remain separate**. A PDR can change direction while
+keeping its action id. Counter cells outlive entries; sharing cells would
+attribute old-direction totals to the new direction and report usage twice.
+The buffering counter is separate too: it deliberately uses the same action
+id as the direction counter. Meters safely share a table because the single
+meter pool allocates different ids for UL and DL. Tunnel values are
+configuration, rewritten in place, and their shared action-id pool prevents
+two live PDRs or MAR accesses owning the same key.
+
+All appliance commands go to the real module name (`upf`):
+
+* `get_counts` uses `upf.pb.UrrCountCommandGetCountsArg` with **`string table = 3`**,
+  selecting `counters_ul`, `counters_dl` or `buffer_counters`; action ids and
+  `restart_window` are unchanged. Graph requests omit `table` entirely, so
+  old graph schemas still work. An appliance request against a schema lacking
+  the field fails rather than reading another counter table.
+* `release`, `drop` and `clear` retain the existing `bess.pb.PacketStoreCommand*Arg`
+  types. `get_errors` and `drain_end_markers` retain the existing
+  `upf.pb.GtpuResponderCommand*Arg` types. These commands have one destination
+  table/state each, so need no additional selector field.
+
+Appliance mode ignores graph module-name flags and enables buffering, ATSSS,
+error tracking and received End Marker tracking. Set a positive `-urr-interval`
+because buffering requires its reporting loop. Nonempty `arp=` still enables
+the subscriber ARP proxy per network instance; its graph module name is not
+used. ARP has one address-keyed table: conflicting MAC identities for one
+address in a session are refused, and another session cannot take an address
+already claimed. Startup ARP cleanup combines the enabled interfaces'
+subscriber pools while retaining deployment-owned addresses. Buffering rules
+use gate 1, forwards gate 0 and drops gate 8192. Outgoing End Markers still use
+`<-end-marker>.<transport_route_domain>` sockets.
+
+Routing and health remain deployment-owned and are never swept. The inner
+Router owns `upf/next_hops`, `upf/neighbors`, `upf/routes`,
+`upf/next_hop_state` and `upf/groups`; the separate transport Router owns the
+corresponding flat `upf/transport_*` resources, with its own gateway-id space.
+The historical graph reset order/list is retained (including its omission of
+ATSSS policies); only target resource names and safe shared-table deduplication
+differ in appliance mode.
+
+## `UpfAppliance` — the user plane in one module
+
+`PortInc` → `UpfAppliance` → `PortOut` (plus the End Marker socket ports as
+inputs). One module owns every table, compiles against the installed BESS
+headers only, and has no fallback and no graph behind it: a frame is fast path,
+slow path inside the module, or dropped and counted (`get_drops`, one counter
+per reason). Files: `upf_appliance.{h,cc}` (args, interface admission, commands),
+`_path.cc` (the burst), `_resources.cc` (tables and codecs), `_slow.cc` (two
+routers, resolvers, ARP/ND, transport routing, End Marker inputs), `_buffer.cc`
+(`PacketStore`), `_selftest.cc`.
+
+Per burst: strip one VLAN tag; own ARP/NS is answered before the MAC is matched
+(slow path); interface match by (ingress gate, VLAN, destination MAC); N3/N9
+frames go through `ParseGtpuAdmission` and **one** F-TEID `LookupBatch`, then
+decap (context and QFI stay in `FrameState`, not metadata); one masked-table
+`LookupBatch` per direction on the graph's fixed key (IPv4 offsets, UL
+`context,qfi`, DL `route_domain,context,qfi`); two-level colour-aware
+`MeterSet::CheckBatchColorAware` (id 0 skips a level; unknown or red drops);
+the direction's URR counters (`counters_ul`/`counters_dl`, buffering arrivals in
+`buffer_counters`); ATSSS (`atsss_select.h`, downlink only); one
+`Router::LookupNextHops`; the next-hop class decides `OUTPUT` (N6),
+`ENCAP` (`WriteGtpOuterHeaders`, then the transport router grouped per domain
+through `route::ResolveFrames`) or `REINJECT_DL` (one bounded re-pass into the
+DL PDR with the UL result's route domain; a second reinjection is counted as
+`repass_limit`). A PDR whose gate is 1 is held: the frame's whole decision
+(`FrameState`) is stored beside it, and `release` continues at the meter stage
+with that original decision, whatever the PDR table says by then.
+
+Behaviours the graph drops are counted drops (miss, gate 8192, red meter,
+unresolved neighbour, TTL ≤ 1, no tunnel, unknown MAC, malformed GTP-U...).
+What is unverified here: nothing in this tree has been built or run; see
+`upf_appliance_selftest.cc` (table round trip), `upf_appliance_frame_test.cc`
+(key layout) and the byte-identical output comparison against the graph, which
+is the acceptance test.
+
 ## The graph
 
 One `bessd`, one graph, one set of workers. In the packet-path graphs an edge
@@ -140,6 +262,15 @@ Session programming writes exact F-TEID admission entries, tunnel records,
 counters, subscriber ARP entries, and any steering policies/health. F-TEID and
 tunnel keys are not interchangeable: ingress admission uses the complete local
 endpoint identity; egress tunnels are selected by ActionId.
+
+Three modules' packet paths are header-only helpers the module calls per packet,
+so `UpfAppliance` runs the same code rather than a copy:
+`gtpu_control.h` (`AnswerGtpuControl`: echo reply, Error Indication for an
+unknown G-PDU, peer Error Indication counts in `GtpuErrorCounts`, End Marker
+logging, a verdict per drop reason), `atsss_select.h` (`upf::atsss::Steer`), and
+`arp_proxy.h` (`upf::arp::AnswerProxyRequest`). Each takes the frame and its
+owner's tables (as lookups or a context) and owns no state;
+`datapath/packet_helpers_test.cc` tests them on byte buffers.
 
 ### `gtpu_decap` — endpoint-scoped ingress admission
 

@@ -22,13 +22,25 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
+TARGET=${UPF_TARGET:-graph}
+case "$TARGET" in
+  graph) DEFAULT_GRAPH=$ROOT/deploy/session-path.yaml ;;
+  appliance) DEFAULT_GRAPH=$ROOT/deploy/session-path-appliance.yaml ;;
+  *) echo "TARGET must be graph or appliance" >&2; exit 2 ;;
+esac
+GRAPH=${GRAPH:-$DEFAULT_GRAPH}
+export TMPDIR=${TMPDIR:-$ROOT/build/run}
+mkdir -p "$TMPDIR"
+export GLOG_log_dir=${GLOG_log_dir:-$TMPDIR/glog}
+mkdir -p "$GLOG_log_dir"
+TARGET_ARGS=(-target "$TARGET")
+if [ "$TARGET" = appliance ]; then TARGET_ARGS+=(-appliance upf); fi
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
 TICK=${TICK:-1s}
 BESSCTL=$STAGE/bin/bessctl
 
-WORK=$(mktemp -d /tmp/upf-session-report-XXXXXX)
+WORK=$(mktemp -d "$TMPDIR/upf-session-report-XXXXXX")
 LOG=$WORK/bessd.log
 UPFD_LOG=$WORK/upfd.log
 UPFD_PID=""
@@ -47,13 +59,15 @@ if ! bessd_wait 60 0.5; then
   tail -30 "$LOG" >&2
   exit 1
 fi
-bessd_apply "$GRAPH"
+MARKER_SOCK=$TMPDIR/m-$BESS_PORT.sock
+sed "s|/tmp/upf-end-marker.sock|$MARKER_SOCK|" "$GRAPH" >"$WORK/graph.yaml"
+bessd_apply "$WORK/graph.yaml"
 
 # The controller with its reporting loop on: the graph's chain names its
 # defaults, and the tick is short enough that a test's quota is spent inside a
 # couple of them.
 "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-  -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.1" -gtpu-decap decap0 -urr-interval "$TICK" -log-level info >"$UPFD_LOG" 2>&1 &
+  "${TARGET_ARGS[@]}" -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.1" -gtpu-decap decap0 -urr-interval "$TICK" -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do
   grep -q "n4 listening" "$UPFD_LOG" && break

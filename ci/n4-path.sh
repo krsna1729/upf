@@ -26,7 +26,19 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
+TARGET=${UPF_TARGET:-graph}
+case "$TARGET" in
+  graph) DEFAULT_GRAPH=$ROOT/deploy/session-path.yaml ;;
+  appliance) DEFAULT_GRAPH=$ROOT/deploy/session-path-appliance.yaml ;;
+  *) echo "TARGET must be graph or appliance" >&2; exit 2 ;;
+esac
+GRAPH=${GRAPH:-$DEFAULT_GRAPH}
+export TMPDIR=${TMPDIR:-$ROOT/build/run}
+mkdir -p "$TMPDIR"
+export GLOG_log_dir=${GLOG_log_dir:-$TMPDIR/glog}
+mkdir -p "$GLOG_log_dir"
+TARGET_ARGS=(-target "$TARGET")
+if [ "$TARGET" = appliance ]; then TARGET_ARGS+=(-appliance upf -urr-interval 1s); fi
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
 BESSCTL=$STAGE/bin/bessctl
@@ -39,7 +51,7 @@ UE=${UE:-10.45.0.2}
 GNB=${GNB:-10.20.30.2}
 N3=${N3:-192.0.2.1}
 
-WORK=$(mktemp -d /tmp/upf-n4-path-XXXXXX)
+WORK=$(mktemp -d "$TMPDIR/upf-n4-path-XXXXXX")
 LOG=$WORK/bessd.log
 UPFD_LOG=$WORK/upfd.log
 UPFD_PID=""
@@ -63,7 +75,9 @@ if ! bessd_wait 60 0.5; then
   cat "$LOG" >&2
   exit 1
 fi
-bessd_apply "$GRAPH"
+MARKER_SOCK=$TMPDIR/m-$BESS_PORT.sock
+sed "s|/tmp/upf-end-marker.sock|$MARKER_SOCK|" "$GRAPH" >"$WORK/graph.yaml"
+bessd_apply "$WORK/graph.yaml"
 
 # The control arm: the Sources have been running for seconds, and nothing has
 # selected their packets, so the chains' Dumps are silent.
@@ -79,7 +93,7 @@ fi
 # The node a real SMF talks to, with the graph's shape (its flags' defaults are
 # deploy/upf.yaml's module names; the N3 address and both next hops match).
 "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-  -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info >"$UPFD_LOG" 2>&1 &
+  "${TARGET_ARGS[@]}" -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info >"$UPFD_LOG" 2>&1 &
 UPFD_PID=$!
 for _ in $(seq 1 20); do
   grep -q "n4 listening" "$UPFD_LOG" 2>/dev/null && break
@@ -102,6 +116,7 @@ FAIL=0
 # header says why a dump is scoped (the graphs' frames share their openings).
 . "$ROOT/ci/dumphex.sh"
 UP_HEX=$(dump_hex dump_u "$LOG")
+if [ "$TARGET" = appliance ]; then UP_HEX=$(dump_hex dump_n6 "$LOG"); fi
 DOWN_HEX=$(dump_hex dump_d "$LOG")
 check() { # check <description> <the dump's hex> <fixed string it must contain>
   if printf '%s\n' "$2" | grep -Fq -- "$3"; then
@@ -134,7 +149,7 @@ if [ "$FAIL" = 0 ]; then
   wait "$UPFD_PID" 2>/dev/null || true
   : >"$UPFD_LOG"
   "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-    -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info >>"$UPFD_LOG" 2>&1 &
+    "${TARGET_ARGS[@]}" -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info >>"$UPFD_LOG" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
     grep -q "n4 listening" "$UPFD_LOG" 2>/dev/null && break
@@ -181,7 +196,7 @@ if [ "$FAIL" = 0 ]; then
   kill "$UPFD_PID" 2>/dev/null || true
   wait "$UPFD_PID" 2>/dev/null || true
   "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-    -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info -checkpoint "$CP" >>"$CP1" 2>&1 &
+    "${TARGET_ARGS[@]}" -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info -checkpoint "$CP" >>"$CP1" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
     grep -q "n4 listening" "$CP1" 2>/dev/null && break
@@ -208,7 +223,7 @@ if [ "$FAIL" = 0 ]; then
   kill "$UPFD_PID" 2>/dev/null || true
   wait "$UPFD_PID" 2>/dev/null || true
   "$WORK/upfd" -n4 "127.0.0.1:$N4_PORT" -node-id 127.0.0.1 -bess "127.0.0.1:$BESS_PORT" \
-    -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info -checkpoint "$CP" >>"$CP2" 2>&1 &
+    "${TARGET_ARGS[@]}" -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$N3" -gtpu-decap decap0 -log-level info -checkpoint "$CP" >>"$CP2" 2>&1 &
   UPFD_PID=$!
   for _ in $(seq 1 20); do
     grep -q "n4 listening" "$CP2" 2>/dev/null && break

@@ -18,6 +18,9 @@
 #
 #   ci/interop/run.sh
 #   LABEL=no-urr URR_PERIOD=0 URR_THRESHOLD=0 ci/interop/run.sh
+#   UPF_TARGET=appliance DATAPLANE=1 ci/interop/run.sh
+# Both real-dataplane arms require twenty successful echoes and at least
+# twenty packets in each target's own usage-counter bank.
 
 set -uo pipefail
 D=$(dirname "${BASH_SOURCE[0]}")
@@ -74,16 +77,18 @@ sleep 15
 # comes back, and the UPF's own counting modules saw the packets -- the counters
 # a URR report is built from.
 if [ -n "$DATAPLANE" ]; then
-  log "stage b2: packets through bessd (UE -> data network)"
-  ul0=$(dp_pkts cnt_ul) && dl0=$(dp_pkts cnt_dl) || {
+  log "stage b2: packets through bessd target $UPF_TARGET (UE -> data network)"
+  ul0=$(dp_pkts ul) && dl0=$(dp_pkts dl) || {
     log "stage b2 FAILED: reading the UPF's initial counters"; RC=1; finish
   }
   "$D/ue.sh" traffic 20 >"$LOGS/ping.out" 2>&1 || true
-  ul1=$(dp_pkts cnt_ul) && dl1=$(dp_pkts cnt_dl) || {
+  ul1=$(dp_pkts ul) && dl1=$(dp_pkts dl) || {
     log "stage b2 FAILED: reading the UPF's final counters"; RC=1; finish
   }
   loss=$(grep -o '[0-9]*% packet loss' "$LOGS/ping.out" | tail -1 | tr -dc '0-9')
   log "ping: loss=${loss:-?}%, cnt_ul +$((ul1 - ul0)) packets, cnt_dl +$((dl1 - dl0)) packets"
+  printf 'ul_before=%s\nul_after=%s\ndl_before=%s\ndl_after=%s\n' \
+    "$ul0" "$ul1" "$dl0" "$dl1" >"$LOGS/traffic-counters.out"
   if [ "${loss:-100}" != 0 ]; then
     log "stage b2 FAILED: the echo did not come back ($(tail -3 "$LOGS/ping.out" | tr '\n' ' '))"
     RC=1; finish

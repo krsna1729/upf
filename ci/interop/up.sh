@@ -21,6 +21,7 @@
 #   SUBSCRIBER=subscriber-flows.json ci/interop/up.sh   # two PCC flow rules: SDF filters and QER/QFI per rule
 #   URR_PERIOD=0 URR_THRESHOLD=0 ci/interop/up.sh   # the SMF creates no default URRs
 #   UPFD_BIN=/path/to/upfd ci/interop/up.sh   # skip building upfd
+#   UPF_TARGET=appliance DATAPLANE=1 ci/interop/up.sh  # production owned appliance on the same live veths
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -31,6 +32,11 @@ BESSCTL=$STAGE/bin/bessctl
 [ -x "$BESSCTL" ] || die "no bessctl at $BESSCTL (set STAGE)"
 [ -f "$PLUG/libupf_datapath.so" ] || die "build the plugin first: (cd datapath && ninja -C build)"
 dk info >/dev/null 2>&1 || die "docker is not reachable (neither directly nor through 'sudo -n -u $OWNER -g docker')"
+[ "$UPF_TARGET" != appliance ] || [ -n "$DATAPLANE" ] || die "UPF_TARGET=appliance requires DATAPLANE=1"
+if alive "$STATE/bessd.pid"; then
+  [ "$(cat "$STATE/target" 2>/dev/null)" = "$UPF_TARGET" ] ||
+    die "the running dataplane has a different target; run ci/interop/down.sh first"
+fi
 
 # --- the network ----------------------------------------------------------
 if dk network inspect "$NET" >/dev/null 2>&1; then
@@ -90,11 +96,13 @@ if alive "$STATE/bessd.pid"; then
 else
   : >"$LOGS/bessd.log"
   echo "$BESS_PORT" >"$STATE/bess_port"
+  echo "$UPF_TARGET" >"$STATE/target"
   if [ -n "$DATAPLANE" ]; then
     # Real ports: the veths, the graph wired to them, and bessd as root (an
     # AF_PACKET socket needs it; the packets and the N4 side stay the same).
     "$(dirname "${BASH_SOURCE[0]}")/net.sh" up
     DEPLOYED=$ROOT/deploy/upf.yaml
+    [ "$UPF_TARGET" = appliance ] && DEPLOYED=$ROOT/deploy/appliance.yaml
     python3 "$(dirname "${BASH_SOURCE[0]}")/graph.py" "$DEPLOYED" "$STATE/graph.yaml" "$IF_N3" "$IF_N6" \
       "$N3_IP" "$N3_MAC" "$GNB_IP" "$N6_MAC" "$DN_IP" "$DN_GW" "$STATE/end-marker.sock" || die "building the dataplane graph failed"
     GRAPH=$STATE/graph.yaml
@@ -107,7 +115,7 @@ else
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" status >/dev/null 2>&1 || { cat "$LOGS/bessd.log" >&2; die "bessd did not come up"; }
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" apply "$GRAPH" >/dev/null
   "$BESSCTL" -s "127.0.0.1:$BESS_PORT" resume >/dev/null
-  log "bessd up on 127.0.0.1:$BESS_PORT, graph $(basename "$GRAPH") applied"
+  log "bessd up on 127.0.0.1:$BESS_PORT, target $UPF_TARGET, graph $(basename "$GRAPH") applied"
 fi
 
 # SHIM=1: upfd listens on loopback and ci/interop/n4shim, a diagnostic relay,
@@ -133,8 +141,13 @@ else
   # QFI. The default field order matches deploy/upf.yaml.
   UPFD_ARGS=(-n4 "$N4_UPFD" -node-id "$UPF_IP" -bess "127.0.0.1:$BESS_PORT"
     -fteid-address "endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=$UPF_N3"
-    -gtpu-decap decap0
+    -target "$UPF_TARGET"
     -log-level "${UPFD_LOG_LEVEL:-debug}")
+  if [ "$UPF_TARGET" = appliance ]; then
+    UPFD_ARGS+=(-appliance upf)
+  else
+    UPFD_ARGS+=(-gtpu-decap decap0)
+  fi
   # The evaluation loop: without it no URR is ever read, so a real SMF's URRs
   # (the stock config's period 10 s and volume threshold 1000 bytes) are never
   # reported on, and even the Session Deletion Response's termination reports

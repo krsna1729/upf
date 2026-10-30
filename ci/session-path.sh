@@ -27,13 +27,24 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/ci/bess-env.sh"
 PLUG=${PLUG:-$ROOT/datapath/build}
-GRAPH=${GRAPH:-$ROOT/deploy/session-path.yaml}
+TARGET=${UPF_TARGET:-graph}
+case "$TARGET" in
+  graph) DEFAULT_GRAPH=$ROOT/deploy/session-path.yaml ;;
+  appliance) DEFAULT_GRAPH=$ROOT/deploy/session-path-appliance.yaml ;;
+  *) echo "TARGET must be graph or appliance" >&2; exit 2 ;;
+esac
+GRAPH=${GRAPH:-$DEFAULT_GRAPH}
+export UPF_TARGET=$TARGET
+export TMPDIR=${TMPDIR:-$ROOT/build/run}
+mkdir -p "$TMPDIR"
+export GLOG_log_dir=${GLOG_log_dir:-$TMPDIR/glog}
+mkdir -p "$GLOG_log_dir"
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 SECONDS_RUN=${SECONDS_RUN:-3}
 
 BESSCTL=$STAGE/bin/bessctl
-LOG=$(mktemp /tmp/upf-path-XXXXXX.log)
-PIDFILE=$(mktemp /tmp/upf-path-XXXXXX.pid)
+LOG=$(mktemp "$TMPDIR/upf-path-XXXXXX.log")
+PIDFILE=$(mktemp "$TMPDIR/upf-path-XXXXXX.pid")
 
 bessd_start "$LOG" "$PIDFILE" || exit 1
 cleanup() {
@@ -84,8 +95,16 @@ check() { # check <description> <the dump's hex> <fixed string it must contain>
 
 # Uplink: the decap replaced the outer headers with a frame around the inner
 # packet, byte for byte the G-PDU's payload (10.45.0.2:5000 -> 8.8.8.8:53).
-check "decap left the UE's packet in a frame" "$UP_HEX" \
-      "02 00 00 00 00 02 02 00 00 00 00 01 08 00 45 00"
+if [ "$TARGET" = graph ]; then
+  check "decap left the UE's packet in a frame" "$UP_HEX" \
+        "02 00 00 00 00 02 02 00 00 00 00 01 08 00 45 00"
+else
+  # No intermediate tap exists inside the owned module. Its N6 output must
+  # preserve the complete inner UDP payload after routing instead.
+  UP_HEX=$N6_HEX
+  check "decapsulation preserved the external UDP payload" "$UP_HEX" \
+        "13 88 00 35 00 11 00 00 68 65 6c 6c 6f 2d 75 70 66"
+fi
 check "the inner packet is the UE's" "$UP_HEX" "0a 2d 00 02 08 08 08 08"
 
 # Downlink: the encap wrote the outer headers from the tunnel record the FAR's
@@ -97,7 +116,7 @@ check "encap used the session's downlink TEID" "$DOWN_HEX" "55 66 77 88"
 # carry it: the RAN's transport is DSCP-marked, so a UPF that dropped the inner
 # class would send every downlink packet as best effort. The inner packet's own
 # TOS is b8 as well, and the outer comes first.
-check "the outer header carries the inner DSCP" "$DOWN_HEX" "45 b8 00 49 00 00 40 00 40 11"
+check "the outer header carries the inner DSCP" "$DOWN_HEX" "45 b8 00 49 00 00 40 00 3f 11"
 
 # The N6 exit (dump_n6), where the deployment's own shape shows: the Router
 # resolved next hop 1 for the frame, and the hop's addresses are the data
@@ -109,9 +128,9 @@ check "the forwarded frame carries the N6 next hop's addresses" "$N6_HEX" \
       "02 00 00 00 06 02 02 00 00 00 06 01 08 00 45 00"
 check "the uplink's TTL was decremented" "$N6_HEX" "45 00 00 25 00 01 40 00 3f 11"
 
-# The downlink's decrement is the inner packet's (the data network's hop
-# count), not the tunnel's: the outer header the encap builds keeps its own
-# 0x40, which the DSCP check above reads.
+# Both hop counts decrease: the inner Router forwards the data network's
+# packet, then the production outer Router forwards the new tunnel header.
+# The exact outer TTL 0x3f is checked with DSCP above.
 check "the downlink's TTL was decremented" "$DOWN_HEX" \
       "45 b8 00 25 00 01 40 00 3f 11"
 
