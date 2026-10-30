@@ -2532,14 +2532,27 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// failure rather than half-programmed.
 	writtenRules := map[string]bool{}
 	// The rule keys the session still holds, as the transaction will write them.
+	// Each PDR's keys are built once here and written below: a key is a map per
+	// field, the largest garbage of an establishment.
+	type pdrRules struct {
+		keys []map[string]any
+		ids  []string
+		err  error
+	}
+	rulesOf := make(map[*pdr]pdrRules, len(s.PDRs))
 	live := map[string]bool{}
-	for _, p := range s.PDRs {
+	for _, p := range pdrsInOrder(s) {
 		dir := c.direction(p)
-		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
-			for _, key := range keys {
-				live[c.res(pdrTable(p.downlink()))+"\x00"+ruleID(key)] = true
+		keys, err := p.ruleKeys(dir.PDRFields)
+		r := pdrRules{keys: keys, err: err}
+		if err == nil {
+			r.ids = make([]string, len(keys))
+			for i, key := range keys {
+				r.ids[i] = c.res(pdrTable(p.downlink())) + "\x00" + ruleID(key)
+				live[r.ids[i]] = true
 			}
 		}
+		rulesOf[p] = r
 	}
 	// The ARP entries the session still holds: one per subscriber address its
 	// subscriber-side PDRs name, where the interface declares a responder. A
@@ -2791,13 +2804,13 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			created = append(created, ie.NewCreatedPDR(
 				ie.NewPDRID(p.id), c.createdFTEID(p)))
 		}
-		dir := c.direction(p)
-		keys, err := p.ruleKeys(dir.PDRFields)
-		if err != nil {
-			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
+		r := rulesOf[p]
+		if r.err != nil {
+			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, r.err)
 		}
-		for _, key := range keys {
-			rkey := c.res(pdrTable(p.downlink())) + "\x00" + ruleID(key)
+		keys := r.keys
+		for i := range keys {
+			rkey := r.ids[i]
 			if writtenRules[rkey] {
 				// The rule table knows PDR ids no better than the SMF's filters do:
 				// one key is one rule, and the engine would reject the second
