@@ -134,10 +134,11 @@ with that original decision, whatever the PDR table says by then.
 
 Behaviours the graph drops are counted drops (miss, gate 8192, red meter,
 unresolved neighbour, TTL ≤ 1, no tunnel, unknown MAC, malformed GTP-U...).
-What is unverified here: nothing in this tree has been built or run; see
-`upf_appliance_selftest.cc` (table round trip), `upf_appliance_frame_test.cc`
-(key layout) and the byte-identical output comparison against the graph, which
-is the acceptance test.
+Evidence: `gtpu_datapath_test` (`upf_appliance_frame_test.cc` key layout,
+`packet_helpers_test.cc` shared per-packet helpers), `upf_appliance_selftest.cc`
+(table round trip), and `UPF_TARGET=appliance` runs of `ci/session-path.sh`,
+`ci/n4-path.sh` and `ci/session-report.sh`, which assert the same external
+bytes and counters as the graph arm.
 
 ## The graph
 

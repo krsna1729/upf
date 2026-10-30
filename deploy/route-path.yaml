@@ -225,6 +225,10 @@ modules:
   - name: enc
     mclass: GtpuEncap
     arg: {max_tunnels: 65536}
+  # Match production: the newly encapsulated frame crosses the outer Router.
+  - name: rt_transport
+    mclass: Router
+    arg: {mode: ROUTE_MODE_DESTINATION, max_domains: 3, max_ipv4_routes: 64, domain_attr: transport_route_domain}
   - name: mt_transport
     mclass: MetadataTest
     arg: {read: {transport_route_domain: 4}}
@@ -297,7 +301,8 @@ connections:
   - {upstream: cnt_dl, downstream: atsss}
   - {upstream: atsss, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
-  - {upstream: enc, downstream: mt_transport}
+  - {upstream: enc, downstream: rt_transport}
+  - {upstream: rt_transport, downstream: mt_transport}
   - {upstream: mt_transport, downstream: dump_d}
   - {upstream: dump_d, downstream: sink_n3}
 
@@ -310,6 +315,12 @@ workers:
   - {wid: 0, core: 0}
 
 resources:
+  rt_transport/next_hops:
+    - key: {id: 1}
+      value: {egress_gate: 0}
+  rt_transport/routes:
+    - key: {ipv4: "0.0.0.0", prefix_length: 0, domain: 1}
+      value: {next_hop_id: 1}
   # The actions' next hops: the deployment's, not a session's. In this graph
   # the action's id is 0 (the compiler writes none in destination mode); the
   # routes below name these hops, and their egress gates are the Router's
