@@ -78,7 +78,7 @@ forwarding F-TEIDs, and the PSA's to S11's N9 F-TEID (Mode 4): each leaves
 once per marker sent, with the outgoing tunnel's TEID, from its local endpoint
 to its peer, and no session chain counts it. The one sent to S1's uplink
 F-TEID, whose FAR ends at N6, is relayed nowhere.
-`TestReceivedEndMarkersAreRelayedThroughTheirTunnels` checks the frames. The
+`TestEndMarkerRelaysAreWrittenWithTheirFTEIDsAdmission` checks the relays the compiler writes. The
 End Marker the UP function builds itself when the SMF asks (SNDEM) is
 unchanged.
 
