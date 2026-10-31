@@ -494,20 +494,26 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 		return reading{}
 	})
 
-	// The peer's Error Indications (5.10), read once for the whole tick: one
-	// responder module holds the counts of every TEID it has seen, and the
-	// sessions below compare them against what each has already reported. A
-	// reading that fails is the tick's other half failing alone: the usage
-	// reports are still decided, and the same counts are read again next tick.
-	var indications map[uint32]uint64
+	// The peer's Error Indications (5.10) since the last tick, each delivered
+	// once by the drain: one responder module logs every indication, and the
+	// sessions below report the ones that name their tunnels. A drain that
+	// fails loses nothing -- the events stay in the ring for the next one.
+	var indications map[uint32]bool
 	if readsErrors {
-		read, err := errorReader.ErrorCounts(ctx, c.target.Errors())
+		read, dropped, err := errorReader.DrainErrors(ctx, c.target.Errors())
 		if err != nil {
 			c.log.Warn("session: error indications", "module", c.target.Errors(), "error", err)
 		} else {
-			indications = make(map[uint32]uint64, len(read))
-			for _, e := range read {
-				indications[e.TEID] = e.Count
+			if dropped > c.errorsDropped {
+				c.log.Warn("session: error indications lost to a full ring", "module", c.target.Errors(),
+					"lost", dropped-c.errorsDropped)
+				c.errorsDropped = dropped
+			}
+			if len(read) > 0 {
+				indications = make(map[uint32]bool, len(read))
+				for _, teid := range read {
+					indications[teid] = true
+				}
 			}
 		}
 	}

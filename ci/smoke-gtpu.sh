@@ -210,11 +210,11 @@ check_next "IPv6 Echo request receives a type-2 response" \
       "32 02" "00 11 00 00"
 
 # The peer's own Error Indication is control traffic on gate 2. The responder
-# records it without a reply; the count is what the controller's ERIR report
+# logs it without a reply; the drain is what the controller's ERIR report
 # reads. 0x55667788 is 1432778632.
 ERRORS=$(mktemp /tmp/upf-smoke-errors-XXXXXX.txt)
-"$BESSCTL" -s "127.0.0.1:$BESS_PORT" action resp_err get_errors '{}' >"$ERRORS" 2>&1 || true
-check_file "the responder counted the peer's Error Indication" "$ERRORS" "1432778632"
+"$BESSCTL" -s "127.0.0.1:$BESS_PORT" action resp_err drain_errors '{}' >"$ERRORS" 2>&1 || true
+check_file "the responder logged the peer's Error Indication" "$ERRORS" "1432778632"
 
 check_clean_shutdown "$BESSD_PID" || FAIL=1
 if [ "$FAIL" = 0 ]; then

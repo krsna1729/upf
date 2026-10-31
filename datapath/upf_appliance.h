@@ -116,7 +116,7 @@ class UpfAppliance final : public Module {
   std::string GetDesc() const override;
   CheckConstraintResult CheckModuleConstraints() const override;
   CommandResponse CommandGetCounts(const upf::pb::UrrCountCommandGetCountsArg &);
-  CommandResponse CommandGetErrors(const upf::pb::GtpuResponderCommandGetErrorsArg &);
+  CommandResponse CommandDrainErrors(const upf::pb::GtpuResponderCommandDrainErrorsArg &);
   CommandResponse CommandDrainEndMarkers(const upf::pb::GtpuResponderCommandDrainEndMarkersArg &);
   CommandResponse CommandRelease(const bess::pb::PacketStoreCommandReleaseArg &);
   CommandResponse CommandDrop(const bess::pb::PacketStoreCommandDropArg &);
@@ -179,7 +179,7 @@ class UpfAppliance final : public Module {
   std::unique_ptr<bess::dataplane::SlotResource<Id, upf::atsss::SteeringPolicy>> policy_resource_;
   std::unique_ptr<bess::dataplane::SlotResource<Id, upf::atsss::AccessHealth>> health_resource_;
   bess::framework::Sized<upf::arp::EntriesResource> entries_;
-  bess::framework::Sized<upf::datapath::GtpuErrorCounts> errors_;
+  bess::framework::Sized<upf::datapath::ErrorIndicationLog> errors_;
   bess::framework::Sized<upf::datapath::EndMarkerLog> end_markers_;
   bess::framework::Sized<bess::route::Router> router_, transport_router_;
   std::vector<bess::framework::ResourceBinding> bindings_;

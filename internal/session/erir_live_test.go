@@ -21,8 +21,8 @@ import (
 // The lane's graph carries the same error arm as the smoke graph -- a Source
 // injecting the peer's GTP-U Error Indication, ingress gate 2 delivering it to
 // a responder whose track_errors is on -- and this test drives
-// the control plane against that daemon: the tick's live reading of the
-// module's error table (get_errors, the same command bessctl answers), and the
+// the control plane against that daemon: the tick's live drain of the
+// module's Error Indication log (drain_errors, the same command bessctl answers), and the
 // Error Indication Report that comes out of it for the session whose downlink
 // FAR sends into the tunnel the frame names.
 //

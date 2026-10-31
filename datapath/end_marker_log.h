@@ -21,25 +21,33 @@ struct EndMarkerEvent {
   bool operator==(const EndMarkerEvent &) const = default;
 };
 
-// EndMarkerLog hands End Markers from the workers to the control side as
-// events, each delivered once. One single-producer ring per worker slot: the
+// One Error Indication a peer sent (TS 29.281 7.3.1): the TEID its TEID IE
+// names, which is the one this UPF sent to and the peer could not reach.
+struct ErrorIndicationEvent {
+  uint32_t teid = 0;
+  bool operator==(const ErrorIndicationEvent &) const = default;
+};
+
+// ControlEventLog hands GTP-U control events from the workers to the control
+// side, each delivered once. One single-producer ring per worker slot: the
 // worker writes its slot and publishes the head with release; the drain reads
 // up to that head and publishes the tail with release, so a worker reuses a
 // slot only after the drain is done with it. A full ring drops the event and
 // counts it, so a slow reader costs reports, never a worker.
 //
-// Events rather than counters: a counter table keyed by (endpoint, TEID) never
-// learns when a key is gone, fills as TEIDs churn, and hands a reused TEID the
-// count of its last holder. A drained event has no history to go stale.
+// Events rather than counters: a counter table keyed by TEID never learns when
+// a key is gone, fills as TEIDs churn, and hands a reused TEID the count of its
+// last holder. A drained event has no history to go stale.
 //
 // Memory (BESS D-198): the rings are glibc memory (aligned new), one per
 // worker slot, made by the constructor and never grown; Bytes/GlibcBytes is
 // what the constructor allocates, for framework::MemoryCost.
-class EndMarkerLog {
+template <typename Event>
+class ControlEventLog {
  public:
   static constexpr size_t kRingSize = 256;  // per worker; a power of two
 
-  explicit EndMarkerLog(size_t workers)
+  explicit ControlEventLog(size_t workers)
       : rings_(std::make_unique<Ring[]>(workers)), workers_(workers) {}
 
   static size_t Bytes(size_t workers) noexcept { return workers * sizeof(Ring); }
@@ -47,7 +55,7 @@ class EndMarkerLog {
   size_t bytes() const noexcept { return Bytes(workers_); }
 
   // Record is the worker's half: one event into its own ring.
-  void Record(size_t worker, EndMarkerEvent event) noexcept {
+  void Record(size_t worker, Event event) noexcept {
     if (worker >= workers_) {
       dropped_.fetch_add(1, std::memory_order_relaxed);
       return;
@@ -65,9 +73,9 @@ class EndMarkerLog {
   // Drain is the control side's half: every event recorded since the last
   // drain, worker by worker in arrival order within a worker. Drains are
   // serialized, so two commands never consume the same event.
-  std::vector<EndMarkerEvent> Drain() {
+  std::vector<Event> Drain() {
     std::lock_guard<std::mutex> lock(drain_mu_);
-    std::vector<EndMarkerEvent> out;
+    std::vector<Event> out;
     for (size_t w = 0; w < workers_; ++w) {
       Ring &ring = rings_[w];
       const uint64_t head = ring.head.load(std::memory_order_acquire);
@@ -88,7 +96,7 @@ class EndMarkerLog {
   struct alignas(64) Ring {
     std::atomic<uint64_t> head{0};
     alignas(64) std::atomic<uint64_t> tail{0};
-    EndMarkerEvent events[kRingSize];
+    Event events[kRingSize];
   };
 
   std::unique_ptr<Ring[]> rings_;
@@ -96,6 +104,11 @@ class EndMarkerLog {
   std::atomic<uint64_t> dropped_{0};
   std::mutex drain_mu_;
 };
+
+// The End Markers that arrived, for drain_end_markers.
+using EndMarkerLog = ControlEventLog<EndMarkerEvent>;
+// The peer's Error Indications, for drain_errors.
+using ErrorIndicationLog = ControlEventLog<ErrorIndicationEvent>;
 
 }  // namespace upf::datapath
 

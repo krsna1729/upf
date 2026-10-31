@@ -41,12 +41,10 @@ class GtpuResponder final : public Module {
 
   std::string GetDesc() const override;
 
-  // The Error Indications the peer sent (7.3.1), one monotonic count per TEID.
-  // A reading is what the controller's report compares with the count it last
-  // reported, so nothing here is cleared: the writes are relaxed adds and the
-  // read never takes a lock.
-  CommandResponse CommandGetErrors(
-      const upf::pb::GtpuResponderCommandGetErrorsArg &arg);
+  // The Error Indications recorded since the previous drain (TS 29.281
+  // 7.3.1), each returned once, with the count lost to a full ring.
+  CommandResponse CommandDrainErrors(
+      const upf::pb::GtpuResponderCommandDrainErrorsArg &arg);
 
   // The End Markers recorded since the previous drain (TS 29.281 7.3.2), each
   // returned once, with the count lost to a full ring.
@@ -57,10 +55,8 @@ class GtpuResponder final : public Module {
   uint16_t port_ = 0;  // the UDP port the messages must arrive on
   uint32_t stamp_ = 0; // seconds from 1900 to this entity's start (8.7)
   int reply_gate_attr_ = -1;  // optional ingress BE32 output gate
-  // Peer Error Indications, when tracked. A fixed size no argument scales
-  // (GtpuErrorCounts::kDefaultSlots), so it is not admitted through memory()
-  // (D-198 admits what arguments size).
-  std::unique_ptr<upf::datapath::GtpuErrorCounts> errors_;
+  // Admitted as "errors" (D-198).
+  bess::framework::Sized<upf::datapath::ErrorIndicationLog> errors_;
   int endpoint_attr_ = -1;  // "endpoint_id", read when End Markers are tracked
   // Admitted as "end_markers" (D-198).
   bess::framework::Sized<upf::datapath::EndMarkerLog> end_markers_;
