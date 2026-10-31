@@ -21,6 +21,8 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -454,12 +456,17 @@ type reportSender interface {
 	Report(ctx context.Context, cpSEID uint64, ies ...*ie.IE) (n4.ReportAnswer, error)
 }
 
-// reportQueueDepth bounds one session's reports waiting for an answer, and
-// reportQueueSessions the sessions with queued reports: a CP function that never
-// answers cannot grow this node's memory without bound.
+// reportQueueDepth bounds one session's reports waiting for an answer: a CP
+// function that never answers cannot grow this node's memory past the sessions
+// it holds times this. Every session may hold reports -- a tick at the 1M
+// target owes a report to every session whose period ends in it -- so the
+// queue has no bound of its own on sessions.
 const (
-	reportQueueDepth    = 4
-	reportQueueSessions = 256
+	reportQueueDepth = 4
+	// reportWindow is how many Session Report Requests the drain keeps in
+	// flight at once once the SMF has answered the tick's first: one at a time,
+	// a tick's reports cost a round trip each.
+	reportWindow = 64
 	// reportBackoffCap is the longest a report waits before it is tried again:
 	// each attempt costs the n4 layer's whole retry budget, and the tick that
 	// makes it also carries the evaluation that enforces every session's quota,
@@ -500,8 +507,9 @@ type heldReport struct {
 // (the same reason the SDK asks again rather than assuming), so the report is
 // kept and sent before the session's next one -- which is what keeps the
 // UR-SEQNs the SMF reads in order. A *refusal* is a definite answer and is not
-// retried; only silence is. What does not fit is logged with its usage when it
-// is dropped rather than disappearing quietly.
+// retried; only silence is. A report the session's queue has no room for is
+// not queued, and its usage is not lost: the session layer takes the decision
+// back (Compiler.Unreport) or the session's last held report carries it.
 type reportQueue struct {
 	held map[uint64][]heldReport // by the session's local SEID
 }
@@ -510,21 +518,28 @@ func newReportQueue() *reportQueue {
 	return &reportQueue{held: map[uint64][]heldReport{}}
 }
 
-// add queues a report, dropping the oldest one this session still holds when the
-// session's queue is full (or, for a session with no room at all, refusing to
-// hold it): the dropped report is returned for the caller to log.
-func (q *reportQueue) add(r session.Report) (dropped *session.Report) {
-	if _, ok := q.held[r.SEID]; !ok && len(q.held) >= reportQueueSessions {
+// add queues a report, or hands it back when the session already holds
+// reportQueueDepth: the newest is the one turned away, because it is the one
+// whose decision can still be taken back.
+func (q *reportQueue) add(r session.Report) (refused *session.Report) {
+	queue := q.held[r.SEID]
+	if len(queue) >= reportQueueDepth {
 		return &r
 	}
-	queue := append(q.held[r.SEID], heldReport{report: r})
-	if len(queue) > reportQueueDepth {
-		old := queue[0]
-		queue = queue[1:]
-		dropped = &old.report
+	q.held[r.SEID] = append(queue, heldReport{report: r})
+	return nil
+}
+
+// absorb adds an undelivered report's usage to the session's newest held one,
+// which has not been sent yet whenever the session holds more than its head.
+// It reports false when there is nothing held to carry it.
+func (q *reportQueue) absorb(r session.Report) bool {
+	queue := q.held[r.SEID]
+	if len(queue) == 0 {
+		return false
 	}
-	q.held[r.SEID] = queue
-	return dropped
+	queue[len(queue)-1].report.Absorb(r)
+	return true
 }
 
 // seids is every session with a report waiting, low SEID first: a drain visits
@@ -605,12 +620,16 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 		case <-ticker.C:
 		}
 		for _, report := range sessions.EvaluateAll(ctx, time.Now()) {
-			if dropped := queue.add(report); dropped != nil {
-				reports.dropped.Add(1)
-				log.Warn("usage report dropped: the SMF has not answered the ones before it",
-					"seid", dropped.SEID, "cp_seid", dropped.CPSEID, "urr", dropped.URRID,
-					"seqn", dropped.Seqn, "trigger", dropped.Trigger.String(),
-					"octets", dropped.Up.Octets, "held", reportQueueDepth)
+			if refused := queue.add(report); refused != nil {
+				// The usage stays owed: the decision goes back to the session
+				// layer, or rides on the session's newest held report.
+				if !sessions.Unreport(*refused) && !queue.absorb(*refused) {
+					reports.dropped.Add(1)
+				}
+				log.Warn("usage report not queued: the SMF has not answered the ones before it",
+					"seid", refused.SEID, "cp_seid", refused.CPSEID, "urr", refused.URRID,
+					"seqn", refused.Seqn, "trigger", refused.Trigger.String(),
+					"octets", refused.Up.Octets, "held", reportQueueDepth)
 			}
 		}
 		// The downlink half of the same tick: the PDRs whose first buffered
@@ -641,12 +660,10 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 				"seid", d.SEID, "cp_seid", d.CPSEID, "pdrs", d.PDRs)
 		}
 
+		// One report per session per tick, so a session's reports reach the
+		// SMF in order however many sessions' are in flight.
 		now := time.Now()
-		// One report per session per tick, and the tick's first transport
-		// failure ends the drain: each send costs the n4 layer's whole retry
-		// budget, and this same tick carries the evaluation that opens windows
-		// and enforces quotas -- a CP function that has stopped answering must
-		// not hold it. What is not sent now keeps its place (and its backoff).
+		var due []heldReport
 		for _, seid := range queue.seids() {
 			if !sessions.Holds(seid) {
 				// The session ended while these reports waited: the deletion's
@@ -660,15 +677,17 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 				}
 				continue
 			}
-			r, ok := queue.head(seid)
-			if !ok || r.next.After(now) {
+			if r, ok := queue.head(seid); ok && !r.next.After(now) {
+				due = append(due, r)
+			}
+		}
+		for i, res := range sendReports(ctx, sender, due) {
+			if !res.tried {
 				continue
 			}
-			// The report is addressed to the CP function, and the header's
-			// SEID is the identity the *receiver* looks the session up with:
-			// the CP F-SEID, not ours (TS 29.244 7.2.2.4.2).
-			answer, err := sender.Report(ctx, r.report.CPSEID, r.report.IEs()...)
-			if err != nil {
+			r := due[i]
+			seid := r.report.SEID
+			if res.err != nil {
 				reports.held.Add(1)
 				backoff := reportBackoff(r.attempts+1, every)
 				queue.sent(seid, now, backoff)
@@ -676,13 +695,17 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 					log.Warn("usage report not delivered: held and backed off",
 						"seid", r.report.SEID, "cp_seid", r.report.CPSEID, "urr", r.report.URRID,
 						"trigger", r.report.Trigger.String(), "octets", r.report.Up.Octets,
-						"attempts", r.attempts+1, "retry_in", backoff, "error", err)
+						"attempts", r.attempts+1, "retry_in", backoff, "error", res.err)
 				}
-				break
+				continue
 			}
+			answer := res.answer
 			queue.done(seid)
 			if answer.Cause != ie.CauseRequestAccepted {
 				reports.refused.Add(1)
+				// A refusal is the SMF's answer and is not sent again; the
+				// usage it carried rides on the session's next held report.
+				queue.absorb(r.report)
 				log.Warn("usage report refused", "seid", r.report.SEID, "cp_seid", r.report.CPSEID,
 					"urr", r.report.URRID, "trigger", r.report.Trigger.String(), "cause", answer.Cause)
 			} else {
@@ -702,6 +725,52 @@ func reportLoop(ctx context.Context, sessions *session.Compiler, sender reportSe
 			}
 		}
 	}
+}
+
+// reportResult is one due report's send: the SMF's answer, or the error that
+// says none came. tried is false for a report the drain did not get to.
+type reportResult struct {
+	answer n4.ReportAnswer
+	err    error
+	tried  bool
+}
+
+// sendReports sends the tick's due reports: the first alone, and once the SMF
+// has answered it the rest with up to reportWindow in flight. The first
+// transport failure stops further sends -- each costs the n4 layer's whole
+// retry budget, and this same tick carries the evaluation that opens windows
+// and enforces quotas, so a CP function that has stopped answering must not
+// hold it. What is not sent keeps its place (and its backoff).
+func sendReports(ctx context.Context, sender reportSender, due []heldReport) []reportResult {
+	out := make([]reportResult, len(due))
+	send := func(i int) bool {
+		// The report is addressed to the CP function, and the header's SEID
+		// is the identity the *receiver* looks the session up with: the CP
+		// F-SEID, not ours (TS 29.244 7.2.2.4.2).
+		r := due[i].report
+		answer, err := sender.Report(ctx, r.CPSEID, r.IEs()...)
+		out[i] = reportResult{answer: answer, err: err, tried: true}
+		return err == nil
+	}
+	if len(due) == 0 || !send(0) {
+		return out
+	}
+	var failed atomic.Bool
+	var wg sync.WaitGroup
+	window := make(chan struct{}, reportWindow)
+	for i := 1; i < len(due) && !failed.Load(); i++ {
+		window <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !send(i) {
+				failed.Store(true)
+			}
+			<-window
+		}()
+	}
+	wg.Wait()
+	return out
 }
 
 // graphArgs is the flag set graphConfig turns into a session.Config.

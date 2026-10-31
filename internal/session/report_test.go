@@ -320,3 +320,44 @@ func TestATickAllocatesAtMostOnePerRule(t *testing.T) {
 			len(reader.held), allocs, perRule)
 	}
 }
+
+// TestAReportTakenBackIsDecidedAgain is UG-B2's other half: a report the loop
+// could not queue is taken back, so the next tick reports the same usage under
+// the same UR-SEQN instead of the window being lost to a moved base.
+func TestAReportTakenBackIsDecidedAgain(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrEstablishment(0x5010, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the measured session answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	ctx, at := context.Background(), time.Unix(1_700_000_000, 0)
+	if reports := c.EvaluateAll(ctx, at); len(reports) != 0 {
+		t.Fatalf("the baseline tick returned %d reports, want none", len(reports))
+	}
+	// 2 MiB crosses the URR's 1 MiB volume threshold.
+	var counts []bess.RuleCount
+	for _, p := range pdrsInOrder(sessionOf(t, c, seid)) {
+		if len(p.urrIDs) > 0 && p.actionID != 0 {
+			counts = append(counts, bess.RuleCount{ActionID: p.actionID, Packets: 2, Octets: 2 << 20})
+		}
+	}
+	rec.counts = map[string][]bess.RuleCount{testConfig().Up.Counters: counts}
+	first := c.EvaluateAll(ctx, at.Add(time.Second))
+	if len(first) != 1 || first[0].Up.Octets != 2<<20 {
+		t.Fatalf("the threshold tick returned %+v, want one report of 2 MiB", first)
+	}
+	if !c.Unreport(first[0]) {
+		t.Fatal("the tick's own report could not be taken back")
+	}
+	again := c.EvaluateAll(ctx, at.Add(2*time.Second))
+	if len(again) != 1 || again[0].Up.Octets != first[0].Up.Octets || again[0].Seqn != first[0].Seqn {
+		t.Errorf("after taking the report back the next tick returned %+v, want the same %d octets under UR-SEQN %d",
+			again, first[0].Up.Octets, first[0].Seqn)
+	}
+	// A report something later has moved past cannot be taken back.
+	if c.Unreport(first[0]) {
+		t.Error("a report the next tick superseded was taken back")
+	}
+}

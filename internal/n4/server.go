@@ -187,7 +187,6 @@ type ReportAnswer struct {
 // every other message here it is this node's own transaction, and the answer is
 // handed to the Report call that is waiting for it rather than to a handler.
 type reportWait struct {
-	seq uint32
 	got chan ReportAnswer // the CP function's answer, buffered once
 }
 
@@ -206,12 +205,11 @@ type Server struct {
 	pending  *pending
 	seq      uint32
 
-	// reportMu serializes the report exchange: one Session Report Request is in
-	// flight at a time, and report is the one being waited for. The usage a
-	// report carries is a decision the session layer makes serially, so a
-	// second concurrent report is not a case to optimize for.
-	reportMu sync.Mutex
-	report   *reportWait
+	// reports are the Session Report Requests in flight, by sequence number:
+	// the caller decides how many it keeps outstanding (upfd's report loop
+	// sends a window of them), and each answer goes to the Report call that
+	// sent its sequence.
+	reports map[uint32]*reportWait
 
 	wake chan struct{}
 	done chan struct{}
@@ -279,6 +277,7 @@ func New(cfg Config) (*Server, error) {
 		nodeID:   nodeID(cfg.NodeID),
 		features: ie.NewUPFunctionFeatures(cfg.UPFunctionFeatures[0], cfg.UPFunctionFeatures[1], cfg.UPFunctionFeatures[2], cfg.UPFunctionFeatures[3]),
 		recovery: ie.NewRecoveryTimeStamp(stamp),
+		reports:  map[uint32]*reportWait{},
 		wake:     make(chan struct{}, 1),
 		done:     make(chan struct{}),
 	}
@@ -469,7 +468,8 @@ func sequenceNumber(b []byte) uint32 {
 //
 // The Cause and the error are different things: a report the SMF *refused* is an
 // answer (it arrived, and the caller decides what to do with the cause), while
-// an error means no answer came at all. Only one report is in flight at a time.
+// an error means no answer came at all. Calls may overlap: each request is its
+// own sequence number, and its answer is matched to it by that number.
 //
 // The answer carries the Update BAR the response did, if any (5.2.4.1): the
 // session layer applies it to the session the report came from, so this call
@@ -478,9 +478,6 @@ func (s *Server) Report(ctx context.Context, seid uint64, ies ...*ie.IE) (Report
 	if s.conn == nil {
 		return ReportAnswer{}, errors.New("n4: the socket is not bound")
 	}
-	s.reportMu.Lock()
-	defer s.reportMu.Unlock()
-
 	s.mu.Lock()
 	if s.peer == nil || s.peer.addr == nil {
 		s.mu.Unlock()
@@ -490,14 +487,12 @@ func (s *Server) Report(ctx context.Context, seid uint64, ies ...*ie.IE) (Report
 	}
 	to := s.peer.addr
 	seq := s.nextSequence()
-	wait := &reportWait{seq: seq, got: make(chan ReportAnswer, 1)}
-	s.report = wait
+	wait := &reportWait{got: make(chan ReportAnswer, 1)}
+	s.reports[seq] = wait
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		if s.report == wait {
-			s.report = nil
-		}
+		delete(s.reports, seq)
 		s.mu.Unlock()
 	}()
 
@@ -534,9 +529,9 @@ func (s *Server) onReportResponse(resp *message.SessionReportResponse) {
 		}
 	}
 	s.mu.Lock()
-	wait := s.report
+	wait := s.reports[resp.Sequence()]
 	s.mu.Unlock()
-	if wait == nil || wait.seq != resp.Sequence() {
+	if wait == nil {
 		s.log.Info("n4: a session report response arrived with no report waiting for it",
 			"seq", resp.Sequence(), "cause", causeName(cause))
 		return
