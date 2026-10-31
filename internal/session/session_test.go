@@ -749,10 +749,9 @@ func TestAReleasedPinInsideTheRangeComesBack(t *testing.T) {
 }
 
 func TestAQueuedPinIsNotHandedOutByTheWalk(t *testing.T) {
-	// A pin released before the walk reaches it is queued, and the value is
-	// still ahead of the walk -- so both paths can offer it. The walk must skip
-	// an id that is queued, or one id is handed to two sessions: once here, once
-	// from the free list.
+	// A pin released before the walk reaches it is still ahead of the walk, and
+	// the walk offers it; queuing it too would let both paths offer it, and one
+	// id would be handed to two sessions: once here, once from the free list.
 	p := newIDPool(64, 0)
 	p.reserve(5)
 	p.release(5)
@@ -3227,8 +3226,9 @@ func TestARefusedEstablishmentReleasesItsIDs(t *testing.T) {
 	if got := cause(t, c.Establish(bad)); got != ie.CauseRuleCreationModificationFailure {
 		t.Fatalf("the inexpressible PDI answered cause %d", got)
 	}
-	// With the id back the space still has one; without it, the answer here is
-	// cause 75.
+	// With the id back the space still has one once the reuse delay has
+	// passed; without it, the answer here is cause 75.
+	c.teids.now = func() time.Time { return time.Now().Add(time.Minute) }
 	good := c.Establish(establishment(0x5563, "10.45.0.7")).(*message.SessionEstablishmentResponse)
 	if got := cause(t, good); got != ie.CauseRequestAccepted {
 		t.Errorf("after a refused establishment the space answered cause %d", got)
@@ -3252,6 +3252,11 @@ func TestAnEmptyIDPoolAnswersNoResources(t *testing.T) {
 // handed to two sessions later.
 func TestARepeatedReleaseQueuesOneID(t *testing.T) {
 	p := newIDPool(4, 0)
+	for { // the walk passes every id: releases only queue ids it has passed
+		if _, err := p.alloc(); err != nil {
+			break
+		}
+	}
 	p.release(3)
 	p.release(3)
 	p.release(3)
@@ -3316,7 +3321,9 @@ func TestAMergeRefusalReleasesWhatItAllocated(t *testing.T) {
 	if got := cause(t, c.Establish(clash)); got != ie.CauseNoResourcesAvailable {
 		t.Fatalf("the clashing session answered cause %d", got)
 	}
-	// The id the refused session allocated is back: a new session gets it.
+	// The id the refused session allocated is back: once the reuse delay has
+	// passed, a new session gets it.
+	c.teids.now = func() time.Time { return time.Now().Add(time.Minute) }
 	next := c.Establish(establishment(0x5712, "10.45.0.10")).(*message.SessionEstablishmentResponse)
 	if got := cause(t, next); got != ie.CauseRequestAccepted {
 		t.Errorf("after a refused merge the single id was not given back (cause %d)", got)
@@ -3388,18 +3395,18 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 	c.releaseSession(first)
 	remaining := c.fteidTEIDKeys[0x77]
 	_, secondStillOwned := c.byFTEID[fteidKeysOf(secondPDR)[0]]
-	freed := len(c.teids.freed)
+	pinned := c.teids.taken[0x77]
 	c.mu.Unlock()
-	if remaining != 1 || !secondStillOwned || freed != 0 {
-		t.Fatalf("releasing one endpoint prematurely freed the shared TEID: refs=%d owner=%v freed=%d", remaining, secondStillOwned, freed)
+	if remaining != 1 || !secondStillOwned || !pinned {
+		t.Fatalf("releasing one endpoint prematurely freed the shared TEID: refs=%d owner=%v pinned=%v", remaining, secondStillOwned, pinned)
 	}
 	c.mu.Lock()
 	c.releaseSession(second)
-	remaining, freed = c.fteidTEIDKeys[0x77], len(c.teids.freed)
+	remaining, pinned = c.fteidTEIDKeys[0x77], c.teids.taken[0x77]
 	contexts := len(c.fteidContexts)
 	c.mu.Unlock()
-	if remaining != 0 || freed != 1 || contexts != 0 {
-		t.Fatalf("last endpoint did not release TEID exactly once: refs=%d freed=%d contexts=%d", remaining, freed, contexts)
+	if remaining != 0 || pinned || contexts != 0 {
+		t.Fatalf("last endpoint did not release the TEID: refs=%d pinned=%v contexts=%d", remaining, pinned, contexts)
 	}
 }
 
@@ -4897,14 +4904,14 @@ func TestARemovedQERsMeterReturnsAtTeardown(t *testing.T) {
 	// removal would be one another session could meter with while this one
 	// still names it. The deletion is where the pool gets it back, which is
 	// what releaseSession does for every id the session holds.
-	if c.meters.released[meter] {
+	if c.meters.queued(meter) {
 		t.Error("the removed QER's meter was returned to the pool while the session lives")
 	}
 	del := message.NewSessionDeletionRequest(0, 0, seid, 5, 0)
 	if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
-	if !c.meters.released[meter] {
+	if !c.meters.queued(meter) {
 		t.Error("the removed QER's meter was not returned to the pool with the session")
 	}
 }

@@ -56,7 +56,7 @@ func TestARefusedModificationGivesBackTheMetersAndTEIDsItTook(t *testing.T) {
 	seid := upFSEID(t, resp)
 
 	c.mu.Lock()
-	metersBefore := len(c.meters.released)
+	metersBefore := len(c.meters.freed)
 	c.mu.Unlock()
 	// A new QER with a rate (the merge allocates its meters) and a second
 	// uplink PDR pinned to an F-TEID of its own, in a request the merge refuses
@@ -77,7 +77,7 @@ func TestARefusedModificationGivesBackTheMetersAndTEIDsItTook(t *testing.T) {
 	if c.fteidTEIDKeys[0x4242] != 0 {
 		t.Error("the refused request's exact F-TEID key was not released")
 	}
-	if got := len(c.meters.released) - metersBefore; got != 2 {
+	if got := len(c.meters.freed) - metersBefore; got != 2 {
 		t.Errorf("%d meters were given back, want the refused QER's uplink and downlink pair", got)
 	}
 	if s := c.sessions[seid]; s.QERs[9] != nil || s.PDRs[5] != nil {

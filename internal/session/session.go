@@ -24,10 +24,8 @@ package session
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"net"
 	"net/netip"
 	"slices"
@@ -539,6 +537,13 @@ type fteidContext struct {
 	keys int // claimed exact admission keys that write this id
 }
 
+// teidReuseDelay is how long a released F-TEID waits before the pool may hand
+// it out again: G-PDUs the peer sent before it learnt of the deletion are
+// still arriving, and a TEID reissued at once would admit them to another
+// session. It is a floor, not the whole wait: the pool hands out fresh TEIDs
+// while it has them.
+const teidReuseDelay = 5 * time.Second
+
 // New returns a compiler writing through ap.
 func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	if log == nil {
@@ -562,8 +567,11 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		actions:       newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		policies:      newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		meters:        newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
-		teids:         newIDPool(cfg.MaxTEIDs, 0),
-		contexts:      newIDPool(1<<31, 0),
+		teids:         newIDPool(cfg.MaxTEIDs, teidReuseDelay),
+		// A context never reaches the wire (GtpuDecap writes it, the PDR key
+		// matches it), so it may be reused at once -- and over a 2^31 space a
+		// grace would hold every release until a walk that never ends.
+		contexts: newIDPool(1<<31, 0),
 	}
 	if reader, ok := ap.(CounterReader); ok {
 		c.counters = reader
@@ -1360,153 +1368,6 @@ func (c *Compiler) checkpoint(kind string, seid uint64, msg message.Message) {
 		// re-establishes. There is nothing else to undo here.
 		c.log.Error("session: the checkpoint did not take the change", "kind", kind, "seid", seid, "error", err)
 	}
-}
-
-// idPool hands out small ids and takes them back, so a long-lived UPF reuses
-// the space the dataplane's fixed-size tables have.
-//
-// The walk is spread, not in order: the pool starts at a random point and steps
-// by a random stride, so it visits the whole space once. Two reasons, both
-// about the dataplane's slots. A transaction that removes a record leaves its
-// slot retiring for a grace period and refuses a publish into it
-// (core/dataplane/slot_table.h: CanPublish), and the engine's cascade of those
-// periods is asynchronous: a compiler that reissued the ids it had just
-// released got "the meter is still retiring (removed less than a grace period
-// ago)", and the session established right after a deletion was refused. And a
-// *new* compiler -- after a controller restart, replaying what the SMF sends
-// again -- knows nothing of what the daemon still holds retiring, so it must
-// not walk its predecessor's order either. A released id is reused only after
-// the walk has come round (and then only once it has aged), which is far longer
-// than any grace period.
-type idPool struct {
-	limit  uint32
-	start  uint32 // where the walk began, and so where it is done
-	next   uint32
-	stride uint32
-	walked bool // the walk has visited every id once
-	grace  time.Duration
-	now    func() time.Time
-	freed  []freedID
-	// taken holds ids the pool must not hand out even though its own books say
-	// nothing about them: an F-TEID an SMF pinned, which another session is
-	// using right now. Pool-owned ids need no entry (the walk visits each once,
-	// and a released one is aged before it is visited again).
-	taken map[uint32]bool
-	// released is the ids waiting in freed: a session releases an id once per
-	// PDR that names it, and the pool must not queue it twice.
-	released map[uint32]bool
-}
-
-type freedID struct {
-	id uint32
-	at time.Time
-}
-
-// newIDPool returns a pool of ids 1..limit-1 (the dataplane's slots are
-// numbered from 1). The starting point and the stride are random; the stride is
-// coprime with the space, so the walk visits every id.
-func newIDPool(limit uint32, grace time.Duration) *idPool {
-	p := &idPool{limit: limit, grace: grace, now: time.Now,
-		taken: map[uint32]bool{}, released: map[uint32]bool{}}
-	if limit < 2 {
-		// No usable id at all (the slots are numbered from 1): the walk is
-		// over before it starts, so alloc goes straight to the empty free list
-		// and answers no-resources. A misconfigured -capacity must not panic in
-		// the walk's arithmetic (limit 0 would underflow span).
-		p.walked = true
-		return p
-	}
-	span := limit - 1
-	p.start = 1 + rand.Uint32N(span)
-	p.next = p.start
-	for {
-		p.stride = 1 + rand.Uint32N(span)
-		if gcd(p.stride, span) == 1 {
-			return p
-		}
-	}
-}
-
-func gcd(a, b uint32) uint32 {
-	for b != 0 {
-		a, b = b, a%b
-	}
-	return a
-}
-
-// advance is one step of the walk: ids stay in 1..limit-1.
-func (p *idPool) advance(id uint32) uint32 {
-	span := p.limit - 1
-	if span < 1 {
-		span = 1 // a pool with no ids: the walk is one step long
-	}
-	return 1 + (id-1+p.stride)%span
-}
-
-func (p *idPool) alloc() (uint32, error) {
-	// One walk of the space: an id released behind the walk waits for the
-	// round trip, which is what keeps it out of circulation past the grace.
-	// An id another session pinned is skipped wherever the walk meets it.
-	for !p.walked {
-		id := p.next
-		p.next = p.advance(p.next)
-		if p.next == p.start {
-			p.walked = true
-		}
-		if !p.taken[id] && !p.released[id] {
-			// A released id is skipped even though nothing holds it: it is in
-			// the free list, and handing it out here would hand it out twice.
-			return id, nil
-		}
-	}
-	// The walk is done: a released id, if one has aged.
-	for n := len(p.freed); n != 0; n = len(p.freed) {
-		oldest := p.freed[0]
-		if p.now().Sub(oldest.at) < p.grace {
-			break
-		}
-		p.freed = p.freed[1:]
-		delete(p.released, oldest.id)
-		if !p.taken[oldest.id] {
-			return oldest.id, nil
-		}
-	}
-	return 0, errors.New("id space exhausted")
-}
-
-// reserve keeps an id the pool did not hand out out of the walk: an F-TEID an
-// SMF pinned. The walk visits each id once and never returns, so this matters
-// twice: a pinned value must not be handed out while the session holds it, and
-// once released (releaseSession) the value comes back only because release
-// queues it -- outside the pool's range nothing queues it, which is what keeps
-// 0x11223344 (a legal pin, an illegal allocation) out of the free list.
-func (p *idPool) reserve(id uint32) {
-	if id == 0 {
-		return
-	}
-	p.taken[id] = true
-}
-
-// release takes back an id the pool handed out, or ends the reservation of one
-// an SMF pinned. Either way the id is queued for allocation when it lies in the
-// pool's own range: the walk visits each id once and never comes round again, so
-// a value it passed while it was taken or reserved would otherwise be gone for
-// the life of the pool -- the SMF that pinned it could not pin it again, and no
-// other session could be given it. A value outside the range (0x11223344 is a
-// legal pin and an illegal allocation) only ends its reservation: the range is
-// what the deployment's peer expects to see in a TEID. A zero grace means an id
-// may be reused as soon as the walk is over (for a resource with no retire
-// period: F-TEID admission entries are exact-index keys, not slots).
-func (p *idPool) release(id uint32) {
-	if id == 0 {
-		return
-	}
-	delete(p.taken, id)
-	if id >= p.limit || p.released[id] {
-		return
-	}
-	p.released[id] = true
-	p.freed = append(p.freed, freedID{id: id, at: p.now()})
 }
 
 // res is the resource table t is, as the compiler's target names it.
