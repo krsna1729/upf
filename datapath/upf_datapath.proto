@@ -285,6 +285,10 @@ message UrrCountCommandGetCountsArg {
   // Appliance counter bank: counters_ul, counters_dl, or buffer_counters.
   // Graph UrrCount callers omit this selector.
   string table = 3;
+  // UpfAppliance and UpfSessionAppliance page a read with no action_ids:
+  // the rules above this ActionId, at most 1048576 of them, so a reply stays
+  // under gRPC's 64 MiB at any table size. They refuse more action_ids than that.
+  uint32 after = 4;
 }
 
 // UrrCountCommandGetCountsResponse is one reading of the counters: every
@@ -311,6 +315,9 @@ message UrrCountCommandGetCountsResponse {
   // timestamp carries.
   uint64 read_monotonic_ns = 2;
   uint64 read_wall_unix_ns = 3;
+  // UpfAppliance and UpfSessionAppliance, with no action_ids: the ActionId to
+  // pass as `after` for the next page, or 0 when this page was the last.
+  uint32 next_after = 4;
 }
 
 // TunnelKey selects a per-action GtpuEncap tunnel record.
@@ -393,7 +400,9 @@ message UpfApplianceArg {
   GtpuDecapArg decap = 1;
   UpfAppliancePdrArg pdr_ul = 2;
   UpfAppliancePdrArg pdr_dl = 3;
-  UrrCountArg counters = 4; // same capacity for all three independent banks
+  // Same capacity for all three independent banks. worker_planes 0 means one
+  // plane here, written by the module's single worker whatever its id.
+  UrrCountArg counters = 4;
   UpfApplianceMeterArg meter = 5;
   GtpuEncapArg encap = 6;
   AtsssSteerArg atsss = 7; // capacity only; no packet metadata used

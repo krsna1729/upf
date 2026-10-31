@@ -246,7 +246,7 @@ Seen Classify(const Store &s, uint8_t host = 2) {
 uint64_t Packets(const SessionResource &s, uint32_t id, bool dl) {
   upf::pb::UrrCountCommandGetCountsResponse out;
   const uint32_t ids[] = {id};
-  s.Counts(dl, ids, false, &out);
+  s.Counts(dl, ids, false, 0, SIZE_MAX, &out);
   return out.counts_size() == 1 ? out.counts(0).packets() : ~uint64_t{0};
 }
 
@@ -563,9 +563,17 @@ TEST(SessionStore, BulkReadsHoldTheLockForAChunkAndNeverReFind) {
   constexpr uint32_t kN = 100000;
   Store s({.capacity = kN, .max_actions = 1, .max_qers = 1});
   for (uint32_t i = 0; i < kN; ++i) ASSERT_TRUE(Applied(s.Put(Counted(i), i + 1))) << "session " << i + 1;
+  // Pages of 30000: 4 pages, every action once, in order.
   upf::pb::UrrCountCommandGetCountsResponse out;
-  s.sessions->Counts(false, {}, false, &out);
+  int pages = 0;
+  uint32_t after = 0;
+  do {
+    after = s.sessions->Counts(false, {}, false, after, 30000, &out);
+    ++pages;
+  } while (after != 0);
+  EXPECT_EQ(pages, 4);
   EXPECT_EQ(out.counts_size(), static_cast<int>(kN));
+  for (int i = 1; i < out.counts_size(); ++i) ASSERT_LT(out.counts(i - 1).action_id(), out.counts(i).action_id());
   EXPECT_EQ(s.sessions->work().action_finds, 0u) << "a bulk read looked each action up again";
   EXPECT_LE(s.sessions->work().max_per_hold, SessionResource::kEntriesPerHold) << "get_counts";
   size_t visited = 0;

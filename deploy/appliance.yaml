@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Production: only port adapters and one owned appliance, no helper datapath.
+# Packet pool: run bessd with --buffers=131071 (2^17 - 1, against the 262144
+# default): buffering holds up to buffer.max_packets (65536) plus the two
+# ports' rings and the bursts in flight.
 ports:
   - {name: n3, driver: PMDPort, arg: {port_id: 0}, num_rx_queues: 1}
   - {name: n6, driver: PMDPort, arg: {port_id: 1}, num_rx_queues: 1}
@@ -9,6 +12,9 @@ modules:
   - name: upf
     mclass: UpfAppliance
     arg:
+      # ActionIds 1..capacity for the three counter banks; one worker plane
+      # (the module runs on one worker): 16 B per id per bank.
+      counters: {capacity: 65536, worker_planes: 1}
       interfaces:
         - {ingress_gate: 0, output_gate: 1, id: 1, endpoint_id: 1, mac_addr: '02:00:00:00:03:01', ip_addr: '192.0.2.1', ipv6_addr: '2001:db8:1::1', addresses: ['192.0.2.1/24', '2001:db8:1::1/64'], transport_route_domain: 1}
         - {ingress_gate: 0, output_gate: 2, id: 2, endpoint_id: 2, mac_addr: '02:00:00:00:09:01', ip_addr: '192.0.2.3', ipv6_addr: '2001:db8:9::1', addresses: ['192.0.2.3/24', '2001:db8:9::1/64'], transport_route_domain: 2}

@@ -30,6 +30,7 @@
 #include "stats/keyed_counters.h"
 #include "stats/metric_registry.h"
 #include "utils/dpdk_memory.h"
+#include "counter_ids.h"
 #include "upf_appliance_sessions.h"
 
 namespace upf::appliance {
@@ -40,8 +41,9 @@ struct Stamps { std::atomic<uint64_t> first{0}, last{0}; };
 struct Counters {
   Sized<bess::dataplane::SlotTable<Id, CounterEntry>> entries;
   Sized<bess::stats::KeyedCounters> cells;
-  bess::framework::MemoryLease stamps_lease;
+  bess::framework::MemoryLease stamps_lease, live_lease;
   bess::utils::DpdkArray<Stamps> stamps;
+  std::unique_ptr<LiveIds> live;  // the ids `entries` holds, walked by get_counts
   std::unique_ptr<bess::dataplane::SlotResource<Id, CounterEntry>> resource;
 };
 struct Pdr {

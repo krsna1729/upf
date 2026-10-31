@@ -146,8 +146,16 @@ with that original decision, whatever the PDR table says by then.
 
 Behaviours the graph drops are counted drops (miss, gate 8192, red meter,
 unresolved neighbour, TTL ≤ 1, no tunnel, unknown MAC, malformed GTP-U...).
+
+The counter banks keep one worker plane unless `counters.worker_planes`
+asks for more: the module runs on one worker, which writes plane 0 whatever
+its id, so a bank costs 16 B per ActionId. A `get_counts` without
+`action_ids` walks the bank's live ids, not its capacity, in pages of at most
+2^20 rules (under gRPC's 64 MiB): pass the reply's `next_after` as `after`
+until it is 0. Either layout refuses more than 2^20 `action_ids` per read.
 Evidence: `gtpu_datapath_test` (`upf_appliance_frame_test.cc` key layout,
-`packet_helpers_test.cc` shared per-packet helpers), `upf_appliance_selftest.cc`
+`packet_helpers_test.cc` shared per-packet helpers, `upf_appliance_test.cc`
+counter planes and paged reads), `upf_appliance_selftest.cc`
 (table round trip), and `UPF_TARGET=appliance` runs of `ci/session-path.sh`,
 `ci/n4-path.sh` and `ci/session-report.sh`, which assert the same external
 bytes and counters as the graph arm.
