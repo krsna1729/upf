@@ -2740,14 +2740,14 @@
    "id": "status-44",
    "scope": "status",
    "evidence": [
-    "TestReceivedEndMarkersAreRelayedThroughTheirTunnels",
+    "TestEndMarkerRelaysAreWrittenWithTheirFTEIDsAdmission",
     "ci/iface-path.sh",
     "ci/veth-layouts.sh"
    ],
    "result": {
     "state": "ok",
     "evidence": {
-     "TestReceivedEndMarkersAreRelayedThroughTheirTunnels": {
+     "TestEndMarkerRelaysAreWrittenWithTheirFTEIDsAdmission": {
       "state": "ok"
      },
      "ci/iface-path.sh": {
