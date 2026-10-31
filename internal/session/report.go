@@ -690,7 +690,7 @@ func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts re
 	if err != nil {
 		return reports, fmt.Errorf("compiling the enforcement: %w", err)
 	}
-	if err := c.ap.Apply(ctx, changes...); err != nil {
+	if err := c.apply(ctx, s, changes, false); err != nil {
 		// The flag stays in the model, so the next evaluation compiles the same
 		// enforcement again; until it lands the traffic keeps flowing over a
 		// quota, which the report says.

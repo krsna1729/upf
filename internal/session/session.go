@@ -382,6 +382,12 @@ type Config struct {
 	// deployment uses. Empty is the module graph, whose tables are
 	// "<module>/<table>" of the modules those fields name.
 	Appliance string
+
+	// Sessions is the appliance's session-major layout (UpfSessionAppliance,
+	// upfd's -target session-major), with Appliance naming the module: each
+	// session is one "<module>/sessions" entry (sessionmajor.go). Nil is the
+	// appliance's masked layout, or the graph.
+	Sessions *SessionLayout
 }
 
 // downlink is whether this PDR's packets travel toward the UE. Source
@@ -502,6 +508,9 @@ type Compiler struct {
 	// by it: the decap's max_fteids is what bounds live contexts.
 	fteidContexts map[fteidContextKey]*fteidContext
 	contexts      *idPool
+	// sessionIDs are the "<module>/sessions" keys (cfg.Sessions), aged like
+	// the action ids: an erased session's id retires for a grace period.
+	sessionIDs *idPool
 	// MAR policy and tunnel records are allocated from the same pools as
 	// action records: a tunnel key shares the GtpuEncap table with an ordinary
 	// PDR's action key, and a policy key must be unique across sessions. The
@@ -572,6 +581,9 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		// matches it), so it may be reused at once -- and over a 2^31 space a
 		// grace would hold every release until a walk that never ends.
 		contexts: newIDPool(1<<31, 0),
+	}
+	if cfg.Sessions != nil {
+		c.sessionIDs = newIDPool(cfg.Sessions.MaxSessions+1, cfg.IDReuseDelay)
 	}
 	if reader, ok := ap.(CounterReader); ok {
 		c.counters = reader
@@ -685,6 +697,13 @@ type Session struct {
 	// lock. compile adds a key when it is the first to claim it, settle removes
 	// the ones a transaction gave up, and releaseSession frees what is left.
 	ruleKeys []string
+
+	// sessionID is the session's "<module>/sessions" key under
+	// -target session-major (sessionmajor.go), 0 before its first write;
+	// sessionLive says that entry may be in the dataplane, so the deletion
+	// erases it.
+	sessionID   uint32
+	sessionLive bool
 }
 
 // modelSnapshot is a session's model as it stood before a modification was
@@ -1647,6 +1666,12 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 			add(bess.Change{Resource: c.res(MetersDownlink), Key: map[string]any{"id": q.meterDL}})
 		}
 	}
+	// Under -target session-major the session's records are one entry: the
+	// removal erases it (foldSession), wherever the changes are applied --
+	// remove, or AssociationEnded's batches.
+	if _, ok := c.target.(sessionTarget); ok {
+		return c.foldSession(s, changes, true)
+	}
 	return changes, nil
 }
 
@@ -1796,6 +1821,10 @@ func (c *Compiler) releaseSession(s *Session) {
 		}
 	}
 	clear(s.chids)
+	if s.sessionID != 0 && c.sessionIDs != nil {
+		c.sessionIDs.release(s.sessionID)
+		s.sessionID, s.sessionLive = 0, false
+	}
 	// The meters are the QERs': one per policed direction, allocated with the
 	// QER and not with the PDRs that happen to name it. A QER a modification
 	// removed is one of them: the removal took it out of the model, so this is

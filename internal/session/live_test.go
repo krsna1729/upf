@@ -18,8 +18,12 @@ import (
 // exactly as a deployment spells them.
 func liveConfig() Config {
 	cfg := testConfig()
-	if os.Getenv("UPF_TARGET") == "appliance" {
+	if liveAppliance() {
 		cfg.Appliance = "upf"
+	}
+	if os.Getenv("UPF_TARGET") == "session-major" {
+		// deploy/session-path-session-major.yaml's session arguments.
+		cfg.Sessions = &SessionLayout{MaxSessions: 1024, Actions: 4, QERs: 4}
 	}
 	cfg.GTPUDecap = "decap0"
 	cfg.Up = Direction{
@@ -56,6 +60,13 @@ func liveConfig() Config {
 	// set matching capacities on Meter, UrrCount and GtpuEncap; compiler ID
 	// spaces must fit those resource limits or the session is refused.
 	return cfg
+}
+
+// liveAppliance is whether the lane deployed an appliance module ("upf"),
+// in either layout (UPF_TARGET=appliance or session-major).
+func liveAppliance() bool {
+	t := os.Getenv("UPF_TARGET")
+	return t == "appliance" || t == "session-major"
 }
 
 // TestLiveSessionProgramsTheDaemon runs the whole control path against a real

@@ -89,9 +89,9 @@ func run() error {
 		"the bound on route-domain ids: every -instances domain must be below it. With "+
 			"-route-mode=destination it must equal the inner Router's max_domains, or a packet "+
 			"classified in a domain the router does not have resolves to no table")
-	pdrFieldsUL := flag.String("pdr-fields-ul", "src,dst,proto,sport,dport,fteid,qfi",
+	pdrFieldsUL := flag.String("pdr-fields-ul", defaultPDRFieldsUL,
 		"the uplink PDR table's fields, in the graph's order")
-	pdrFieldsDL := flag.String("pdr-fields-dl", "src,dst,proto,sport,dport,domain,fteid,qfi",
+	pdrFieldsDL := flag.String("pdr-fields-dl", defaultPDRFieldsDL,
 		"the downlink PDR table's fields, in the graph's order")
 	metersUL := flag.String("meters-ul", "mt_ul", "the uplink Meter module")
 	pdrTableUL := flag.String("pdr-table-ul", "pdr_ul",
@@ -155,14 +155,25 @@ func run() error {
 	target := flag.String("target", "graph",
 		"what the session compiler writes to: graph (the default) is the module graph, every "+
 			"table \"<module>/<table>\" of the module its flag names; appliance is one module "+
-			"(-appliance) that runs the whole user plane and owns every table. With appliance the "+
+			"(-appliance) that runs the whole user plane and owns every table; session-major is "+
+			"that appliance with the session-major layout (UpfSessionAppliance): each PFCP "+
+			"session is one \"<module>/sessions\" entry, rewritten beside running workers. With "+
+			"appliance or session-major the "+
 			"module flags (-gtpu-decap, -pdr-table-*, -meters-*, -counters-*, -tunnels*, -atsss, "+
 			"-buffer-store, -buffer-counter, -buffer-gate, -gtpu-errors, -gtpu-end-markers) are not "+
 			"read: the appliance has every table and buffers, steers and tracks errors and End "+
 			"Markers, so -urr-interval must be positive. A nonempty -instances arp= enables "+
 			"the appliance's subscriber ARP proxy for that interface")
 	applianceModule := flag.String("appliance", "upf",
-		"the appliance module's name, with -target appliance")
+		"the appliance module's name, with -target appliance or session-major")
+	maxSessions := flag.Uint("max-sessions", 65536,
+		"-target session-major: the module's session.capacity (session ids 1..N)")
+	sessionActions := flag.Uint("session-actions", 4,
+		"-target session-major: the module's session.max_actions, the actions one session holds "+
+			"(one per forwarding, buffering or measured PDR, plus its ATSSS tunnels), 1..16")
+	sessionQERs := flag.Uint("session-qers", 4,
+		"-target session-major: the module's session.max_qers, the rate-bearing QER meters "+
+			"one session holds, 0..16")
 	// The config file's own flag: its value is read back from the flag set
 	// (applyLayers), because it must be layered like any other flag before the
 	// file it names is read.
@@ -265,8 +276,10 @@ func run() error {
 		}
 		defer client.Close()
 		graph, err := graphConfig(graphArgs{
-			target:         *target,
-			appliance:      *applianceModule,
+			target:    *target,
+			appliance: *applianceModule,
+			sessions: session.SessionLayout{MaxSessions: uint32(*maxSessions),
+				Actions: int(*sessionActions), QERs: int(*sessionQERs)},
 			fteidAddresses: fteidAddresses,
 			capacity:       uint32(*capacity),
 			n6NextHop:      uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
@@ -777,6 +790,7 @@ func sendReports(ctx context.Context, sender reportSender, due []heldReport) []r
 type graphArgs struct {
 	target         string
 	appliance      string
+	sessions       session.SessionLayout
 	fteidAddresses entryList
 	capacity       uint32
 	n6NextHop      uint32
@@ -805,11 +819,35 @@ type graphArgs struct {
 	endMarker      string
 }
 
+// The PDR key fields every appliance table has: UpfSessionAppliance packs its
+// rules in exactly this order (UpfSessionPdr), so -target session-major
+// takes no other.
+const (
+	defaultPDRFieldsUL = "src,dst,proto,sport,dport,fteid,qfi"
+	defaultPDRFieldsDL = "src,dst,proto,sport,dport,domain,fteid,qfi"
+)
+
 // graphConfig is the deployed dataplane's shape, from the flags: the module
-// graph's, or the appliance's (-target).
+// graph's, or the appliance's in either layout (-target).
 func graphConfig(a graphArgs) (session.Config, error) {
-	if a.target != "graph" && a.target != "appliance" {
-		return session.Config{}, fmt.Errorf("-target %q is graph or appliance", a.target)
+	if a.target != "graph" && a.target != "appliance" && a.target != "session-major" {
+		return session.Config{}, fmt.Errorf("-target %q is graph, appliance or session-major", a.target)
+	}
+	if a.target == "session-major" {
+		if a.pdrFieldsUL != defaultPDRFieldsUL || a.pdrFieldsDL != defaultPDRFieldsDL {
+			return session.Config{}, fmt.Errorf("-target session-major packs the PDR keys in the default field order: -pdr-fields-ul %q -pdr-fields-dl %q",
+				defaultPDRFieldsUL, defaultPDRFieldsDL)
+		}
+		l := a.sessions
+		if l.MaxSessions == 0 || l.MaxSessions > 1<<27-1 {
+			return session.Config{}, fmt.Errorf("-max-sessions %d is 1..%d", l.MaxSessions, 1<<27-1)
+		}
+		if l.Actions < 1 || l.Actions > 16 {
+			return session.Config{}, fmt.Errorf("-session-actions %d is 1..16", l.Actions)
+		}
+		if l.QERs < 0 || l.QERs > 16 {
+			return session.Config{}, fmt.Errorf("-session-qers %d is 0..16", l.QERs)
+		}
 	}
 	fteidEndpoints, err := parseFTEIDAddresses(a.fteidAddresses, a.instances != "")
 	if err != nil {
@@ -908,8 +946,15 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		AccessNextHop: a.accessNextHop,
 		Atsss:         a.atsss,
 	}
-	if a.target == "appliance" {
+	switch a.target {
+	case "appliance":
 		return applianceConfig(graph, a.appliance)
+	case "session-major":
+		cfg, err := applianceConfig(graph, a.appliance)
+		if err == nil {
+			cfg.Sessions = &a.sessions
+		}
+		return cfg, err
 	}
 	if a.bufferStore != "" {
 		// The buffering branch is all three names or none: a store collects the
