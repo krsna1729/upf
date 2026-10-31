@@ -131,6 +131,19 @@ type reading struct {
 	First, Last time.Time
 }
 
+// readings is a reading's answers as a decision looks them up: by the ActionId
+// of the rule each belongs to. An ActionId is one PDR's and a PDR is counted by
+// one module, so the modules' answers share the one index.
+type readings func(actionID uint32) reading
+
+// countChunk is the most rules one get_counts names. The daemon refuses a
+// message over 64 MiB, and one reading of every counted rule passes that at
+// ~2M rules (34 B a rule on the wire): that tick's reading failed every time,
+// and no URR reported. A rule is at most 52 B on the wire (five varints at
+// their widest, its tag and length), so a chunk's reply is at most ~3.3 MiB,
+// and 2M rules are ~32 round trips per module.
+const countChunk = 1 << 16
+
 // Report is one report this UPF owes the SMF for one URR: why it is due, and
 // the usage of the window it covers.
 type Report struct {
@@ -321,13 +334,14 @@ func usageReportIE(typ ie.IEType, urrID, seqn uint32, trigger Trigger, endMarker
 // call.
 //
 // It is not Evaluate in a loop, and that is the point: the counters are read
-// **once per counter module** before any session is judged -- the module's own
-// reading of every rule it holds, one round trip -- and each session is then
-// decided in memory against what was read. A tick at the 1M-session target is
-// therefore one call per counter module rather than one or two million (the
-// per-session read this replaced), which is docs/design.md's control-plane
-// O(total sessions) item 3; what is read is still every counted rule of every
-// session, so the tick's read is O(all sessions) in bytes, not in round trips.
+// **per counter module** before any session is judged -- every rule of the
+// tick's sessions the module counts, named in chunks of countChunk -- and each
+// session is then decided in memory against what was read. A tick at the
+// 1M-session target is therefore a few dozen calls per counter module rather
+// than one or two million (the per-session read this replaced), which is
+// docs/design.md's control-plane O(total sessions) item 3; what is read is
+// still every counted rule of every session, so the tick's read is O(all
+// sessions) in bytes, not in round trips.
 //
 // A module whose reading fails costs the sessions that measure through it and
 // nothing else, the way a per-session read that failed cost its own session,
@@ -336,20 +350,33 @@ func usageReportIE(typ ie.IEType, urrID, seqn uint32, trigger Trigger, endMarker
 func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	c.mu.Lock()
 	seids := make([]uint64, 0, len(c.sessions))
-	modules := map[string]bool{}
+	if c.tickIDs == nil {
+		c.tickIDs = map[string][]uint32{}
+	}
+	ids := c.tickIDs
+	for module, rules := range ids {
+		ids[module] = rules[:0]
+	}
 	for seid, s := range c.sessions {
 		seids = append(seids, seid)
-		c.measuredModules(s, modules)
+		c.appendMeasuredRules(s, ids)
 	}
 	c.mu.Unlock()
 	slices.Sort(seids)
-
+	names := make([]string, 0, len(ids))
+	top := uint32(0)
+	for module, rules := range ids {
+		if len(rules) > 0 {
+			names = append(names, module)
+			top = max(top, slices.Max(rules))
+		}
+	}
 	readsErrors := c.cfg.GTPUErrors != ""
 	// The End Marker log is drained every tick it is configured, whether or
 	// not any session asks: a drain is what frees the ring, and an End Marker
 	// no REEMR URR names is one nobody asked to hear about.
 	readsMarkers := c.cfg.GTPUEndMarkers != ""
-	if len(modules) == 0 && !readsErrors && !readsMarkers {
+	if len(names) == 0 && !readsErrors && !readsMarkers {
 		// No session measures anything: nothing to read, and nothing owed --
 		// the per-session path returns before its own read on exactly this
 		// fact.
@@ -373,26 +400,39 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 		}
 		return nil
 	}
-	// One read per module, in a fixed order, each naming no rule: the modules
-	// are separate reads because the daemon bounds one message (64 MiB), and
-	// the reading is the module's own enumeration of the rules it holds.
-	names := make([]string, 0, len(modules))
-	for module := range modules {
-		names = append(names, module)
-	}
+	// Each module in a fixed order, its rules in chunks: one reply holding
+	// every rule would pass the daemon's 64 MiB bound (countChunk). The
+	// answers land in the one slice indexed by ActionId the report loop keeps.
 	slices.Sort(names)
-	counts := make(map[string]map[uint32]reading, len(names))
+	if need := int(top) + 1; len(c.tickCounts) < need {
+		c.tickCounts = make([]reading, need)
+	}
+	cells := c.tickCounts
 	failed := make([]string, 0, len(names))
 	failures := make(map[string]error, len(names))
 	for _, module := range names {
-		read, err := counters.RuleCounts(ctx, module)
-		if err != nil {
-			failed = append(failed, module)
-			failures[module] = fmt.Errorf("reading %s: %w", module, err)
-			continue
+		for rules := ids[module]; len(rules) > 0; {
+			chunk := rules[:min(len(rules), countChunk)]
+			rules = rules[len(chunk):]
+			read, err := counters.RuleCounts(ctx, module, chunk...)
+			if err != nil {
+				failed = append(failed, module)
+				failures[module] = fmt.Errorf("reading %s: %w", module, err)
+				break
+			}
+			for _, rule := range read {
+				if int(rule.ActionID) < len(cells) {
+					cells[rule.ActionID] = readingOf(rule)
+				}
+			}
 		}
-		counts[module] = readingsOf(read)
 	}
+	counts := readings(func(id uint32) reading {
+		if int(id) < len(cells) {
+			return cells[id]
+		}
+		return reading{}
+	})
 
 	// The peer's Error Indications (5.10), read once for the whole tick: one
 	// responder module holds the counts of every TEID it has seen, and the
@@ -476,6 +516,14 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 			out = append(out, c.errorReports(seid, s, indications)...)
 		}
 	}
+	// The cells go back to zero for the next tick: a rule it does not read --
+	// one a modification added after its list was taken -- reads zero, as a
+	// rule no reading answered always has.
+	for _, module := range names {
+		for _, id := range ids[module] {
+			cells[id] = reading{}
+		}
+	}
 	return out
 }
 
@@ -518,13 +566,9 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 		// session's URRs would report nothing: an error, not zero forever.
 		return nil, errNoCounters
 	}
-	counts := make(map[string]map[uint32]reading, len(ids))
-	for module, rules := range ids {
-		read, err := reader.RuleCounts(ctx, module, rules...)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", module, err)
-		}
-		counts[module] = readingsOf(read)
+	counts, err := readRules(ctx, reader, ids)
+	if err != nil {
+		return nil, err
 	}
 	return c.judge(ctx, seid, s, counts, nil, now)
 }
@@ -535,7 +579,7 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 // the same way a modification writes them. The read is the caller's: Evaluate
 // reads one session's rules, EvaluateAll reads each counter module once for
 // every session of the tick.
-func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts map[string]map[uint32]reading, markers map[endMarkerKey]bool, now time.Time) ([]Report, error) {
+func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts readings, markers map[endMarkerKey]bool, now time.Time) ([]Report, error) {
 	c.mu.Lock()
 	if c.sessions[seid] != s {
 		c.mu.Unlock()
@@ -565,17 +609,29 @@ func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts ma
 	return reports, nil
 }
 
-// readingsOf is one counting module's answer as the decision reads it: the
-// counters keyed by the ActionId of the rule each belongs to.
-func readingsOf(read []bess.RuleCount) map[uint32]reading {
-	cells := make(map[uint32]reading, len(read))
-	for _, rule := range read {
-		cells[rule.ActionID] = reading{
-			Usage: Usage{Packets: rule.Packets, Octets: rule.Octets},
-			First: rule.First, Last: rule.Last,
+// readingOf is one rule's answer from a counting module as the decision reads
+// it.
+func readingOf(rule bess.RuleCount) reading {
+	return reading{
+		Usage: Usage{Packets: rule.Packets, Octets: rule.Octets},
+		First: rule.First, Last: rule.Last,
+	}
+}
+
+// readRules reads the rules one session measures (measuredRules), one call
+// per module: the single-session reading Evaluate and windowsOf make.
+func readRules(ctx context.Context, reader CounterReader, ids map[string][]uint32) (readings, error) {
+	cells := map[uint32]reading{}
+	for module, rules := range ids {
+		read, err := reader.RuleCounts(ctx, module, rules...)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", module, err)
+		}
+		for _, rule := range read {
+			cells[rule.ActionID] = readingOf(rule)
 		}
 	}
-	return cells
+	return func(id uint32) reading { return cells[id] }, nil
 }
 
 // countedModule is where this PDR's counters are read (Target.Counts), when the
@@ -597,12 +653,18 @@ func (c *Compiler) countedModule(p *pdr) (string, bool) {
 // counts them: one entry per PDR a URR measures. The caller holds the lock.
 func (c *Compiler) measuredRules(s *Session) map[string][]uint32 {
 	ids := map[string][]uint32{}
+	c.appendMeasuredRules(s, ids)
+	return ids
+}
+
+// appendMeasuredRules appends the rules s's URRs measure to ids, by the module
+// that counts them. The caller holds the lock.
+func (c *Compiler) appendMeasuredRules(s *Session, ids map[string][]uint32) {
 	for _, p := range pdrsInOrder(s) {
 		if module, ok := c.countedModule(p); ok {
 			ids[module] = append(ids[module], p.actionID)
 		}
 	}
-	return ids
 }
 
 // measuredModules adds the counting modules a session's measured PDRs read
@@ -636,7 +698,7 @@ func (c *Compiler) measuredModules(s *Session, modules map[string]bool) {
 // asks for REEMR is due when one came in on a PDR it measures, from its first
 // tick on -- an End Marker is an event, not a measurement, so it needs no
 // baseline -- and a report due for another reason carries it too.
-func (c *Compiler) decide(s *Session, counts map[string]map[uint32]reading, markers map[endMarkerKey]bool, now time.Time) ([]Report, bool) {
+func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]bool, now time.Time) ([]Report, bool) {
 	var reports []Report
 	stopped := false
 	for _, members := range linkedGroups(s) {
@@ -837,7 +899,7 @@ func windowTimes(first, last time.Time, up, down Usage) (time.Time, time.Time) {
 // sum of their counters, keyed by each rule's own ActionId, and the window's
 // own stamps: the earliest first packet and the latest last one among them. The
 // caller holds the lock.
-func (c *Compiler) countsOf(s *Session, uid uint32, counts map[string]map[uint32]reading) (up, down Usage, first, last time.Time) {
+func (c *Compiler) countsOf(s *Session, uid uint32, counts readings) (up, down Usage, first, last time.Time) {
 	for _, p := range pdrsInOrder(s) {
 		if p.actionID == 0 || p.drop || !slices.Contains(p.urrIDs, uid) {
 			continue
@@ -846,7 +908,7 @@ func (c *Compiler) countsOf(s *Session, uid uint32, counts map[string]map[uint32
 		if dir.Counters == "" {
 			continue
 		}
-		cell := counts[c.target.Counts(counterTable(p.downlink()))][p.actionID]
+		cell := counts(p.actionID)
 		if !p.downlink() {
 			up = up.add(cell.Usage)
 		} else {
@@ -962,18 +1024,12 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 	c.mu.Lock()
 	ids := c.measuredRules(s)
 	c.mu.Unlock()
-	counts := make(map[string]map[uint32]reading, len(ids))
-	if len(ids) > 0 {
-		if c.counters == nil {
-			return nil, errNoCounters
-		}
-		for module, rules := range ids {
-			read, err := c.counters.RuleCounts(ctx, module, rules...)
-			if err != nil {
-				return nil, fmt.Errorf("reading %s: %w", module, err)
-			}
-			counts[module] = readingsOf(read)
-		}
+	if len(ids) > 0 && c.counters == nil {
+		return nil, errNoCounters
+	}
+	counts, err := readRules(ctx, c.counters, ids)
+	if err != nil {
+		return nil, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

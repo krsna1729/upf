@@ -433,7 +433,9 @@ the arrival signal the Downlink Data Report is decided from on the BUFF branch.
   `restart_window: false` and clears only once the SMF has taken the report
   (`bess.Client.{RuleCounts,PeekRuleCounts}`). An argument that names **no**
   rule is the module's whole table — `get_counts` enumerates every entry it
-  holds — which is the reading a usage tick makes: one call per counter module
+  holds — an operator's question. A usage tick names the rules its sessions
+  measure, in chunks of 65,536 ActionIds per call, so no reply nears the
+  daemon's 64 MiB message bound; it is still a few calls per counter module
   rather than one per session, and the only read that carries counts at all
   (the `<module>/counters` resource value is empty by design: a resource value
   is copied on every publish, so a count kept in it would be zeroed by a
