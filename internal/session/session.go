@@ -479,9 +479,15 @@ type Compiler struct {
 	journal   *Journal
 	restoring bool
 
-	mu            sync.Mutex
-	sessions      map[uint64]*Session
-	byCP          map[uint64]*Session // sessions by CP F-SEID: an establishment's retransmission, found without a walk
+	mu       sync.Mutex
+	sessions map[uint64]*Session
+	byCP     map[uint64]*Session // sessions by CP F-SEID: an establishment's retransmission, found without a walk
+	// measured and buffering are the sessions a tick walks instead of every
+	// session (track): the ones with a URR (EvaluateAll) and the ones with a
+	// BUFF+NOCP PDR (EvaluateDownlinks). Each is a superset the tick itself
+	// prunes, so a refused change that left a session listed costs one look.
+	measured      map[uint64]struct{}
+	buffering     map[uint64]struct{}
 	nextSEID      uint64
 	byFTEID       map[fteidKey]fteidOwner
 	fteidTEIDKeys map[uint32]int // byFTEID keys per TEID: the TEID is released when none is left
@@ -546,6 +552,8 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		log:           log,
 		sessions:      map[uint64]*Session{},
 		byCP:          map[uint64]*Session{},
+		buffering:     map[uint64]struct{}{},
+		measured:      map[uint64]struct{}{},
 		rules:         map[string]uint64{},
 		byFTEID:       map[fteidKey]fteidOwner{},
 		fteidTEIDKeys: map[uint32]int{},
@@ -618,6 +626,8 @@ type Session struct {
 	cachedPDRs []*pdr
 	cachedQERs []*qer
 	cachedMARs []*mar
+	// cachedGroups is linkedGroups' answer, which every tick asks for.
+	cachedGroups [][]uint32
 
 	// removed holds the PDRs a modification took out of the model: their
 	// records are still in the dataplane, and the next transaction that
@@ -1623,11 +1633,28 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 func (c *Compiler) forget(s *Session) {
 	c.mu.Lock()
 	delete(c.sessions, s.LocalSEID)
+	delete(c.measured, s.LocalSEID)
+	delete(c.buffering, s.LocalSEID)
 	if c.byCP[s.CPSEID] == s {
 		delete(c.byCP, s.CPSEID)
 	}
 	c.releaseSession(s)
 	c.mu.Unlock()
+}
+
+// track lists s for the ticks its model may owe something to: EvaluateAll if
+// it has a URR, EvaluateDownlinks if a PDR buffers and notifies. Only adds:
+// the ticks drop what no longer qualifies. The caller holds the lock.
+func (c *Compiler) track(s *Session) {
+	if len(s.URRs) > 0 {
+		c.measured[s.LocalSEID] = struct{}{}
+	}
+	for _, p := range s.PDRs {
+		if p.notify {
+			c.buffering[s.LocalSEID] = struct{}{}
+			return
+		}
+	}
 }
 
 // removal is the transaction that erases a session's records (remove).
@@ -1941,5 +1968,6 @@ func (s *Session) invalidateOrderCache() {
 		s.cachedPDRs = nil
 		s.cachedQERs = nil
 		s.cachedMARs = nil
+		s.cachedGroups = nil
 	}
 }

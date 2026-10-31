@@ -27,6 +27,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"slices"
 
@@ -70,81 +71,103 @@ func (c *Compiler) BufferingConfigured() bool {
 	return c.cfg.Buffering != nil && c.cfg.Buffering.Store != "" && c.cfg.Buffering.Counter != ""
 }
 
-// EvaluateDownlinks reads the BUFF branch's counters for every session and
-// returns the Downlink Data Reports they owe, low SEID first -- one call per
-// tick, the way EvaluateAll is. A flow is reported once per buffering episode:
-// the flag stands until the SMF's next instruction stops the PDR buffering
-// (resolve clears it), which is what "the first buffered DL packet" means when
-// the SMF may leave a UE idle for hours.
+// EvaluateDownlinks reads the BUFF branch's counters for every session that
+// may owe one and returns the Downlink Data Reports they owe, low SEID first --
+// one call per tick, the way EvaluateAll is. A flow is reported once per
+// buffering episode: the flag stands until the SMF's next instruction stops the
+// PDR buffering (resolve clears it), which is what "the first buffered DL
+// packet" means when the SMF may leave a UE idle for hours.
 //
-// The reading is skipped when there is nothing to ask about, so a deployment
-// with a store but no buffering session pays one map walk per tick and no RPC.
+// The tick walks the buffering set (Compiler.buffering), not every session, a
+// bounded batch of sessions per hold of the lock, and reads every flow it asks
+// about in one reading -- chunked by countChunk like the usage tick's -- rather
+// than one per session: at the 1M target that was up to a million serial round
+// trips per tick. With nothing to ask about it makes no RPC.
 func (c *Compiler) EvaluateDownlinks(ctx context.Context) []Downlink {
 	if !c.BufferingConfigured() || c.counters == nil {
 		return nil
 	}
 	c.mu.Lock()
-	// The rules to read, per session: the buffering PDRs whose report has not
-	// been sent yet. A flow already reported is left out -- its arrivals are no
-	// longer news -- so the RPC carries only what could change the answer. The
-	// list is not sized by the session count: it holds the sessions that are
-	// buffering, and sizing it by all of them was a million-entry allocation
-	// per tick for a handful of entries.
-	var asks []downlinkAsk
-	for seid, s := range c.sessions {
-		var ids []uint32
-		for _, p := range pdrsInOrder(s) {
-			if p.buffer && p.notify && p.actionID != 0 && !p.ddnSent {
-				ids = append(ids, p.actionID)
-			}
-		}
-		if len(ids) > 0 {
-			asks = append(asks, downlinkAsk{seid: seid, cpseid: s.CPSEID, ids: ids})
-		}
+	seids := make([]uint64, 0, len(c.buffering))
+	for seid := range c.buffering {
+		seids = append(seids, seid)
 	}
 	c.mu.Unlock()
-	// The asks are built by walking a map: the tick reads the sessions low SEID
-	// first, so two runs against the same state ask in the same order.
-	slices.SortFunc(asks, func(a, b downlinkAsk) int {
-		switch {
-		case a.seid < b.seid:
-			return -1
-		case a.seid > b.seid:
-			return 1
-		}
-		return 0
-	})
+	slices.Sort(seids)
 
-	var out []Downlink
-	for _, a := range asks {
-		read, err := c.peekBuffering(ctx, a.ids)
+	// The flows to read: the buffering PDRs whose report has not been sent
+	// yet, and whose they are. A flow already reported is left out -- its
+	// arrivals are no longer news -- and a session that no longer buffers
+	// leaves the set.
+	var ids []uint32
+	owners := map[uint32]downlinkFlow{}
+	for start := 0; start < len(seids); start += tickHold {
+		c.mu.Lock()
+		for _, seid := range seids[start:min(start+tickHold, len(seids))] {
+			buffering := false
+			for _, p := range pdrsInOrder(c.sessions[seid]) {
+				if !p.buffer || !p.notify {
+					continue
+				}
+				buffering = true
+				if p.actionID != 0 && !p.ddnSent {
+					ids = append(ids, p.actionID)
+					owners[p.actionID] = downlinkFlow{seid: seid, pdr: p.id, action: p.actionID}
+				}
+			}
+			if !buffering {
+				delete(c.buffering, seid)
+			}
+		}
+		c.mu.Unlock()
+	}
+
+	// A stamp means a packet arrived since the previous reading: the rule
+	// counted one, and the store is holding it. A chunk that cannot be read
+	// leaves its flows owed, and the next tick tries again.
+	var arrived []downlinkFlow
+	for rest := ids; len(rest) > 0; {
+		chunk := rest[:min(len(rest), countChunk)]
+		rest = rest[len(chunk):]
+		read, err := c.peekBuffering(ctx, chunk)
 		if err != nil {
-			// The counters could not be read: the report is owed but cannot be
-			// decided, and the next tick tries again. Saying so is the caller's
-			// log's business (upfd logs the tick's error), so the session is
-			// skipped rather than failed.
-			c.log.Warn("session: reading the buffering counters", "seid", a.seid, "error", err)
+			c.log.Warn("session: reading the buffering counters", "flows", len(chunk), "error", err)
 			continue
 		}
+		for _, rule := range read {
+			if f, ok := owners[rule.ActionID]; ok && !rule.First.IsZero() {
+				arrived = append(arrived, f)
+			}
+		}
+	}
+	// The reading answers in the order it was asked, low SEID first; the sort
+	// keeps each session's flows in that order whatever the reply's.
+	slices.SortStableFunc(arrived, func(a, b downlinkFlow) int { return cmp.Compare(a.seid, b.seid) })
+
+	var out []Downlink
+	for len(arrived) > 0 {
+		seid := arrived[0].seid
+		n := 1
+		for n < len(arrived) && arrived[n].seid == seid {
+			n++
+		}
+		flows := arrived[:n]
+		arrived = arrived[n:]
 		c.mu.Lock()
-		s := c.sessions[a.seid]
+		s := c.sessions[seid]
 		if s == nil {
 			// The SMF deleted the session while the counters were being read.
 			c.mu.Unlock()
 			continue
 		}
-		d := Downlink{SEID: a.seid, CPSEID: s.CPSEID}
-		for _, rule := range read {
-			p := pdrByAction(s, rule.ActionID)
-			// A stamp means a packet arrived since the previous reading: the
-			// rule counted one, and the store is holding it.
-			if p == nil || p.ddnSent || rule.First.IsZero() {
-				continue
-			}
+		d := Downlink{SEID: seid, CPSEID: s.CPSEID}
+		for _, f := range flows {
 			// Not marked here: the caller confirms what the SMF took
 			// (ConfirmDownlinks), so a report nobody received is offered
 			// again instead of being lost.
-			d.PDRs = append(d.PDRs, p.id)
+			if p := s.PDRs[f.pdr]; p != nil && p.actionID == f.action && !p.ddnSent {
+				d.PDRs = append(d.PDRs, p.id)
+			}
 		}
 		c.mu.Unlock()
 		if len(d.PDRs) > 0 {
@@ -152,6 +175,19 @@ func (c *Compiler) EvaluateDownlinks(ctx context.Context) []Downlink {
 		}
 	}
 	return out
+}
+
+// tickHold is the most sessions one hold of the compiler's lock walks in a
+// tick (EvaluateAll, EvaluateDownlinks): a tick over a million sessions must
+// not stall every establishment behind it.
+const tickHold = 1024
+
+// downlinkFlow is one buffering PDR a tick asks about: its session, its id and
+// the ActionId its counter is read by.
+type downlinkFlow struct {
+	seid   uint64
+	pdr    uint16
+	action uint32
 }
 
 // peekBuffering reads the branch's counters without opening the next window: a
@@ -200,16 +236,6 @@ func (c *Compiler) ConfirmDownlinks(ctx context.Context, seid uint64, pdrs []uin
 			c.log.Warn("session: the buffering counters were not read back", "seid", seid, "error", err)
 		}
 	}
-}
-
-// pdrByAction is the PDR a rule's ActionId names. The caller holds the lock.
-func pdrByAction(s *Session, actionID uint32) *pdr {
-	for _, p := range pdrsInOrder(s) {
-		if p.actionID != 0 && p.actionID == actionID {
-			return p
-		}
-	}
-	return nil
 }
 
 // barHoldsAFlow reports whether a PDR of the session buffers under this BAR: a
@@ -316,13 +342,6 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 	}
 	c.log.Info("session: an Update BAR in a Session Report Response was applied",
 		"seid", seid, "bar", b.id, "duration", b.duration, "infinite", b.infinite, "count", b.count)
-}
-
-// downlinkAsk is one tick's worth of work per session: the flows to read.
-type downlinkAsk struct {
-	seid   uint64
-	cpseid uint64
-	ids    []uint32
 }
 
 // endedFlows is the flows whose buffering episode the model has just ended

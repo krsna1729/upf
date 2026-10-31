@@ -258,6 +258,7 @@ func boundedTick(t *testing.T, sessions, perSession int) (*Compiler, *boundedRea
 			s.URRs[id] = &own
 		}
 		c.sessions[s.LocalSEID] = &s
+		c.track(&s)
 	}
 	return c, reader
 }
@@ -359,5 +360,48 @@ func TestAReportTakenBackIsDecidedAgain(t *testing.T) {
 	// A report something later has moved past cannot be taken back.
 	if c.Unreport(first[0]) {
 		t.Error("a report the next tick superseded was taken back")
+	}
+}
+
+// TestATickCostsOnlyTheSessionsThatMeasure is UG-R1 and UG-R2: the tick walks
+// the sessions with a URR, not the whole table, and once each has taken its
+// baseline a tick allocates a constant rather than per session -- the linked
+// groups are cached, and a counter module's name is not rebuilt per rule.
+func TestATickCostsOnlyTheSessionsThatMeasure(t *testing.T) {
+	build := func(measured, plain int) *Compiler {
+		c := New(testConfig(), &recorder{}, quietLogger())
+		for i := range measured {
+			ue := fmt.Sprintf("10.1.%d.%d", i/250, i%250+1)
+			resp := c.Establish(urrSession(uint64(1+i), uint32(0x1000+i), ue, 1, fullURR(1)))
+			if got := cause(t, resp.(*message.SessionEstablishmentResponse)); got != ie.CauseRequestAccepted {
+				t.Fatalf("measured session %d answered cause %d", i, got)
+			}
+		}
+		for i := range plain {
+			ue := fmt.Sprintf("10.2.%d.%d", i/250, i%250+1)
+			resp := c.Establish(establishment(uint64(100_000+i), ue))
+			if got := cause(t, resp.(*message.SessionEstablishmentResponse)); got != ie.CauseRequestAccepted {
+				t.Fatalf("plain session %d answered cause %d", i, got)
+			}
+		}
+		return c
+	}
+	now := time.Now()
+	allocs := func(c *Compiler) float64 {
+		return testing.AllocsPerRun(5, func() { c.EvaluateAll(context.Background(), now) })
+	}
+	few, many, mixed := build(100, 0), build(400, 0), build(100, 900)
+	if got := len(mixed.measured); got != 100 {
+		t.Errorf("the tick walks %d of %d sessions, want the 100 with a URR", got, len(mixed.sessions))
+	}
+	if a, b, m := allocs(few), allocs(many), allocs(mixed); b > a || m > a {
+		t.Errorf("a tick allocates %v at 100 measured sessions, %v at 400 and %v beside 900 that measure nothing; want no growth",
+			a, b, m)
+	}
+	cfg := testConfig()
+	cfg.Appliance = "upf"
+	target := newTarget(cfg)
+	if n := testing.AllocsPerRun(100, func() { _ = target.Counts(CountersUplink) }); n != 0 {
+		t.Errorf("naming the appliance's counter table allocates %v times", n)
 	}
 }
