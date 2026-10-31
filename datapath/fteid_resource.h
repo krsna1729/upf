@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "dataplane/resource.h"
 #include "flow/shared_exact_index.h"
@@ -24,9 +25,25 @@ namespace upf::datapath {
 // Canonical key bytes: endpoint BE32, family U8, 16-byte canonical local IP,
 // and TEID BE32.
 using FteidId = std::array<uint8_t, 25>;
+
+// One GTP-U tunnel a received End Marker on the F-TEID is relayed through
+// (TS 29.244 Table 8.2.64-1 NOTE 2): the outgoing TEID, the tunnel's local and
+// peer addresses (16 bytes; IPv4 is the last four), and the transport route
+// domain the relayed marker is routed in.
+struct EndMarkerRelay {
+  uint32_t teid = 0;
+  uint8_t family = 0;
+  std::array<uint8_t, 16> local{};
+  std::array<uint8_t, 16> peer{};
+  uint32_t transport_route_domain = 0;
+  bool operator==(const EndMarkerRelay &) const = default;
+};
+using EndMarkerRelays = std::vector<EndMarkerRelay>;
+
 struct FteidRecord {
   uint8_t direction = 0;
   uint32_t context_id = 0;
+  EndMarkerRelays relays;
 };
 
 class FteidResource final : public bess::dataplane::Resource {
@@ -37,6 +54,10 @@ class FteidResource final : public bess::dataplane::Resource {
   struct DirectionRecord {
     std::atomic<uint8_t> state{0};  // 0 pending, 1 UL, 2 DL
     uint32_t context_id = 0;
+    // The End Marker relays, null for none. An upsert replaces the list whole
+    // and retires the one it replaced; the record frees the last one.
+    std::atomic<const EndMarkerRelays *> relays{nullptr};
+    ~DirectionRecord() { delete relays.load(std::memory_order_relaxed); }
   };
 
   FteidResource(std::string name, bess::flow::SharedExactIndex &index,
@@ -54,8 +75,12 @@ class FteidResource final : public bess::dataplane::Resource {
   template <typename Fn>
   void ForEach(Fn &&visit) const {
     std::lock_guard lock(control_mu_);
-    for (const auto &[id, entry] : entries_)
-      if (entry.live) visit(id, FteidRecord{entry.direction, entry.context_id});
+    for (const auto &[id, entry] : entries_) {
+      if (!entry.live) continue;
+      const auto *relays = entry.record->relays.load(std::memory_order_relaxed);
+      visit(id, FteidRecord{entry.direction, entry.context_id,
+                            relays ? *relays : EndMarkerRelays{}});
+    }
   }
 
   bool Contains(const bess::dataplane::ResourceKey &key) const override {
@@ -111,9 +136,19 @@ class FteidResource final : public bess::dataplane::Resource {
         return std::unexpected("F-TEID key is already assigned another context");
       if (mirror->second.erase_pending)
         return std::unexpected("F-TEID key already has a pending erase");
-      Reservation no_op{std::make_unique<NoopOp>(), {}, {}};
-      no_op.existed = true;
-      return no_op;
+      // The same admission with other relays: the tunnels the F-TEID's PDRs
+      // forward into changed, so the list is replaced.
+      const auto *relays =
+          mirror->second.record->relays.load(std::memory_order_relaxed);
+      if (relays ? *relays == value->relays : value->relays.empty()) {
+        Reservation no_op{std::make_unique<NoopOp>(), {}, {}};
+        no_op.existed = true;
+        return no_op;
+      }
+      Reservation replace{std::make_unique<RelaysOp>(*this, id, value->relays),
+                          {}, {.retires = 1}};
+      replace.existed = true;
+      return replace;
     }
     if (mirror != entries_.end())
       return std::unexpected("F-TEID key reservation is inconsistent");
@@ -125,6 +160,9 @@ class FteidResource final : public bess::dataplane::Resource {
     entry.context_id = value->context_id;
     entry.record = std::make_unique<DirectionRecord>();
     entry.record->context_id = value->context_id;
+    if (!value->relays.empty())
+      entry.record->relays.store(new EndMarkerRelays(value->relays),
+                                 std::memory_order_relaxed);
     auto [it, inserted] = entries_.emplace(id, std::move(entry));
     if (!inserted)
       return std::unexpected("F-TEID key reservation is inconsistent");
@@ -165,6 +203,26 @@ class FteidResource final : public bess::dataplane::Resource {
   class NoopOp final : public bess::dataplane::StagedOp {
    public:
     void Publish(bess::dataplane::Retirer &) noexcept override {}
+  };
+
+  class RelaysOp final : public bess::dataplane::StagedOp {
+   public:
+    RelaysOp(FteidResource &owner, FteidId id, const EndMarkerRelays &relays)
+        : owner_(owner),
+          id_(id),
+          relays_(relays.empty() ? nullptr : new EndMarkerRelays(relays)) {}
+    void Publish(bess::dataplane::Retirer &retirer) noexcept override {
+      std::lock_guard lock(owner_.control_mu_);
+      auto it = owner_.entries_.find(id_);
+      CHECK(it != owner_.entries_.end() && it->second.live);
+      retirer.Retire(std::unique_ptr<const EndMarkerRelays>(
+          it->second.record->relays.exchange(relays_.release(),
+                                             std::memory_order_acq_rel)));
+    }
+   private:
+    FteidResource &owner_;
+    FteidId id_;
+    std::unique_ptr<const EndMarkerRelays> relays_;
   };
 
   class UpsertOp final : public bess::dataplane::StagedOp {

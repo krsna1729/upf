@@ -29,6 +29,7 @@ inline void WriteOuterIpv6(uint8_t *ip, const uint8_t src[16],
                            uint8_t traffic_class, uint8_t hop_limit = 64) noexcept {
   ip[0] = static_cast<uint8_t>(0x60 | (traffic_class >> 4));
   ip[1] = static_cast<uint8_t>((traffic_class << 4) & 0xf0);
+  ip[2] = ip[3] = 0;  // flow label 0: the bytes may be a reused buffer's
   PutWire16(ip + 4, payload_length);
   ip[6] = 17;
   ip[7] = hop_limit;
@@ -126,6 +127,36 @@ inline bool WriteGtpOuterHeaders(uint8_t *frame, uint8_t family,
   if (has_qfi) WritePduSessionContainer(gtpu, qfi);
   if (family == 6)
     PutWire16(udp + 6, Ipv6UdpChecksum(local, peer, udp, 8 + gtpu_payload));
+  return true;
+}
+
+// The End Marker frame's length: the tunnel's outer headers and nothing after
+// them (TS 29.281 7.3.2: no information element), padded to the 60-byte
+// minimum Ethernet frame.
+inline size_t EndMarkerFrameBytes(uint8_t family) noexcept {
+  return std::max<size_t>(GtpOuterHeaderBytes(family, false), 60);
+}
+
+// WriteEndMarker writes the End Marker this UPF sends on a tunnel into
+// EndMarkerFrameBytes(family) bytes: the tunnel's IPv4 or IPv6 header
+// (TTL/hop limit 64), UDP 2152 to 2152, and GTP-U 0x30, type 254, length 0,
+// with the IPv6 UDP checksum. The MACs are left zero for the transport Router.
+inline bool WriteEndMarker(uint8_t *frame, uint8_t family,
+                           const uint8_t local[16], const uint8_t peer[16],
+                           uint32_t teid) noexcept {
+  if (!WriteGtpOuterHeaders(frame, family, local, peer, teid,
+                            bess::tunnel::kGtpuPort, bess::tunnel::kGtpuPort,
+                            false, 0, 0, 0, 0))
+    return false;
+  const size_t header_length = GtpOuterHeaderBytes(family, false);
+  std::memset(frame + header_length, 0,
+              EndMarkerFrameBytes(family) - header_length);
+  uint8_t *udp = frame + 14 + (family == 4 ? 20 : 40);
+  udp[9] = 254;
+  if (family == 6) {
+    PutWire16(udp + 6, 0);
+    PutWire16(udp + 6, Ipv6UdpChecksum(local, peer, udp, 16));
+  }
   return true;
 }
 

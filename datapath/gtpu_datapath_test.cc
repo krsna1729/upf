@@ -135,10 +135,11 @@ FteidId Key(uint32_t endpoint, uint8_t family, uint32_t teid,
 }
 
 void Publish(upf::datapath::FteidResource &resource, const FteidId &id,
-             uint8_t direction, uint32_t context = 7) {
+             uint8_t direction, uint32_t context = 7,
+             upf::datapath::EndMarkerRelays relays = {}) {
   auto reservation = resource.Reserve(bess::dataplane::Op::Upsert(
       resource.name(), bess::dataplane::EncodeKey(id),
-      std::any(upf::datapath::FteidRecord{direction, context})));
+      std::any(upf::datapath::FteidRecord{direction, context, std::move(relays)})));
   ASSERT_TRUE(reservation.has_value());
   bess::dataplane::Retirer retirer;
   reservation->staged->Publish(retirer);
@@ -448,6 +449,182 @@ TEST(GtpuOuterWriter, EncodesQfiZeroAndOmitsAnAbsentQfi) {
   EXPECT_EQ(plain_gtpu[0] & 0x04, 0);
   EXPECT_EQ(upf::datapath::GetWire16(plain_gtpu + 2), 20);
   EXPECT_EQ(plain.size(), plain_headers + inner_length);
+}
+
+// The relayed End Marker is the one upfd builds for a tunnel
+// (internal/session/endmarker.go endMarkerFrame): zero MACs, TTL/hop limit 64,
+// UDP 2152 to 2152, GTP-U 0x30 type 254 length 0, the IPv4 frame padded to 60
+// bytes and the IPv6 one with its UDP checksum.
+TEST(GtpuOuterWriter, WritesTheEndMarkerUpfdBuildsForATunnel) {
+  std::array<uint8_t, 16> local4{}, peer4{};
+  std::copy_n(std::array<uint8_t, 4>{192, 0, 2, 1}.begin(), 4, local4.begin() + 12);
+  std::copy_n(std::array<uint8_t, 4>{10, 20, 30, 9}.begin(), 4, peer4.begin() + 12);
+  std::vector<uint8_t> frame4(upf::datapath::EndMarkerFrameBytes(4), 0xaa);
+  ASSERT_TRUE(upf::datapath::WriteEndMarker(frame4.data(), 4, local4.data(),
+                                            peer4.data(), 0x5566778b));
+  const std::vector<uint8_t> want4 = {
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x00,
+      0x45, 0x00, 0x00, 0x24, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x50, 0xab,
+      0xc0, 0x00, 0x02, 0x01, 0x0a, 0x14, 0x1e, 0x09,
+      0x08, 0x68, 0x08, 0x68, 0x00, 0x10, 0x00, 0x00,
+      0x30, 0xfe, 0x00, 0x00, 0x55, 0x66, 0x77, 0x8b,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  EXPECT_EQ(frame4, want4);
+
+  std::array<uint8_t, 16> local6{0x20, 0x01, 0x0d, 0xb8, 0, 0x09}, peer6 = local6;
+  local6[15] = 1;
+  peer6[15] = 2;
+  std::vector<uint8_t> frame6(upf::datapath::EndMarkerFrameBytes(6), 0xaa);
+  ASSERT_TRUE(upf::datapath::WriteEndMarker(frame6.data(), 6, local6.data(),
+                                            peer6.data(), 0x77000012));
+  const std::vector<uint8_t> want6 = {
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x86, 0xdd,
+      0x60, 0x00, 0x00, 0x00, 0x00, 0x10, 0x11, 0x40,
+      0x20, 0x01, 0x0d, 0xb8, 0x00, 0x09, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+      0x20, 0x01, 0x0d, 0xb8, 0x00, 0x09, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
+      0x08, 0x68, 0x08, 0x68, 0x00, 0x10, 0xeb, 0x66,
+      0x30, 0xfe, 0x00, 0x00, 0x77, 0x00, 0x00, 0x12};
+  EXPECT_EQ(frame6, want6);
+}
+
+upf::datapath::EndMarkerRelay Relay4(uint32_t teid, uint32_t domain) {
+  upf::datapath::EndMarkerRelay relay;
+  relay.teid = teid;
+  relay.family = 4;
+  std::copy_n(std::array<uint8_t, 4>{192, 0, 2, 1}.begin(), 4, relay.local.begin() + 12);
+  std::copy_n(std::array<uint8_t, 4>{10, 20, 30, 9}.begin(), 4, relay.peer.begin() + 12);
+  relay.transport_route_domain = domain;
+  return relay;
+}
+
+// A burst through GtpuDecap's steps: parse every frame, one batch lookup, then
+// each End Marker's relays written as new frames beside the burst. The one End
+// Marker on an F-TEID whose PDR forwards into a tunnel leaves exactly once, as
+// that tunnel's -- its TEID, from its local address to its peer, in its
+// transport domain; the G-PDU and the Echo Request on that F-TEID, and the End
+// Markers on an F-TEID that ends at N6 (no relays), on one still pending and
+// on one nobody admitted, leave none.
+TEST(EndMarkerRelay, OneEndMarkerInABurstLeavesOnceThroughItsFteidsTunnel) {
+  TestIndex table(8);
+  ASSERT_NE(table.index, nullptr);
+  upf::datapath::FteidResource resource("decap/fteids", *table.index,
+                                        table.domain, 8);
+  constexpr uint32_t kEndpoint = 2;
+  constexpr uint32_t kForwarding = 0x11223351, kEnding = 0x11223344,
+                     kPending = 0x11223352, kUnknown = 0x11223399;
+  constexpr uint8_t kEndMarker = upf::datapath::kGtpuEndMarker;
+  auto key_of = [](uint32_t teid) {
+    const auto frame = Gtpu4(kEndMarker, false, false, teid);
+    upf::datapath::ParsedGtpu parsed;
+    upf::datapath::ParseGtpuAdmission(frame, frame.size(), 2152, kEndpoint, &parsed);
+    return parsed.key;
+  };
+  Publish(resource, key_of(kForwarding), 1, 7, {Relay4(0x5566778b, 3)});
+  Publish(resource, key_of(kEnding), 0, 8);
+  auto pending = resource.Reserve(bess::dataplane::Op::Upsert(
+      resource.name(), bess::dataplane::EncodeKey(key_of(kPending)),
+      std::any(upf::datapath::FteidRecord{1, 9, {Relay4(0x77, 3)}})));
+  ASSERT_TRUE(pending.has_value());
+
+  const std::vector<std::vector<uint8_t>> burst = {
+      Gtpu4(kEndMarker, false, false, kForwarding),
+      Gtpu4(bess::tunnel::kGtpuGpdu, false, false, kForwarding),
+      Gtpu4(1, false, false, kForwarding),  // an Echo Request
+      Gtpu4(kEndMarker, false, false, kEnding),
+      Gtpu4(kEndMarker, false, false, kPending),
+      Gtpu4(kEndMarker, false, false, kUnknown),
+  };
+  FteidId keys[8]{};
+  bool end_marker[8]{};
+  uint64_t values[8]{};
+  for (size_t i = 0; i < burst.size(); ++i) {
+    upf::datapath::ParsedGtpu parsed;
+    const auto kind = upf::datapath::ParseGtpuAdmission(
+        burst[i], burst[i].size(), 2152, kEndpoint, &parsed);
+    ASSERT_NE(kind, upf::datapath::GtpuParseKind::kMalformed);
+    keys[i] = parsed.key;
+    end_marker[i] = kind == upf::datapath::GtpuParseKind::kControl &&
+                    parsed.info.message_type == kEndMarker;
+  }
+  const uint64_t hits = table.index->LookupBatch(
+      reinterpret_cast<const std::byte *>(keys), sizeof(keys[0]), values,
+      burst.size());
+  struct Relayed {
+    std::vector<uint8_t> frame;
+    uint32_t domain;
+  };
+  std::vector<Relayed> relayed;
+  for (size_t i = 0; i < burst.size(); ++i) {
+    if (!end_marker[i]) continue;
+    const auto *relays = upf::datapath::FteidRelays(((hits >> i) & 1) != 0, values[i]);
+    for (size_t r = 0; relays != nullptr && r < relays->size(); ++r) {
+      const auto &relay = (*relays)[r];
+      std::vector<uint8_t> frame(upf::datapath::EndMarkerFrameBytes(relay.family));
+      ASSERT_TRUE(upf::datapath::WriteEndMarker(frame.data(), relay.family,
+          relay.local.data(), relay.peer.data(), relay.teid));
+      relayed.push_back({std::move(frame), relay.transport_route_domain});
+    }
+  }
+  ASSERT_EQ(relayed.size(), 1u);
+  const uint8_t *ip = relayed[0].frame.data() + 14;
+  EXPECT_EQ(std::vector<uint8_t>(ip + 12, ip + 16), (std::vector<uint8_t>{192, 0, 2, 1}));
+  EXPECT_EQ(std::vector<uint8_t>(ip + 16, ip + 20), (std::vector<uint8_t>{10, 20, 30, 9}));
+  const uint8_t *gtpu = ip + 20 + 8;
+  EXPECT_EQ(gtpu[1], kEndMarker);
+  EXPECT_EQ(std::vector<uint8_t>(gtpu + 4, gtpu + 8),
+            (std::vector<uint8_t>{0x55, 0x66, 0x77, 0x8b}));
+  EXPECT_EQ(relayed[0].domain, 3u);
+  pending->staged->Abort();
+}
+
+// The F-TEID's FAR moved to another tunnel: the same admission upserted with
+// other relays replaces the list (retiring the old one), reads back, and an
+// unchanged one is a no-op; a FAR that stops forwarding leaves none.
+TEST(FteidResource, AnUpsertReplacesTheEndMarkerRelays) {
+  TestIndex table(2);
+  ASSERT_NE(table.index, nullptr);
+  upf::datapath::FteidResource resource("decap/fteids", *table.index,
+                                        table.domain, 2);
+  const auto key = Key(1, 4, 55, 1);
+  auto relays_now = [&] {
+    bool hit = false;
+    const uint64_t value = TableValue(*table.index, key, &hit);
+    return upf::datapath::FteidRelays(hit, value);
+  };
+  auto upsert = [&](upf::datapath::EndMarkerRelays relays) {
+    return resource.Reserve(bess::dataplane::Op::Upsert(
+        resource.name(), bess::dataplane::EncodeKey(key),
+        std::any(upf::datapath::FteidRecord{1, 7, std::move(relays)})));
+  };
+  Publish(resource, key, 1, 7, {Relay4(0x10, 1)});
+  ASSERT_NE(relays_now(), nullptr);
+  EXPECT_EQ(relays_now()->front().teid, 0x10u);
+
+  auto moved = upsert({Relay4(0x20, 2)});
+  ASSERT_TRUE(moved.has_value());
+  EXPECT_TRUE(moved->existed);
+  EXPECT_EQ(moved->footprint.retires, 1u);
+  EXPECT_EQ(relays_now()->front().teid, 0x10u) << "visible before its publish";
+  {
+    bess::dataplane::Retirer retirer;
+    moved->staged->Publish(retirer);
+  }
+  ASSERT_NE(relays_now(), nullptr);
+  EXPECT_EQ(*relays_now(), upf::datapath::EndMarkerRelays{Relay4(0x20, 2)});
+
+  auto same = upsert({Relay4(0x20, 2)});
+  ASSERT_TRUE(same.has_value());
+  EXPECT_EQ(same->footprint.retires, 0u);
+  std::vector<upf::datapath::FteidRecord> read;
+  resource.ForEach([&read](const FteidId &, const upf::datapath::FteidRecord &r) {
+    read.push_back(r);
+  });
+  ASSERT_EQ(read.size(), 1u);
+  EXPECT_EQ(read[0].relays, upf::datapath::EndMarkerRelays{Relay4(0x20, 2)});
+
+  Publish(resource, key, 1, 7);
+  EXPECT_EQ(relays_now(), nullptr);
+  EXPECT_EQ(resource.LiveCount(), 1u);
 }
 
 using upf::datapath::EndMarkerEvent;

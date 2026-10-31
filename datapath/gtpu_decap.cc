@@ -19,11 +19,14 @@
 #include "framework/plugin.h"
 #include "dataplane/resource_registry.h"
 #include "framework/resource_codec.h"
+#include "gtpu_wire.h"
+#include "packet_pool.h"
 #include "pdu_session_qfi.h"
 #include "tunnel/tunnel.h"
 #include "utils/endian.h"
 #include "utils/ether.h"
 #include "gtpu_admission.h"
+#include "worker.h"
 namespace dataplane = bess::dataplane;
 
 const ResourceTables GtpuDecap::resource_tables = {
@@ -86,8 +89,26 @@ CommandResponse GtpuDecap::Init(const upf::pb::GtpuDecapArg &arg) {
               return std::unexpected("direction must be 0 (UL) or 1 (DL)");
             if (value.context_id() == 0)
               return std::unexpected("context_id must be nonzero");
-            return std::any(upf::datapath::FteidRecord{
-                static_cast<uint8_t>(value.direction()), value.context_id()});
+            upf::datapath::FteidRecord record{
+                static_cast<uint8_t>(value.direction()), value.context_id(), {}};
+            for (const auto &relay : value.end_marker_relays()) {
+              const size_t length = relay.local_address().size();
+              if (relay.teid() == 0 || (length != 4 && length != 16) ||
+                  relay.peer_address().size() != length)
+                return std::unexpected(
+                    "an end_marker_relays entry needs a teid and a local and peer "
+                    "address of one family (4 or 16 bytes)");
+              upf::datapath::EndMarkerRelay r;
+              r.teid = relay.teid();
+              r.family = length == 4 ? 4 : 6;
+              std::memcpy(r.local.data() + 16 - length,
+                          relay.local_address().data(), length);
+              std::memcpy(r.peer.data() + 16 - length,
+                          relay.peer_address().data(), length);
+              r.transport_route_domain = relay.transport_route_domain();
+              record.relays.push_back(r);
+            }
+            return std::any(std::move(record));
           },
           [this](const auto &visit) {
             resource_->ForEach([&visit](const upf::datapath::FteidId &id,
@@ -109,6 +130,16 @@ CommandResponse GtpuDecap::Init(const upf::pb::GtpuDecapArg &arg) {
               upf::pb::FteidEntry value;
               value.set_direction(record.direction);
               value.set_context_id(record.context_id);
+              for (const auto &r : record.relays) {
+                const size_t length = r.family == 4 ? 4 : 16;
+                auto *relay = value.add_end_marker_relays();
+                relay->set_teid(r.teid);
+                relay->set_local_address(
+                    reinterpret_cast<const char *>(r.local.data() + 16 - length), length);
+                relay->set_peer_address(
+                    reinterpret_cast<const char *>(r.peer.data() + 16 - length), length);
+                relay->set_transport_route_domain(r.transport_route_domain);
+              }
               visit(key, value);
             });
           }));
@@ -142,6 +173,16 @@ CommandResponse GtpuDecap::Init(const upf::pb::GtpuDecapArg &arg) {
     unwind_resource();
     return CommandFailure(-endpoint_attr_, "add_metadata_attr() failed");
   }
+  // The relays' transport route domain, for the transport Router. An update:
+  // the ingress tag's value passes through on everything else this module
+  // emits (the responder's replies on gate 2 are routed by it).
+  domain_attr_ = AddMetadataAttr("transport_route_domain", sizeof(bess::utils::be32_t),
+                                 AccessMode::kUpdate,
+                                 bess::metadata::Attribute::Contract::kDefault);
+  if (domain_attr_ < 0) {
+    unwind_resource();
+    return CommandFailure(-domain_attr_, "add_metadata_attr() failed");
+  }
 
   return CommandSuccess();
 }
@@ -150,12 +191,14 @@ void GtpuDecap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   const auto context_offset = attr_offset(context_attr_);
   const auto endpoint_offset = attr_offset(endpoint_attr_);
   const auto qfi_offset = attr_offset(qfi_attr_);
+  const auto domain_offset = attr_offset(domain_attr_);
   const size_t cnt = batch->cnt();
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   upf::datapath::FteidId keys[bess::PacketBatch::kMaxBurst]{};
   bess::packet::ParsedFrame outer[bess::PacketBatch::kMaxBurst]{};
   bess::tunnel::GtpuInfo info[bess::PacketBatch::kMaxBurst]{};
   bool candidate[bess::PacketBatch::kMaxBurst]{};
+  bool end_marker[bess::PacketBatch::kMaxBurst]{};
   uint64_t values[bess::PacketBatch::kMaxBurst]{};
 
   // Parse all frames first; the fixed-width exact table then admits the burst
@@ -173,7 +216,14 @@ void GtpuDecap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
         frame, pkt.total_len(), port_, endpoint_id, &parsed);
     if (kind != upf::datapath::GtpuParseKind::kGpdu) {
       // Control frames go to the responder; malformed frames drop here.
-      if (kind == upf::datapath::GtpuParseKind::kControl) ogates[i] = 2;
+      if (kind != upf::datapath::GtpuParseKind::kControl) continue;
+      ogates[i] = 2;
+      // An End Marker is looked up too: its F-TEID's entry names the tunnels
+      // it is relayed through.
+      if (parsed.info.message_type == upf::datapath::kGtpuEndMarker) {
+        keys[i] = parsed.key;
+        end_marker[i] = true;
+      }
       continue;
     }
     outer[i] = parsed.outer;
@@ -187,8 +237,32 @@ void GtpuDecap::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       key_bytes, sizeof(keys[0]), values, cnt);
 
   for (size_t i = 0; i < cnt; ++i) {
-    if (!candidate[i]) continue;
     const uint64_t bit = uint64_t{1} << i;
+    // The received End Marker still leaves on gate 2, where the responder
+    // records it; each relay is a new frame on gate 3, in this batch, routed
+    // by its tunnel's transport domain (TS 29.244 Table 8.2.64-1 NOTE 2).
+    if (end_marker[i]) {
+      const auto *relays =
+          upf::datapath::FteidRelays((hits & bit) != 0, values[i]);
+      for (size_t r = 0; relays != nullptr && r < relays->size(); ++r) {
+        const auto &relay = (*relays)[r];
+        bess::PacketHandle handle = current_worker.packet_pool()->Alloc(
+            upf::datapath::EndMarkerFrameBytes(relay.family));
+        if (handle == nullptr) continue;
+        bess::PacketRef out(handle);
+        if (!upf::datapath::WriteEndMarker(out.head_data<uint8_t *>(), relay.family,
+                                           relay.local.data(), relay.peer.data(),
+                                           relay.teid)) {
+          bess::PacketFree(handle);
+          continue;
+        }
+        set_attr_with_offset<bess::utils::be32_t>(
+            domain_offset, out, bess::utils::be32_t(relay.transport_route_domain));
+        EmitPacket(ctx, out, 3);
+      }
+      continue;
+    }
+    if (!candidate[i]) continue;
     uint32_t context = 0;
     const uint8_t gate = upf::datapath::FteidOutputGate(
         (hits & bit) != 0, values[i], &context);
@@ -247,4 +321,5 @@ BESS_PLUGIN("upf_datapath", "0.2.0");
 ADD_MODULE(GtpuDecap, "gtpu_decap",
            "admits G-PDUs by endpoint/family/local-address/TEID; known UL and DL "
            "frames leave gates 0 and 1, unknown G-PDUs and control frames leave "
-           "gate 2, and malformed packets drop")
+           "gate 2, End Markers relayed through their F-TEID's tunnels gate 3, "
+           "and malformed packets drop")

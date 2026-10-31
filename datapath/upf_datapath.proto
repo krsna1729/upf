@@ -38,9 +38,26 @@ message FteidKey {
 // 4-byte id instead of endpoint, family, local address and TEID. Every key of
 // one tunnel (its IPv4 and IPv6 address) carries the same id; a TEID repeated on
 // another endpoint or by another session carries a different one.
+//
+// end_marker_relays are the GTP-U tunnels the F-TEID's PDRs forward into
+// (TS 29.244 Table 8.2.64-1 NOTE 2): an End Marker received on the F-TEID
+// leaves the decap's gate 3 once per relay, rewritten to that tunnel, beside
+// the original on gate 2. Empty for a PDR that ends the tunnel, drops or
+// buffers.
 message FteidEntry {
   uint32 direction = 1;
   uint32 context_id = 2;
+  repeated EndMarkerRelay end_marker_relays = 3;
+}
+
+// EndMarkerRelay is one tunnel a received End Marker is relayed through: its
+// TEID, local source and peer destination (both 4 bytes, IPv4, or both 16),
+// and the transport route domain the relayed marker is routed in.
+message EndMarkerRelay {
+  uint32 teid = 1;
+  bytes local_address = 2;
+  bytes peer_address = 3;
+  uint32 transport_route_domain = 4;
 }
 
 // UpfArpResponderArg configures the ARP responder for the subscriber

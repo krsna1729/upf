@@ -18,6 +18,8 @@
 namespace upf::datapath {
 
 enum class GtpuParseKind : uint8_t { kMalformed, kControl, kGpdu };
+// The End Marker's message type (TS 29.281 table 6.1-1).
+inline constexpr uint8_t kGtpuEndMarker = 254;
 struct ParsedGtpu {
   bess::packet::ParsedFrame outer{};
   bess::tunnel::GtpuInfo info{};
@@ -53,6 +55,8 @@ inline uint8_t PduSessionQfi(std::span<const uint8_t> frame, size_t gtpu,
   return upf::kNoPduSessionQfi;
 }
 
+// ParseGtpuAdmission splits a frame into a G-PDU, a control message or a
+// malformed one, and builds the F-TEID key both of the first two are on.
 inline GtpuParseKind ParseGtpuAdmission(std::span<const uint8_t> frame,
                                        size_t total_length, uint16_t port,
                                        uint32_t endpoint_id,
@@ -60,15 +64,14 @@ inline GtpuParseKind ParseGtpuAdmission(std::span<const uint8_t> frame,
   if (endpoint_id == 0) return GtpuParseKind::kMalformed;
   const auto status = bess::tunnel::DecapGtpu(
       frame, parsed->outer, parsed->info, port, total_length);
-  if (status == bess::tunnel::DecapError::kNotTunnel &&
+  const bool control =
+      status == bess::tunnel::DecapError::kNotTunnel &&
       parsed->outer.l4 == bess::packet::L4Kind::kUdp &&
       parsed->outer.dst_port == port &&
       parsed->info.message_type != bess::tunnel::kGtpuGpdu &&
-      parsed->info.message_type != 0)
-    return GtpuParseKind::kControl;
-  if (status != bess::tunnel::DecapError::kOk)
+      parsed->info.message_type != 0;
+  if (!control && status != bess::tunnel::DecapError::kOk)
     return GtpuParseKind::kMalformed;
-
   parsed->family = parsed->outer.l3 == bess::packet::L3Kind::kIpv4 ? 4 : 6;
   auto &key = parsed->key;
   key[0] = static_cast<uint8_t>(endpoint_id >> 24);
@@ -86,7 +89,7 @@ inline GtpuParseKind ParseGtpuAdmission(std::span<const uint8_t> frame,
   key[22] = static_cast<uint8_t>(teid >> 16);
   key[23] = static_cast<uint8_t>(teid >> 8);
   key[24] = static_cast<uint8_t>(teid);
-  return GtpuParseKind::kGpdu;
+  return control ? GtpuParseKind::kControl : GtpuParseKind::kGpdu;
 }
 
 
@@ -101,6 +104,18 @@ inline uint8_t FteidOutputGate(bool hit, uint64_t value,
   if (state != 1 && state != 2) return 2;  // pending reservations are not admitted
   *context = record->context_id;
   return static_cast<uint8_t>(state - 1);  // known UL leaves gate 0, known DL gate 1
+}
+
+// FteidRelays is the End Marker relays of one lookup: the tunnels an End
+// Marker on an admitted F-TEID leaves relayed through, or null when the F-TEID
+// is unknown, still pending, or forwards into no tunnel.
+inline const EndMarkerRelays *FteidRelays(bool hit, uint64_t value) noexcept {
+  if (!hit || value == 0) return nullptr;
+  const auto *record = reinterpret_cast<const FteidResource::DirectionRecord *>(
+      static_cast<uintptr_t>(value));
+  const uint8_t state = record->state.load(std::memory_order_acquire);
+  if (state != 1 && state != 2) return nullptr;
+  return record->relays.load(std::memory_order_acquire);
 }
 
 inline GtpuDecapMetadata BuildGtpuDecapMetadata(
