@@ -257,10 +257,6 @@ type pdrReq struct {
 	// or "n9" (an N9 or N19 tunnel between UPFs), empty when the PDI carried
 	// none or a type that names no GTP-U endpoint of this UP.
 	reference string
-
-	// hasPDI says the PDI IE was there. An Update PDR carries it only when
-	// the PDI changes (Table 7.5.4.2-1); without it the stored PDI stands.
-	hasPDI bool
 }
 
 // marReq is one Create MAR or Update MAR (TS 29.244 7.5.2.8): the access
@@ -1209,15 +1205,10 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			}
 			// An Update PDR carries the IEs that change, and the UP function
 			// keeps the stored value of one it leaves out (Table 7.5.4.2-1
-			// NOTE 1). A PDI the update names replaces the stored one whole
-			// (its row); the F-TEID it does not name is kept below.
+			// NOTE 1). A PDI it leaves out is restored whole after the rule is
+			// built below.
 			if !p.hasPrecedence {
 				p.precedence = old.precedence
-			}
-			if !p.hasPDI {
-				p.srcIfc, p.ueIP, p.hasUEIP, p.ueIPDst = old.srcIfc, old.ueIP, old.hasUEIP, old.ueIPDst
-				p.sdfs, p.instance, p.qfis = slices.Clone(old.sdfs), old.instance, old.qfis
-				p.fteidIPv4, p.fteidIPv6 = old.fteidIPv4, old.fteidIPv6
 			}
 			if !p.hasFarID && !p.hasMAR {
 				p.farID, p.hasMAR, p.marID = old.farID, old.hasMAR, old.marID
