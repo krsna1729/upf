@@ -80,8 +80,8 @@ flowchart TB
 ```
 
 `upfd` builds an End Marker from a tunnel's address family, local/peer
-addresses and TEID: the old tunnel's on SNDEM, and the outgoing tunnel's when
-it relays a received End Marker through a transit or forwarding tunnel. It
+addresses and TEID: the old tunnel's on SNDEM. A received End Marker is
+relayed by decap itself (gate 3, below), not by `upfd`. It
 writes to the socket selected by that tunnel's transport route domain. The
 deployment routes that frame through the same post-encap Router as session
 traffic (`ci/veth-transport.sh` captures it on the wire, IPv4 and IPv6, with
@@ -249,9 +249,10 @@ Received Error Indications and End Markers are recorded and dropped; other
 unsupported message types are dropped. End Markers go to one single-producer
 ring per worker (`end_marker_log.h`, 256 events each): a drain returns each
 event once, and a full ring drops and counts rather than stall the worker.
-The report tick that drains them relays each through its F-TEID's forwarding
-tunnels by the End Marker ports above, so the relay leaves up to one
-`-urr-interval` after the marker arrived.
+`upfd` drains them for REEMR. The relay is decap's own: an End Marker on an
+F-TEID whose admission entry names relays leaves decap gate 3 once per relay,
+rewritten to that tunnel, and waits in a `Queue` for the worker's next round,
+so it leaves behind the G-PDUs its burst carried ahead of it.
 Replies are rewritten in place, with outer addresses and UDP ports swapped,
 lengths updated, and Ethernet MACs swapped. The post-encap Router resolves
 their next hop.
@@ -368,7 +369,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 | module commands | `get_counts` (counters), `get_errors` (the responder's Error Indication table: monotonic counts, no clear, read by the report tick), `drain_end_markers` (the responder's End Marker events, each returned once), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
 | metadata attributes | `action_id` (PDR result, read by counters/encap/store), `fteid_context` (written by decap, read by the PDR tables), `endpoint_id` (tagged before decap, read by decap and, with `track_end_markers`, by the responder), `qfi` (decap output, read by the PDR tables), `route_domain` (Vif/PDR result, read by tables and inner Router), `vif_id` (Vif or tag output, read by the Router's neighbor input), and `transport_route_domain` (encap/tag output, read by `rt_transport`) |
 | slot tables (`dataplane/slot_table.h`) | every per-rule table: ids are 1..capacity, an erased key retires for a grace period, and publishing into a retiring slot is refused — which is why released ids wait their walk (`docs/design.md`, the id pool) |
-| packet ownership | `bess::PacketRef` and the store's explicit free/release path; our modules copy no packet and allocate none |
+| packet ownership | `bess::PacketRef` and the store's explicit free/release path; our modules copy no packet, and only decap allocates one: each End Marker relay |
 | tasks (`RegisterTask`/`RunTask`) | BESS's store drains released packets from a task; **none of our modules has one** — nothing in our packet path runs between packets |
 | `GetSchema`/descriptor set | the controller builds every message from the daemon's own schema, so a field this plugin does not have fails loudly instead of silently |
 | `ListMetrics` (D-116) | per-gate counters: how an unwired gate's drops (store eviction, overflow) and a chain's throughput are read. What it does *not* show is a command's effect on the packets a module holds: `packet_store`'s `drop` frees them with `bess::PacketFree` and only decrements `total_packets_` (visible in `GetDesc`, not in metrics), `EvictExpired` (and the owner's per-run sweep, `EvictExpiredBounded`) frees an aged flow's packets the same way (its own timeout, no counter at all), while `release` moves them to the release queue, which does reach a gate — and only once the store's owner task has applied the request, since the command is *accepted* when the call returns. That is why the session layer counts the *accepted* commands it issued (`Stats.BuffersReleased`/`BuffersDropped`/`BufferFailures`) rather than reading drops back out of the daemon |
