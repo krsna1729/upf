@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Received End Markers (TS 29.281 7.3.2). An End Marker from the old I-UPF or
-// PSA arrives on N3/N9 on one of this UPF's own local F-TEIDs and reaches the
-// GTP-U responder through `GtpuDecap` gate 2, which records it with the
-// endpoint it came in on (datapath/gtpu_responder.cc, "drain_end_markers").
-// This side drains that log once per tick (Config.GTPUEndMarkers) and does two
-// things with each event: relays it through the GTP-U tunnel the F-TEID's PDR
-// forwards into, and reports it as a Usage Report with EMRRE (TS 29.244 8.2.19
-// REEMR, 8.2.41 EMRRE) for every REEMR URR a PDR on that F-TEID names.
+// PSA arrives on N3/N9 on one of this UPF's own local F-TEIDs. `GtpuDecap`
+// relays it in the packet path through the tunnels its F-TEID entry names
+// (endMarkerRelays, written with the entry), and sends it on through gate 2
+// to the GTP-U responder, which records it with the endpoint it came in on
+// (datapath/gtpu_responder.cc, "drain_end_markers"). This side drains that
+// log once per tick (Config.GTPUEndMarkers) and reports each End Marker as a
+// Usage Report with EMRRE (TS 29.244 8.2.19 REEMR, 8.2.41 EMRRE) for every
+// REEMR URR a PDR on that F-TEID names.
 package session
 
 import (
+	"net/netip"
 	"slices"
-
-	"github.com/krsna1729/upf/internal/bess"
 )
 
 // endMarkerKey is where an End Marker arrived: the logical endpoint and this
@@ -41,73 +41,48 @@ func endMarkerArrived(s *Session, uid uint32, markers map[endMarkerKey]bool) boo
 	return false
 }
 
-// relayEndMarkers sends each End Marker that arrived on a PDR's local F-TEID
-// on through the GTP-U tunnel that PDR's FAR forwards into: an I-UPF's
-// transit tunnel, or an indirect data forwarding tunnel. TS 29.244 Table
-// 8.2.64-1 NOTE 2 has the I-UPF keep the message type of a GTP-U signalling
-// message it forwards, and TS 23.502 4.9.1.3.3 step 10b has the PSA's End
-// Markers reach the target RAN through the forwarding tunnels.
+// endMarkerRelays is the end_marker_relays of the session's admission entry
+// for the F-TEID (endpoint, teid): every distinct GTP-U tunnel a PDR on that
+// F-TEID forwards into -- an I-UPF's transit tunnel, or an indirect data
+// forwarding tunnel. TS 29.244 Table 8.2.64-1 NOTE 2 has the I-UPF keep the
+// message type of a GTP-U signalling message it forwards, and TS 23.502
+// 4.9.1.3.3 step 10b has the PSA's End Markers reach the target RAN through
+// the forwarding tunnels.
 //
-// The relayed marker is the one this UPF sends on that tunnel itself
-// (endMarkerFrame): the FAR's outgoing TEID toward its peer, from the
-// tunnel's local address, through its transport's port. Each arrival is
-// relayed once per distinct tunnel. A PDR whose FAR adds no outer header (N6,
-// 5G VN Internal), drops or buffers relays nothing; the arrival is still
-// reported. The relay is as late as the tick that drains the log, never ahead
-// of the G-PDUs that preceded the marker on its tunnel: those were forwarded
-// when they arrived.
-func (c *Compiler) relayEndMarkers(arrived []bess.EndMarker) {
-	if !c.endMarkersConfigured() {
-		return
+// A relay is the tunnel this UPF's encap writes for the PDR: the FAR's
+// outgoing TEID toward its peer, from the tunnel's local address, routed in
+// its transport domain. The decap sends one End Marker per relay in the batch
+// the received one arrived in, behind the G-PDUs that preceded it. A PDR whose
+// FAR adds no outer header (N6, 5G VN Internal), drops, buffers or names a MAR
+// relays nothing; the arrival is still reported. The caller holds the lock.
+func endMarkerRelays(s *Session, endpoint, teid uint32) []map[string]any {
+	type tunnel struct {
+		teid        uint32
+		local, peer netip.Addr
+		domain      uint32
 	}
-	for _, m := range arrived {
-		for _, tunnel := range c.relayTunnels(endMarkerKey{endpoint: m.EndpointID, teid: m.TEID}) {
-			if err := c.sendTunnelEndMarker(tunnel); err != nil {
-				c.stats.markerFailures.Add(1)
-				c.log.Warn("session: an end marker was not relayed", "endpoint", m.EndpointID,
-					"teid", m.TEID, "tunnel_teid", tunnel.teid, "error", err)
-				continue
-			}
-			c.stats.markers.Add(1)
-		}
-	}
-}
-
-// relayTunnels is every distinct GTP-U tunnel a PDR on the local F-TEID at
-// forwards into, as the session holds it now. The F-TEID's admission keys
-// name the one session that owns it.
-func (c *Compiler) relayTunnels(at endMarkerKey) []tunnelEndMarker {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var out []tunnelEndMarker
-	var owners []*Session
-	for key := range c.fteidTEIDKeys[at.teid] {
-		s := c.byFTEID[key].session
-		if s == nil || slices.Contains(owners, s) {
+	var seen []tunnel
+	var relays []map[string]any
+	for _, p := range pdrsInOrder(s) {
+		// The tunnel's local end is resolved only for a PDR whose FAR
+		// forwards with an Outer Header Creation (resolve).
+		if p.endpointID != endpoint || p.teid != teid || p.hasMAR ||
+			!p.tunnelLocalAddress.IsValid() || p.transportRouteDomain == 0 {
 			continue
 		}
-		owners = append(owners, s)
-		for _, p := range pdrsInOrder(s) {
-			// The tunnel's local end is resolved only for a PDR whose FAR
-			// forwards with an Outer Header Creation (resolve).
-			if p.endpointID != at.endpoint || p.teid != at.teid || p.hasMAR ||
-				!p.tunnelLocalAddress.IsValid() || p.transportRouteDomain == 0 {
-				continue
-			}
-			f := s.FARs[p.farID]
-			if f == nil || !f.hasOuter || f.teid == 0 {
-				continue
-			}
-			if slices.ContainsFunc(out, func(t tunnelEndMarker) bool {
-				return t.teid == f.teid && t.peer == f.peer && t.localAddress == p.tunnelLocalAddress &&
-					t.transportRouteDomain == p.transportRouteDomain
-			}) {
-				continue
-			}
-			out = append(out, tunnelEndMarker{
-				far: *f, localAddress: p.tunnelLocalAddress, transportRouteDomain: p.transportRouteDomain,
-			})
+		f := s.FARs[p.farID]
+		if f == nil || !f.hasOuter || f.teid == 0 {
+			continue
 		}
+		t := tunnel{teid: f.teid, local: p.tunnelLocalAddress, peer: f.peer, domain: p.transportRouteDomain}
+		if slices.Contains(seen, t) {
+			continue
+		}
+		seen = append(seen, t)
+		relays = append(relays, map[string]any{
+			"teid": t.teid, "local_address": t.local.AsSlice(), "peer_address": t.peer.AsSlice(),
+			"transport_route_domain": t.domain,
+		})
 	}
-	return out
+	return relays
 }
