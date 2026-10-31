@@ -408,8 +408,14 @@ func usageReportIE(typ ie.IEType, urrID, seqn uint32, trigger Trigger, endMarker
 // and a session the SMF deleted while the counters were being read is skipped
 // rather than failed: the usage belongs to a session nobody has.
 func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
+	// The sessions with a URR (Compiler.measured), not every session, and
+	// their rules a bounded batch of sessions per hold of the lock: a tick
+	// must not stall every establishment behind a walk of the whole table.
 	c.mu.Lock()
-	seids := make([]uint64, 0, len(c.sessions))
+	seids := make([]uint64, 0, len(c.measured))
+	for seid := range c.measured {
+		seids = append(seids, seid)
+	}
 	if c.tickIDs == nil {
 		c.tickIDs = map[string][]uint32{}
 	}
@@ -417,12 +423,20 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	for module, rules := range ids {
 		ids[module] = rules[:0]
 	}
-	for seid, s := range c.sessions {
-		seids = append(seids, seid)
-		c.appendMeasuredRules(s, ids)
-	}
 	c.mu.Unlock()
 	slices.Sort(seids)
+	for start := 0; start < len(seids); start += tickHold {
+		c.mu.Lock()
+		for _, seid := range seids[start:min(start+tickHold, len(seids))] {
+			s := c.sessions[seid]
+			if s == nil || len(s.URRs) == 0 {
+				delete(c.measured, seid)
+				continue
+			}
+			c.appendMeasuredRules(s, ids)
+		}
+		c.mu.Unlock()
+	}
 	names := make([]string, 0, len(ids))
 	top := uint32(0)
 	for module, rules := range ids {
@@ -514,6 +528,17 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 				for _, teid := range read {
 					indications[teid] = true
 				}
+			}
+			if len(indications) > 0 {
+				// Error Indications are owed by any session whose tunnel the
+				// peer named, measured or not: this tick judges them all.
+				c.mu.Lock()
+				seids = seids[:0]
+				for seid := range c.sessions {
+					seids = append(seids, seid)
+				}
+				c.mu.Unlock()
+				slices.Sort(seids)
 			}
 		}
 	}
@@ -779,7 +804,10 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 			window         time.Duration
 			first, last    time.Time
 		}
-		states := make([]memberState, 0, len(members))
+		// On the stack for the groups a session has in practice: this runs
+		// for every measured session every tick.
+		var held [4]memberState
+		states := held[:0]
 		anyDue := false
 		for _, uid := range members {
 			u := s.URRs[uid]
@@ -916,8 +944,12 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 // reports them in one order whatever the map's is. The link is undirected for
 // grouping -- a URR "Y" may itself link to more URRs, and 5.2.2.4 makes the
 // group everything reachable from any of them. A URR with no link is a group of
-// one.
+// one. The answer is cached until the model changes (invalidateOrderCache).
+// The caller holds the lock.
 func linkedGroups(s *Session) [][]uint32 {
+	if s.cachedGroups != nil {
+		return s.cachedGroups
+	}
 	ids := urrIDsInOrder(s)
 	parent := make(map[uint32]uint32, len(ids))
 	for _, id := range ids {
@@ -951,6 +983,7 @@ func linkedGroups(s *Session) [][]uint32 {
 		groups = append(groups, g)
 	}
 	slices.SortFunc(groups, func(a, b []uint32) int { return cmp.Compare(a[0], b[0]) })
+	s.cachedGroups = groups
 	return groups
 }
 

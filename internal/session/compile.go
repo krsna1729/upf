@@ -610,6 +610,9 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 
 	c.mu.Lock()
 	c.sessions[local] = s
+	// resolve listed it for the ticks before it was a session, and a tick in
+	// between may have dropped it again.
+	c.track(s)
 	c.byCP[cpSEID] = s
 	c.mu.Unlock()
 	c.stats.established.Add(1)
@@ -1656,6 +1659,7 @@ func (s *Session) retireTunnel(id uint32) {
 // must follow the model as it is now rather than as the last message left it.
 // The caller holds the lock.
 func (c *Compiler) resolve(s *Session) error {
+	defer c.track(s)
 	// The one QER each PDR's rates come from, chosen for the session (finding
 	// 6: one rule's action carries one meter id, so a PDR naming several
 	// rate-bearing QERs is policed by one of them -- sharedRateQER says which

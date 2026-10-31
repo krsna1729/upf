@@ -133,7 +133,15 @@ type Target interface {
 // the graph of its module fields otherwise.
 func newTarget(cfg Config) Target {
 	if cfg.Appliance != "" {
-		return applianceTarget{module: cfg.Appliance, cfg: cfg}
+		a := applianceTarget{module: cfg.Appliance, cfg: cfg, names: new([tableCount]string)}
+		for t := range tableCount {
+			name, ok := applianceTables[t]
+			if !ok {
+				name = tableNames[t]
+			}
+			a.names[t] = cfg.Appliance + "/" + name
+		}
+		return a
 	}
 	return graphTarget{cfg: cfg}
 }
@@ -261,6 +269,9 @@ func (g graphTarget) BufferGate() uint32 {
 type applianceTarget struct {
 	module string
 	cfg    Config
+	// names is each table's resource name, built once: the tick asks for the
+	// counter tables' per measured rule.
+	names *[tableCount]string
 }
 
 // applianceTables are the appliance's own table names, where they differ
@@ -278,10 +289,7 @@ func (a applianceTarget) Resource(t Table) string {
 	if t >= tableCount {
 		return ""
 	}
-	if name, ok := applianceTables[t]; ok {
-		return a.module + "/" + name
-	}
-	return a.module + "/" + tableNames[t]
+	return a.names[t]
 }
 
 // Entries is one table whatever responder an interface names: the appliance

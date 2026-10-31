@@ -866,8 +866,13 @@ addressed:
    `internal/session/report_test.go`'s `TestATickReadsEachCounterModuleOnce`
    pins the call count: one read per module per chunk, never one per session,
    and the reports it decides are compared element by element against the
-   per-session path's). The reading itself is the module's `get_counts`. **That
-   is not a
+   per-session path's). The tick walks only the sessions with a URR
+   (`Compiler.measured`), at most 1,024 per hold of the compiler's lock, and
+   `EvaluateDownlinks` does the same over the BUFF+NOCP sessions
+   (`Compiler.buffering`) with one bulk peek per chunk rather than one per
+   session (`TestATickReadsEveryBufferingSessionInOneReading`,
+   `TestATickCostsOnlyTheSessionsThatMeasure`). The reading itself is the
+   module's `get_counts`. **That is not a
    preference, it is the only read that carries counts:** the counter *resource*
    (`<module>/counters`) is the existence of an entry, keyed by ActionId, with
    an **empty value** -- `datapath/upf_datapath.proto` says why ("the counts are

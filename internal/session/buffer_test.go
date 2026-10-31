@@ -803,3 +803,45 @@ func TestTheDownlinkReportIsOwedOncePerBufferingEpisode(t *testing.T) {
 		t.Fatalf("a new buffering episode owes no report: %+v", got)
 	}
 }
+
+// TestATickReadsEveryBufferingSessionInOneReading is the downlink tick at
+// scale: a thousand idle UEs buffering with NOCP are read in one reading, not
+// one round trip each, and every one of them still owes its report.
+func TestATickReadsEveryBufferingSessionInOneReading(t *testing.T) {
+	rec := &recorder{}
+	c := New(bufferingConfig(), rec, quietLogger())
+	const sessions = 1000
+	arrived := time.Now()
+	stamped := make([]bess.RuleCount, 0, sessions)
+	for i := range sessions {
+		ue := []byte{10, 46, byte(i / 250), byte(i%250 + 1)}
+		req := buffEstablishment(uint64(0x8000+i), "10.46."+strconv.Itoa(int(ue[2]))+"."+strconv.Itoa(int(ue[3])))
+		req.CreateFAR[1] = ie.NewCreateFAR(ie.NewFARID(2), ie.NewApplyAction(applyBuff|applyNOCP), ie.NewBARID(1))
+		if got := cause(t, c.Establish(req).(*message.SessionEstablishmentResponse)); got != ie.CauseRequestAccepted {
+			t.Fatalf("establishment %d answered cause %d", i, got)
+		}
+		flow := ruleCarrying(t, rec.last(), fieldDstIP, ue).actionID()
+		stamped = append(stamped, bess.RuleCount{ActionID: flow, Packets: 1, First: arrived, Last: arrived})
+	}
+	rec.counts = map[string][]bess.RuleCount{"cnt_buf": stamped}
+	rec.calls = nil
+
+	owed := c.EvaluateDownlinks(context.Background())
+	reads := 0
+	for _, call := range rec.calls {
+		if call.module == "cnt_buf" {
+			reads++
+		}
+	}
+	if reads > 1 {
+		t.Errorf("the tick read the buffering counters %d times for %d sessions, want 1", reads, sessions)
+	}
+	if len(owed) != sessions {
+		t.Fatalf("%d sessions owe a report, want %d", len(owed), sessions)
+	}
+	for i := 1; i < len(owed); i++ {
+		if owed[i-1].SEID >= owed[i].SEID || len(owed[i].PDRs) != 1 || owed[i].PDRs[0] != 2 {
+			t.Fatalf("report %d is %+v after %+v, want PDR 2, low SEID first", i, owed[i], owed[i-1])
+		}
+	}
+}
