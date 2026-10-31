@@ -264,10 +264,11 @@ class SessionResource final : public bess::dataplane::Resource {
   void set_memory_growth(bess::utils::MemoryGrowth *growth) noexcept { growth_ = growth; }
   // Every live session as a client writes it.
   void ForEachLive(const std::function<void(uint32_t, const upf::pb::UpfSession &)> &visit) const;
-  // get_counts for counters_ul (dl false) or counters_dl: every action ever
-  // provisioned for counting that direction (ids empty), else the ids asked for.
-  void Counts(bool dl, std::span<const uint32_t> ids, bool restart,
-              upf::pb::UrrCountCommandGetCountsResponse *out) const;
+  // get_counts for counters_ul (dl false) or counters_dl: the ids asked for,
+  // else at most `limit` actions above `after` ever provisioned for counting
+  // that direction. Returns the id to resume after, 0 when done.
+  uint32_t Counts(bool dl, std::span<const uint32_t> ids, bool restart, uint32_t after, size_t limit,
+                  upf::pb::UrrCountCommandGetCountsResponse *out) const;
   // The most entries ForEachLive and Counts handle per hold of the lock a
   // transaction needs.
   static constexpr size_t kEntriesPerHold = 1024;

@@ -161,8 +161,7 @@ uint32_t Read32(const std::vector<std::byte> &v, size_t off) {
 CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg) {
   auto &memory = init_context().memory();
   capacity_ = arg.counters().capacity() ? arg.counters().capacity() : 65536;
-  const size_t planes = arg.counters().worker_planes() ? arg.counters().worker_planes()
-                                                     : dataplane::kMaxWorkers;
+  const size_t planes = upf::appliance::CounterPlanes(arg.counters().worker_planes());
   if (planes > dataplane::kMaxWorkers)
     return CommandFailure(EINVAL, "worker_planes exceeds maximum");
   if (arg.meter().levels() != 0 && arg.meter().levels() != 2)
@@ -347,8 +346,12 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
     bank.stamps_lease = memory.Lease(std::string(table) + "_stamps", bess::utils::DpdkArray<Stamps>::Bytes(capacity_, memory.socket()));
     bank.stamps = bess::utils::DpdkArray<Stamps>(capacity_, memory.socket());
     bank.stamps_lease.Track(bank.stamps);
+    bank.live_lease = memory.Lease(std::string(table) + "_live", upf::appliance::LiveIds::Bytes(capacity_, memory.socket()));
+    bank.live = std::make_unique<upf::appliance::LiveIds>(capacity_, memory.socket());
+    bank.live_lease.Track(bank.live->array());
     bank.entries = memory.Create<dataplane::SlotTable<Id, CounterEntry>>(table, capacity_);
-    bank.resource = std::make_unique<dataplane::SlotResource<Id, CounterEntry>>(name() + "/" + table, *bank.entries);
+    bank.resource = std::make_unique<upf::appliance::TrackedSlotResource<Id, CounterEntry>>(
+        name() + "/" + table, *bank.entries, *bank.live);
     bindings_.push_back(init_context().codecs().Bind(*bank.resource,
       std::make_shared<bess::framework::TypedCodec<upf::pb::CounterKey, upf::pb::CounterEntry>>(
         [](const upf::pb::CounterKey &key) -> std::expected<dataplane::ResourceKey, std::string> {
@@ -357,12 +360,10 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
         },
         [](const upf::pb::CounterEntry &) -> std::expected<std::any, std::string> { return std::any(CounterEntry{}); },
         [&bank](const auto &visit) {
-          for (size_t i = 1; i <= bank.entries->capacity(); ++i) {
-            const Id id(static_cast<Id::rep_type>(i));
-            if (!bank.entries->Current(id)) continue;
+          bank.live->Walk(0, SIZE_MAX, [&visit](uint32_t i) {
             upf::pb::CounterKey key; key.set_action_id(i);
             visit(key, upf::pb::CounterEntry{});
-          }
+          });
         })));
     return enroll(bank.resource.get());
   };
@@ -660,6 +661,7 @@ void UpfAppliance::ReleaseResources() {
   for (auto *bank : {&counters_ul_, &counters_dl_, &buffer_counters_}) {
     bank->resource.reset(); bank->entries.reset(); bank->cells.reset();
     bank->stamps = {}; bank->stamps_lease.reset();
+    bank->live.reset(); bank->live_lease.reset();
   }
   fteid_resource_.reset(); fteids_.reset(); entries_.reset();
   meters_.reset(); errors_.reset(); end_markers_.reset();
@@ -677,11 +679,16 @@ CommandResponse UpfAppliance::CommandGetCounts(const upf::pb::UrrCountCommandGet
   gettimeofday(&wall, nullptr);
   response.set_read_wall_unix_ns(static_cast<uint64_t>(wall.tv_sec) * 1000000000ull + static_cast<uint64_t>(wall.tv_usec) * 1000ull);
   response.set_read_monotonic_ns(tsc_to_ns(rdtsc()));
+  // A RuleCount is at most 52 bytes on the wire: a page of kCountsPage
+  // stays under gRPC's 64 MiB.
+  constexpr size_t kCountsPage = 1 << 20;
+  if (static_cast<size_t>(arg.action_ids_size()) > kCountsPage)
+    return CommandFailure(EINVAL, "at most %zu action_ids per read", kCountsPage);
   if (cells) {
     // UpfSessionAppliance: the URR cells live in the sessions' strides.
-    sessions_->Counts(arg.table() == "counters_dl",
-                      std::span<const uint32_t>(arg.action_ids().data(), arg.action_ids_size()),
-                      arg.restart_window(), &response);
+    response.set_next_after(sessions_->Counts(
+        arg.table() == "counters_dl", std::span<const uint32_t>(arg.action_ids().data(), arg.action_ids_size()),
+        arg.restart_window(), arg.after(), kCountsPage, &response));
     return CommandSuccess(response);
   }
   auto report = [&](uint32_t id) {
@@ -702,8 +709,7 @@ CommandResponse UpfAppliance::CommandGetCounts(const upf::pb::UrrCountCommandGet
     count->set_last_packet_ns(stamp.last.load(std::memory_order_relaxed));
   };
   if (arg.action_ids_size() == 0) {
-    for (size_t i = 1; i <= capacity_; ++i)
-      if (bank->entries->Current(Id(static_cast<Id::rep_type>(i)))) report(i);
+    response.set_next_after(bank->live->Walk(arg.after(), kCountsPage, report));
   } else {
     for (uint32_t id : arg.action_ids()) report(id);
   }

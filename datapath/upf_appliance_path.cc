@@ -273,7 +273,9 @@ void UpfAppliance::MeterSessions(bess::PacketBatch *batch, State *states, size_t
 
 void UpfAppliance::CountUsage(Context *ctx, bess::PacketBatch *batch, State *states,
     size_t n, Counters &bank, bool buffer) {
-  const auto plane = bank.cells->ForWorker(ctx->wid);
+  // One plane (the default): the module's only worker writes it, whatever its id.
+  const auto plane = bank.cells->ForWorker(
+      bank.cells->workers() == 1 ? bess::dataplane::WorkerId(0) : ctx->wid);
   uint32_t counted[kBurst];
   size_t count = 0;
   for (size_t i = 0; i < n; ++i) {

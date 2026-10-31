@@ -960,8 +960,8 @@ void SessionResource::Report(uint32_t action_id, uint32_t at, bool dl, bool rest
   count->set_last_packet_ns(bank.last_ns.load(std::memory_order_relaxed));
 }
 
-void SessionResource::Counts(bool dl, std::span<const uint32_t> ids, bool restart,
-                             upf::pb::UrrCountCommandGetCountsResponse *out) const {
+uint32_t SessionResource::Counts(bool dl, std::span<const uint32_t> ids, bool restart, uint32_t after,
+                                 size_t limit, upf::pb::UrrCountCommandGetCountsResponse *out) const {
   // At most kEntriesPerHold entries per mu_ hold, so a transaction waits for
   // one chunk, not the whole read.
   if (!ids.empty()) {
@@ -975,21 +975,30 @@ void SessionResource::Counts(bool dl, std::span<const uint32_t> ids, bool restar
         Report(ids[i], it == actions_.end() ? 0 : it->second, dl, restart, out);
       }
     }
-    return;
+    return 0;
   }
-  // Every counted action in id order, resuming each hold where the last
-  // stopped: one index walk, no lookup per entry.
-  for (std::optional<uint32_t> next = 0; next;) {
+  // Every counted action above `after` in id order, at most `limit`,
+  // resuming each hold where the last stopped: one index walk, no lookup
+  // per entry.
+  size_t reported = 0;
+  uint32_t last = after;
+  for (std::optional<uint64_t> next = uint64_t{after} + 1; next;) {
     std::lock_guard lock(mu_);
-    auto it = actions_.lower_bound(*next);
+    auto it = actions_.lower_bound(static_cast<uint32_t>(std::min<uint64_t>(*next, UINT32_MAX)));
+    if (*next > UINT32_MAX) it = actions_.end();
     size_t n = 0;
     for (; it != actions_.end() && n < kEntriesPerHold; ++it, ++n) {
       const uint8_t slot = static_cast<uint8_t>(it->second & ((uint32_t{1} << (kActionBits + 1)) - 1));
-      if (mirrors_[SessionOf(it->second) - 1].banks[dl] >> slot & 1) Report(it->first, it->second, dl, restart, out);
+      if (!(mirrors_[SessionOf(it->second) - 1].banks[dl] >> slot & 1)) continue;
+      if (reported == limit) return last;
+      Report(it->first, it->second, dl, restart, out);
+      ++reported;
+      last = it->first;
     }
     work_.max_per_hold = std::max(work_.max_per_hold, n);
-    next = it == actions_.end() ? std::nullopt : std::optional<uint32_t>(it->first);
+    next = it == actions_.end() ? std::nullopt : std::optional<uint64_t>(it->first);
   }
+  return 0;
 }
 
 }  // namespace upf::appliance
