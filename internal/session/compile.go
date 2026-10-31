@@ -592,7 +592,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		c.mu.Unlock()
 		return c.establishResponse(req, cpSEID, local, compileCause(err), nil)
 	}
-	if err := c.ap.Apply(context.Background(), changes...); err != nil {
+	if err := c.apply(context.Background(), s, changes, false); err != nil {
 		c.log.Warn("session: the dataplane refused the session",
 			"cp_seid", cpSEID, "seid", local, "error", err)
 		// A definite refusal means nothing of this session is in the dataplane,
@@ -745,7 +745,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
 	created := s.createdPDRsFor(c.cfg, asked)
-	if err := c.ap.Apply(context.Background(), changes...); err != nil {
+	if err := c.apply(context.Background(), s, changes, false); err != nil {
 		if definiteRefusal(err) {
 			c.mu.Lock()
 			c.rollback(s, before)
@@ -5144,7 +5144,8 @@ func compileCause(err error) uint8 {
 func causeOf(err error) uint8 {
 	var invalid *bess.InvalidRequestError
 	switch {
-	case errors.As(err, &invalid) && invalid.Code == codes.ResourceExhausted:
+	case errors.As(err, &invalid) && invalid.Code == codes.ResourceExhausted,
+		errors.Is(err, errNoResources):
 		// The daemon refused for lack of memory or capacity (BESS D-198): a
 		// definite refusal, nothing was applied, and TS 29.244 has a cause
 		// for it.
@@ -5161,13 +5162,16 @@ func causeOf(err error) uint8 {
 }
 
 // definiteRefusal reports whether the SDK's error says the daemon refused the
-// transaction outright. The alternative is an outcome that is unknown (no
-// answer, a transport error): the transaction may have committed, so a caller
-// must not treat the session's ids or records as its own to undo.
+// transaction outright, or the session-major fold refused it before it was
+// sent (errNotExpressible, errNoResources: sessionmajor.go). The alternative
+// is an outcome that is unknown (no answer, a transport error): the
+// transaction may have committed, so a caller must not treat the session's
+// ids or records as its own to undo.
 func definiteRefusal(err error) bool {
 	var invalid *bess.InvalidRequestError
 	var rejected *bess.RejectedError
-	return errors.As(err, &invalid) || errors.As(err, &rejected)
+	return errors.As(err, &invalid) || errors.As(err, &rejected) ||
+		errors.Is(err, errNotExpressible) || errors.Is(err, errNoResources)
 }
 
 // createdFTEID is the F-TEID of a Created PDR: our own TEID and the N3

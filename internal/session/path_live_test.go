@@ -313,7 +313,7 @@ func gatePackets(t *testing.T, ctx context.Context, client *bess.Client, module 
 // fan out (the router's two exits) is read by which gate carried what.
 func gatePacketsAt(t *testing.T, ctx context.Context, client *bess.Client, module, gate string) float64 {
 	t.Helper()
-	if os.Getenv("UPF_TARGET") == "appliance" && gate == "0" {
+	if liveAppliance() && gate == "0" {
 		switch module {
 		case "rt", "mt_ul":
 			module, gate = "upf", "0"
@@ -551,7 +551,7 @@ func octetsOf(t *testing.T, ctx context.Context, client *bess.Client, module str
 func countersOf(t *testing.T, ctx context.Context, client *bess.Client, module string) map[uint32][2]uint64 {
 	t.Helper()
 	fieldsArg := map[string]any(nil)
-	if os.Getenv("UPF_TARGET") == "appliance" {
+	if liveAppliance() {
 		table := map[string]string{"cnt_ul": "counters_ul", "cnt_dl": "counters_dl"}[module]
 		fieldsArg = map[string]any{"table": table}
 		module = "upf"

@@ -129,21 +129,25 @@ type Target interface {
 	SweepResources() []string
 }
 
-// newTarget is the target cfg describes: the appliance when it names one,
-// the graph of its module fields otherwise.
+// newTarget is the target cfg describes: the appliance when it names one
+// (session-major when cfg.Sessions says so), the graph of its module fields
+// otherwise.
 func newTarget(cfg Config) Target {
-	if cfg.Appliance != "" {
-		a := applianceTarget{module: cfg.Appliance, cfg: cfg, names: new([tableCount]string)}
-		for t := range tableCount {
-			name, ok := applianceTables[t]
-			if !ok {
-				name = tableNames[t]
-			}
-			a.names[t] = cfg.Appliance + "/" + name
-		}
-		return a
+	if cfg.Appliance == "" {
+		return graphTarget{cfg: cfg}
 	}
-	return graphTarget{cfg: cfg}
+	a := applianceTarget{module: cfg.Appliance, cfg: cfg, names: new([tableCount]string)}
+	for t := range tableCount {
+		name, ok := applianceTables[t]
+		if !ok {
+			name = tableNames[t]
+		}
+		a.names[t] = cfg.Appliance + "/" + name
+	}
+	if cfg.Sessions != nil {
+		return sessionTarget{a}
+	}
+	return a
 }
 
 // endMarkerPath is <base>.<domain>: the unix port of the routed path for

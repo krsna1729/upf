@@ -28,6 +28,8 @@ func validArgs() graphArgs {
 		// One encap module, both directions: the deployed daemon writes an
 		// uplink forward's tunnel record there too.
 		tunnels: "enc", tunnelsUL: "enc",
+		// -target session-major's flag defaults.
+		sessions: session.SessionLayout{MaxSessions: 65536, Actions: 4, QERs: 4},
 	}
 }
 
@@ -243,6 +245,22 @@ func TestGraphConfigRefusesWhatNoTargetIs(t *testing.T) {
 		"no appliance module": func(a *graphArgs) {
 			a.target, a.appliance = "appliance", ""
 		},
+		"session-major with other PDR fields": func(a *graphArgs) {
+			a.target, a.appliance = "session-major", "upf"
+			a.pdrFieldsUL = "src,dst,proto,sport,dport,qfi"
+		},
+		"session-major with no actions": func(a *graphArgs) {
+			a.target, a.appliance = "session-major", "upf"
+			a.sessions.Actions = 0
+		},
+		"session-major beyond 16 actions": func(a *graphArgs) {
+			a.target, a.appliance = "session-major", "upf"
+			a.sessions.Actions = 17
+		},
+		"session-major beyond the result's session bits": func(a *graphArgs) {
+			a.target, a.appliance = "session-major", "upf"
+			a.sessions.MaxSessions = 1 << 27
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			args := validArgs()
@@ -251,5 +269,24 @@ func TestGraphConfigRefusesWhatNoTargetIs(t *testing.T) {
 				t.Fatal("graphConfig accepted it")
 			}
 		})
+	}
+}
+
+// TestGraphConfigSessionMajor: -target session-major is the appliance's
+// config plus the module's session layout, which bounds what the compiler
+// folds into one entry.
+func TestGraphConfigSessionMajor(t *testing.T) {
+	args := validArgs()
+	args.target, args.appliance = "session-major", "upf"
+	cfg, err := graphConfig(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Appliance != "upf" || cfg.Sessions == nil || *cfg.Sessions != args.sessions {
+		t.Fatalf("appliance %q sessions %+v, want upf and %+v", cfg.Appliance, cfg.Sessions, args.sessions)
+	}
+	args.target = "appliance"
+	if cfg, err = graphConfig(args); err != nil || cfg.Sessions != nil {
+		t.Fatalf("-target appliance gave sessions %+v, err %v; want the masked layout", cfg.Sessions, err)
 	}
 }
