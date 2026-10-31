@@ -203,6 +203,66 @@ type Report struct {
 	// report's URR measures and asks for REEMR: the Usage Report Trigger
 	// carries EMRRE (8.2.41, octet 7) whatever else it carries.
 	EndMarker bool
+
+	// bases are each member's base as this report found it, in the group's
+	// order (the UR-SEQN's holder first): what Compiler.Unreport puts back.
+	bases []urrBase
+}
+
+// urrBase is the part of a URR a report moves: the base its next window is
+// measured from, and that window's stamps.
+type urrBase struct {
+	uid                     uint32
+	reported                time.Time
+	lastUp, lastDown        Usage
+	windowFirst, windowLast time.Time
+}
+
+// Absorb adds another undelivered report of the same session to r, URR by
+// URR: the usage the other one carried reaches the SMF in r instead of being
+// lost. r keeps its UR-SEQN; the reading the delivered base moves to on
+// acceptance (ConfirmReport) is the later report's, and the base Unreport
+// would put back is the earlier one's.
+func (r *Report) Absorb(o Report) {
+	window := func(up, down *Usage, d *time.Duration, first, last *time.Time,
+		oUp, oDown Usage, oD time.Duration, oFirst, oLast time.Time) {
+		*up, *down, *d = up.add(oUp), down.add(oDown), *d+oD
+		if !oFirst.IsZero() && (first.IsZero() || oFirst.Before(*first)) {
+			*first = oFirst
+		}
+		if oLast.After(*last) {
+			*last = oLast
+		}
+	}
+	later := o.DecidedAt.After(r.DecidedAt)
+	merge := func(uid uint32, up, down Usage, d time.Duration, first, last time.Time, rawUp, rawDown Usage) {
+		if uid == r.URRID {
+			window(&r.Up, &r.Down, &r.Duration, &r.First, &r.Last, up, down, d, first, last)
+			if later {
+				r.RawUp, r.RawDown = rawUp, rawDown
+			}
+			return
+		}
+		for i := range r.Linked {
+			l := &r.Linked[i]
+			if l.URRID == uid {
+				window(&l.Up, &l.Down, &l.Duration, &l.First, &l.Last, up, down, d, first, last)
+				if later {
+					l.RawUp, l.RawDown = rawUp, rawDown
+				}
+			}
+		}
+	}
+	merge(o.URRID, o.Up, o.Down, o.Duration, o.First, o.Last, o.RawUp, o.RawDown)
+	for _, l := range o.Linked {
+		merge(l.URRID, l.Up, l.Down, l.Duration, l.First, l.Last, l.RawUp, l.RawDown)
+	}
+	r.Enforcing = r.Enforcing || o.Enforcing
+	if later {
+		r.DecidedAt = o.DecidedAt
+	} else {
+		r.bases = o.bases
+	}
 }
 
 // LinkedUsage is one URR of a linked group (8.2.55) as the group's report
@@ -825,16 +885,20 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 				r.Enforcing = true
 			}
 		}
-		reports = append(reports, r)
 		// The report opens every member's next window, and it is the SMF's
 		// message that carries this usage: the counters are not reset (the
 		// dataplane knows nothing of reports), so the base is what moves -- and
 		// with it the window's own stamps, which the next tick writes afresh.
+		// Where it was is kept with the report, for a report the SMF never
+		// gets (Unreport).
 		for _, st := range states {
 			u := s.URRs[st.uid]
+			r.bases = append(r.bases, urrBase{uid: st.uid, reported: u.reported, lastUp: u.lastUp,
+				lastDown: u.lastDown, windowFirst: u.windowFirst, windowLast: u.windowLast})
 			u.reported, u.lastUp, u.lastDown = now, st.rawUp, st.rawDown
 			u.windowFirst, u.windowLast = time.Time{}, time.Time{}
 		}
+		reports = append(reports, r)
 		s.URRs[members[0]].seqn++
 	}
 	return reports, stopped
@@ -1106,6 +1170,37 @@ func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) 
 			lead.seqn++
 		}
 	}
+}
+
+// Unreport takes back the decision of a report that will never be sent -- the
+// session's queue had no room for it -- while it is still the latest its URRs
+// made: their base, window stamps and the group's UR-SEQN go back to where the
+// report found them, so the next tick decides that usage again rather than
+// losing it, and the SMF sees no gap in the sequence. A report something later
+// has already moved past (a modification that carried the window, a later
+// tick) cannot be taken back, and the answer is false: the caller keeps its
+// usage some other way (Report.Absorb).
+func (c *Compiler) Unreport(r Report) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.sessions[r.SEID]
+	if s == nil || len(r.bases) == 0 {
+		return false
+	}
+	for _, b := range r.bases {
+		if u := s.URRs[b.uid]; u == nil || !u.reported.Equal(r.DecidedAt) {
+			return false
+		}
+	}
+	for _, b := range r.bases {
+		u := s.URRs[b.uid]
+		u.reported, u.lastUp, u.lastDown = b.reported, b.lastUp, b.lastDown
+		u.windowFirst, u.windowLast = b.windowFirst, b.windowLast
+	}
+	if holder := s.URRs[r.bases[0].uid]; holder.seqn == r.Seqn+1 {
+		holder.seqn--
+	}
+	return true
 }
 
 // ConfirmReport moves the delivered base of the URRs a report carried: the

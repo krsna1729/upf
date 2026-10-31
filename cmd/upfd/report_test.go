@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -490,28 +491,30 @@ func TestATickStopsDrainingAfterATransportFailure(t *testing.T) {
 
 // TestTheReportQueueIsBoundedPerSession: a CP function that never answers must
 // not grow this node's memory without bound, and what does not fit is handed
-// back so the loop can log it with its usage rather than lose it quietly.
+// back -- the newest, whose decision the session layer can still take back --
+// so the loop keeps its usage rather than losing it quietly.
 func TestTheReportQueueIsBoundedPerSession(t *testing.T) {
 	q := newReportQueue()
-	var dropped []uint32
+	var refused []uint32
 	for seqn := uint32(0); seqn < reportQueueDepth+2; seqn++ {
 		if d := q.add(session.Report{SEID: 1, URRID: 7, Seqn: seqn}); d != nil {
-			dropped = append(dropped, d.Seqn)
+			refused = append(refused, d.Seqn)
 		}
 	}
-	if len(dropped) != 2 || dropped[0] != 0 || dropped[1] != 1 {
-		t.Errorf("the queue dropped UR-SEQNs %v, want the two oldest (0, 1)", dropped)
+	if len(refused) != 2 || refused[0] != reportQueueDepth || refused[1] != reportQueueDepth+1 {
+		t.Errorf("the queue turned away UR-SEQNs %v, want the two newest (%d, %d)",
+			refused, reportQueueDepth, reportQueueDepth+1)
 	}
 	if held := len(q.held[1]); held != reportQueueDepth {
 		t.Errorf("the session holds %d reports, want the depth %d", held, reportQueueDepth)
 	}
 	// The eldest held report is what the SMF is owed first.
-	if head, ok := q.head(1); !ok || head.report.Seqn != 2 {
-		t.Errorf("the oldest held report is UR-SEQN %d (held %v), want 2", head.report.Seqn, ok)
+	if head, ok := q.head(1); !ok || head.report.Seqn != 0 {
+		t.Errorf("the oldest held report is UR-SEQN %d (held %v), want 0", head.report.Seqn, ok)
 	}
 	q.done(1)
-	if head, _ := q.head(1); head.report.Seqn != 3 {
-		t.Errorf("after the acknowledgement the oldest is UR-SEQN %d, want 3", head.report.Seqn)
+	if head, _ := q.head(1); head.report.Seqn != 1 {
+		t.Errorf("after the acknowledgement the oldest is UR-SEQN %d, want 1", head.report.Seqn)
 	}
 	// An unanswered send is recorded without moving the report, and the next
 	// attempt is what the backoff schedules.
@@ -524,6 +527,86 @@ func TestTheReportQueueIsBoundedPerSession(t *testing.T) {
 	q.add(session.Report{SEID: 2, URRID: 7})
 	if got := q.seids(); len(got) != 2 || got[0] != 1 || got[1] != 2 {
 		t.Errorf("the queue's sessions are %v, want [1 2]", got)
+	}
+}
+
+// windowSender is a reportSender that accepts every report and counts what the
+// loop sends: the calls, by UR-SEQN, and the most in flight at once. A call
+// after the first waits briefly for company, so a loop that pipelines is seen
+// doing it and one that sends one at a time is seen not to (the wait is given
+// up for good after the first that finds none).
+type windowSender struct {
+	mu            sync.Mutex
+	calls         int
+	bySeqn        map[uint32]int
+	inFlight, max int
+	alone         bool
+	company       *sync.Cond
+}
+
+func (s *windowSender) Report(_ context.Context, _ uint64, ies ...*ie.IE) (n4.ReportAnswer, error) {
+	_, seqn, err := reportIdentity(ies)
+	if err != nil {
+		return n4.ReportAnswer{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	s.bySeqn[seqn]++
+	s.inFlight++
+	s.max = max(s.max, s.inFlight)
+	s.company.Broadcast()
+	if s.calls > 1 && !s.alone && s.inFlight < 2 {
+		timer := time.AfterFunc(time.Second, func() {
+			s.mu.Lock()
+			s.alone = true
+			s.company.Broadcast()
+			s.mu.Unlock()
+		})
+		for s.inFlight < 2 && !s.alone {
+			s.company.Wait()
+		}
+		timer.Stop()
+	}
+	s.inFlight--
+	return n4.ReportAnswer{Cause: ie.CauseRequestAccepted}, nil
+}
+
+// TestATickSendsEveryDueReportPipelined is UG-B2: a tick that owes a report to
+// every one of 1000 sessions queues all of them -- the queue's bound is per
+// session, not 256 sessions -- and sends each once, more than one in flight.
+func TestATickSendsEveryDueReportPipelined(t *testing.T) {
+	const sessions = 1000
+	ests := make([]*message.SessionEstablishmentRequest, 0, sessions)
+	for i := range sessions {
+		ests = append(ests, withUE(periodicEstablishment(uint32(i+1), 0x9001+uint64(i), time.Second),
+			fmt.Sprintf("10.46.%d.%d", i/250, i%250+1), 0x0b000000+uint32(i)))
+	}
+	compiler := loopSession(t, ests...)
+	sender := &windowSender{bySeqn: map[uint32]int{}}
+	sender.company = sync.NewCond(&sender.mu)
+	stats := &reportStats{}
+	logs := &logCapture{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reportLoop(ctx, compiler, sender, 20*time.Millisecond, stats,
+		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	// Every session's first window ends on the same tick: each is answered,
+	// or dropped by a queue with no room for it.
+	waitFor(t, 30*time.Second, func() bool { return stats.sent.Load()+stats.dropped.Load() >= sessions },
+		"the tick's reports were sent or dropped", logs.log)
+	cancel()
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if got := stats.dropped.Load(); got != 0 {
+		t.Errorf("%d of %d due reports were dropped, want none", got, sessions)
+	}
+	if got := sender.bySeqn[0]; got != sessions {
+		t.Errorf("%d first-window reports were sent, want one per session (%d)", got, sessions)
+	}
+	if sender.max < 2 {
+		t.Errorf("at most %d report was in flight, want the drain to pipeline them", sender.max)
 	}
 }
 
