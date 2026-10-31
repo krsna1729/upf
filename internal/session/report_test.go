@@ -140,16 +140,15 @@ func urrSession(cpSEID uint64, fteid uint32, ueIP string, urrID uint32, urr *ie.
 }
 
 // assertTheTicksReads is the bound a tick is judged by: one call per counter
-// module, each naming no rules -- the module's own reading of every rule it
-// holds, one round trip -- and never one call per session. The graph under test
-// measures uplink PDRs, so cnt_ul is the one module in play; a call that named
-// two resources at once is impossible through the reader (one module per call)
-// and a call naming several would be visible here as a second entry.
+// module per countChunk rules, naming the rules the sessions measure, and never
+// one call per session. The graph under test measures one uplink PDR per
+// session, so cnt_ul is the one module in play and one chunk holds them all; a
+// call per session would be visible here as more entries.
 func assertTheTicksReads(t *testing.T, calls []readCall, sessions int) {
 	t.Helper()
-	want := []readCall{{module: testConfig().Up.Counters}}
+	want := []readCall{{module: testConfig().Up.Counters, rules: sessions}}
 	if !reflect.DeepEqual(calls, want) {
-		t.Errorf("a tick over %d sessions made %v, want %v: one read per counter module, naming no rules",
+		t.Errorf("a tick over %d sessions made %v, want %v: one read per counter module, naming its rules",
 			sessions, calls, want)
 	}
 }
@@ -178,4 +177,146 @@ func measuredRules(t *testing.T, c *Compiler, seids []uint64) []bess.RuleCount {
 		}
 	}
 	return out
+}
+
+// The daemon's message bound, as boundedReader applies it: a reply over 64 MiB
+// is refused, and a counted rule is 34 B of it on the wire (UG-B1).
+const (
+	messageBound = 64 << 20
+	ruleOnWire   = 34
+)
+
+// boundedReader is a counting module behind the daemon's message bound: a
+// reading whose reply would pass messageBound is refused, and a reading that
+// names no rule answers every rule the module holds. It counts the calls, the
+// refusals, the most rules one call named, and how often each ActionId was
+// named. Its reply slice is reused, so what a tick allocates is the tick's.
+type boundedReader struct {
+	*recorder
+	held          []uint32
+	named         []uint8
+	refused, most int
+	reply         []bess.RuleCount
+}
+
+func (r *boundedReader) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
+	r.calls = append(r.calls, readCall{module: module, rules: len(actionIDs)})
+	r.most = max(r.most, len(actionIDs))
+	if len(actionIDs) == 0 {
+		actionIDs = r.held
+	}
+	if size := len(actionIDs) * ruleOnWire; size > messageBound {
+		r.refused++
+		return nil, fmt.Errorf("a reply of %d B is over the %d B message bound", size, messageBound)
+	}
+	r.reply = r.reply[:0]
+	for _, id := range actionIDs {
+		r.named[id]++
+		r.reply = append(r.reply, bess.RuleCount{ActionID: id, Packets: 1, Octets: 100})
+	}
+	return r.reply, nil
+}
+
+// boundedTick is a compiler holding sessions × perSession rules its URRs
+// measure, all counted by cnt_ul, behind a boundedReader. One session is
+// established through PFCP and cloned with its own PDRs, URRs and ActionIds
+// 1..sessions×perSession: millions of rules established one message at a time
+// would cost minutes and gigabytes the tick's read is not about.
+func boundedTick(t *testing.T, sessions, perSession int) (*Compiler, *boundedReader) {
+	t.Helper()
+	reader := &boundedReader{recorder: &recorder{}}
+	c := New(testConfig(), reader, quietLogger())
+	resp := c.Establish(urrSession(0x5010, 0x2000, "10.45.0.1", 7, quotaURR(7, 100))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the measured session answered cause %d", got)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seid := upFSEID(t, resp)
+	model := c.sessions[seid]
+	delete(c.sessions, seid)
+	measured := pdrsInOrder(model)[0]
+	rules := sessions * perSession
+	reader.held = make([]uint32, 0, rules)
+	reader.named = make([]uint8, rules+1)
+	for i := range sessions {
+		s := *model
+		s.LocalSEID = seid + 1 + uint64(i)
+		s.cachedPDRs = nil
+		s.PDRs = make(map[uint16]*pdr, perSession)
+		pdrs := make([]pdr, perSession)
+		for j := range pdrs {
+			pdrs[j] = *measured
+			pdrs[j].id = uint16(j + 1)
+			pdrs[j].actionID = uint32(len(reader.held) + 1)
+			reader.held = append(reader.held, pdrs[j].actionID)
+			s.PDRs[pdrs[j].id] = &pdrs[j]
+		}
+		s.URRs = make(map[uint32]*urr, len(model.URRs))
+		for id, u := range model.URRs {
+			own := *u
+			s.URRs[id] = &own
+		}
+		c.sessions[s.LocalSEID] = &s
+	}
+	return c, reader
+}
+
+// raceEnabled is set by race_test.go in a -race build.
+var raceEnabled bool
+
+// TestATickReadsEveryRuleUnderTheMessageBound is UG-B1: at 2.1M counted rules
+// one reply holding them all is 71 MB, over the daemon's 64 MiB bound, and a
+// tick that read each module in one call was refused every time -- no session
+// read, no URR ever reported. Read in chunks of named ActionIds, every rule is
+// named exactly once, no call passes the chunk cap or the bound, and every
+// session's URR takes its first reading.
+func TestATickReadsEveryRuleUnderTheMessageBound(t *testing.T) {
+	if testing.Short() || raceEnabled {
+		t.Skip("2.1M rules: ~1.4 GB of heap")
+	}
+	const sessions, perSession = 32_813, 64 // 2,100,032 rules
+	c, reader := boundedTick(t, sessions, perSession)
+	c.EvaluateAll(context.Background(), time.Unix(1_700_000_000, 0))
+
+	if reader.refused != 0 || reader.most > countChunk {
+		t.Errorf("%d of %d readings refused, the largest naming %d rules: want none refused, each ≤ %d",
+			reader.refused, len(reader.calls), reader.most, countChunk)
+	}
+	unread := 0
+	for _, n := range reader.named[1:] {
+		if n != 1 {
+			unread++
+		}
+	}
+	if unread != 0 {
+		t.Errorf("%d of %d rules were not named exactly once", unread, len(reader.named)-1)
+	}
+	baselined := 0
+	for _, s := range c.sessions {
+		if s.URRs[7].baselined {
+			baselined++
+		}
+	}
+	if baselined != sessions {
+		t.Errorf("%d of %d sessions took their first reading", baselined, sessions)
+	}
+}
+
+// TestATickAllocatesAtMostOnePerRule bounds what a tick's read costs the heap:
+// the answers land in a slice indexed by ActionId the report loop keeps, so a
+// tick over 100K rules allocates at most one object per rule, sessions
+// included.
+func TestATickAllocatesAtMostOnePerRule(t *testing.T) {
+	const sessions, perSession = 1_563, 64 // 100,032 rules
+	c, reader := boundedTick(t, sessions, perSession)
+	now := time.Unix(1_700_000_000, 0)
+	allocs := testing.AllocsPerRun(4, func() {
+		now = now.Add(time.Second)
+		c.EvaluateAll(context.Background(), now)
+	})
+	if perRule := allocs / float64(len(reader.held)); perRule > 1 {
+		t.Errorf("a tick over %d rules made %.0f allocations, %.2f per rule: want ≤ 1",
+			len(reader.held), allocs, perRule)
+	}
 }

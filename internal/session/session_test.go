@@ -143,8 +143,7 @@ var errRepeatedOperation = errors.New("one key touched twice in one transaction"
 
 // readCall is one counter reading the compiler made: the module it named and
 // how many of that module's rules it named. A reading that names no rule is the
-// module's own bulk read -- every rule it holds, in one round trip -- which is
-// what the usage-report tick makes (report.go's EvaluateAll).
+// module's own bulk read -- every rule it holds, in one round trip.
 type readCall struct {
 	module string
 	rules  int
@@ -153,8 +152,8 @@ type readCall struct {
 // RuleCounts answers the rules asked for; a rule the fake does not hold reads
 // zero, which is what a module with no traffic says. Naming no rule is the
 // module's own reading of **every rule it holds**, which is what the daemon's
-// get_counts answers for an empty action_ids (urr_count.cc) and what the tick
-// reads. The call is recorded either way, so a test can count them.
+// get_counts answers for an empty action_ids (urr_count.cc). The call is
+// recorded either way, so a test can count them.
 func (r *recorder) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
 	r.calls = append(r.calls, readCall{module: module, rules: len(actionIDs)})
 	if r.readFail != nil {

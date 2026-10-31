@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -274,12 +275,39 @@ func (c *Client) PeekRuleCounts(ctx context.Context, counters string, actionIDs 
 // table entirely so their wire encoding and old daemon schemas stay unchanged.
 func (c *Client) countRequest(counters string, restart bool, actionIDs []uint32) (string, proto.Message, error) {
 	module, table, _ := strings.Cut(counters, "/")
-	argFields := map[string]any{"action_ids": actionIDs, "restart_window": restart}
+	argFields := map[string]any{"restart_window": restart}
 	if table != "" {
 		argFields["table"] = table
 	}
 	arg, err := c.Message("upf.pb.UrrCountCommandGetCountsArg", argFields)
-	return module, arg, err
+	if err != nil {
+		return module, nil, err
+	}
+	// The ids go on already encoded, as the packed field the daemon reads:
+	// Message's map boxes each id into an interface, and so does dynamicpb's
+	// own List.Append when it type-checks one -- an allocation per rule, and a
+	// tick names every counted rule. The dynamic message carries the bytes as
+	// unknown and marshals them verbatim, so the wire holds action_ids either
+	// way.
+	m := arg.ProtoReflect()
+	fd := m.Descriptor().Fields().ByName("action_ids")
+	if fd == nil {
+		return module, nil, errors.New("bess: upf.pb.UrrCountCommandGetCountsArg has no action_ids")
+	}
+	if len(actionIDs) > 0 {
+		size := 0
+		for _, id := range actionIDs {
+			size += protowire.SizeVarint(uint64(id))
+		}
+		raw := make([]byte, 0, protowire.SizeTag(fd.Number())+protowire.SizeBytes(size))
+		raw = protowire.AppendTag(raw, fd.Number(), protowire.BytesType)
+		raw = protowire.AppendVarint(raw, uint64(size))
+		for _, id := range actionIDs {
+			raw = protowire.AppendVarint(raw, uint64(id))
+		}
+		m.SetUnknown(raw)
+	}
+	return module, arg, nil
 }
 
 func (c *Client) ruleCounts(ctx context.Context, counters string, restart bool,
@@ -292,34 +320,101 @@ func (c *Client) ruleCounts(ctx context.Context, counters string, restart bool,
 	if err != nil {
 		return nil, fmt.Errorf("bess: %s get_counts: %w", counters, err)
 	}
-	response, err := c.Message("upf.pb.UrrCountCommandGetCountsResponse", nil)
+	if result.MessageName() != "upf.pb.UrrCountCommandGetCountsResponse" {
+		return nil, fmt.Errorf("bess: %s get_counts answered %s", counters, result.GetTypeUrl())
+	}
+	out, err := decodeCounts(result.GetValue())
 	if err != nil {
-		return nil, err
-	}
-	if err := result.UnmarshalTo(response); err != nil {
-		return nil, fmt.Errorf("bess: %s get_counts answered %s: %w", counters, result.GetTypeUrl(), err)
-	}
-	fields := response.ProtoReflect().Descriptor().Fields()
-	counts := response.ProtoReflect().Get(fields.ByName("counts")).List()
-	// The reading's clock: the per-rule stamps are in the module's monotonic
-	// domain, and the wall clock it read at the same instant is what places them
-	// on the clock a PFCP timestamp carries. A daemon whose plugin predates the
-	// stamps has no such field at all -- uintField answers 0 and the times are
-	// unknown, rather than the reporting loop panicking on a nil descriptor.
-	mono := uintField(response.ProtoReflect(), "read_monotonic_ns")
-	wall := int64(uintField(response.ProtoReflect(), "read_wall_unix_ns"))
-	out := make([]RuleCount, 0, counts.Len())
-	for i := range counts.Len() {
-		rule := counts.Get(i).Message()
-		out = append(out, RuleCount{
-			ActionID: uint32(uintField(rule, "action_id")),
-			Packets:  uintField(rule, "packets"),
-			Octets:   uintField(rule, "octets"),
-			First:    packetTime(uintField(rule, "first_packet_ns"), mono, wall),
-			Last:     packetTime(uintField(rule, "last_packet_ns"), mono, wall),
-		})
+		return nil, fmt.Errorf("bess: %s get_counts: %w", counters, err)
 	}
 	return out, nil
+}
+
+// decodeCounts is a UrrCountCommandGetCountsResponse read straight off the
+// wire, by upf_datapath.proto's field numbers: the dynamic message it replaces
+// cost several allocations per rule, and a tick reads every counted rule. The
+// reading's clock -- the monotonic stamp the per-rule stamps are in and the
+// wall clock at the same instant -- follows the rules on the wire, so it is
+// found first. A field the daemon's plugin predates is absent and reads 0: the
+// times are then unknown, never invented.
+func decodeCounts(b []byte) ([]RuleCount, error) {
+	var mono, wall uint64
+	rules := 0
+	for rest := b; len(rest) > 0; {
+		num, typ, v, _, n := consumeField(rest)
+		if n < 0 {
+			return nil, protowire.ParseError(n)
+		}
+		rest = rest[n:]
+		switch {
+		case num == 1 && typ == protowire.BytesType:
+			rules++
+		case num == 2 && typ == protowire.VarintType:
+			mono = v
+		case num == 3 && typ == protowire.VarintType:
+			wall = v
+		}
+	}
+	out := make([]RuleCount, 0, rules)
+	for rest := b; len(rest) > 0; {
+		num, typ, _, rule, n := consumeField(rest)
+		rest = rest[n:]
+		if num != 1 || typ != protowire.BytesType {
+			continue
+		}
+		var r RuleCount
+		var first, last uint64
+		for len(rule) > 0 {
+			num, typ, v, _, n := consumeField(rule)
+			if n < 0 {
+				return nil, protowire.ParseError(n)
+			}
+			rule = rule[n:]
+			if typ != protowire.VarintType {
+				continue
+			}
+			switch num {
+			case 1:
+				r.ActionID = uint32(v)
+			case 2:
+				r.Packets = v
+			case 3:
+				r.Octets = v
+			case 4:
+				first = v
+			case 5:
+				last = v
+			}
+		}
+		r.First = packetTime(first, mono, int64(wall))
+		r.Last = packetTime(last, mono, int64(wall))
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// consumeField is the field at the head of b: its number and wire type, its
+// value as a varint or as a length-delimited field's bytes (the two kinds a
+// counts reply carries), and its length on the wire, negative when b is not a
+// field. A field of any other type is skipped whole.
+func consumeField(b []byte) (num protowire.Number, typ protowire.Type, v uint64, sub []byte, n int) {
+	num, typ, n = protowire.ConsumeTag(b)
+	if n < 0 {
+		return 0, 0, 0, nil, n
+	}
+	var m int
+	switch typ {
+	case protowire.VarintType:
+		v, m = protowire.ConsumeVarint(b[n:])
+	case protowire.BytesType:
+		sub, m = protowire.ConsumeBytes(b[n:])
+	default:
+		m = protowire.ConsumeFieldValue(num, typ, b[n:])
+	}
+	if m < 0 {
+		return 0, 0, 0, nil, m
+	}
+	return num, typ, v, sub, n + m
 }
 
 // uintField is a uint field of a message the daemon's own schema defines, or 0

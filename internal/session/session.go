@@ -448,6 +448,12 @@ type Compiler struct {
 	// logged: the drain answers a running total, and only an increase is news.
 	// Only EvaluateAll touches it, from the one report loop.
 	markersDropped uint64
+	// tickIDs and tickCounts are EvaluateAll's buffers, kept from tick to
+	// tick: the ActionIds a tick names, by the module that counts them, and
+	// what the reading answered, indexed by ActionId. Only EvaluateAll touches
+	// them, from the one report loop.
+	tickIDs    map[string][]uint32
+	tickCounts []reading
 	// peek is the same counter reader without the window restart, when the
 	// dataplane offers it (WindowReader): the DDN path's reading.
 	peek WindowReader

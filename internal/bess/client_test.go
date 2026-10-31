@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -79,41 +80,13 @@ func TestPacketTimePlacesAStampOnTheWallClock(t *testing.T) {
 	}
 }
 
-// A graph's get_counts argument is byte-identical without table and works with
-// the old schema. An appliance request selects exactly one of its counter
-// tables; a daemon lacking that field must refuse it, never silently read a
-// different table.
+// A graph's get_counts argument is the same message on the wire without table
+// and works with the old schema. An appliance request selects exactly one of
+// its counter tables; a daemon lacking that field must refuse it, never
+// silently read a different table.
 func TestCounterCommandTableSelection(t *testing.T) {
 	for _, withTable := range []bool{false, true} {
-		fields := []*descriptorpb.FieldDescriptorProto{
-			{Name: proto.String("action_ids"), Number: proto.Int32(1),
-				Label: descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(),
-				Type:  descriptorpb.FieldDescriptorProto_TYPE_UINT32.Enum()},
-			{Name: proto.String("restart_window"), Number: proto.Int32(2),
-				Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
-				Type:  descriptorpb.FieldDescriptorProto_TYPE_BOOL.Enum()},
-		}
-		if withTable {
-			fields = append(fields, &descriptorpb.FieldDescriptorProto{
-				Name: proto.String("table"), Number: proto.Int32(3),
-				Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
-				Type:  descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
-			})
-		}
-		file, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
-			Name: proto.String("counts.proto"), Package: proto.String("upf.pb"), Syntax: proto.String("proto3"),
-			MessageType: []*descriptorpb.DescriptorProto{{
-				Name: proto.String("UrrCountCommandGetCountsArg"), Field: fields,
-			}},
-		}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		registry := new(protoregistry.Files)
-		if err := registry.RegisterFile(file); err != nil {
-			t.Fatal(err)
-		}
-		client := &Client{files: registry}
+		client := &Client{files: countArgFiles(t, withTable)}
 		for _, restart := range []bool{false, true} {
 			module, got, err := client.countRequest("cnt_ul", restart, []uint32{7, 9})
 			if err != nil || module != "cnt_ul" {
@@ -124,7 +97,7 @@ func TestCounterCommandTableSelection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !proto.Equal(got, want) {
+			if !proto.Equal(onTheWire(t, got), want) {
 				t.Errorf("graph argument changed: got %v, want %v", got, want)
 			}
 			for _, table := range []string{"counters_ul", "counters_dl", "buffer_counters"} {
@@ -143,10 +116,114 @@ func TestCounterCommandTableSelection(t *testing.T) {
 					t.Errorf("selected table %q, want %q", got, table)
 				}
 				m.Clear(m.Descriptor().Fields().ByName("table"))
-				if !proto.Equal(arg, want) {
+				if !proto.Equal(onTheWire(t, arg), want) {
 					t.Errorf("appliance changed other arguments: got %v, want %v", arg, want)
 				}
 			}
 		}
+	}
+}
+
+// onTheWire is m as the daemon reads it: marshaled, then parsed by its own
+// schema, so a field m carries pre-encoded is a field again.
+func onTheWire(t *testing.T, m proto.Message) proto.Message {
+	t.Helper()
+	raw, err := proto.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := m.ProtoReflect().New().Interface()
+	if err := proto.Unmarshal(raw, out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// countArgFiles is a schema holding UrrCountCommandGetCountsArg, with the
+// appliance's table selector or without it (a graph daemon's older plugin).
+func countArgFiles(t *testing.T, withTable bool) *protoregistry.Files {
+	t.Helper()
+	fields := []*descriptorpb.FieldDescriptorProto{
+		{Name: proto.String("action_ids"), Number: proto.Int32(1),
+			Label: descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(),
+			Type:  descriptorpb.FieldDescriptorProto_TYPE_UINT32.Enum()},
+		{Name: proto.String("restart_window"), Number: proto.Int32(2),
+			Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:  descriptorpb.FieldDescriptorProto_TYPE_BOOL.Enum()},
+	}
+	if withTable {
+		fields = append(fields, &descriptorpb.FieldDescriptorProto{
+			Name: proto.String("table"), Number: proto.Int32(3),
+			Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:  descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+		})
+	}
+	file, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+		Name: proto.String("counts.proto"), Package: proto.String("upf.pb"), Syntax: proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name: proto.String("UrrCountCommandGetCountsArg"), Field: fields,
+		}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := new(protoregistry.Files)
+	if err := registry.RegisterFile(file); err != nil {
+		t.Fatal(err)
+	}
+	return registry
+}
+
+// TestACountRequestDoesNotAllocatePerRule: the report tick names every counted
+// rule, so building a get_counts argument costs a constant per call, not an
+// allocation per ActionId (an id boxed into an interface is one).
+func TestACountRequestDoesNotAllocatePerRule(t *testing.T) {
+	const rules = 10_000
+	client := &Client{files: countArgFiles(t, true)}
+	ids := make([]uint32, rules)
+	for i := range ids {
+		ids[i] = uint32(1000 + i)
+	}
+	allocs := testing.AllocsPerRun(10, func() {
+		if _, _, err := client.countRequest("upf/counters_ul", true, ids); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocs > rules/100 {
+		t.Errorf("an argument naming %d rules made %.0f allocations, want ≤ %d", rules, allocs, rules/100)
+	}
+}
+
+// TestACountReplyDecodesWithOneAllocation: a get_counts reply is read off the
+// wire into one slice -- every field of every rule, each stamp placed on the
+// wall clock by the reading's own clock pair, which follows the rules.
+func TestACountReplyDecodesWithOneAllocation(t *testing.T) {
+	const rules = 10_000
+	const mono, wall = uint64(5_000_000_000), uint64(1_700_000_000_000_000_000)
+	var reply []byte
+	for i := range uint64(rules) {
+		var rule []byte
+		for field, v := range []uint64{1000 + i, i, 100 * i, mono - 1000, mono - 10} {
+			rule = protowire.AppendTag(rule, protowire.Number(field+1), protowire.VarintType)
+			rule = protowire.AppendVarint(rule, v)
+		}
+		reply = protowire.AppendTag(reply, 1, protowire.BytesType)
+		reply = protowire.AppendBytes(reply, rule)
+	}
+	for field, v := range []uint64{mono, wall} {
+		reply = protowire.AppendTag(reply, protowire.Number(field+2), protowire.VarintType)
+		reply = protowire.AppendVarint(reply, v)
+	}
+	got, err := decodeCounts(reply)
+	if err != nil || len(got) != rules {
+		t.Fatalf("decoded %d rules (%v), want %d", len(got), err, rules)
+	}
+	want := RuleCount{ActionID: 1007, Packets: 7, Octets: 700,
+		First: time.Unix(0, int64(wall)-1000), Last: time.Unix(0, int64(wall)-10)}
+	if got[7] != want {
+		t.Errorf("rule 7 decoded as %+v, want %+v", got[7], want)
+	}
+	if allocs := testing.AllocsPerRun(10, func() { _, _ = decodeCounts(reply) }); allocs > 1 {
+		t.Errorf("a reply of %d rules made %.0f allocations, want 1", rules, allocs)
 	}
 }
