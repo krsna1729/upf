@@ -171,6 +171,8 @@ matrix with the per-cell audit.
 
 ## Read next
 
+- `docs/engineering-guide.md` — the rules review and the lanes enforce (scale,
+  3GPP, the BESS interface, lanes, measurement, pull requests).
 - `docs/design.md` — why the deployment is shaped this way: walls, costs,
   milestones.
 - `docs/datapath.md` — modules, resources and keys, placement, and the
