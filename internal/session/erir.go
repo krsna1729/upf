@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// The indication arrives on N3/N9 and is counted by the GTP-U responder on
-// `GtpuDecap` gate 2 (datapath/gtpu_responder.cc, "get_errors"). This side reads
-// that table once per tick (Config.GTPUErrors) and reports every new count as
-// the remote F-TEID the FAR sends with.
+// The indication arrives on N3/N9 and is logged by the GTP-U responder on
+// `GtpuDecap` gate 2 (datapath/gtpu_responder.cc, "drain_errors"). This side
+// drains that log once per tick (Config.GTPUErrors) and reports each indication
+// as the remote F-TEID the FAR sends with.
 package session
 
 import (
@@ -21,32 +21,18 @@ type ErrorIndication struct {
 	Addr netip.Addr
 }
 
-// outboundTEIDs are the tunnels this session sends into, low TEID first: the
-// F-TEIDs its FARs carry, which are the TEIDs an Error Indication about this
-// session names. A FAR with no outer header sends into no tunnel, and a FAR
-// whose TEID is zero is one whose record has not been written yet, so neither
-// is in the list.
-func outboundTEIDs(s *Session) []ErrorIndication {
-	out := make([]ErrorIndication, 0, len(s.FARs))
-	for _, f := range s.FARs {
-		if f.hasOuter && f.teid != 0 {
-			out = append(out, ErrorIndication{TEID: f.teid, Addr: f.peer})
-		}
-	}
-	slices.SortFunc(out, func(a, b ErrorIndication) int { return cmp.Compare(a.TEID, b.TEID) })
-	return out
-}
-
-// errorReports is the Error Indication Reports one session owes its SMF, from
-// one tick's reading of the responder's table: the tunnels the peer reported
-// that this session has not been reported about yet. One report carries them
-// all -- several Error Indication Report IEs in one message is one report of
-// the Report Type's ERIR bit (7.5.8.4) -- and the session's high-water marks
-// move with it, so the next tick reports only what arrived since.
+// errorReports is the Error Indication Report one session owes its SMF from
+// one tick's drain of the responder's log: the tunnels this session sends into
+// -- the F-TEIDs its FARs carry, low TEID first -- that the peer reported since
+// the last drain. One report carries them all: several Error Indication Report
+// IEs in one message is one report of the Report Type's ERIR bit (7.5.8.4). A
+// FAR with no outer header sends into no tunnel, and one whose TEID is zero has
+// no record written yet, so neither is matched. A session none of whose tunnels
+// was reported costs no allocation.
 //
-// The guard is judge's: the reading happened outside the lock, and a report
+// The guard is judge's: the drain happened outside the lock, and a report
 // about a session the SMF no longer has would be worse than none.
-func (c *Compiler) errorReports(seid uint64, s *Session, indications map[uint32]uint64) []Report {
+func (c *Compiler) errorReports(seid uint64, s *Session, indications map[uint32]bool) []Report {
 	if len(indications) == 0 {
 		return nil
 	}
@@ -56,20 +42,15 @@ func (c *Compiler) errorReports(seid uint64, s *Session, indications map[uint32]
 		return nil
 	}
 	var owed []ErrorIndication
-	for _, tunnel := range outboundTEIDs(s) {
-		count, seen := indications[tunnel.TEID]
-		if !seen || count <= s.erirSent[tunnel.TEID] {
-			continue
+	for _, f := range s.FARs {
+		if f.hasOuter && f.teid != 0 && indications[f.teid] {
+			owed = append(owed, ErrorIndication{TEID: f.teid, Addr: f.peer})
 		}
-		if s.erirSent == nil {
-			s.erirSent = map[uint32]uint64{}
-		}
-		s.erirSent[tunnel.TEID] = count
-		owed = append(owed, tunnel)
 	}
 	if len(owed) == 0 {
 		return nil
 	}
+	slices.SortFunc(owed, func(a, b ErrorIndication) int { return cmp.Compare(a.TEID, b.TEID) })
 	return []Report{{
 		SEID:   s.LocalSEID,
 		CPSEID: s.CPSEID,

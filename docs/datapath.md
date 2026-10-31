@@ -81,7 +81,7 @@ All appliance commands go to the real module name (`upf`):
   old graph schemas still work. An appliance request against a schema lacking
   the field fails rather than reading another counter table.
 * `release`, `drop` and `clear` retain the existing `bess.pb.PacketStoreCommand*Arg`
-  types. `get_errors` and `drain_end_markers` retain the existing
+  types. `drain_errors` and `drain_end_markers` retain the
   `upf.pb.GtpuResponderCommand*Arg` types. These commands have one destination
   table/state each, so need no additional selector field.
 
@@ -273,7 +273,7 @@ endpoint identity; egress tunnels are selected by ActionId.
 Three modules' packet paths are header-only helpers the module calls per packet,
 so `UpfAppliance` runs the same code rather than a copy:
 `gtpu_control.h` (`AnswerGtpuControl`: echo reply, Error Indication for an
-unknown G-PDU, peer Error Indication counts in `GtpuErrorCounts`, End Marker
+unknown G-PDU, peer Error Indication events in an `ErrorIndicationLog`, End Marker
 logging, a verdict per drop reason), `atsss_select.h` (`upf::atsss::Steer`), and
 `arp_proxy.h` (`upf::arp::AnswerProxyRequest`). Each takes the frame and its
 owner's tables (as lookups or a context) and owns no state;
@@ -376,8 +376,8 @@ header.
 
 The main graph sends `GtpuDecap` gate 2 here. The responder replies to Echo
 Requests and to unknown nonzero-TEID G-PDUs with the corresponding GTP-U
-messages. It can count peer Error Indications per TEID when `track_errors` is
-enabled; the control plane reads those counters with `get_errors`. With
+messages. It can log peer Error Indications by TEID when `track_errors` is
+enabled; the control plane drains that log with `drain_errors`. With
 `track_end_markers` it records each End Marker as an (endpoint_id, local TEID)
 event, reading the `endpoint_id` metadata decap was fed; the control plane
 drains them with `drain_end_markers`. IPv4 and IPv6 outer headers are
@@ -416,15 +416,17 @@ the arrival signal the Downlink Data Report is decided from on the BUFF branch.
   worker's, so it is shared and written once per batch that counted a packet —
   never once per packet, and by design a store lost to a concurrent reader costs
   one packet's stamp rather than a count (`urr_count.h`).
-* **The responder's own reading** is `get_errors` on the `GtpuResponder`
-  (`upf.pb.GtpuResponderCommandGetErrorsArg` → `…Response`): the Error
-  Indications the peer sent, one count per TEID it named, with the names it was
-  asked for or the whole table when it was asked for none. The counts only grow
-  — nothing clears them, and a read races no packet — so the reporting side
-  keeps its own high-water mark per session (`internal/session/erir.go`) and
-  one reading serves every session of a tick (`-gtpu-errors`). Its End Marker
-  log is `drain_end_markers` (`-gtpu-end-markers`): events, not counts, so a
-  TEID that changes hands carries no history to the next session.
+* **The responder's own reading** is `drain_errors` on the `GtpuResponder`
+  (`upf.pb.GtpuResponderCommandDrainErrorsArg` → `…Response`): the TEID each
+  Error Indication the peer sent since the previous drain named, each returned
+  once, from one ring per worker (`end_marker_log.h`'s `ControlEventLog`, the
+  End Marker log's shape). A full ring drops and counts; nothing fills up for
+  good. The table of counts it replaced had 64 slots that were never cleared, so
+  after 64 distinct peer TEIDs in the daemon's life no indication was reported
+  again. One drain serves every session of a tick (`-gtpu-errors`,
+  `internal/session/erir.go`). Its End Marker log is `drain_end_markers`
+  (`-gtpu-end-markers`): the same shape, so a TEID that changes hands carries no
+  history to the next session.
 * **Reads** are the `get_counts` command
   (`upf.pb.UrrCountCommandGetCountsArg` → `…Response`), which is also how the
   control side asks for a *window*: with `restart_window` the module clears each
@@ -510,7 +512,7 @@ Used as they are; the configuration is ours and is what the compiler assumes.
 |---|---|
 | control_v2, one transaction per session change | `internal/session` writes a session's rules, actions, meters, counters and tunnels together or not at all, with a request id that survives retries |
 | resources and codecs (D-129) | the tables above: configuration written in a transaction, a codec that validates the key, and a readback the startup sweep uses. The store's `flows` is one of them (one entry per flow id, each field optional, absent meaning the module-wide argument), written by the session compiler with the SMF's own numbers (8.2.29's duration as `timeout_ns`, 8.2.30's count as `max_packets_per_flow`) in the same transaction as the rule: an upsert or an erase moves no packet and stops no worker, and an erase is configuration only — `drop` is what frees what a flow holds |
-| module commands | `get_counts` (counters), `get_errors` (the responder's Error Indication table: monotonic counts, no clear, read by the report tick), `drain_end_markers` (the responder's End Marker events, each returned once), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
+| module commands | `get_counts` (counters), `drain_errors` (the responder's peer Error Indication events, each returned once, drained by the report tick), `drain_end_markers` (the responder's End Marker events, each returned once), `release`/`drop`/`clear` (the store's *held packets* — commands act on state, resources on configuration) |
 | metadata attributes | `action_id` (PDR result, read by counters/encap/store), `fteid_context` (written by decap, read by the PDR tables), `endpoint_id` (tagged before decap, read by decap and, with `track_end_markers`, by the responder), `qfi` (decap output, read by the PDR tables), `route_domain` (Vif/PDR result, read by tables and inner Router), `vif_id` (Vif or tag output, read by the Router's neighbor input), and `transport_route_domain` (encap/tag output, read by `rt_transport`) |
 | slot tables (`dataplane/slot_table.h`) | every per-rule table: ids are 1..capacity, an erased key retires for a grace period, and publishing into a retiring slot is refused — which is why released ids wait their walk (`docs/design.md`, the id pool) |
 | packet ownership | `bess::PacketRef` and the store's explicit free/release path; our modules copy no packet, and only decap allocates one: each End Marker relay |

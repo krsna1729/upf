@@ -70,7 +70,7 @@ Dataplane events, the `upfd` code that reads them, and the PFCP report each beco
 flowchart LR
     E1["<b>First DL packet for a BUFF rule</b><br/>stamped by cnt_buf, held in PacketStore"] --> C1["<b>session/downlink.go</b><br/>polled each tick; one notification<br/>per episode (ddnSent)"] --> M1["<b>Downlink Data Report</b><br/>Session Report, DLDR, PDR ID"]
     E2["<b>URR counters</b><br/>UrrCount cnt_ul / cnt_dl"] --> C2["<b>session/report.go</b><br/>volume/time thresholds and quotas"] --> M2["<b>Usage Report</b><br/>Session Report, USAR, URR ID"]
-    E3["<b>GTP-U Error Indication</b><br/>counted by GtpuResponder<br/>on decap gate 2 (get_errors)"] --> C3["<b>session/erir.go</b><br/>polled each tick; new counts<br/>matched to FAR F-TEIDs"] --> M3["<b>Error Indication Report</b><br/>Session Report, ERIR, remote F-TEID"]
+    E3["<b>GTP-U Error Indication</b><br/>logged by GtpuResponder<br/>on decap gate 2 (drain_errors)"] --> C3["<b>session/erir.go</b><br/>drained each tick; new events<br/>matched to FAR F-TEIDs"] --> M3["<b>Error Indication Report</b><br/>Session Report, ERIR, remote F-TEID"]
     E4["<b>GTP-U End Marker</b><br/>logged by GtpuResponder<br/>on decap gate 2 (drain_end_markers)"] --> C4["<b>session/emrr.go</b><br/>drained each tick; matched to<br/>a PDR's local F-TEID"] --> M4["<b>Usage Report</b><br/>Session Report, USAR, EMRRE"]
 ```
 

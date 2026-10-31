@@ -37,7 +37,7 @@ const ResourceTables UpfAppliance::resource_tables = {
 };
 const Commands UpfAppliance::cmds = {
     {"get_counts", "upf.pb.UrrCountCommandGetCountsArg", MODULE_CMD_FUNC(&UpfAppliance::CommandGetCounts), Command::THREAD_SAFE, "upf.pb.UrrCountCommandGetCountsResponse"},
-    {"get_errors", "upf.pb.GtpuResponderCommandGetErrorsArg", MODULE_CMD_FUNC(&UpfAppliance::CommandGetErrors), Command::THREAD_SAFE, "upf.pb.GtpuResponderCommandGetErrorsResponse"},
+    {"drain_errors", "upf.pb.GtpuResponderCommandDrainErrorsArg", MODULE_CMD_FUNC(&UpfAppliance::CommandDrainErrors), Command::THREAD_SAFE, "upf.pb.GtpuResponderCommandDrainErrorsResponse"},
     {"drain_end_markers", "upf.pb.GtpuResponderCommandDrainEndMarkersArg", MODULE_CMD_FUNC(&UpfAppliance::CommandDrainEndMarkers), Command::THREAD_SAFE, "upf.pb.GtpuResponderCommandDrainEndMarkersResponse"},
     {"release", "bess.pb.PacketStoreCommandReleaseArg", MODULE_CMD_FUNC(&UpfAppliance::CommandRelease), Command::THREAD_SAFE},
     {"drop", "bess.pb.PacketStoreCommandDropArg", MODULE_CMD_FUNC(&UpfAppliance::CommandDrop), Command::THREAD_SAFE},
@@ -163,15 +163,11 @@ const Interface *UpfAppliance::FindInterface(uint16_t ingress, uint16_t vlan,
   return nullptr;
 }
 
-CommandResponse UpfAppliance::CommandGetErrors(const upb::GtpuResponderCommandGetErrorsArg &arg) {
-  upb::GtpuResponderCommandGetErrorsResponse out;
-  auto report = [&](uint32_t teid, uint64_t count) {
-    auto *e = out.add_errors(); e->set_teid(teid); e->set_count(count);
-  };
+CommandResponse UpfAppliance::CommandDrainErrors(const upb::GtpuResponderCommandDrainErrorsArg &) {
+  upb::GtpuResponderCommandDrainErrorsResponse out;
   if (errors_) {
-    if (arg.teids().empty()) errors_->ForEach(report);
-    else for (uint32_t teid : arg.teids()) if (auto count = errors_->Count(teid)) report(teid, *count);
-    out.set_untracked(errors_->Untracked());
+    for (const auto &event : errors_->Drain()) out.add_teids(event.teid);
+    out.set_dropped(errors_->Dropped());
   }
   return CommandSuccess(out);
 }

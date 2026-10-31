@@ -731,50 +731,35 @@ type (
 	StaleResourceError    = sdk.StaleResourceError
 )
 
-// ErrorCount is one TEID's Error Indication count, as a GTP-U responder
-// recorded it. The count only grows: the module never clears it, so the
-// reporting side keeps its own baseline per TEID (TS 29.244 5.10).
-type ErrorCount struct {
-	TEID  uint32
-	Count uint64
-}
-
-// ErrorCounts reads a GTP-U responder's error table through its own get_errors
-// action (datapath/upf_datapath.proto): peer Error Indications, one count per
-// TEID. Naming no TEID reads every entry the table holds. It is independent of
-// usage counters: a graph may enable the gate-2 responder without a URR
-// counter, and the session layer must read the responder's own answer.
-func (c *Client) ErrorCounts(ctx context.Context, module string, teids ...uint32) ([]ErrorCount, error) {
-	arg, err := c.Message("upf.pb.GtpuResponderCommandGetErrorsArg",
-		map[string]any{"teids": teids})
+// DrainErrors takes the peer Error Indications a GTP-U responder recorded
+// since the previous drain (drain_errors, datapath/upf_datapath.proto): the TEID
+// each one named, once per indication, and the running count of those its full
+// rings lost. A drain consumes what it returns, so one caller -- the report
+// loop -- owns it. It is independent of usage counters: a graph may enable the
+// gate-2 responder without a URR counter.
+func (c *Client) DrainErrors(ctx context.Context, module string) ([]uint32, uint64, error) {
+	arg, err := c.Message("upf.pb.GtpuResponderCommandDrainErrorsArg", nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	result, err := c.sdk.InvokeAction(ctx, module, "get_errors", arg)
+	result, err := c.sdk.InvokeAction(ctx, module, "drain_errors", arg)
 	if err != nil {
-		return nil, fmt.Errorf("bess: %s get_errors: %w", module, err)
+		return nil, 0, fmt.Errorf("bess: %s drain_errors: %w", module, err)
 	}
-	response, err := c.Message("upf.pb.GtpuResponderCommandGetErrorsResponse", nil)
+	response, err := c.Message("upf.pb.GtpuResponderCommandDrainErrorsResponse", nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := result.UnmarshalTo(response); err != nil {
-		return nil, fmt.Errorf("bess: %s get_errors answered %s: %w", module, result.GetTypeUrl(), err)
+		return nil, 0, fmt.Errorf("bess: %s drain_errors answered %s: %w", module, result.GetTypeUrl(), err)
 	}
-	fields := response.ProtoReflect().Descriptor().Fields()
-	// A plugin built before this command has no such field, and uintField
-	// answers zero there: the reading is empty rather than a panic on a nil
-	// descriptor, the same way the counter reading treats its own stamps.
-	list := response.ProtoReflect().Get(fields.ByName("errors")).List()
-	out := make([]ErrorCount, 0, list.Len())
+	m := response.ProtoReflect()
+	list := m.Get(m.Descriptor().Fields().ByName("teids")).List()
+	out := make([]uint32, 0, list.Len())
 	for i := range list.Len() {
-		entry := list.Get(i).Message()
-		out = append(out, ErrorCount{
-			TEID:  uint32(uintField(entry, "teid")),
-			Count: uintField(entry, "count"),
-		})
+		out = append(out, uint32(list.Get(i).Uint()))
 	}
-	return out, nil
+	return out, uintField(m, "dropped"), nil
 }
 
 // EndMarker is one End Marker a GTP-U responder recorded (TS 29.281 7.3.2):

@@ -125,7 +125,7 @@ void UpfAppliance::ControlGtpu(Context *ctx, bess::PacketRef p, State &s) {
   const auto v = gtpu::AnswerGtpuControl(p, c, [&] { return s.endpoint_id; });
   if (gtpu::IsGtpuReply(v)) { s.lane = Lane::kTransport; return; }
   // Verdict order is stable in the shared helper; every consumed/drop reason
-  // is distinct, and get_errors/drain_end_markers expose the detailed events.
+  // is distinct, and drain_errors/drain_end_markers expose the detailed events.
   switch (v) {
     case gtpu::GtpuControlVerdict::kPeerErrorIndication: Drop(s, Reason::kControlPeerError); break;
     case gtpu::GtpuControlVerdict::kEndMarker: Drop(s, Reason::kControlEndMarker); break;

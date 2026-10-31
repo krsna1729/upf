@@ -1356,7 +1356,7 @@
    },
    "clause": "5.10",
    "part": "procedures",
-   "title": "**fixed**: the responder connected to `GtpuDecap` gate 2 records peer Error Indications by TEID in its fixed-size lock-free table (`track_errors`; TS 29.281 7.3.1 receive half), and the report tick reads `get_errors` (`-gtpu-errors <module>`): each count above a session's high-water mark becomes a Session Report Request with the ERIR bit and an Error Indication Report carrying the FAR's remote F-TEID. No capability bit is advertised because 8.2.25 defines none, so the report is sent by any graph that tracks indications",
+   "title": "**fixed**: the responder connected to `GtpuDecap` gate 2 logs peer Error Indications by TEID in a per-worker event ring (`track_errors`; TS 29.281 7.3.1 receive half), and the report tick drains it with `drain_errors` (`-gtpu-errors <module>`): each indication naming a session's tunnel becomes a Session Report Request with the ERIR bit and an Error Indication Report carrying the FAR's remote F-TEID. No capability bit is advertised because 8.2.25 defines none, so the report is sent by any graph that tracks indications",
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
@@ -1364,7 +1364,7 @@
    ],
    "message": "Error Indication and its report",
    "statement": "5.10, 7.5.8.4 and 8.2.21's third bit (ERIR): on receipt of a GTP-U Error Indication the UP shall send a Session Report Request with an **Error Indication Report** (Report Type ERIR) carrying the remote F-TEID",
-   "detail": "**fixed**: the responder connected to `GtpuDecap` gate 2 records peer Error Indications by TEID in its fixed-size lock-free table (`track_errors`; TS 29.281 7.3.1 receive half), and the report tick reads `get_errors` (`-gtpu-errors <module>`): each count above a session's high-water mark becomes a Session Report Request with the ERIR bit and an Error Indication Report carrying the FAR's remote F-TEID. No capability bit is advertised because 8.2.25 defines none, so the report is sent by any graph that tracks indications",
+   "detail": "**fixed**: the responder connected to `GtpuDecap` gate 2 logs peer Error Indications by TEID in a per-worker event ring (`track_errors`; TS 29.281 7.3.1 receive half), and the report tick drains it with `drain_errors` (`-gtpu-errors <module>`): each indication naming a session's tunnel becomes a Session Report Request with the ERIR bit and an Error Indication Report carrying the FAR's remote F-TEID. No capability bit is advertised because 8.2.25 defines none, so the report is sent by any graph that tracks indications",
    "effect": "the SMF learns a gNB-side tunnel is gone while the session is still up, which is what lets it move the session instead of sending into a dead tunnel",
    "extra": [
     {

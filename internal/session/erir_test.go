@@ -12,8 +12,6 @@ import (
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
-
-	"github.com/krsna1729/upf/internal/bess"
 )
 
 // tunnelSession is a session whose FAR sends into an N3 tunnel: a downlink PDR
@@ -36,10 +34,10 @@ func tunnelSession(cpSEID uint64, teid uint32, peer string) *message.SessionEsta
 
 // TestAPeerErrorIndicationBecomesAnERIRReport is finding 15 (TS 29.244 5.10):
 // the peer's GTP-U Error Indication names a tunnel this UPF sends into, the
-// responder's table holds the count, and the tick turns it into a Session
-// Report Request whose Report Type is the Error Indication Report and whose
-// Error Indication Report IE carries that remote F-TEID -- once, not once per
-// tick: the count only grows, and the session remembers what it has reported.
+// responder's log holds the event, and the tick turns it into a Session Report
+// Request whose Report Type is the Error Indication Report and whose Error
+// Indication Report IE carries that remote F-TEID -- once, not once per tick:
+// the drain delivers each indication once.
 //
 // The session has no URR, so this is also the shape a deployment that measures
 // nothing runs: the error table is read on its own, with no counter module in
@@ -60,12 +58,9 @@ func TestAPeerErrorIndicationBecomesAnERIRReport(t *testing.T) {
 		t.Fatalf("the tunnel session answered cause %d", got)
 	}
 
-	// The responder's table as get_errors answers it: the peer reported this
+	// The responder's log as drain_errors answers it: the peer reported this
 	// session's own tunnel, and one TEID that names no session of this UPF.
-	rec.errorCounts = map[string][]bess.ErrorCount{"echo0": {
-		{TEID: outTEID, Count: 3},
-		{TEID: 0xdeadbeef, Count: 9},
-	}}
+	rec.errors = map[string][]uint32{"echo0": {outTEID, 0xdeadbeef}}
 	t0 := time.Unix(1_700_000_000, 0)
 
 	reports := c.EvaluateAll(ctx, t0)
@@ -104,15 +99,38 @@ func TestAPeerErrorIndicationBecomesAnERIRReport(t *testing.T) {
 		t.Errorf("the F-TEID names %v, want the peer the FAR sends to (%s)", fteid.IPv4Address, peer)
 	}
 
-	// The count has not moved: the same tick again owes nothing, which is what
-	// keeps a tunnel loss from being reported once per tick forever.
+	// Nothing new was drained: the next tick owes nothing, which is what keeps
+	// a tunnel loss from being reported once per tick forever.
 	if again := c.EvaluateAll(ctx, t0.Add(time.Second)); len(again) != 0 {
-		t.Errorf("the next tick returned %d reports for an unchanged count, want none", len(again))
+		t.Errorf("the next tick returned %d reports with nothing drained, want none", len(again))
 	}
-	// A new indication moves the count, and the new one is reported.
-	rec.errorCounts["echo0"][0].Count = 4
+	// A new indication is drained, and reported.
+	rec.errors = map[string][]uint32{"echo0": {outTEID}}
 	if next := c.EvaluateAll(ctx, t0.Add(2*time.Second)); len(next) != 1 {
 		t.Errorf("the tick after a new indication returned %d reports, want one", len(next))
+	}
+}
+
+// TestAnErrorIndicationForAnotherTunnelCostsASessionNothing is UG-R2's EI half:
+// a tick with indications walks every session, so a session none of whose
+// tunnels the peer named must cost no allocation.
+func TestAnErrorIndicationForAnotherTunnelCostsASessionNothing(t *testing.T) {
+	cfg := testConfig()
+	cfg.GTPUErrors = "echo0"
+	c := New(cfg, &recorder{}, quietLogger())
+	resp := c.Establish(tunnelSession(0x8880, 0x11223344, "10.20.30.2")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the tunnel session answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	s := sessionOf(t, c, seid)
+	indications := map[uint32]bool{0xdeadbeef: true}
+	if allocs := testing.AllocsPerRun(100, func() {
+		if owed := c.errorReports(seid, s, indications); owed != nil {
+			t.Fatalf("a session was reported about another tunnel: %+v", owed)
+		}
+	}); allocs != 0 {
+		t.Errorf("a session the indications do not name made %.0f allocations, want 0", allocs)
 	}
 }
 

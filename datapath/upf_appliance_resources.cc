@@ -541,7 +541,7 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
             });
           })));
   if (auto r = enroll(entries_.get()); !r) return CommandFailure(EEXIST, "%s", r.error().c_str());
-  errors_ = memory.Create<upf::datapath::GtpuErrorCounts>("errors", upf::datapath::GtpuErrorCounts::kDefaultSlots);
+  errors_ = memory.Create<upf::datapath::ErrorIndicationLog>("errors", dataplane::kMaxWorkers);
   end_markers_ = memory.Create<upf::datapath::EndMarkerLog>("end_markers", dataplane::kMaxWorkers);
   return CommandSuccess();
 }

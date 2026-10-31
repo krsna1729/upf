@@ -20,9 +20,9 @@ using bess::utils::be32_t;
 const ResourceTables GtpuResponder::resource_tables = {};
 
 const Commands GtpuResponder::cmds = {
-    {"get_errors", "upf.pb.GtpuResponderCommandGetErrorsArg",
-     MODULE_CMD_FUNC(&GtpuResponder::CommandGetErrors), Command::THREAD_SAFE,
-     "upf.pb.GtpuResponderCommandGetErrorsResponse"},
+    {"drain_errors", "upf.pb.GtpuResponderCommandDrainErrorsArg",
+     MODULE_CMD_FUNC(&GtpuResponder::CommandDrainErrors), Command::THREAD_SAFE,
+     "upf.pb.GtpuResponderCommandDrainErrorsResponse"},
     {"drain_end_markers", "upf.pb.GtpuResponderCommandDrainEndMarkersArg",
      MODULE_CMD_FUNC(&GtpuResponder::CommandDrainEndMarkers), Command::THREAD_SAFE,
      "upf.pb.GtpuResponderCommandDrainEndMarkersResponse"},
@@ -51,7 +51,9 @@ CommandResponse GtpuResponder::Init(const upf::pb::GtpuResponderArg &arg) {
   }
   stamp_ = static_cast<uint32_t>(seconds);
   if (arg.track_errors()) {
-    errors_ = std::make_unique<upf::datapath::GtpuErrorCounts>();
+    // Admitted before it is made (D-198), as end_markers below.
+    errors_ = init_context().memory().Create<upf::datapath::ErrorIndicationLog>(
+        "errors", static_cast<size_t>(Worker::kMaxWorkers));
   }
   if (arg.track_end_markers()) {
     // Admitted before it is made (D-198): a refusal throws
@@ -75,27 +77,16 @@ CommandResponse GtpuResponder::Init(const upf::pb::GtpuResponderArg &arg) {
   return CommandSuccess();
 }
 
-CommandResponse GtpuResponder::CommandGetErrors(
-    const upf::pb::GtpuResponderCommandGetErrorsArg &arg) {
-  upf::pb::GtpuResponderCommandGetErrorsResponse response;
-  if (errors_ == nullptr) {
+CommandResponse GtpuResponder::CommandDrainErrors(
+    const upf::pb::GtpuResponderCommandDrainErrorsArg &) {
+  upf::pb::GtpuResponderCommandDrainErrorsResponse response;
+  if (!errors_) {
     return CommandSuccess(response);
   }
-  auto report = [&](uint32_t teid, uint64_t count) {
-    auto *entry = response.add_errors();
-    entry->set_teid(teid);
-    entry->set_count(count);
-  };
-  if (arg.teids_size() == 0) {
-    errors_->ForEach(report);
-  } else {
-    for (uint32_t teid : arg.teids()) {
-      if (const auto count = errors_->Count(teid)) {
-        report(teid, *count);
-      }
-    }
+  for (const auto &event : errors_->Drain()) {
+    response.add_teids(event.teid);
   }
-  response.set_untracked(errors_->Untracked());
+  response.set_dropped(errors_->Dropped());
   return CommandSuccess(response);
 }
 

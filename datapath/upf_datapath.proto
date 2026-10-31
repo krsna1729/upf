@@ -99,11 +99,11 @@ message GtpuResponderArg {
   // start in a graph that is applied when the daemon starts.
   uint64 recovery_time_stamp = 2;
 
-  // Track the peer's Error Indications (TS 29.281 7.3.1): each one's TEID IE
-  // is recorded in a small lock-free table, one monotonic count per TEID, for
-  // the control side's get_errors to read. Off, an Error Indication is dropped
-  // like any other message the module does not answer -- which is what a
-  // deployment whose controller does not report them wants.
+  // Record the peer's Error Indications (TS 29.281 7.3.1) as TEID events in
+  // a per-worker ring, each delivered once by the control side's
+  // drain_errors. Off, an Error Indication is dropped like any other message
+  // the module does not answer -- which is what a deployment whose controller
+  // does not report them wants.
   bool track_errors = 3;
   // Read a BE32 gate from ingress metadata; empty always replies on gate 0.
   string reply_gate_attr = 4;
@@ -114,26 +114,19 @@ message GtpuResponderArg {
   bool track_end_markers = 5;
 }
 
-// GtpuResponderCommandGetErrorsArg selects the TEIDs to read.
-message GtpuResponderCommandGetErrorsArg {
-  // The TEIDs to read, as the peer's Error Indications named them (the TEID
-  // the peer could not reach, which is the one this UPF sent to). Empty reads
-  // every entry the table holds.
-  repeated uint32 teids = 1;
-}
+// GtpuResponderCommandDrainErrorsArg takes nothing: a drain returns every Error
+// Indication recorded since the previous one.
+message GtpuResponderCommandDrainErrorsArg {}
 
-// GtpuResponderCommandGetErrorsResponse is one reading of the Error Indications
-// the responder has seen. The count only grows: the reporting side keeps its
-// own baseline per TEID and needs no clear, so a read never races a packet.
-message GtpuResponderCommandGetErrorsResponse {
-  message ErrorCount {
-    uint32 teid = 1;
-    uint64 count = 2;
-  }
-  repeated ErrorCount errors = 1;
-  // Indications that found no free slot (the table is small and a flood of
-  // distinct TEIDs would not be a tunnel failure but a scan).
-  uint64 untracked = 2;
+// GtpuResponderCommandDrainErrorsResponse is the peer's Error Indications
+// recorded since the previous drain, each delivered once: a TEID the peer
+// sent another indication for appears again.
+message GtpuResponderCommandDrainErrorsResponse {
+  // The TEID each indication's TEID IE named: the one this UPF sent to and
+  // the peer could not reach.
+  repeated uint32 teids = 1;
+  // Events lost to a full per-worker ring since the module started.
+  uint64 dropped = 2;
 }
 
 // GtpuResponderCommandDrainEndMarkersArg takes nothing: a drain returns every

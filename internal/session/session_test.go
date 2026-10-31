@@ -39,9 +39,10 @@ type recorder struct {
 	// RuleCounts answers, and the failure it answers with when readFail is set.
 	counts   map[string][]bess.RuleCount
 	readFail error
-	// errorCounts is the fake dataplane's GTP-U responders, by module name:
-	// what ErrorCounts answers (finding 15).
-	errorCounts map[string][]bess.ErrorCount
+	// errors is the fake GTP-U responders' Error Indication logs, by module
+	// name: what DrainErrors answers once and then forgets, as the module does
+	// (finding 15).
+	errors map[string][]uint32
 	// endMarkers is the fake responders' End Marker logs, by module name: what
 	// DrainEndMarkers answers once and then forgets, as the module does.
 	endMarkers map[string][]bess.EndMarker
@@ -177,29 +178,15 @@ func (r *recorder) RuleCounts(_ context.Context, module string, actionIDs ...uin
 	return out, nil
 }
 
-// ErrorCounts answers a GtpuResponder's error table (ErrorReader): the counts
-// the test seeded, keyed by module, and only the TEIDs asked for when some are
-// named -- the module's own answer omits a TEID it never saw rather than
-// reporting a zero (gtpu_responder.cc).
-func (r *recorder) ErrorCounts(_ context.Context, module string, teids ...uint32) ([]bess.ErrorCount, error) {
+// DrainErrors answers a GtpuResponder's Error Indication log (ErrorReader): the
+// TEIDs the test seeded, each returned once, as drain_errors does.
+func (r *recorder) DrainErrors(_ context.Context, module string) ([]uint32, uint64, error) {
 	if r.readFail != nil {
-		return nil, r.readFail
+		return nil, 0, r.readFail
 	}
-	held := r.errorCounts[module]
-	if len(teids) == 0 {
-		return held, nil
-	}
-	wanted := make(map[uint32]bool, len(teids))
-	for _, teid := range teids {
-		wanted[teid] = true
-	}
-	out := make([]bess.ErrorCount, 0, len(teids))
-	for _, e := range held {
-		if wanted[e.TEID] {
-			out = append(out, e)
-		}
-	}
-	return out, nil
+	out := r.errors[module]
+	delete(r.errors, module)
+	return out, 0, nil
 }
 
 // DrainEndMarkers answers a GtpuResponder's End Marker log (EndMarkerReader):

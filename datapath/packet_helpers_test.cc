@@ -36,11 +36,12 @@ namespace {
 using bess::utils::be16_t;
 using bess::utils::be32_t;
 using upf::datapath::AnswerGtpuControlFrame;
+using upf::datapath::ErrorIndicationEvent;
+using upf::datapath::ErrorIndicationLog;
 using upf::datapath::GetWire16;
 using upf::datapath::GetWire32;
 using upf::datapath::GtpuControlContext;
 using upf::datapath::GtpuControlVerdict;
-using upf::datapath::GtpuErrorCounts;
 using upf::datapath::PutWire16;
 using upf::datapath::PutWire32;
 
@@ -225,11 +226,11 @@ TEST(GtpuControl, DropsWhatItDoesNotAnswerAndLeavesItUnchanged) {
   }
 }
 
-TEST(GtpuControl, CountsPeerErrorIndicationsByTheTeidIe) {
+TEST(GtpuControl, LogsPeerErrorIndicationsByTheTeidIe) {
   // S set: the sequence field, then the TEID Data I IE.
   const std::vector<uint8_t> body = {0, 1, 0, 0, upf::datapath::kGtpuTeidIe, 0, 0, 0x12, 0x34};
-  GtpuErrorCounts errors;
-  const GtpuControlContext ctx{.errors = &errors};
+  ErrorIndicationLog errors(2);
+  const GtpuControlContext ctx{.errors = &errors, .worker = 1};
   for (int n = 0; n < 2; n++) {
     Frame f = Gtpu4(0x32, upf::datapath::kGtpuErrorIndication, 0, body);
     const std::vector<uint8_t> before = f.bytes;
@@ -237,14 +238,13 @@ TEST(GtpuControl, CountsPeerErrorIndicationsByTheTeidIe) {
               GtpuControlVerdict::kPeerErrorIndication);
     EXPECT_EQ(f.bytes, before);  // never answered
   }
-  EXPECT_EQ(errors.Count(0x1234), 2u);
-  EXPECT_EQ(errors.Untracked(), 0u);
+  EXPECT_EQ(errors.Drain(), (std::vector<ErrorIndicationEvent>{{0x1234}, {0x1234}}));
 
-  // Not tracked: the same verdict, nothing counted anywhere.
+  // Not tracked: the same verdict, nothing logged anywhere.
   Frame f = Gtpu4(0x32, upf::datapath::kGtpuErrorIndication, 0, body);
   EXPECT_EQ(AnswerGtpuControlFrame(f.frame(), f.room(), GtpuControlContext{}, NoEndpoint).verdict,
             GtpuControlVerdict::kPeerErrorIndication);
-  EXPECT_EQ(errors.Count(0x1234), 2u);
+  EXPECT_TRUE(errors.Drain().empty());
 }
 
 TEST(GtpuControl, LogsEndMarkersWithTheirEndpoint) {
@@ -277,24 +277,17 @@ TEST(GtpuControl, LogsEndMarkersWithTheirEndpoint) {
   EXPECT_EQ(asked, 2);
 }
 
-TEST(GtpuErrorCounts, CountsPerTeidAndCountsAFullTable) {
-  GtpuErrorCounts counts(2);
-  EXPECT_EQ(GtpuErrorCounts::Bytes(2), counts.bytes());
-  counts.Record(1);
-  counts.Record(2);
-  counts.Record(2);
-  counts.Record(3);  // no slot left
-  EXPECT_EQ(counts.Count(1), 1u);
-  EXPECT_EQ(counts.Count(2), 2u);
-  EXPECT_FALSE(counts.Count(3).has_value());
-  EXPECT_FALSE(counts.Count(0).has_value());
-  EXPECT_EQ(counts.Untracked(), 1u);
-  std::map<uint32_t, uint64_t> seen;
-  counts.ForEach([&seen](uint32_t teid, uint64_t count) { seen[teid] = count; });
-  EXPECT_EQ(seen, (std::map<uint32_t, uint64_t>{{1, 1}, {2, 2}}));
-
-  GtpuErrorCounts empty;
-  EXPECT_FALSE(empty.Count(0).has_value());  // an empty slot is not TEID 0's
+// UD-B5: the table this log replaced had 64 slots that were never cleared, so
+// after 64 distinct peer TEIDs in the daemon's life every later indication was
+// Untracked and never reported. A drained log has no history to fill.
+TEST(ErrorIndicationLog, The65thTeidIsDeliveredAfterADrain) {
+  ErrorIndicationLog log(1);
+  EXPECT_EQ(ErrorIndicationLog::Bytes(1), log.bytes());
+  for (uint32_t teid = 1; teid <= 64; ++teid) log.Record(0, {teid});
+  EXPECT_EQ(log.Drain().size(), 64u);
+  log.Record(0, {65});
+  EXPECT_EQ(log.Drain(), (std::vector<ErrorIndicationEvent>{{65}}));
+  EXPECT_EQ(log.Dropped(), 0u);
 }
 
 // -- ATSSS ------------------------------------------------------------------------

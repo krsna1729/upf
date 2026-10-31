@@ -68,13 +68,15 @@ type WindowReader interface {
 	PeekRuleCounts(ctx context.Context, counters string, actionIDs ...uint32) ([]bess.RuleCount, error)
 }
 
-// ErrorReader is the GTP-U responder's error table as a dataplane capability:
-// the Error Indications the peer sent this UPF, by the TEID each named (TS
-// 29.244 5.10). It is a capability of its own for the same reason the counter
-// reader is -- a graph whose responder does not track them never asks, and one
-// whose responder is a different module from its counters still answers.
+// ErrorReader is the GTP-U responder's Error Indication log as a dataplane
+// capability: the indications the peer sent this UPF since the previous drain,
+// by the TEID each named, each returned once (TS 29.244 5.10), and the running
+// count lost to full rings. It is a capability of its own for the same reason
+// the counter reader is -- a graph whose responder does not track them never
+// asks, and one whose responder is a different module from its counters still
+// answers. A drain consumes what it returns, so only the report loop calls it.
 type ErrorReader interface {
-	ErrorCounts(ctx context.Context, module string, teids ...uint32) ([]bess.ErrorCount, error)
+	DrainErrors(ctx context.Context, module string) ([]uint32, uint64, error)
 }
 
 // EndMarkerReader is the GTP-U responder's End Marker log as a dataplane
@@ -444,10 +446,11 @@ type Compiler struct {
 	// (Evaluate says so rather than reporting zero forever).
 	counters CounterReader
 
-	// markersDropped is the End Marker log's lost count the report loop last
-	// logged: the drain answers a running total, and only an increase is news.
-	// Only EvaluateAll touches it, from the one report loop.
-	markersDropped uint64
+	// markersDropped and errorsDropped are the End Marker and Error
+	// Indication logs' lost counts the report loop last logged: each drain
+	// answers a running total, and only an increase is news. Only EvaluateAll
+	// touches them, from the one report loop.
+	markersDropped, errorsDropped uint64
 	// tickIDs and tickCounts are EvaluateAll's buffers, kept from tick to
 	// tick: the ActionIds a tick names, by the module that counts them, and
 	// what the reading answered, indexed by ActionId. Only EvaluateAll touches
@@ -610,13 +613,6 @@ type Session struct {
 	// per CHOOSE ID (TS 29.244 8.2.3). All PDIs sharing an ID reuse precisely
 	// that selection, which remains reserved for a retry until no PDR names it.
 	chids map[uint8]chosenFTEID
-
-	// erirSent is the count of each TEID this session's SMF has already been
-	// told about: the responder's error counts only grow (bess.ErrorCounts),
-	// so a report is due when a reading is above the high-water mark kept
-	// here. The mark moves when the report is decided, not when the SMF
-	// answers it -- the report queue holds it until the SMF does (5.10).
-	erirSent map[uint32]uint64
 
 	// Cached sorted slices for hot compile paths; invalidated on mutation.
 	cachedPDRs []*pdr
