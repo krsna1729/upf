@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Production, session-major profile (upfd -target session-major): deploy/appliance.yaml
+# with UpfSessionAppliance -- one upf/sessions entry per PFCP session, rewritten
+# beside running workers. upfd's -max-sessions/-session-actions/-session-qers must
+# equal session.capacity/max_actions/max_qers.
+ports:
+  - {name: n3, driver: PMDPort, arg: {port_id: 0}, num_rx_queues: 1}
+  - {name: n6, driver: PMDPort, arg: {port_id: 1}, num_rx_queues: 1}
+  - {name: cp_marker_n3, driver: UnixSocketPort, arg: {path: /tmp/upf-end-marker.sock.1}}
+  - {name: cp_marker_n9, driver: UnixSocketPort, arg: {path: /tmp/upf-end-marker.sock.2}}
+modules:
+  - name: upf
+    mclass: UpfSessionAppliance
+    arg:
+      session: {capacity: 65536, max_actions: 4, max_qers: 4}
+      interfaces:
+        - {ingress_gate: 0, output_gate: 1, id: 1, endpoint_id: 1, mac_addr: '02:00:00:00:03:01', ip_addr: '192.0.2.1', ipv6_addr: '2001:db8:1::1', addresses: ['192.0.2.1/24', '2001:db8:1::1/64'], transport_route_domain: 1}
+        - {ingress_gate: 0, output_gate: 2, id: 2, endpoint_id: 2, mac_addr: '02:00:00:00:09:01', ip_addr: '192.0.2.3', ipv6_addr: '2001:db8:9::1', addresses: ['192.0.2.3/24', '2001:db8:9::1/64'], transport_route_domain: 2}
+        - {ingress_gate: 4, output_gate: 0, id: 1, n6: true, mac_addr: '02:00:00:00:06:01', ip_addr: '192.0.2.2', addresses: ['192.0.2.2/24']}
+      marker_inputs:
+        - {ingress_gate: 2, interface_id: 1, transport_route_domain: 1}
+        - {ingress_gate: 3, interface_id: 2, transport_route_domain: 2}
+      next_hop_classes:
+        - {egress_gate: 0, action: OUTPUT, output_gate: 0}
+        - {egress_gate: 1, action: ENCAP}
+        - {egress_gate: 2, action: ENCAP}
+        - {egress_gate: 4, action: REINJECT_DL}
+  - {name: n3_in, mclass: PortInc, arg: {port: n3}}
+  - {name: n6_in, mclass: PortInc, arg: {port: n6}}
+  - {name: n3_out, mclass: PortOut, arg: {port: n3}}
+  - {name: n6_out, mclass: PortOut, arg: {port: n6}}
+  - {name: cp_in_n3, mclass: PortInc, arg: {port: cp_marker_n3}}
+  - {name: cp_in_n9, mclass: PortInc, arg: {port: cp_marker_n9}}
+connections:
+  - {upstream: n3_in, downstream: upf, igate: 0}
+  - {upstream: n6_in, downstream: upf, igate: 4}
+  - {upstream: cp_in_n3, downstream: upf, igate: 2}
+  - {upstream: cp_in_n9, downstream: upf, igate: 3}
+  - {upstream: upf, downstream: n6_out, ogate: 0}
+  - {upstream: upf, downstream: n3_out, ogate: 1}
+  - {upstream: upf, downstream: n3_out, ogate: 2}
+resources:
+  upf/next_hops:
+    - {key: {id: 2}, value: {egress_gate: 1}}
+    - {key: {id: 3}, value: {egress_gate: 2}}
+    - {key: {id: 5}, value: {egress_gate: 4}}
+  upf/neighbors:
+    - {key: {id: 1}, value: {interface_id: 1, ipv4: '192.0.2.1'}}
+  upf/transport_neighbors:
+    - {key: {id: 1}, value: {interface_id: 1, ipv4: '192.0.2.2'}}
+    - {key: {id: 2}, value: {interface_id: 1, ipv6: '2001:db8:1::2'}}
+    - {key: {id: 3}, value: {interface_id: 2, ipv4: '192.0.2.4'}}
+    - {key: {id: 4}, value: {interface_id: 2, ipv6: '2001:db8:9::2'}}
+  upf/transport_routes:
+    - {key: {ipv4: '0.0.0.0', prefix_length: 0, domain: 1}, value: {next_hop_id: 1}}
+    - {key: {ipv6: '::', prefix_length: 0, domain: 1}, value: {next_hop_id: 2}}
+    - {key: {ipv4: '0.0.0.0', prefix_length: 0, domain: 2}, value: {next_hop_id: 3}}
+    - {key: {ipv6: '::', prefix_length: 0, domain: 2}, value: {next_hop_id: 4}}
+  upf/entries:
+    - {key: {ip: '192.0.2.2'}, value: {mac_addr: '02:00:00:00:06:01'}}

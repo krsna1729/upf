@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# deploy/session-path-appliance.yaml with the session-major layout.
+# Source/Rewrite/Dump/Sink and marker capture are external test instrumentation.
+ports:
+- name: cp_marker
+  driver: UnixSocketPort
+  arg:
+    path: /tmp/upf-end-marker.sock.1
+modules:
+- name: upf
+  mclass: UpfSessionAppliance
+  arg:
+    # upfd/liveConfig: -max-sessions 1024 -session-actions 4 -session-qers 4.
+    session: {capacity: 1024, max_actions: 4, max_qers: 4}
+    interfaces:
+    - ingress_gate: 0
+      output_gate: 1
+      id: 1
+      endpoint_id: 1
+      mac_addr: 02:00:00:00:00:02
+      ip_addr: 192.0.2.1
+      addresses:
+      - 192.0.2.1/24
+      transport_route_domain: 1
+    - ingress_gate: 4
+      output_gate: 0
+      id: 1
+      n6: true
+      mac_addr: 02:00:00:00:06:01
+      ip_addr: 192.0.2.2
+      addresses:
+      - 192.0.2.2/24
+    marker_inputs: []
+    next_hop_classes:
+    - egress_gate: 0
+      action: OUTPUT
+      output_gate: 0
+    - egress_gate: 1
+      action: ENCAP
+- name: src_err
+  mclass: Source
+  arg:
+    pkt_size: 55
+    burst: 1
+- name: rewrite_err
+  mclass: Rewrite
+  arg:
+    templates:
+    - AgAAAAACAgAAAAABCABFAAApAAAAAEARKpoKFB4CChQeAQhoCGgAFQAAMBoABQAAAAAQVWZ3iA==
+- name: src_em
+  mclass: Source
+  arg:
+    pkt_size: 50
+    burst: 1
+- name: rewrite_em
+  mclass: Rewrite
+  arg:
+    templates:
+    - AgAAAAACAgAAAAABCABFAAAkAAFAAEARULEKFB4CwAACAQhoCGgAEAAAMP4AABEiM0Q=
+- name: src_up
+  mclass: Source
+  arg:
+    pkt_size: 87
+    burst: 32
+- name: rewrite_up
+  mclass: Rewrite
+  arg:
+    templates:
+    - AgAAAAACAgAAAAABCABFAABJAAFAAEARUIwKFB4CwAACAQhoCGgANQAAMP8AJREiM0RFAAAlAAFAAEARIIkKLQACCAgICBOIADUAEQAAaGVsbG8tdXBm
+- name: dump_n6
+  mclass: Dump
+  arg:
+    interval: 1
+- name: sink_n6
+  mclass: Sink
+- name: src_dn
+  mclass: Source
+  arg:
+    pkt_size: 51
+    burst: 32
+- name: rewrite_dn
+  mclass: Rewrite
+  arg:
+    templates:
+    - AgAAAAYBAgAAAAYCCABFuAAlAAFAAEARH9EICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm
+# Capture only fixture IPv4 G-PDUs; N3 also carries unknown-TEID replies.
+- name: n3_data
+  mclass: ExactMatch
+  arg:
+    fields:
+    - {offset: 43, num_bytes: 1}
+    default_gate: 1
+- name: dump_d
+  mclass: Dump
+  arg:
+    interval: 1
+- name: sink_n3
+  mclass: Sink
+- name: cp_in
+  mclass: PortInc
+  arg:
+    port: cp_marker
+- name: dump_m
+  mclass: Dump
+  arg:
+    interval: 1
+- name: sink_m
+  mclass: Sink
+connections:
+- upstream: src_up
+  downstream: rewrite_up
+- upstream: src_err
+  downstream: rewrite_err
+- upstream: src_em
+  downstream: rewrite_em
+- upstream: dump_n6
+  downstream: sink_n6
+- upstream: src_dn
+  downstream: rewrite_dn
+- upstream: dump_d
+  downstream: sink_n3
+- upstream: cp_in
+  downstream: dump_m
+- upstream: dump_m
+  downstream: sink_m
+- upstream: rewrite_up
+  downstream: upf
+  igate: 0
+- upstream: rewrite_err
+  downstream: upf
+  igate: 0
+- upstream: rewrite_em
+  downstream: upf
+  igate: 0
+- upstream: rewrite_dn
+  downstream: upf
+  igate: 4
+- upstream: upf
+  downstream: dump_n6
+  ogate: 0
+- upstream: upf
+  downstream: n3_data
+  ogate: 1
+- upstream: n3_data
+  downstream: dump_d
+- upstream: n3_data
+  downstream: sink_n3
+  ogate: 1
+workers:
+- wid: 0
+  core: 0
+resources:
+  upf/next_hops:
+  - key:
+      id: 1
+    value:
+      egress_gate: 0
+      dst_mac: AgAAAAYC
+      src_mac: AgAAAAYB
+  - key:
+      id: 2
+    value:
+      egress_gate: 1
+  upf/transport_next_hops:
+  - key:
+      id: 1
+    value:
+      egress_gate: 0
+  upf/transport_routes:
+  - key:
+      ipv4: 0.0.0.0
+      prefix_length: 0
+      domain: 1
+    value:
+      next_hop_id: 1
+  n3_data/rules:
+  - key: {fields: [{value_int: 255}]}
+    value: {gate: 0}

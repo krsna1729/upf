@@ -31,7 +31,8 @@ TARGET=${UPF_TARGET:-graph}
 case "$TARGET" in
   graph) DEFAULT_GRAPH=$ROOT/deploy/session-path.yaml ;;
   appliance) DEFAULT_GRAPH=$ROOT/deploy/session-path-appliance.yaml ;;
-  *) echo "TARGET must be graph or appliance" >&2; exit 2 ;;
+  session-major) DEFAULT_GRAPH=$ROOT/deploy/session-path-session-major.yaml ;;
+  *) echo "TARGET must be graph, appliance or session-major" >&2; exit 2 ;;
 esac
 GRAPH=${GRAPH:-$DEFAULT_GRAPH}
 export UPF_TARGET=$TARGET

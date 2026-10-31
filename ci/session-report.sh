@@ -26,7 +26,8 @@ TARGET=${UPF_TARGET:-graph}
 case "$TARGET" in
   graph) DEFAULT_GRAPH=$ROOT/deploy/session-path.yaml ;;
   appliance) DEFAULT_GRAPH=$ROOT/deploy/session-path-appliance.yaml ;;
-  *) echo "TARGET must be graph or appliance" >&2; exit 2 ;;
+  session-major) DEFAULT_GRAPH=$ROOT/deploy/session-path-session-major.yaml ;;
+  *) echo "TARGET must be graph, appliance or session-major" >&2; exit 2 ;;
 esac
 GRAPH=${GRAPH:-$DEFAULT_GRAPH}
 export TMPDIR=${TMPDIR:-$ROOT/build/run}
@@ -34,7 +35,11 @@ mkdir -p "$TMPDIR"
 export GLOG_log_dir=${GLOG_log_dir:-$TMPDIR/glog}
 mkdir -p "$GLOG_log_dir"
 TARGET_ARGS=(-target "$TARGET")
-if [ "$TARGET" = appliance ]; then TARGET_ARGS+=(-appliance upf); fi
+case "$TARGET" in
+  appliance) TARGET_ARGS+=(-appliance upf) ;;
+  # deploy/session-path-session-major.yaml's session arguments.
+  session-major) TARGET_ARGS+=(-appliance upf -max-sessions 1024 -session-actions 4 -session-qers 4) ;;
+esac
 GO=${GO:-$(MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} mise which go 2>/dev/null || echo go)}
 
 TICK=${TICK:-1s}

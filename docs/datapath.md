@@ -25,6 +25,10 @@ one `UpfAppliance` module between input and output port modules, not dummy
 modules or a hidden graph. PFCP parsing, session compilation, key/value types
 and PDR result records are shared. `internal/session/target.go` owns resource
 names, command destinations, the startup reset list and End Marker sockets.
+`-target session-major -appliance upf` is the same appliance with the
+session-major layout, `UpfSessionAppliance` ("Session-major" below):
+`deploy/session-major.yaml`, plus `-max-sessions`, `-session-actions` and
+`-session-qers` equal to the module's `session` arguments.
 
 `deploy/appliance.yaml` is the port-only production composition. From the
 repository root, create `build/run`, apply that manifest, and run:
@@ -36,7 +40,8 @@ upfd -target appliance -appliance upf -urr-interval 1s \
   -fteid-address 'endpoint=2,reference=n9,transport-domain=2,source=core,ipv4=192.0.2.3'
 ```
 
-The behavioral lanes choose `UPF_TARGET=graph` (default) or `UPF_TARGET=appliance`:
+The behavioral lanes choose `UPF_TARGET=graph` (default), `UPF_TARGET=appliance`
+or `UPF_TARGET=session-major` (`deploy/session-path-session-major.yaml`):
 `ci/session-path.sh`, `ci/n4-path.sh`, and `ci/session-report.sh`. `STAGE`,
 `PLUG`, `DPDK_LIB`, `GO`, and `TMPDIR` remain overrides. The appliance arm
 applies `deploy/session-path-appliance.yaml`, whose Sources, Rewrites, Dumps
@@ -145,6 +150,61 @@ Evidence: `gtpu_datapath_test` (`upf_appliance_frame_test.cc` key layout,
 (table round trip), and `UPF_TARGET=appliance` runs of `ci/session-path.sh`,
 `ci/n4-path.sh` and `ci/session-report.sh`, which assert the same external
 bytes and counters as the graph arm.
+
+## Session-major (`UpfSessionAppliance`)
+
+The profile for deployments sized by sessions: `UpfAppliance`'s burst with
+the masked PDR, F-TEID, counter and tunnel tables driven by **one entry per
+PFCP session**, `upf/sessions` (`UpfSessionKey` → `UpfSession`,
+`upf_datapath.proto`). Files: `upf_appliance_sessions.{h,cc}` (the store),
+the session branches of `_path.cc`, `_resources.cc` and `_selftest.cc`.
+
+| logical table | `-target appliance` | `-target session-major` |
+|---|---|---|
+| F-TEIDs, UL / DL PDRs, QER meters, URR counters, tunnels | `upf/fteids`, `upf/pdr_*`, `upf/meters`, `upf/counters_*`, `upf/tunnels` | the session's `upf/sessions` entry |
+| meters shared across sessions | — | `upf/meters` (referenced by an entry's QER) |
+| buffering, ATSSS, ARP, flows, routers | as appliance | as appliance; an ATSSS access `tunnel_id` is the 1-based action position in the session |
+
+upfd compiles exactly as for the appliance, then folds the session's writes
+into the entry (`internal/session/sessionmajor.go`); session ids come from an
+aged pool of `-max-sessions`. `get_counts` keeps `table=counters_ul|counters_dl|buffer_counters`.
+
+**Memory.** Session `s` owns a fixed stride of one DPDK array: two versions of
+the action configuration (one 64 B line per action each), `2·max_actions` URR
+cell slots and `2·max_qers` meter slots — `256·A + 128·Q` bytes (768 B at
+2/2, 1536 B at the default 4/4). Module creation admits `capacity × stride`
+through the memory scope or is refused; a rewrite allocates nothing on the
+DPDK side.
+
+**Live rewrite.** A PDR rule's result is `session << 5 | version << 4 |
+action`. An update writes the inactive version, then commits the rules
+make-before-break (inserts and raised priorities first, erases and lowered
+priorities last) and flips the session's active version: workers keep
+running, and every packet reads one version's FAR, QER, URR and tunnel
+together. A second rewrite of the same session within one grace period waits
+for that grace period (bounded by one worker batch). Counters and meters are
+never copied: an action keeping its `action_id` keeps its URR cells, a QER
+keeping its id and profile keeps its buckets; new ones start zeroed / full.
+A packet held by buffering is re-bound to its session's current version on
+release, or dropped as `session_gone` when the session was erased.
+
+**Limits.** At most `max_actions` (≤ 16) actions and `max_qers` (≤ 16) QER
+meters per session (a QER with a rate is one meter per policed direction);
+upfd refuses a session beyond them before anything is sent. Sessions ≤
+`capacity` ≤ 2^27 − 1. The PDR keys use the default field lists only.
+Not provided: atomic replacement of a session's whole rule *set* (a packet
+can match a transitional winner among overlapping rules whose keys or
+priorities change during the commit, as in graph and appliance); QER
+Correlation ID in the compiler, so upfd never emits shared meters although
+the module supports them; a per-session stride size; the `iface-path` and
+`veth-layouts` lanes, which only know graph compositions.
+
+Evidence: `upf_appliance_sessions_test` (the store driven through
+Reserve/Publish while a reader thread classifies: no mixed version, no miss,
+no lost count or refilled bucket across 2000 rewrites; built only when the
+vendored `build/bess/fast` has `libbess_meter.a`, which bess-dev-static does
+not ship) and `ci/session-path.sh`, `ci/n4-path.sh`, `ci/session-report.sh`
+with `UPF_TARGET=session-major`.
 
 ## The graph
 
