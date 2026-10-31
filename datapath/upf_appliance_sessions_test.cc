@@ -132,6 +132,20 @@ struct Store {
   Result Put(const SessionValue &v, uint32_t id = kSession) {
     return Apply(dp::Op::Upsert(sessions->name(), dp::EncodeKey(id), std::any(v)));
   }
+  // One transaction of session upserts (ids first, first + 1, ...),
+  // published into `retirer`; the caller finishes it, or holds it as an
+  // engine does whose grace period has not started yet.
+  void Transaction(const std::vector<SessionValue> &values, uint32_t first, dp::Retirer &retirer) {
+    std::vector<std::unique_ptr<dp::StagedOp>> staged;
+    for (uint32_t i = 0; i < values.size(); ++i) {
+      auto r = sessions->Reserve(dp::Op::Upsert(sessions->name(), dp::EncodeKey(first + i), std::any(values[i])));
+      ASSERT_TRUE(r.has_value()) << r.error();
+      staged.push_back(std::move(r->staged));
+    }
+    ASSERT_TRUE(sessions->Prepare().has_value());
+    for (auto &op : staged) op->Publish(retirer);
+    sessions->EndTransaction();
+  }
 
   bess::rcu::RcuDomain domain;
   std::unique_ptr<bess::flow::SharedExactIndex> index;
@@ -174,6 +188,18 @@ upf::appliance::Tunnel MakeTunnel(uint32_t teid, uint16_t marking) {
 }
 
 const meter::TrTcmSpec kSlow{1000, 10000, 1000, 10000};
+
+// Session i + 1: one counted UL action and a PDR key of its own.
+SessionValue Counted(uint32_t i, uint32_t route_domain = 1) {
+  auto key = UlKey(0);
+  key[1] = std::byte(i >> 16); key[2] = std::byte(i >> 8); key[3] = std::byte(i);
+  SessionValue v;
+  v.actions = {{.action_id = 0x10000 + i, .route_domain = route_domain, .count = true}};
+  v.pdrs = {{.dl = false, .mask = std::vector<std::byte>(18, std::byte{0xff}),
+             .value = std::vector<std::byte>(key.begin(), key.end()), .priority = 100, .gate = 0,
+             .action = 0}};
+  return v;
+}
 
 // Version A: kId at position 0. Version B: a tunnel-only action first, so
 // kId moves to position 1 -- its cell and meter slots must not.
@@ -391,6 +417,8 @@ TEST(SessionStore, CellsAndBucketsFollowIdentityNotPosition) {
   auto &cells = s.sessions->Cells(kSession, a.cell & ActionConfig::kCellSlot);
   for (int i = 0; i < 7; ++i) cells.urr[0].Add(64, 100 + i);
   auto &bucket = s.sessions->Meter(kSession, a.meter[0] - 1).meter();
+  // One worker writes the module's buckets: no locked update per packet.
+  EXPECT_EQ(bucket.sharing(), meter::MeterSharing::kWorkerExclusive);
   ASSERT_EQ(bucket.Check(meter::MeterNow(), 6000), meter::MeterColor::kGreen);
   const auto before = bucket.Inspect();
 
@@ -529,6 +557,42 @@ TEST(SessionStore, MemoryRefusalLeavesNothingAndTheLiveVersionServing) {
   EXPECT_EQ(s.sessions->Active(kSession), live.version);
   s.budget.left = SIZE_MAX / 2;
   EXPECT_TRUE(Applied(s.Put(Image(true))));
+}
+
+TEST(SessionStore, BulkReadsHoldTheLockForAChunkAndNeverReFind) {
+  constexpr uint32_t kN = 100000;
+  Store s({.capacity = kN, .max_actions = 1, .max_qers = 1});
+  for (uint32_t i = 0; i < kN; ++i) ASSERT_TRUE(Applied(s.Put(Counted(i), i + 1))) << "session " << i + 1;
+  upf::pb::UrrCountCommandGetCountsResponse out;
+  s.sessions->Counts(false, {}, false, &out);
+  EXPECT_EQ(out.counts_size(), static_cast<int>(kN));
+  EXPECT_EQ(s.sessions->work().action_finds, 0u) << "a bulk read looked each action up again";
+  EXPECT_LE(s.sessions->work().max_per_hold, SessionResource::kEntriesPerHold) << "get_counts";
+  size_t visited = 0;
+  s.sessions->ForEachLive([&](uint32_t, const upf::pb::UpfSession &) { ++visited; });
+  EXPECT_EQ(visited, kN);
+  EXPECT_LE(s.sessions->work().max_per_hold, SessionResource::kEntriesPerHold) << "ForEachLive";
+}
+
+TEST(SessionStore, ReUpdatingManySessionsInOneTransactionWaitsOnce) {
+  constexpr uint32_t kN = 1000;
+  Store s({.capacity = kN, .max_actions = 1, .max_qers = 1});
+  const auto images = [](uint32_t route_domain) {
+    std::vector<SessionValue> v;
+    for (uint32_t i = 0; i < kN; ++i) v.push_back(Counted(i, route_domain));
+    return v;
+  };
+  dp::Retirer insert, update, again;
+  s.Transaction(images(1), 1, insert);
+  s.Finish(insert);
+  // Every session updated; that transaction's grace period not started yet,
+  // so no session has a token to test.
+  s.Transaction(images(2), 1, update);
+  const uint64_t before = s.sessions->work().synchronizes;
+  s.Transaction(images(1), 1, again);
+  EXPECT_LE(s.sessions->work().synchronizes - before, 1u);
+  s.Finish(update);
+  s.Finish(again);
 }
 
 }  // namespace
