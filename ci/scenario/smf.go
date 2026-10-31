@@ -3,7 +3,6 @@
 package scenario
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -48,10 +47,6 @@ const smfNodeID = "smf"
 // port -- the internal/n4 node upfd runs, with the compiler as its session
 // handler -- and associates a stand-in SMF with it. The lanes drive every
 // scenario through it, so each session message crosses N4 as a PFCP datagram.
-// It also runs upfd's report loop (-urr-interval) once per tick: the tick is what
-// drains the GTP-U responder's End Marker log and relays each End Marker
-// through the tunnel its F-TEID forwards into. The scenarios ask for no usage
-// report, so one that is decided anyway is logged.
 func Serve(c *session.Compiler, log *slog.Logger) (*SMF, func(), error) {
 	srv, err := n4.New(n4.Config{NodeID: "127.0.0.1", Listen: "127.0.0.1:0", Sessions: c, Logger: log})
 	if err != nil {
@@ -66,27 +61,8 @@ func Serve(c *session.Compiler, log *slog.Logger) (*SMF, func(), error) {
 		_ = srv.Close()
 		return nil, nil, err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		ticker := time.NewTicker(tick)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case now := <-ticker.C:
-				for _, r := range c.EvaluateAll(ctx, now) {
-					log.Warn("scenario: an unexpected usage report", "seid", r.SEID, "urr", r.URRID)
-				}
-			}
-		}
-	}()
-	return smf, func() { cancel(); smf.Close(); _ = srv.Close() }, nil
+	return smf, func() { smf.Close(); _ = srv.Close() }, nil
 }
-
-// tick is the lanes' -urr-interval: short, so a relayed End Marker leaves
-// within a phase.
-const tick = 100 * time.Millisecond
 
 // Associate dials the UP function's N4 address and sets up the association.
 func Associate(addr string) (*SMF, error) {
