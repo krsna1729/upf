@@ -2,9 +2,12 @@
 package session
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,6 +71,10 @@ func TestTheCheckpointReplaysSessions(t *testing.T) {
 	if held := c.Stats().Sessions; held != 1 {
 		t.Fatalf("the first run holds %d sessions, want 1", held)
 	}
+	// The deletion left the file with more than twice as many records as
+	// sessions, so a compaction is running: the size measured is the one it
+	// leaves.
+	j.compactions.Wait()
 	size, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -269,5 +276,176 @@ func TestTheAssociationEndingClearsTheCheckpoint(t *testing.T) {
 	// is not a fact that changed.
 	if _, ok := j.Recovery(); !ok {
 		t.Error("clearing the sessions threw the Recovery Time Stamp away")
+	}
+}
+
+// TestTheCheckpointHoldsSessionsNotHistory (UG-B5): the journal is as long as
+// the sessions it describes, not the messages that made them. One session
+// takes 10,000 modifications and is deleted beside ten that stay: the file
+// holds at most the stamp and two records per session that was live, and the
+// restart replays one establishment per session that is.
+func TestTheCheckpointHoldsSessionsNotHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "checkpoint")
+	j, _ := checkpointJournal(t, path)
+	c := New(testConfig(), &recorder{}, quietLogger())
+	c.Checkpoint(j)
+	for n := range 10 {
+		if got := cause(t, c.Establish(establishment(uint64(0x9a00+n), fmt.Sprintf("10.45.1.%d", n+1)))); got != ie.CauseRequestAccepted {
+			t.Fatalf("establishment %d answered cause %d", n, got)
+		}
+	}
+	seid := upFSEID(t, c.Establish(establishment(0x9aff, "10.45.1.200")).(*message.SessionEstablishmentResponse))
+	for n := range 10000 {
+		// A handover: the downlink FAR's tunnel moves to another TEID.
+		if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, uint32(n+2), 0,
+			ie.NewUpdateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
+				ie.NewUpdateForwardingParameters(ie.NewOuterHeaderCreation(0x0100, uint32(n+1), "10.20.30.2", "", 0, 0, 0)))))); got != ie.CauseRequestAccepted {
+			t.Fatalf("modification %d answered cause %d", n, got)
+		}
+	}
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 10002, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records := bytes.Count(blob, []byte("\n")); records > 1+2*11 {
+		t.Errorf("the journal holds %d records for 11 sessions, want at most %d", records, 1+2*11)
+	}
+
+	restart, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restart.Close()
+	rec := &recorder{}
+	c2 := New(testConfig(), rec, quietLogger())
+	if err := c2.Restore(restart); err != nil {
+		t.Fatalf("replaying the checkpoint: %v", err)
+	}
+	if applies := len(rec.txns); applies > 11 {
+		t.Errorf("the replay applied %d transactions for 10 sessions, want at most 11", applies)
+	}
+	if held := c2.Stats().Sessions; held != 10 {
+		t.Errorf("the replay restored %d sessions, want 10", held)
+	}
+}
+
+// TestACompactedCheckpointKeepsWhatTheModificationsMade: a compaction folds a
+// session's modifications into its establishment, and the replay of that one
+// message has to build the model the messages built -- the tunnel the last
+// FAR update named (a placeholder after it names nothing), and the gates and
+// rates of the updated QER.
+func TestACompactedCheckpointKeepsWhatTheModificationsMade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "checkpoint")
+	j, _ := checkpointJournal(t, path)
+	c := New(testConfig(), &recorder{}, quietLogger())
+	c.Checkpoint(j)
+	seid := upFSEID(t, c.Establish(establishment(0x9b01, "10.45.3.2")).(*message.SessionEstablishmentResponse))
+	for n, mod := range []*ie.IE{
+		ie.NewUpdateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(ie.NewOuterHeaderCreation(0x0100, 0x1001, "10.20.30.9", "", 0, 0, 0))),
+		ie.NewUpdateQER(ie.NewQERID(1), ie.NewGateStatus(ie.GateStatusClosed, ie.GateStatusOpen), ie.NewMBR(3000, 4000)),
+		ie.NewUpdateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
+			ie.NewUpdateForwardingParameters(ie.NewOuterHeaderCreation(0x0100, 0, "0.0.0.0", "", 0, 0, 0))),
+	} {
+		if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, uint32(n+2), 0, mod))); got != ie.CauseRequestAccepted {
+			t.Fatalf("modification %d answered cause %d", n, got)
+		}
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restart, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restart.Close()
+	c2 := New(testConfig(), &recorder{}, quietLogger())
+	if err := c2.Restore(restart); err != nil {
+		t.Fatalf("replaying the checkpoint: %v", err)
+	}
+	was, now := c.sessions[seid], c2.sessions[seid]
+	if now == nil {
+		t.Fatalf("the replay holds no session at SEID %d", seid)
+	}
+	if *now.FARs[2] != *was.FARs[2] {
+		t.Errorf("the replayed FAR 2 is %+v, want %+v", *now.FARs[2], *was.FARs[2])
+	}
+	q, want := now.QERs[1], was.QERs[1]
+	if q.gateUL != want.gateUL || q.gateDL != want.gateDL || q.mbUL != want.mbUL || q.mbDL != want.mbDL {
+		t.Errorf("the replayed QER 1 gates %d/%d at %d/%d, want %d/%d at %d/%d",
+			q.gateUL, q.gateDL, q.mbUL, q.mbDL, want.gateUL, want.gateDL, want.mbUL, want.mbDL)
+	}
+	if len(now.PDRs) != len(was.PDRs) {
+		t.Errorf("the replay holds %d PDRs, want %d", len(now.PDRs), len(was.PDRs))
+	}
+}
+
+// syncCounter is a journal file that counts its fsyncs. The first one waits
+// until every writer has written, which is the moment a group commit is for:
+// the writers queued behind one fsync share the next. (The wait gives up
+// after a second, so a journal that syncs under the lock its writes take
+// fails the count instead of hanging.)
+type syncCounter struct {
+	mu            sync.Mutex
+	writes, syncs int
+	want          int
+	written       chan struct{}
+}
+
+func (f *syncCounter) Write(b []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.writes++; f.writes == f.want {
+		close(f.written)
+	}
+	return len(b), nil
+}
+
+func (f *syncCounter) Sync() error {
+	f.mu.Lock()
+	f.syncs++
+	first := f.syncs == 1
+	f.mu.Unlock()
+	if first {
+		select {
+		case <-f.written:
+		case <-time.After(time.Second):
+		}
+	}
+	return nil
+}
+
+func (f *syncCounter) Truncate(int64) error { return nil }
+func (f *syncCounter) Close() error         { return nil }
+
+// TestTheJournalSharesItsFsyncs (UG-R7): every record is durable before the
+// SMF is answered, but an fsync covers everything written before it, so 64
+// session messages recorded at once need not queue 64 fsyncs.
+func TestTheJournalSharesItsFsyncs(t *testing.T) {
+	const writers = 64
+	f := &syncCounter{want: writers, written: make(chan struct{})}
+	j := &Journal{path: filepath.Join(t.TempDir(), "checkpoint"), f: f, hasStamp: true}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for n := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := j.record(kindEstablish, uint64(n+1), establishment(uint64(0x9c00+n), "10.45.4.2")); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if f.syncs > 2 {
+		t.Errorf("%d records took %d fsyncs, want at most 2", writers, f.syncs)
 	}
 }

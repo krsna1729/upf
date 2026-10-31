@@ -1114,7 +1114,7 @@ The walls, in order:
    startup (`session.Compiler.Sweep`, in bounded transactions, before the PFCP
    socket opens, and fatal to the run if it cannot finish), because the previous
    incarnation's records are indistinguishable from this one's.
-   The replay path is `upfd -checkpoint <path>`: an append-only journal of the
+   The replay path is `upfd -checkpoint <path>`: a journal of the
    *applied* PFCP session messages, not a serialisation of the model, because
    the messages are already the complete description of what a session is, any
    second format would be a second thing to keep in step with the first, and
@@ -1123,10 +1123,11 @@ The walls, in order:
    belongs to a message nobody was answered for -- which its own retransmission
    puts back. A restart sweeps first -- the dataplane's records are the graph's,
    and dropping them wholesale is what makes the replay an installation rather
-   than a trust fall -- and then replays the journal in order, pinning each
-   session's local SEID to the value the journal recorded, so a retransmission
-   of an establishment the previous incarnation accepted is answered with the
-   same SEID.
+   than a trust fall -- and then replays the journal, one establishment per
+   live session in the order they were established, pinning each session's
+   local SEID to the value the journal recorded, so a retransmission of an
+   establishment the previous incarnation accepted is answered with the same
+   SEID.
    The stamp is what makes the replay coherent with the SMF rather than a trap:
    a restart that restored the journal re-advertises the *recorded* Recovery
    Time Stamp, so the SMF does not consider its sessions lost and does not
@@ -1149,10 +1150,18 @@ The walls, in order:
    established into a checkpointed `upfd`, the process killed, its successor
    logging `checkpoint replayed ... sessions=1` with the same Recovery Time
    Stamp, and the replayed rules selecting packets with no SMF message since the
-   restart. The file is appended to and never rewritten by a replay, so folding
-   a long session's chain into one record is compaction, and it is not a
-   prerequisite for the replay being correct: a replay reads the records in the
-   order they were written.
+   restart. The file holds the sessions, not their history: once its records
+   are more than twice the sessions they leave standing, a background
+   compaction rewrites it as one establishment per live session with every
+   modification folded in (the fold is merge's, field for field, on the
+   messages), copies over what was appended meanwhile and renames it over the
+   old file; the replay reads the same fold, so a session that took ten
+   thousand modifications replays as one establishment. The fsyncs are a group
+   commit: a record waits for one fsync that covers it, not one of its own.
+   *Proof:* TestTheCheckpointHoldsSessionsNotHistory (10,000 modifications of
+   a session deleted beside ten live ones: at most 23 records, at most 11
+   transactions on the replay), TestACompactedCheckpointKeepsWhatTheModificationsMade,
+   TestTheJournalSharesItsFsyncs.
 5. **Id and priority space.** uint32 throughout (PDR priority, ActionId, meter
    id): a million sessions at four PDRs is 4M rules, which fits.
 
