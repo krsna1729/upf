@@ -58,17 +58,20 @@ the target UPF and RAN are scripted peers.
 Marker is relayed through the GTP-U tunnel its F-TEID's PDR forwards into. TS
 29.244 Table 8.2.64-1 NOTE 2 has the I-UPF keep the message type of a GTP-U
 signalling message it forwards, and TS 23.502 §4.9.1.3.3 step 10b has the
-PSA's End Markers forwarded toward the target RAN. Decap sends every received
-End Marker to the GTP-U responder, which records it with the endpoint it
-arrived on. `upfd`'s report tick (`-gtpu-end-markers`, `-urr-interval`)
-drains that record once: it reports the marker to REEMR URRs and, for each
-PDR on that F-TEID whose FAR forwards with an Outer Header Creation, writes
-one End Marker with the FAR's TEID toward its peer, from the tunnel's local
-address, to the End Marker port of the tunnel's transport (`-end-marker`),
-which routes it like the encap's tunnels. A PDR whose FAR ends the tunnel (N6,
-5G VN Internal), drops or buffers relays nothing. The relay leaves up to one
-`-urr-interval` tick after the marker arrived, never ahead of the G-PDUs that
-preceded it on its tunnel. `ci/iface-path.sh` (`m6_end_markers`) and
+PSA's End Markers forwarded toward the target RAN. Decap relays a received
+End Marker in the packet path: the compiler writes, with each F-TEID's
+admission entry (`<decap>/fteids`), one relay per distinct tunnel of a PDR on
+that endpoint-scoped F-TEID whose FAR forwards with an Outer Header Creation
+(TEID, local and peer address, transport route domain), and decap emits one
+End Marker per relay with the FAR's TEID toward its peer, from the tunnel's
+local address, on its gate 3. Through a `Queue` (`em_relay`) it reaches
+`rt_transport`, which routes it like the encap's tunnels. A PDR whose FAR
+ends the tunnel (N6, 5G VN Internal), drops, buffers or names a MAR relays
+nothing. Decap still sends the marker to the GTP-U responder, which records it
+for REEMR (`-gtpu-end-markers`). The relay leaves on the worker's next
+scheduler round, never ahead of the G-PDUs that preceded it on its tunnel
+(`ci/veth-layouts.sh` sends a burst of G-PDUs then the marker and checks the
+order on the wire). `ci/iface-path.sh` (`m6_end_markers`) and
 `ci/veth-layouts.sh` (every attachment of every layout) send the PSA's marker
 to S10's N9 F-TEID, the source RAN's and the source UPF's to the two
 forwarding F-TEIDs, and the PSA's to S11's N9 F-TEID (Mode 4): each leaves

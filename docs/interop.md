@@ -475,7 +475,7 @@ bessd, upfd on the host                bessd's N6 port upfi-n6  <--veth-->  eth0
 | the gNB's fixed address and MAC, and a permanent neighbor for the N3 address | `ci/interop/ue.sh` | the gNB needs a static entry because no host kernel owns the UPF's N3 address; `rt_transport` learns the gNB's next-hop MAC by ARP and writes the outer Ethernet pair |
 | the UE's route to the data network, then the echo | `ci/interop/ue.sh traffic` | UERANSIM installs the session's prefix on the tunnel and nothing else, so without it the echo leaves by the container's default route |
 | `-urr-interval 1s` | `ci/interop/up.sh` | without it no URR is ever read: no periodic or threshold report reaches the SMF, and even the termination reports are zero (the first reading of a URR is its baseline) |
-| `-gtpu-end-markers echo0` | `ci/interop/up.sh` (with the dataplane) | the tick drains echo0's End Marker log: REEMR usage reports, and each received End Marker relayed through the tunnel its F-TEID forwards into, as `upfd` does in the deployment |
+| `-gtpu-end-markers echo0` | `ci/interop/up.sh` (with the dataplane) | the tick drains echo0's End Marker log for REEMR usage reports; decap0 itself relays each received End Marker through the tunnel its F-TEID forwards into, as in the deployment |
 
 Measured (`runs/dp4`, `runs/dp5`, generic; `runs/dp-custom`, custom):
 

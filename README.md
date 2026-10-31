@@ -71,16 +71,15 @@ ci/smoke-gtpu.sh
 ./upfd -bess 127.0.0.1:10514 -n4 0.0.0.0:8805 -node-id 10.0.0.1 \
   -fteid-address 'endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.1' \
   -fteid-address 'endpoint=2,reference=n9,transport-domain=2,source=core,ipv4=192.0.2.3' \
-  -gtpu-decap decap0 -gtpu-end-markers echo0 -end-marker /tmp/upf-end-marker.sock \
-  -urr-interval 1s
+  -gtpu-decap decap0
 ```
 
 The sample maps endpoint 1 to N3 and endpoint 2 to N9. Each endpoint binds an
 ingress F-TEID identity and a transport route domain; N9 may be omitted when the
 deployment does not serve it. The graph's post-encap Router resolves the peer
-MAC from ARP/ND. `-gtpu-end-markers`, `-end-marker` and `-urr-interval` let
-the report tick relay a received End Marker through the transit or forwarding
-tunnel its F-TEID forwards into, within one interval.
+MAC from ARP/ND. Decap relays a received End Marker through the transit or
+forwarding tunnel its F-TEID forwards into, in the packet path, from the
+relays the compiler writes with each F-TEID.
 
 `ci/session-path.sh` exercises a PFCP-programmed session on both synthetic
 packet chains and checks the End Marker. `ci/veth-port.sh` exercises a
