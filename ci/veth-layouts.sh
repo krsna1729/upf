@@ -551,7 +551,8 @@ mode6_released() {
 # through em_relay and rt_transport onto the attachment its tunnel's peer is
 # on.
 mode6_end_markers() {
-  local r ex=()
+  local r mark ex=()
+  mark=$(wc -l <"$WORK/sink.log")
   for r in "${!R_IN[@]}"; do
     # shellcheck disable=SC2207 # egress prints two expectations
     ex+=($(egress "${R_LABEL[$r]}" "$(($(attachments "${R_IN[$r]}") * PINGS))"))
@@ -562,17 +563,20 @@ mode6_end_markers() {
     decap0/3/out=$((2 * A + 2 * B)) em_relay/0/out=$((2 * A + 2 * B)) \
     endpoint_check/1/out=0 endpoint_check/2/out=0 endpoint_check_dl/1/out=0 endpoint_check_dl/2/out=0 \
     rt/0/out=0 rt/1/out=0 rt/2/out=0 rt/4/out=0 enc/0/out=0 "${ex[@]}"
-  relayed
+  relayed "$mark"
 }
 
-# relayed: the host's sink saw each contract relay exactly once per End Marker
-# sent -- the outgoing tunnel's TEID, from that tunnel's local endpoint, to
-# its egress's peer -- and no End Marker from a local endpoint besides.
+# relayed <mark>: past the sink's first <mark> lines (the earlier phases', the
+# ordering burst's relays among them), the host saw each contract relay
+# exactly once per End Marker sent -- the outgoing tunnel's TEID, from that
+# tunnel's local endpoint, to its egress's peer -- and no End Marker from a
+# local endpoint besides.
 relayed() {
-  local r line want got total expect=0
+  local r line want got total expect=0 mark=$1
   for r in "${!R_IN[@]}"; do expect=$((expect + $(attachments "${R_IN[$r]}") * PINGS)); done
+  since() { tail -n +"$((mark + 1))" "$WORK/sink.log"; }
   from_local() {
-    grep -F ' type 254 ' "$WORK/sink.log" | grep -cF -e " from ${LOCAL[n3]} to " -e " from ${LOCAL[n9]} to " || true
+    since | grep -F ' type 254 ' | grep -cF -e " from ${LOCAL[n3]} to " -e " from ${LOCAL[n9]} to " || true
   }
   for _ in $(seq 1 50); do
     total=$(from_local)
@@ -583,7 +587,7 @@ relayed() {
   for r in "${!R_IN[@]}"; do
     want=$(($(attachments "${R_IN[$r]}") * PINGS))
     line="vethlayout: sink: GTP-U type 254 TEID ${R_TEID[$r]} from ${LOCAL[${R_LOCAL[$r]}]} to ${EGRESS_HOST[${R_LABEL[$r]}]}"
-    got=$(grep -cxF "$line" "$WORK/sink.log" || true)
+    got=$(since | grep -cxF "$line" || true)
     if [ "$got" = "$want" ]; then
       echo "ok: $LAYOUT End Marker relayed on TEID ${R_TEID[$r]} from ${LOCAL[${R_LOCAL[$r]}]} to ${EGRESS_HOST[${R_LABEL[$r]}]}: $got (want $want)"
     else
