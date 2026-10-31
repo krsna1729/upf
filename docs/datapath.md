@@ -476,6 +476,12 @@ and retirement invariant.
   table is sized at construction, at twice the entries asked for). A write that
   finds no room is refused with nothing visible, not grown under a running
   packet path.
+* **An erase empties its slot.** Each slot counts the keys whose probe went
+  past it, a lookup stops at the first slot no probe went past, and an erase
+  takes its own passes back (`core/flow/flow_index.h`'s overflow counts).
+  Address churn leaves no tombstones, so a miss walks only the live entries'
+  runs; and nothing moves, so a worker mid-probe never misses a live entry, as
+  it could under back-shift deletion.
 * **The publish phase claims each key again**, and every upsert reserves room
   for one replacement. One session's change carries one entry per downlink
   PDR's address (two addresses of one session are two ops of one transaction,
