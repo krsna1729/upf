@@ -1349,9 +1349,16 @@ func (c *Compiler) endedWith(s *Session, reason string, err error) {
 }
 
 // Checkpoint gives the session layer its journal (docs/design.md's restart
-// wall). The caller sets it before the PFCP socket opens, so no session message
-// is in flight while the pointer is written, and it never changes after.
-func (c *Compiler) Checkpoint(j *Journal) { c.journal = j }
+// wall), and the journal the layer's logger for what it does on its own (a
+// compaction that failed). The caller sets it before the PFCP socket opens, so
+// no session message is in flight while the pointer is written, and it never
+// changes after.
+func (c *Compiler) Checkpoint(j *Journal) {
+	c.journal = j
+	j.mu.Lock()
+	j.log = c.log
+	j.mu.Unlock()
+}
 
 // checkpoint appends an applied message to the journal, when there is one. The
 // callers answer the SMF after this returns: that ordering is what makes a
