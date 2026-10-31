@@ -15,10 +15,11 @@
 
 // Strips outer Ethernet/IP/UDP/GTP-U headers after endpoint-scoped admission.
 // The selected local endpoint and TEID are written to metadata; no payload is
-// copied.
+// copied. An End Marker on an admitted F-TEID is relayed out gate 3 through
+// the tunnels its entry names, one new frame each.
 class GtpuDecap final : public Module {
  public:
-  static const gate_idx_t kNumOGates = 3;
+  static const gate_idx_t kNumOGates = 4;
 
   static const ResourceTables resource_tables;
 
@@ -37,6 +38,7 @@ class GtpuDecap final : public Module {
   int context_attr_ = -1;
   int qfi_attr_ = -1;
   int endpoint_attr_ = -1;
+  int domain_attr_ = -1;  // transport_route_domain, written on the relays
   std::unique_ptr<upf::datapath::FteidResource> resource_;
   std::unique_ptr<bess::flow::SharedExactIndex> fteid_table_;
   size_t max_fteids_ = 0;
