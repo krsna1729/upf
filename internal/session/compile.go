@@ -2783,7 +2783,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 
 	for _, p := range pdrsInOrder(s) {
 		// Admission remains live even while a PDR drops or buffers. It is
-		// ingress ownership, not a forwarding action.
+		// ingress ownership, not a forwarding action. The entry also names
+		// the tunnels a received End Marker on it is relayed through (emrr.go),
+		// so a change to the PDRs or FARs on the F-TEID rewrites it here.
 		if p.teid != 0 {
 			direction := uint32(0)
 			if p.down {
@@ -2795,10 +2797,11 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 					continue
 				}
 				writtenFTEIDs[keyID] = true
-				changes = append(changes, bess.Change{
-					Resource: c.teidRes(), Key: key,
-					Value: map[string]any{"direction": direction, "context_id": p.fteidContext},
-				})
+				value := map[string]any{"direction": direction, "context_id": p.fteidContext}
+				if relays := endMarkerRelays(s, p.endpointID, p.teid); relays != nil {
+					value["end_marker_relays"] = relays
+				}
+				changes = append(changes, bess.Change{Resource: c.teidRes(), Key: key, Value: value})
 			}
 			created = append(created, ie.NewCreatedPDR(
 				ie.NewPDRID(p.id), c.createdFTEID(p)))
