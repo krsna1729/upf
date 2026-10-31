@@ -678,9 +678,14 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   // The previous update's version, and every slot only it names, must be
   // unreachable before this one writes over them: one grace period after
   // its publish. Waiting is bounded by a worker batch; refusing would be
-  // the controller's problem for no reason.
+  // the controller's problem for no reason. Nothing of this transaction has
+  // published yet, so one wait covers every session it re-updates.
   if (live && m.flipped) {
-    if (m.flip == 0 || !domain_.IsComplete(m.flip)) domain_.Synchronize();
+    if (!tx_synchronized_ && (m.flip == 0 || !domain_.IsComplete(m.flip))) {
+      domain_.Synchronize();
+      tx_synchronized_ = true;
+      ++work_.synchronizes;
+    }
     m.flipped = false;
     m.flip = 0;
   }
@@ -722,8 +727,10 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
         auto profile = AcquireProfile(*q.spec);
         if (!profile) return std::unexpected(std::format("QER {}: {}", j + 1, profile.error()));
         staged->acquired_.push_back(*profile);
+        // Exclusive: the module runs on one worker (max_allowed_workers_ 1),
+        // the only writer of its own buckets.
         auto built = meter::MeterState::ConstructAt(Meter(session, slot).bytes, **profile,
-                                                    meter::MeterSharing::kShared);
+                                                    meter::MeterSharing::kWorkerExclusive);
         if (!built) return std::unexpected(std::format("QER {}: {}", j + 1, meter::MeterErrorName(built.error())));
       } else {
         Meter(session, slot).set_shared(q.shared);
@@ -859,6 +866,7 @@ void SessionResource::EndTransaction() noexcept {
   tx_sessions_.clear();
   tx_actions_.clear();
   tx_rules_.clear();
+  tx_synchronized_ = false;
 }
 
 upf::pb::UpfSession SessionResource::Read(uint32_t session) const {
@@ -921,19 +929,28 @@ upf::pb::UpfSession SessionResource::Read(uint32_t session) const {
 }
 
 void SessionResource::ForEachLive(const std::function<void(uint32_t, const upf::pb::UpfSession &)> &visit) const {
-  std::lock_guard lock(mu_);
-  for (uint32_t s = 1; s <= limits_.capacity; ++s)
-    if (mirrors_[s - 1].state == Mirror::State::kLive) visit(s, Read(s));
+  // At most kEntriesPerHold sessions read per mu_ hold, visited after it is
+  // released (the visitor may block on the client's stream).
+  std::vector<std::pair<uint32_t, upf::pb::UpfSession>> batch;
+  for (uint32_t s = 1; s <= limits_.capacity;) {
+    batch.clear();
+    {
+      std::lock_guard lock(mu_);
+      for (; s <= limits_.capacity && batch.size() < kEntriesPerHold; ++s)
+        if (mirrors_[s - 1].state == Mirror::State::kLive) batch.emplace_back(s, Read(s));
+      work_.max_per_hold = std::max(work_.max_per_hold, batch.size());
+    }
+    for (const auto &[id, value] : batch) visit(id, value);
+  }
 }
 
-void SessionResource::Report(uint32_t action_id, bool dl, bool restart,
+void SessionResource::Report(uint32_t action_id, uint32_t at, bool dl, bool restart,
                              upf::pb::UrrCountCommandGetCountsResponse *out) const {
   auto *count = out->add_counts();
   count->set_action_id(action_id);
-  const auto it = actions_.find(action_id);
-  if (it == actions_.end()) return;
-  const uint32_t session = SessionOf(it->second);
-  const uint8_t slot = static_cast<uint8_t>(it->second & ((uint32_t{1} << (kActionBits + 1)) - 1));
+  if (at == 0) return;
+  const uint32_t session = SessionOf(at);
+  const uint8_t slot = static_cast<uint8_t>(at & ((uint32_t{1} << (kActionBits + 1)) - 1));
   if (!(mirrors_[session - 1].banks[dl] >> slot & 1)) return;
   SessionUrr &bank = Cells(session, slot).urr[dl];
   count->set_packets(bank.packets.load(std::memory_order_relaxed));
@@ -945,14 +962,33 @@ void SessionResource::Report(uint32_t action_id, bool dl, bool restart,
 
 void SessionResource::Counts(bool dl, std::span<const uint32_t> ids, bool restart,
                              upf::pb::UrrCountCommandGetCountsResponse *out) const {
-  std::lock_guard lock(mu_);
+  // At most kEntriesPerHold entries per mu_ hold, so a transaction waits for
+  // one chunk, not the whole read.
   if (!ids.empty()) {
-    for (uint32_t id : ids) Report(id, dl, restart, out);
+    for (size_t i = 0; i < ids.size();) {
+      std::lock_guard lock(mu_);
+      const size_t end = std::min(ids.size(), i + kEntriesPerHold);
+      work_.max_per_hold = std::max(work_.max_per_hold, end - i);
+      for (; i < end; ++i) {
+        ++work_.action_finds;
+        const auto it = actions_.find(ids[i]);
+        Report(ids[i], it == actions_.end() ? 0 : it->second, dl, restart, out);
+      }
+    }
     return;
   }
-  for (const auto &[id, at] : actions_) {
-    const uint8_t slot = static_cast<uint8_t>(at & ((uint32_t{1} << (kActionBits + 1)) - 1));
-    if (mirrors_[SessionOf(at) - 1].banks[dl] >> slot & 1) Report(id, dl, restart, out);
+  // Every counted action in id order, resuming each hold where the last
+  // stopped: one index walk, no lookup per entry.
+  for (std::optional<uint32_t> next = 0; next;) {
+    std::lock_guard lock(mu_);
+    auto it = actions_.lower_bound(*next);
+    size_t n = 0;
+    for (; it != actions_.end() && n < kEntriesPerHold; ++it, ++n) {
+      const uint8_t slot = static_cast<uint8_t>(it->second & ((uint32_t{1} << (kActionBits + 1)) - 1));
+      if (mirrors_[SessionOf(it->second) - 1].banks[dl] >> slot & 1) Report(it->first, it->second, dl, restart, out);
+    }
+    work_.max_per_hold = std::max(work_.max_per_hold, n);
+    next = it == actions_.end() ? std::nullopt : std::optional<uint32_t>(it->first);
   }
 }
 

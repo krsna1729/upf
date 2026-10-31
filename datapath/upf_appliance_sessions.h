@@ -268,6 +268,19 @@ class SessionResource final : public bess::dataplane::Resource {
   // provisioned for counting that direction (ids empty), else the ids asked for.
   void Counts(bool dl, std::span<const uint32_t> ids, bool restart,
               upf::pb::UrrCountCommandGetCountsResponse *out) const;
+  // The most entries ForEachLive and Counts handle per hold of the lock a
+  // transaction needs.
+  static constexpr size_t kEntriesPerHold = 1024;
+  // Control-side work, for tests: action-index lookups by id (Counts with
+  // ids), the most entries one hold handled, and grace-period waits in Reserve.
+  struct Work {
+    uint64_t action_finds = 0, synchronizes = 0;
+    size_t max_per_hold = 0;
+  };
+  Work work() const {
+    std::lock_guard lock(mu_);
+    return work_;
+  }
 
   bool Contains(const bess::dataplane::ResourceKey &key) const override;
   std::vector<bess::dataplane::Reference> ReferencesOf(
@@ -338,7 +351,8 @@ class SessionResource final : public bess::dataplane::Resource {
   // The removal step of an erase: every slot, the active version gone.
   void Free(uint32_t session) noexcept;
   upf::pb::UpfSession Read(uint32_t session) const;
-  void Report(uint32_t action_id, bool dl, bool restart,
+  // One get_counts entry; `at` is the action's index value, 0 if absent.
+  void Report(uint32_t action_id, uint32_t at, bool dl, bool restart,
               upf::pb::UrrCountCommandGetCountsResponse *out) const;
 
   const Limits limits_;
@@ -362,6 +376,8 @@ class SessionResource final : public bess::dataplane::Resource {
   std::map<ProfileKey, Profile> profiles_;
   std::set<uint32_t> tx_sessions_, tx_actions_;  // this transaction's
   std::set<std::string> tx_rules_;
+  bool tx_synchronized_ = false;  // Reserve waited a grace period this transaction
+  mutable Work work_;
   std::atomic<size_t> live_{0}, mirror_bytes_{0};
 };
 
