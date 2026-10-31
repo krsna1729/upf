@@ -156,20 +156,118 @@ void UpfAppliance::ClassifyPdr(bess::PacketBatch *batch, State *states, size_t n
   }
   const uint64_t hits = count ? pdr.table->LookupBatch(
       classifier::ConstBytes(&keys[0][0], sizeof(keys)), sizeof(keys[0]), matches, count) : 0;
+  // UpfSessionAppliance: the rule's result id is the session, its version and
+  // the action position -- no record, no index; stage-major, so the batch's
+  // config lines are fetched together, then bound.
+  const ActionConfig *configs[kBurst];
   for (size_t k = 0; k < count; ++k) {
     auto &s = states[positions[k]];
+    configs[k] = nullptr;
     if (!(hits & (uint64_t{1} << k))) { Drop(s, Reason::kPdrMiss); continue; }
     const auto &match = matches[k];
     if (match.gate == DROP_GATE) { Drop(s, Reason::kPdrDrop); continue; }
     if (match.gate != 0 && match.gate != 1) { Drop(s, Reason::kPdrGate); continue; }
-    const auto r = pdr.records->Lookup(pdr.table->RuleAt(match.rule_id).result_id);
+    const uint32_t result = pdr.table->RuleAt(match.rule_id).result_id;
+    if (match.gate == 1) s.lane = Lane::kBuffer;
+    if (session_layout_) {
+      s.session_id = SessionResource::SessionOf(result);
+      s.version = SessionResource::VersionOf(result);
+      s.action_index = s.tunnel_action_index = SessionResource::IndexOf(result);
+      configs[k] = &sessions_->Config(s.session_id, s.version, s.action_index);
+      __builtin_prefetch(configs[k]);
+      continue;
+    }
+    const auto r = pdr.records->Lookup(result);
     const auto *b = reinterpret_cast<const uint8_t *>(r.data());
     s.action_id = gtpu::GetWire32(b);
     s.meters[0] = gtpu::GetWire32(b + 4); s.meters[1] = gtpu::GetWire32(b + 8);
     s.next_hop_id = gtpu::GetWire32(b + 12); s.route_domain = gtpu::GetWire32(b + 16);
     s.policy_id = dl ? gtpu::GetWire32(b + 20) : 0;
     s.direction = dl ? 1 : 0;
-    if (match.gate == 1) s.lane = Lane::kBuffer;
+  }
+  if (session_layout_)
+    for (size_t k = 0; k < count; ++k)
+      if (configs[k]) BindSession(states[positions[k]], *configs[k], dl);
+}
+
+void UpfAppliance::BindSession(State &s, const ActionConfig &c, bool dl) const noexcept {
+  s.action_id = c.action_id;
+  s.meters[0] = c.meter[0]; s.meters[1] = c.meter[1];
+  s.next_hop_id = c.next_hop_id; s.route_domain = c.route_domain;
+  s.policy_id = dl ? c.policy_id : 0;
+  s.cell = c.cell;
+  s.direction = dl ? 1 : 0;
+}
+
+// A held frame resumes against its session as it is now (as the graph's
+// release re-reads the action): the current version's action with the same
+// id, all of it, or nothing -- the session or the action is gone.
+bool UpfAppliance::RebindSession(State &s) const noexcept {
+  if (s.session_id == 0 || s.session_id > sessions_->limits().capacity) return false;
+  const uint8_t version = sessions_->Active(s.session_id);
+  if (version == SessionResource::kGone) return false;
+  const int index = sessions_->Find(s.session_id, version, s.action_id);
+  if (s.action_id == 0 || index < 0) return false;
+  s.version = version;
+  s.action_index = s.tunnel_action_index = static_cast<uint8_t>(index);
+  BindSession(s, sessions_->Config(s.session_id, version, s.action_index), s.direction == 1);
+  return true;
+}
+
+void UpfAppliance::CountSessions(Context *ctx, bess::PacketBatch *batch, State *states, size_t n) {
+  // The matched action's cells in its session's stride: one writer (the
+  // worker), atomic cells that get_counts reads beside it.
+  for (size_t i = 0; i < n; ++i) {
+    const auto &s = states[i];
+    if (!Active(s) || !(s.cell & ActionConfig::kCount)) continue;
+    sessions_->Cells(s.session_id, s.cell & ActionConfig::kCellSlot).urr[s.direction].Add(
+        UsageOctets(Bytes(batch->packet(i)), batch->packet(i).total_len()), ctx->current_ns);
+  }
+}
+
+void UpfAppliance::MeterSessions(bess::PacketBatch *batch, State *states, size_t n, uint64_t now,
+    meter::MeterColor *colors, std::array<std::array<uint64_t, 3>, 2> &color_counts) {
+  for (size_t level = 0; level != 2; ++level) {
+    // The session's own buckets are checked in place; shared meters in one
+    // MeterSet batch, read only when a frame names one.
+    meter::MeterState *own[kBurst]; uint8_t own_at[kBurst]; size_t owned = 0;
+    meter::MeterId ids[kBurst]; uint32_t costs[kBurst];
+    meter::MeterColor compact[kBurst]; uint8_t shared_at[kBurst]; size_t shared = 0;
+    for (size_t i = 0; i < n; ++i) {
+      const auto &s = states[i];
+      const uint32_t ref = s.meters[level];
+      if (!Active(s) || ref == 0) continue;
+      MeterSlot &slot = sessions_->Meter(s.session_id,
+          static_cast<uint16_t>((ref & ~uint32_t{ActionConfig::kSharedMeter}) - 1));
+      if (ref & ActionConfig::kSharedMeter) {
+        shared_at[shared] = i; ids[shared] = meter::MeterId(slot.shared());
+        costs[shared] = batch->packet(i).total_len(); compact[shared] = colors[i]; ++shared;
+        continue;
+      }
+      own_at[owned] = i; own[owned] = &slot.meter();
+      __builtin_prefetch(own[owned], 1);
+      ++owned;
+    }
+    const auto result = [&](State &s, size_t i, meter::MeterColor color) {
+      if (color == meter::MeterColor::kRed) {
+        ++color_counts[s.direction][2];
+        Drop(s, Reason::kMeterRed);
+      } else {
+        colors[i] = color;
+      }
+    };
+    for (size_t j = 0; j < owned; ++j) {
+      const size_t i = own_at[j];
+      result(states[i], i, own[j]->CheckColorAware(now, batch->packet(i).total_len(), colors[i]));
+    }
+    if (shared == 0) continue;
+    const uint64_t found = meter_set_.Read()->CheckBatchColorAware(
+        std::span(ids, shared), std::span(costs, shared), std::span(compact, shared), now);
+    for (size_t j = 0; j < shared; ++j) {
+      auto &s = states[shared_at[j]];
+      if (!(found & (uint64_t{1} << j))) Drop(s, Reason::kMeterUnknown);
+      else result(s, shared_at[j], compact[j]);
+    }
   }
 }
 
@@ -210,7 +308,8 @@ void UpfAppliance::MeterCountRoute(Context *ctx, bess::PacketBatch *batch, State
     meter::MeterColor colors[kBurst];
     std::fill_n(colors, n, meter::MeterColor::kGreen);
     std::array<std::array<uint64_t, 3>, 2> color_counts{};
-    for (size_t level = 0; level != 2; ++level) {
+    if (session_layout_) MeterSessions(batch, states, n, now, colors, color_counts);
+    else for (size_t level = 0; level != 2; ++level) {
       meter::MeterId ids[kBurst]; uint32_t costs[kBurst];
       meter::MeterColor compact[kBurst]; uint8_t positions[kBurst]; size_t count = 0;
       for (size_t i = 0; i < n; ++i) if (Active(states[i]) && states[i].meters[level]) {
@@ -241,8 +340,12 @@ void UpfAppliance::MeterCountRoute(Context *ctx, bess::PacketBatch *batch, State
         }
       }
     }
-    CountUsage(ctx, batch, states, n, counters_ul_, false);
-    CountUsage(ctx, batch, states, n, counters_dl_, false);
+    if (session_layout_) {
+      CountSessions(ctx, batch, states, n);
+    } else {
+      CountUsage(ctx, batch, states, n, counters_ul_, false);
+      CountUsage(ctx, batch, states, n, counters_dl_, false);
+    }
     route::NextHopId ids[kBurst]; const route::NextHop *hops[kBurst];
     uint8_t positions[kBurst]; size_t count = 0;
     for (size_t i = 0; i < n; ++i) {
@@ -253,7 +356,12 @@ void UpfAppliance::MeterCountRoute(Context *ctx, bess::PacketBatch *batch, State
             [&](uint32_t id) { return health_->Lookup(Id(id)); });
         if (selected.verdict == upf::atsss::SteerVerdict::kNoPolicy) { Drop(s, Reason::kNoPolicy); continue; }
         if (selected.verdict == upf::atsss::SteerVerdict::kNoAccess) { Drop(s, Reason::kNoAccess); continue; }
-        if (selected.access) s.next_hop_id = selected.access->next_hop_id;
+        if (selected.access) {
+          s.next_hop_id = selected.access->next_hop_id;
+          // Session-major: a 1-based action position in the frame's version.
+          if (session_layout_ && selected.access->tunnel_id != 0)
+            s.tunnel_action_index = static_cast<uint8_t>(selected.access->tunnel_id - 1);
+        }
       }
       positions[count] = i; ids[count++] = route::NextHopId(s.next_hop_id);
     }
@@ -283,7 +391,14 @@ void UpfAppliance::MeterCountRoute(Context *ctx, bess::PacketBatch *batch, State
         case upf::pb::UpfApplianceNextHopClass::OUTPUT:
           s.output_gate = cls->output_gate(); s.lane = Lane::kOutput; break;
         case upf::pb::UpfApplianceNextHopClass::ENCAP: {
-          const Tunnel *t = tunnels_->Lookup(Id(s.action_id));
+          Tunnel local;
+          const Tunnel *t = nullptr;
+          if (!session_layout_) {
+            t = tunnels_->Lookup(Id(s.action_id));
+          } else if (s.tunnel_action_index < sessions_->limits().max_actions) {
+            const auto &c = sessions_->Config(s.session_id, s.version, s.tunnel_action_index);
+            if (c.action_id != 0 && c.has_tunnel()) { local = c.tunnel(); t = &local; }
+          }
           if (!t) { Drop(s, Reason::kNoTunnel); break; }
           if (!Encap(p, *t)) { Drop(s, Reason::kEncapFailed); break; }
           s.transport_route_domain = t->transport_route_domain; s.lane = Lane::kTransport; break;
@@ -341,7 +456,11 @@ void UpfAppliance::Finish(Context *ctx, bess::PacketBatch *batch, State *states,
   if (keep) EmitBatch(ctx, batch, gates);
 }
 void UpfAppliance::Resume(Context *ctx, bess::PacketBatch *batch, State *states, size_t n) {
-  for (size_t i = 0; i < n; ++i) states[i].lane = states[i].direction ? Lane::kDl : Lane::kUl;
+  for (size_t i = 0; i < n; ++i) {
+    auto &s = states[i];
+    s.lane = s.direction ? Lane::kDl : Lane::kUl;
+    if (session_layout_ && !RebindSession(s)) Drop(s, Reason::kSessionGone);
+  }
   MeterCountRoute(ctx, batch, states, n);
   Transport(batch, states, n);
   Finish(ctx, batch, states, n);

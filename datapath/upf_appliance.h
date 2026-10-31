@@ -30,19 +30,11 @@
 #include "stats/keyed_counters.h"
 #include "stats/metric_registry.h"
 #include "utils/dpdk_memory.h"
+#include "upf_appliance_sessions.h"
 
 namespace upf::appliance {
 using Id = bess::dataplane::ActionId;
 using bess::framework::Sized;
-struct Tunnel {
-  uint32_t teid = 0;
-  uint8_t family = 0;
-  uint8_t local[16]{}, peer[16]{};
-  uint32_t transport_route_domain = 0;
-  uint8_t qfi = 0;
-  uint16_t marking = 0;
-  bool has_qfi = false;
-};
 struct CounterEntry {};
 struct Stamps { std::atomic<uint64_t> first{0}, last{0}; };
 struct Counters {
@@ -72,7 +64,14 @@ struct FrameState {
   const Interface *interface = nullptr;
   uint32_t endpoint_id = 0, fteid_context = 0;
   uint32_t route_domain = 0, transport_route_domain = 0;
+  // meters[]: MeterIds (UpfAppliance) or ActionConfig meter slot refs
+  // (UpfSessionAppliance).
   uint32_t action_id = 0, meters[2]{}, next_hop_id = 0, policy_id = 0;
+  // UpfSessionAppliance: the matched PDR's session, the version its result
+  // named and the action position in it; the tunnel's position (ATSSS may
+  // pick another); ActionConfig::cell.
+  uint32_t session_id = 0;
+  uint8_t version = 0, action_index = 0, tunnel_action_index = 0, cell = 0;
   uint8_t qfi = 0xff, direction = 0, repass = 0;
   gate_idx_t output_gate = DROP_GATE;
 };
@@ -95,11 +94,15 @@ enum class Reason : size_t {
   // Not a packet: an End Marker relay an F-TEID entry named, which the
   // appliance does not perform yet (upf_appliance_fteid.h).
   kEndMarkerRelayUnsupported,
+  kSessionGone,
   kCount
 };
 }  // namespace upf::appliance
 
-class UpfAppliance final : public Module {
+// UpfAppliance runs the owned masked layout; UpfSessionAppliance (below) is
+// the same module with the session-major layout. A class declares its tables
+// statically, so the layout is the class, not an argument.
+class UpfAppliance : public Module {
  public:
   static const gate_idx_t kNumIGates = MAX_GATES;
   static const gate_idx_t kNumOGates = MAX_GATES;
@@ -123,6 +126,9 @@ class UpfAppliance final : public Module {
   CommandResponse CommandClear(const bess::pb::PacketStoreCommandClearArg &);
   CommandResponse CommandSelfTest(const bess::pb::EmptyArg &);
   CommandResponse CommandGetDrops(const bess::pb::EmptyArg &);
+
+ protected:
+  explicit UpfAppliance(bool session_layout);
 
  private:
   using State = upf::appliance::FrameState;
@@ -148,6 +154,19 @@ class UpfAppliance final : public Module {
   void Resume(Context *, bess::PacketBatch *, State *, size_t);
   void CountUsage(Context *, bess::PacketBatch *, State *, size_t,
                   upf::appliance::Counters &, bool buffer);
+  // UpfSessionAppliance's stages: the matched config's fields into the frame,
+  // a held frame re-bound to its session's current version, and its meters
+  // and URR cells.
+  void BindSession(State &, const upf::appliance::ActionConfig &, bool dl) const noexcept;
+  bool RebindSession(State &) const noexcept;
+  void MeterSessions(bess::PacketBatch *, State *, size_t, uint64_t now,
+                     bess::meter::MeterColor *colors,
+                     std::array<std::array<uint64_t, 3>, 2> &color_counts);
+  void CountSessions(Context *, bess::PacketBatch *, State *, size_t);
+  CommandResponse InitSessions(const upf::pb::UpfApplianceArg &,
+                               const std::function<std::expected<void, std::string>(
+                                   bess::dataplane::Resource *)> &enroll);
+  CommandResponse SessionSelfTest(const std::array<std::byte, 22> &ul_key);
   void Hold(Context *, bess::PacketRef, const State &);
   CommandResponse InitBuffer(const upf::pb::UpfApplianceArg &);
   void BufferTask(Context *, bess::PacketBatch *);
@@ -174,6 +193,10 @@ class UpfAppliance final : public Module {
   upf::appliance::Counters counters_ul_, counters_dl_, buffer_counters_;
   bess::framework::Sized<bess::dataplane::SlotTable<Id, upf::appliance::Tunnel>> tunnels_;
   std::unique_ptr<bess::dataplane::SlotResource<Id, upf::appliance::Tunnel>> tunnel_resource_;
+  // UpfSessionAppliance: pdr_ul_/pdr_dl_ hold only the tables, meters_ the
+  // shared meters; the session store drives the tables and F-TEIDs.
+  const bool session_layout_;
+  bess::framework::Sized<upf::appliance::SessionResource> sessions_;
   bess::framework::Sized<bess::dataplane::SlotTable<Id, upf::atsss::SteeringPolicy>> policies_;
   bess::framework::Sized<bess::dataplane::SlotTable<Id, upf::atsss::AccessHealth>> health_;
   std::unique_ptr<bess::dataplane::SlotResource<Id, upf::atsss::SteeringPolicy>> policy_resource_;
@@ -188,5 +211,14 @@ class UpfAppliance final : public Module {
   std::shared_ptr<Slow> slow_;
   struct Buffer;
   std::shared_ptr<Buffer> buffer_;
+};
+
+// The session-major profile: one "<module>/sessions" entry per PFCP session
+// (upf_appliance_sessions.h) instead of fteids/pdr_*/counters_*/tunnels, and
+// "<module>/meters" holds only meters shared across sessions.
+class UpfSessionAppliance final : public UpfAppliance {
+ public:
+  static const ResourceTables resource_tables;
+  UpfSessionAppliance() : UpfAppliance(true) {}
 };
 #endif

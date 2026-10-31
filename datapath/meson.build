@@ -53,9 +53,11 @@ upf_datapath = shared_module(
   (bench ? ['bench/bench_gen.cc'] : []) +
   ['arp_responder.cc', 'atsss_steer.cc', 'gtpu_decap.cc', 'gtpu_responder.cc', 'gtpu_encap.cc',
    'urr_count.cc',
-   # UpfAppliance: the whole user plane in one module.
+   # UpfAppliance: the whole user plane in one module; UpfSessionAppliance: the
+   # same module with the session-major layout (upf_appliance_sessions.cc).
    'upf_appliance.cc', 'upf_appliance_resources.cc', 'upf_appliance_path.cc',
    'upf_appliance_slow.cc', 'upf_appliance_buffer.cc', 'upf_appliance_selftest.cc',
+   'upf_appliance_sessions.cc',
    upf_proto[0], upf_proto[1]],
   include_directories: include_directories('.'),
   dependencies: [bess_dep, protobuf_dep],
@@ -96,4 +98,23 @@ if gtest_dep.found() and bess_static_dep.found()
     link_args: ['-Wl,--disable-new-dtags'],
   )
   test('gtpu_datapath', gtpu_datapath_test)
+
+  # UpfSessionAppliance's session store driven through Reserve/Publish under
+  # a reader thread. Its token buckets live in the session slots, so it also
+  # needs the meter archive, which bess-dev-static does not ship: it is taken
+  # from the vendored perf tree (build/bess/fast, ci/vendor-bess.sh) when
+  # that is present.
+  bess_meter_dep = meson.get_compiler('cpp').find_library('bess_meter', static: true,
+    dirs: [meson.project_source_root() / '..' / 'build' / 'bess' / 'fast' / 'core'],
+    required: false)
+  if bess_meter_dep.found()
+    sessions_test = executable(
+      'upf_appliance_sessions_test',
+      ['upf_appliance_sessions_test.cc', 'upf_appliance_sessions.cc', upf_proto[0], upf_proto[1]],
+      include_directories: include_directories('.'),
+      dependencies: [bess_meter_dep, bess_static_dep, protobuf_dep, gtest_dep],
+      link_args: ['-Wl,--disable-new-dtags'],
+    )
+    test('upf_appliance_sessions', sessions_test)
+  endif
 endif
