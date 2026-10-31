@@ -269,8 +269,15 @@ modules:
     arg: {track_errors: true, track_end_markers: true}
     # No port argument: the standard GTP-U port 2152. track_end_markers reads
     # the endpoint_id the tags above write: the End Markers it records are what
-    # upfd -gtpu-end-markers drains, reports (REEMR) and relays through the
-    # tunnel the F-TEID's PDR forwards into, by the cp_marker ports.
+    # upfd -gtpu-end-markers drains and reports (REEMR).
+
+  # A received End Marker on an F-TEID whose PDR forwards into a tunnel leaves
+  # decap0 gate 3 once per tunnel, rewritten to it, with its transport domain
+  # (TS 29.244 Table 8.2.64-1 NOTE 2). The queue holds the relays for the
+  # worker's next round, so a relay leaves behind the G-PDUs its burst carried
+  # ahead of the End Marker: those reach rt_transport through enc in this round.
+  - name: em_relay
+    mclass: Queue
 
   # -- the two PDR tables ------------------------------------------------------
   # Each direction has its own WildcardMatch table and result schema. A match
@@ -410,6 +417,8 @@ connections:
   - {upstream: mt_ul_read, downstream: pdr_ul}
   - {upstream: decap0, downstream: pdr_dl, ogate: 1}
   - {upstream: decap0, downstream: echo0, ogate: 2}
+  - {upstream: decap0, downstream: em_relay, ogate: 3}
+  - {upstream: em_relay, downstream: rt_transport}
   - {upstream: echo0, downstream: rt_transport}
   - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and

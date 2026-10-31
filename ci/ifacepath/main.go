@@ -191,9 +191,8 @@ var (
 const waitWithin = 30 * time.Second
 
 // sockets is the prefix of the graph's unix socket paths, as ci/iface-path.sh
-// renders deploy/iface-path.yaml: the End Marker port the compiler writes
-// relays to (-end-marker's base, plus ".1") and the two the lane writes
-// received End Markers to.
+// renders deploy/iface-path.yaml: the two the lane writes received End Markers
+// to.
 var sockets = "/tmp/upf-iface-path-"
 
 // The graph's Sources and the sizes their `settings` carry: burst 0 stops a
@@ -785,8 +784,9 @@ func mode6(ctx context.Context, client *bess.Client, c scenario.N4, handshake st
 // each F-TEID whose rule forwards into a tunnel -- S10's N9 downlink F-TEID and
 // its forwarding one, S13's forwarding one, S11's N9 downlink one -- and one on
 // S1's uplink F-TEID, which ends at N6. Every marker must reach the responder
-// (decap0 gate 2), the four relays the marker port once each (cp_in), and
-// none a Router exit. One marker a second, so the Dump prints each relay.
+// (decap0 gate 2), the four relays decap0 gate 3 and the relay queue once
+// each (em_relay), and none a Router exit. One marker a second, so the Dump
+// prints each relay.
 func endMarkers(ctx context.Context, client *bess.Client, fwd10, fwd13 uint32) error {
 	n3, err := dialPort(sockets + "em-n3.sock")
 	if err != nil {
@@ -818,7 +818,7 @@ func endMarkers(ctx context.Context, client *bess.Client, fwd10, fwd13 uint32) e
 	if err != nil {
 		return err
 	}
-	relayed0, err := gatePackets(ctx, client, "cp_in", "0")
+	relayed0, err := gatePackets(ctx, client, "em_relay", "0")
 	if err != nil {
 		return err
 	}
@@ -829,7 +829,7 @@ func endMarkers(ctx context.Context, client *bess.Client, fwd10, fwd13 uint32) e
 		}
 		if s.relay {
 			relays++
-			if _, err := waitFor(ctx, client, "cp_in", "0", relayed0+float64(relays-1)); err != nil {
+			if _, err := waitFor(ctx, client, "em_relay", "0", relayed0+float64(relays-1)); err != nil {
 				return fmt.Errorf("the End Marker on TEID %#x was never relayed: %w", s.teid, err)
 			}
 		}
@@ -843,7 +843,7 @@ func endMarkers(ctx context.Context, client *bess.Client, fwd10, fwd13 uint32) e
 	if err != nil {
 		return err
 	}
-	relayed, err := gatePackets(ctx, client, "cp_in", "0")
+	relayed, err := gatePackets(ctx, client, "em_relay", "0")
 	if err != nil {
 		return err
 	}
@@ -1501,9 +1501,5 @@ func config() session.Config {
 			SourceInterface: ie.SrcInterfaceCore, Instance: internet,
 			IPv4: netip.MustParseAddr(n9Addr),
 		}},
-		// The received End Markers' log, and the port the relays leave by
-		// (both endpoints are transport route domain 1 here).
-		GTPUEndMarkers: "echo_em",
-		EndMarker:      sockets + "end-marker.sock",
 	}
 }
