@@ -187,7 +187,8 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
       fteid_capacity, init_context().rcu(), memory.socket());
   fteid_resource_ = memory.Create<upf::datapath::FteidResource>(
       "fteid_records", name() + "/fteids", *fteids_, init_context().rcu(), fteid_capacity);
-  bindings_.push_back( init_context().codecs().Bind(
+  // UpfSessionAppliance: the F-TEIDs are its session entries' (no resource).
+  if (!session_layout_) bindings_.push_back( init_context().codecs().Bind(
       *fteid_resource_,
       std::make_shared<bess::framework::TypedCodec<
           upf::pb::FteidKey, upf::pb::FteidEntry>>(
@@ -247,7 +248,7 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
               visit(key, value);
             });
           })));
-  if (auto r = enroll(fteid_resource_.get()); !r)
+  if (auto r = session_layout_ ? std::expected<void, std::string>() : enroll(fteid_resource_.get()); !r)
     return CommandFailure(EEXIST, "%s", r.error().c_str());
   const size_t meter_capacity = arg.meter().capacity() ? arg.meter().capacity() : 65536;
   auto meter_lease = memory.LeaseFor<bess::meter::MeterResource>("meters", meter_capacity);
@@ -333,10 +334,14 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
         })));
     return enroll(pdr.resource.get());
   };
-  if (auto r = init_pdr(pdr_ul_, "pdr_ul", false, arg.pdr_ul().max_tuples() ? arg.pdr_ul().max_tuples() : 16); !r)
-    return CommandFailure(EINVAL, "%s", r.error().c_str());
-  if (auto r = init_pdr(pdr_dl_, "pdr_dl", true, arg.pdr_dl().max_tuples() ? arg.pdr_dl().max_tuples() : 8); !r)
-    return CommandFailure(EINVAL, "%s", r.error().c_str());
+  if (session_layout_) {
+    if (auto r = InitSessions(arg, enroll); r.error().code()) return r;
+  } else {
+    if (auto r = init_pdr(pdr_ul_, "pdr_ul", false, arg.pdr_ul().max_tuples() ? arg.pdr_ul().max_tuples() : 16); !r)
+      return CommandFailure(EINVAL, "%s", r.error().c_str());
+    if (auto r = init_pdr(pdr_dl_, "pdr_dl", true, arg.pdr_dl().max_tuples() ? arg.pdr_dl().max_tuples() : 8); !r)
+      return CommandFailure(EINVAL, "%s", r.error().c_str());
+  }
   auto init_counter = [&](Counters &bank, const char *table) -> std::expected<void, std::string> {
     bank.cells = memory.Create<bess::stats::KeyedCounters>(std::string(table) + "_cells", capacity_, 2, planes);
     bank.stamps_lease = memory.Lease(std::string(table) + "_stamps", bess::utils::DpdkArray<Stamps>::Bytes(capacity_, memory.socket()));
@@ -361,15 +366,18 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
         })));
     return enroll(bank.resource.get());
   };
+  // UpfSessionAppliance: the URR cells and tunnels are its sessions'.
   for (auto pair : {std::pair{&counters_ul_, "counters_ul"},
                     std::pair{&counters_dl_, "counters_dl"},
-                    std::pair{&buffer_counters_, "buffer_counters"}})
+                    std::pair{&buffer_counters_, "buffer_counters"}}) {
+    if (session_layout_ && pair.first != &buffer_counters_) continue;
     if (auto r = init_counter(*pair.first, pair.second); !r)
       return CommandFailure(EEXIST, "%s", r.error().c_str());
-  tunnels_ = memory.Create<dataplane::SlotTable<Id, Tunnel>>("tunnels", arg.encap().max_tunnels() ? arg.encap().max_tunnels() : 65536);
-  tunnel_resource_ = std::make_unique<dataplane::SlotResource<Id, Tunnel>>(
+  }
+  if (!session_layout_) tunnels_ = memory.Create<dataplane::SlotTable<Id, Tunnel>>("tunnels", arg.encap().max_tunnels() ? arg.encap().max_tunnels() : 65536);
+  if (!session_layout_) tunnel_resource_ = std::make_unique<dataplane::SlotResource<Id, Tunnel>>(
       name() + "/tunnels", *tunnels_);
-  bindings_.push_back( init_context().codecs().Bind(
+  if (!session_layout_) bindings_.push_back( init_context().codecs().Bind(
       *tunnel_resource_,
       std::make_shared<bess::framework::TypedCodec<upf::pb::TunnelKey,
                                                     upf::pb::TunnelEntry>>(
@@ -432,7 +440,8 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
               visit(key, value);
             }
           })));
-  if (auto r = enroll(tunnel_resource_.get()); !r) return CommandFailure(EEXIST, "%s", r.error().c_str());
+  if (auto r = session_layout_ ? std::expected<void, std::string>() : enroll(tunnel_resource_.get()); !r)
+    return CommandFailure(EEXIST, "%s", r.error().c_str());
   const size_t atsss_capacity = arg.atsss().capacity() ? arg.atsss().capacity() : 65536;
   health_ = memory.Create<dataplane::SlotTable<Id, AccessHealth>>("health", atsss_capacity);
   policies_ = memory.Create<dataplane::SlotTable<Id, SteeringPolicy>>("policies", atsss_capacity);
@@ -457,15 +466,18 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
             }
           })));
   if (auto r = enroll(health_resource_.get()); !r) return CommandFailure(EEXIST, "%s", r.error().c_str());
+  // UpfSessionAppliance: access.tunnel_id is a 1-based action position in the
+  // matched session (no tunnels resource to reference).
   policy_resource_ = std::make_unique<dataplane::SlotResource<Id, SteeringPolicy>>(
       name() + "/policies", *policies_, [this](const SteeringPolicy &p) {
         std::vector<dataplane::Reference> refs;
         for (const auto &a : p.access) {
           if (a.next_hop_id) refs.push_back({name() + "/next_hops", dataplane::EncodeKey(Id(a.next_hop_id))});
-          if (a.tunnel_id) refs.push_back({name() + "/tunnels", dataplane::EncodeKey(Id(a.tunnel_id))});
+          if (a.tunnel_id && !session_layout_) refs.push_back({name() + "/tunnels", dataplane::EncodeKey(Id(a.tunnel_id))});
         }
         return refs;
-      }, std::vector<std::string>{name() + "/next_hops", name() + "/tunnels"});
+      }, session_layout_ ? std::vector<std::string>{name() + "/next_hops"}
+                         : std::vector<std::string>{name() + "/next_hops", name() + "/tunnels"});
   bindings_.push_back( init_context().codecs().Bind(
       *policy_resource_,
       std::make_shared<bess::framework::TypedCodec<
@@ -477,7 +489,15 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
             }
             return dataplane::EncodeKey(Id(key.policy_id()));
           },
-          PolicyValue, [this](const auto &visit) {
+          [this](const upf::pb::AtsssSteeringPolicy &in) -> std::expected<std::any, std::string> {
+            if (session_layout_)
+              for (const auto &a : in.access())
+                if (a.tunnel_id() > sessions_->limits().max_actions)
+                  return std::unexpected(std::format("access tunnel_id {} exceeds max_actions {}",
+                                                     a.tunnel_id(), sessions_->limits().max_actions));
+            return PolicyValue(in);
+          },
+          [this](const auto &visit) {
             for (size_t i = 1; i <= policies_->capacity(); i++) {
               const Id id(static_cast<Id::rep_type>(i));
               const SteeringPolicy *entry = policies_->Current(id);
@@ -546,6 +566,72 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
   return CommandSuccess();
 }
 
+// UpfSessionAppliance's store: the UL/DL masked tables stay lookup structures
+// (no resource of their own), and "<module>/sessions" drives them and the
+// F-TEID index from one entry per session.
+CommandResponse UpfAppliance::InitSessions(
+    const upf::pb::UpfApplianceArg &arg,
+    const std::function<std::expected<void, std::string>(dataplane::Resource *)> &enroll) {
+  auto &memory = init_context().memory();
+  if (arg.encap().max_tunnels() != 0)
+    return CommandFailure(EINVAL, "UpfSessionAppliance keeps tunnels in its sessions: "
+                                  "encap.max_tunnels must be 0");
+  const SessionResource::Limits limits{
+      .capacity = arg.session().capacity() ? arg.session().capacity() : 65536,
+      .max_actions = arg.session().max_actions() ? arg.session().max_actions() : 4,
+      .max_qers = arg.session().max_qers() ? arg.session().max_qers() : 4};
+  if (limits.capacity > SessionResource::kMaxCapacity ||
+      limits.max_actions > SessionResource::kMaxActions || limits.max_qers > SessionResource::kMaxQers)
+    return CommandFailure(EINVAL, "session capacity (at most %zu), max_actions (1..%zu) or "
+                          "max_qers (1..%zu) out of range", SessionResource::kMaxCapacity,
+                          SessionResource::kMaxActions, SessionResource::kMaxQers);
+  using Table = bess::classifier::ConcurrentMaskedTable;
+  auto make_table = [&](Pdr &pdr, const char *table_name, uint32_t key_len, size_t tuples)
+      -> std::expected<void, std::string> {
+    pdr.table_lease = memory.LeaseFor<Table>(table_name, key_len, tuples, init_context().rcu());
+    auto table = Table::Create(key_len, tuples, init_context().rcu());
+    if (!table) return std::unexpected(table.error());
+    auto owner = std::make_shared<bess::framework::Sized<Table>>(
+        bess::framework::MemoryScope::Adopt(std::move(pdr.table_lease), std::move(*table)));
+    Table *raw = owner->get();
+    pdr.table = std::shared_ptr<Table>(std::move(owner), raw);
+    return {};
+  };
+  if (auto r = make_table(pdr_ul_, "pdr_ul", 18, arg.pdr_ul().max_tuples() ? arg.pdr_ul().max_tuples() : 16); !r)
+    return CommandFailure(EINVAL, "%s", r.error().c_str());
+  if (auto r = make_table(pdr_dl_, "pdr_dl", 22, arg.pdr_dl().max_tuples() ? arg.pdr_dl().max_tuples() : 8); !r)
+    return CommandFailure(EINVAL, "%s", r.error().c_str());
+  // Refused here, before anything is built, when the scope cannot hold every
+  // stride (D-198): the whole flat array is admitted up front.
+  auto lease = memory.Lease("sessions", SessionResource::Bytes(limits), SessionResource::GlibcBytes(limits));
+  sessions_ = bess::framework::MemoryScope::Adopt(
+      std::move(lease),
+      std::make_unique<SessionResource>(name() + "/sessions", name() + "/next_hops",
+                                        name() + "/meters", limits, *pdr_ul_.table,
+                                        *pdr_dl_.table, *fteid_resource_, init_context().rcu()));
+  bindings_.push_back(init_context().codecs().Bind(
+      *sessions_,
+      std::make_shared<bess::framework::TypedCodec<upf::pb::UpfSessionKey, upf::pb::UpfSession>>(
+          [](const upf::pb::UpfSessionKey &key) -> std::expected<dataplane::ResourceKey, std::string> {
+            if (key.session_id() == 0) return std::unexpected("session id 0 names no session");
+            return dataplane::EncodeKey(key.session_id());
+          },
+          [](const upf::pb::UpfSession &value) -> std::expected<std::any, std::string> {
+            auto decoded = DecodeSession(value);
+            if (!decoded) return std::unexpected(decoded.error());
+            return std::any(std::move(*decoded));
+          },
+          [this](const auto &visit) {
+            sessions_->ForEachLive([&visit](uint32_t id, const upf::pb::UpfSession &value) {
+              upf::pb::UpfSessionKey key;
+              key.set_session_id(id);
+              visit(key, value);
+            });
+          })));
+  if (auto r = enroll(sessions_.get()); !r) return CommandFailure(EEXIST, "%s", r.error().c_str());
+  return CommandSuccess();
+}
+
 void UpfAppliance::ReleaseResources() {
   if (!registered_.empty()) {
     auto released = init_context().resources().ReleaseForTeardown(registered_);
@@ -554,6 +640,8 @@ void UpfAppliance::ReleaseResources() {
   }
   for (auto &binding : bindings_) binding.Reset();
   bindings_.clear();
+  // The session store before the tables and F-TEID index it drives.
+  sessions_.reset();
   pdr_ul_.resource.reset(); pdr_dl_.resource.reset();
   pdr_ul_.table.reset(); pdr_dl_.table.reset();
   pdr_ul_.records.reset(); pdr_dl_.records.reset();
@@ -571,6 +659,7 @@ void UpfAppliance::ReleaseResources() {
 
 CommandResponse UpfAppliance::CommandGetCounts(const upf::pb::UrrCountCommandGetCountsArg &arg) {
   upf::appliance::Counters *bank = nullptr;
+  const bool cells = session_layout_ && (arg.table() == "counters_ul" || arg.table() == "counters_dl");
   if (arg.table() == "counters_ul") bank = &counters_ul_;
   else if (arg.table() == "counters_dl") bank = &counters_dl_;
   else if (arg.table() == "buffer_counters") bank = &buffer_counters_;
@@ -580,6 +669,13 @@ CommandResponse UpfAppliance::CommandGetCounts(const upf::pb::UrrCountCommandGet
   gettimeofday(&wall, nullptr);
   response.set_read_wall_unix_ns(static_cast<uint64_t>(wall.tv_sec) * 1000000000ull + static_cast<uint64_t>(wall.tv_usec) * 1000ull);
   response.set_read_monotonic_ns(tsc_to_ns(rdtsc()));
+  if (cells) {
+    // UpfSessionAppliance: the URR cells live in the sessions' strides.
+    sessions_->Counts(arg.table() == "counters_dl",
+                      std::span<const uint32_t>(arg.action_ids().data(), arg.action_ids_size()),
+                      arg.restart_window(), &response);
+    return CommandSuccess(response);
+  }
   auto report = [&](uint32_t id) {
     auto *count = response.add_counts();
     count->set_action_id(id);
