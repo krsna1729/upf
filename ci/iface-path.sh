@@ -467,7 +467,8 @@ contains "m6_target_kept: S13's downlink still left toward the target RAN" \
 # tunnel's local endpoint, to its peer: 30 fe is version 1 and type 254, the
 # length is 0. S1's uplink ends at N6, so the one on its F-TEID is recorded and
 # relayed nowhere. The driver required exact counts: every marker reached the
-# responder, the four relays the marker port and none a Router exit.
+# responder, the four relays left decap0's gate 3 through the relay queue, and
+# none a Router exit.
 EM=$(dump_hex dump_em "$WORK/m6_end_markers.log")
 contains "m6_end_markers: the driver counted every marker and every relay" \
       "$DRIVER" "m6_end_markers: 5 End Markers received, 4 relayed through their tunnels, 0 by a Router exit"

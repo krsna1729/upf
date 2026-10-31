@@ -141,9 +141,9 @@ else
   # carry zero -- the first reading of a URR is its baseline, not its usage
   # (report.go). One second is well inside the SMF's own 10 s period.
   UPFD_ARGS+=(-urr-interval "${URR_INTERVAL:-1s}")
-  # The base path selects a tunnel's domain-specific marker socket: the old
-  # tunnel's on SNDEM, and the outgoing tunnel's when a received End Marker
-  # (drained from echo0, deploy/upf.yaml) is relayed through it.
+  # The base path selects the old tunnel's domain-specific marker socket
+  # (SNDEM); echo0's End Marker log (deploy/upf.yaml) feeds REEMR. decap0
+  # relays received End Markers itself.
   [ -n "$DATAPLANE" ] && UPFD_ARGS+=(-end-marker "$STATE/end-marker.sock" -gtpu-end-markers echo0)
   detach upfd "$BIN/upfd" "${UPFD_ARGS[@]}"
   wait_log "$LOGS/upfd.log" "n4 listening" 10 || { cat "$LOGS/upfd.log" >&2; die "upfd did not start"; }

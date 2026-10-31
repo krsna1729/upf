@@ -25,10 +25,12 @@
 # it, all remaining sessions still live: no later session or modification may
 # have overwritten an earlier one. The End Markers -- sent to S10's N9 and
 # forwarding F-TEIDs, S13's forwarding F-TEID, S11's N9 downlink F-TEID and
-# S1's uplink F-TEID -- reach decap0's unknown/control gate and no chain, and
-# the host's sink must see each relayed exactly once per marker sent, with the
-# outgoing tunnel's TEID from its local endpoint to its peer, and none for
-# S1's, which ends at N6. A TEID no session admits reaches the
+# S1's uplink F-TEID -- reach decap0's unknown/control gate and no chain;
+# decap0's gate 3 relays them, and the host's sink must see each relayed
+# exactly once per marker sent, with the outgoing tunnel's TEID from its local
+# endpoint to its peer, and none for S1's, which ends at N6. A burst of
+# G-PDUs and then an End Marker on S11's N9 downlink F-TEID must reach the
+# host in that order, the relay last. A TEID no session admits reaches the
 # unknown path and nothing else. The one-VLAN case gives N3 and N9 the same
 # local address, and Mode 3's F-TEID is Mode 1's TEID: only the endpoint id
 # tells the two admissions apart.
@@ -65,6 +67,7 @@ BESSD=$STAGE/bin/bessd
 BESSCTL=$STAGE/bin/bessctl
 PINGS=${PINGS:-3}
 [[ "$PINGS" =~ ^[1-9][0-9]*$ ]] || { echo "veth-layouts: PINGS must be a positive integer" >&2; exit 2; }
+BURST=16 # the G-PDUs ahead of the End Marker in mode4_end_marker_order's burst
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/upf-veth-layouts-XXXXXX")
 LOG=$WORK/bessd.log
@@ -362,6 +365,10 @@ send_phase() {
       elif [ "${P_KIND[$r]}" = em ]; then
         sudo "$WORK/vethlayout" -send-end-marker -device "${A_DEV[$k]}" -local "${A_SRC[$k]}" \
           -remote "${LOCAL[${P_EP[$r]}]}" -teid "$teid" -count "$count"
+      elif [ "${P_KIND[$r]}" = burst ]; then
+        sudo "$WORK/vethlayout" -send-burst -device "${A_DEV[$k]}" -local "${A_SRC[$k]}" \
+          -remote "${LOCAL[${P_EP[$r]}]}" -teid "$teid" -ue "${P_SRC[$r]}" \
+          -dst "${P_DST[$r]}" -sport "${P_SPORT[$r]}" -dport "${P_DPORT[$r]}" -count "$BURST"
       else
         sudo "$WORK/vethlayout" -send-udp -device "${A_DEV[$k]}" -local "${A_SRC[$k]}" \
           -dst "${P_DST[$r]}" -sport "${P_SPORT[$r]}" -dport "${P_DPORT[$r]}" -count "$count"
@@ -540,8 +547,9 @@ mode6_released() {
 # F-TEID, the source RAN's and the source UPF's on the two forwarding
 # F-TEIDs, the PSA's on S11's N9 downlink F-TEID, and one on S1's uplink
 # F-TEID, whose FAR ends at N6. Each reaches the responder on decap0 gate 2
-# and no session chain; the driver's report tick relays every one but S1's
-# through rt_transport onto the attachment its tunnel's peer is on.
+# and no session chain; decap0 relays every one but S1's out its gate 3,
+# through em_relay and rt_transport onto the attachment its tunnel's peer is
+# on.
 mode6_end_markers() {
   local r ex=()
   for r in "${!R_IN[@]}"; do
@@ -551,6 +559,7 @@ mode6_end_markers() {
   phase "Mode 6 and Mode 4 End Markers (every N3 and N9 attachment)" m6em \
     route_check/1/out=$((3 * A)) route_check/2/out=$((2 * B)) \
     decap0/0/out=0 decap0/1/out=0 decap0/2/out=$((3 * A + 2 * B)) \
+    decap0/3/out=$((2 * A + 2 * B)) em_relay/0/out=$((2 * A + 2 * B)) \
     endpoint_check/1/out=0 endpoint_check/2/out=0 endpoint_check_dl/1/out=0 endpoint_check_dl/2/out=0 \
     rt/0/out=0 rt/1/out=0 rt/2/out=0 rt/4/out=0 enc/0/out=0 "${ex[@]}"
   relayed
@@ -589,6 +598,40 @@ relayed() {
   fi
 }
 
+# The relay keeps the tunnel's order: the End Marker (TS 29.281 7.3.2) follows
+# the old path's last G-PDU. From each N9 attachment, BURST G-PDUs on S11's N9
+# downlink F-TEID and then an End Marker on it, in one sendmmsg: out of
+# rt_transport, the host sees every G-PDU of a burst before that burst's
+# relayed End Marker, and exactly one relay per burst.
+mode4_end_marker_order() {
+  local r n mark tunnel lines want_g
+  n=$(attachments n9)
+  want_g=$((n * BURST))
+  for r in "${!R_IN[@]}"; do [ "${R_LABEL[$r]}" = s11dl ] && break; done
+  tunnel="TEID ${R_TEID[$r]} from ${LOCAL[n9]} to ${EGRESS_HOST[s11dl]}"
+  mark=$(wc -l <"$WORK/sink.log")
+  phase "Mode 4 G-PDUs then an End Marker in one burst (every N9 attachment)" m4order \
+    route_check/2/out=$((want_g + n)) decap0/1/out=$want_g decap0/2/out=$n \
+    decap0/3/out=$n em_relay/0/out=$n enc/0/out=$want_g $(egress s11dl $((want_g + n)))
+  for _ in $(seq 1 50); do
+    lines=$(tail -n +"$((mark + 1))" "$WORK/sink.log" | grep -F " $tunnel" | grep -cE ' type (254|255) ' || true)
+    [ "$lines" -ge $((want_g + n)) ] && break
+    sleep 0.1
+  done
+  sleep 0.3
+  # The k-th relay must follow at least k bursts' G-PDUs; the sends are
+  # sequential, so a relay that overtook its burst's G-PDUs breaks this.
+  if tail -n +"$((mark + 1))" "$WORK/sink.log" | grep -F " $tunnel" |
+    awk -v burst="$BURST" -v n="$n" '
+      / type 255 / { g++ }
+      / type 254 / { e++; if (g < e * burst) { printf "relay %d after %d G-PDUs\n", e, g; bad = 1 } }
+      END { if (g != n * burst || e != n) { printf "%d G-PDUs, %d relays\n", g, e; bad = 1 }; exit bad }' >"$WORK/order.log"; then
+    echo "ok: $LAYOUT End Marker relay in tunnel order: $n relays, each behind its burst's $BURST G-PDUs ($want_g G-PDUs)"
+  else
+    fail "$LAYOUT: the relay left out of tunnel order on $tunnel: $(cat "$WORK/order.log")"
+  fi
+}
+
 # await <file>: the driver's handshake, failing at once if the driver has gone.
 await() {
   for _ in $(seq 1 600); do
@@ -608,9 +651,7 @@ run_layout() {
   LAYOUT=$1
   new_names "$("$WORK/vethlayout" -layout "$LAYOUT" -port-count)"
   iface_csv=$(IFS=,; echo "${VETHS[*]}")
-  # The End Marker ports' base path: the graph binds <base>.1 and <base>.2,
-  # and the driver's compiler writes its relays there.
-  "$WORK/vethlayout" -layout "$LAYOUT" -ifaces "$iface_csv" -end-marker "$WORK/em.sock" \
+  "$WORK/vethlayout" -layout "$LAYOUT" -ifaces "$iface_csv" \
     -contract "$WORK/contract.tsv" >"$WORK/graph.json"
   read_contract
   create_veths
@@ -631,7 +672,7 @@ run_layout() {
   # stand-in SMF: it establishes all of them, waits for both Routers'
   # neighbors, and only then signals.
   "$WORK/vethlayout" -drive -layout "$LAYOUT" -target "$SERVER" -handshake "$HS" \
-    -end-marker "$WORK/em.sock" >"$WORK/driver.log" 2>&1 &
+    >"$WORK/driver.log" 2>&1 &
   DRIVER_PID=$!
   await established.done
   for m in 1 2 3 4 5 6; do
@@ -657,6 +698,7 @@ run_layout() {
   mode3_downlink
   mode4_uplink
   mode4_downlink
+  mode4_end_marker_order
   mode5
   n19_in
   n19_out
@@ -708,4 +750,4 @@ for layout in one-mac one-vlan one-hybrid two-n3n9-n6 two-n3n6-n9 two-n6n9-n3 th
   run_layout "$layout"
 done
 
-echo "veth-layouts: ok (9 attachment layouts, up to 4 promiscuous PMD ports; Modes 1 to 6 and N19 over N4 through the compiled pipeline on every attachment, End Markers relayed through transit and forwarding tunnels, endpoint-scoped GTP-U admission, unknown-TEID separation)"
+echo "veth-layouts: ok (9 attachment layouts, up to 4 promiscuous PMD ports; Modes 1 to 6 and N19 over N4 through the compiled pipeline on every attachment, End Markers relayed by the datapath through transit and forwarding tunnels behind their G-PDUs, endpoint-scoped GTP-U admission, unknown-TEID separation)"
