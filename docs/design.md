@@ -940,6 +940,38 @@ addressed:
    threshold or a quota without reading its counters first, so the information
    that would justify skipping arrives only after the read.
 
+**`upfd`'s own memory and establishment rate**, measured with `n4bench`
+(sessions of 2 PDRs, 2 FARs and 1 QER; 16 requests in flight) against a bessd
+with the meter set as a transactional resource (BESS D-199). Each PDR table
+holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
+
+- **Live heap: 3.0-3.1 KB per session**, 2.97 GiB at 1M. Most of it is the
+  model itself: the `pdr` structs (~500 B each), the `Session` with its maps,
+  and the FAR and QER entries.
+- **Garbage: 70 KB per establishment.** Building the dataplane messages
+  (dynamicpb) and parsing PFCP account for most of it.
+- **Rate with one worker: 1,450/s at 100K and 1,220/s at 1M.** bessd's Apply
+  takes 0.63-0.75 ms and is 91% of the load wall time.
+  `-session-workers 8` overlaps those transactions: 2,140/s at 100K and 1,425/s
+  at 1M.
+- **GOMEMLIMIT.** `upfd` sets it from the smallest cgroup v2 `memory.max` on
+  its path, minus max(32 MiB, 10%); a GOMEMLIMIT in the environment wins. At 1M
+  in a 4000 MiB scope (limit 3600 MiB), RSS settles at 3.5 GiB and GC takes
+  14-17% of `upfd`'s CPU.
+- **Budget.** Without a limit, RSS ≈ 30 MiB + N × 3.1 KB × (1 + GOGC/100).
+  With the limit, the floor is about 30 MiB + N × 3.1 KB, plus ~15% for the
+  collector to keep pace.
+- **Pod fits (measured).** bessd's default 1 GiB packet pool is the largest
+  fixed term.
+  - In 2 GiB (upfd 768 + bessd 1280 MiB), 150K sessions fit. bessd's limit
+    refuses establishments from 167,678.
+  - In 3 GiB (upfd 1472 + bessd 1600 MiB), 300K fit. bessd refuses from
+    373,556.
+  - At 1M, `upfd` alone needs ~3.5 GiB and bessd 2.1 GiB.
+- **Association end.** It erases in transactions of up to 1,000 changes. 1M
+  sessions leave in 488 s once BESS's RecordArena grows its retirement queue
+  geometrically (krsna1729/bess#116); before that fix, it took 4,246 s.
+
 Time is measured at scale where memory is not: the masked table looks up 32
 keys in 556 ns at 10^6 rules with one mask tuple, 1,716 ns with four and
 2,463 ns with eight (17 / 54 / 77 ns per key), and an add+delete costs about
