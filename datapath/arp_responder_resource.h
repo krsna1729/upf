@@ -42,6 +42,13 @@ struct Entry {
 // value under the engine's lock, and the value a reader may still hold is
 // retired, not freed, when it is replaced.
 //
+// An erase empties its slot and moves nothing: each slot counts the claimed
+// keys whose probe went past it, a probe stops at the first slot none went
+// past, and an erase takes its passes back (core/flow/flow_index.h's overflow
+// counts). Back-shift deletion would move a live key behind a worker that is
+// mid-probe, which then misses it; a tombstone kept its key, so under address
+// churn every slot ended up keyed and each miss walked the whole table.
+//
 // Memory (BESS D-198): the slot array is glibc memory (a std::vector) made by
 // the constructor, sized from max_entries and never grown; Bytes/GlibcBytes is
 // what the constructor allocates, for framework::MemoryCost. The entries a
@@ -72,7 +79,10 @@ class EntriesResource final : public bess::dataplane::Resource {
 
   // The entry for an address, or nullptr: the packet path's whole lookup (one
   // acquire load of a published pointer).
-  const Entry *Lookup(uint32_t ip) const noexcept;
+  const Entry *Lookup(uint32_t ip) const noexcept { return Probe(ip).entry; }
+
+  // The slots a lookup of `ip` examines (1: its home slot decides).
+  size_t ProbeLength(uint32_t ip) const noexcept { return Probe(ip).slots; }
 
   size_t LiveCount() const override { return live_; }
 
@@ -82,8 +92,8 @@ class EntriesResource final : public bess::dataplane::Resource {
       const bess::dataplane::Op &op) override;
 
   // No per-transaction state is kept: a slot a Reserve claimed holds its claim
-  // (as a tombstone, if the transaction never publishes), and the room that
-  // makes the claim is the table's.
+  // (with no value, if the transaction never publishes, until a later claim
+  // takes it over), and the room that makes the claim is the table's.
   void EndTransaction() noexcept override {}
 
   // Every live entry, control side: what "<module>/entries" reads back.
@@ -114,9 +124,17 @@ class EntriesResource final : public bess::dataplane::Resource {
 
   struct Slot {
     // 0 is never an address this resource holds (the codec refuses it): a slot
-    // no key has used.
+    // that holds no key.
     std::atomic<uint32_t> key{0};
+    // The claimed keys whose probe went past this slot to a later one.
+    std::atomic<uint32_t> passed{0};
     std::atomic<const Entry *> value{nullptr};
+  };
+
+  // A lookup's walk: what it found, and the slots it examined.
+  struct Walk {
+    const Entry *entry;
+    size_t slots;
   };
 
   size_t Hash(uint32_t ip) const noexcept {
@@ -125,16 +143,22 @@ class EntriesResource final : public bess::dataplane::Resource {
     return (static_cast<size_t>(ip) * 2654435761u) & mask_;
   }
 
+  Walk Probe(uint32_t ip) const noexcept;
+
   // The slot holding `ip`, or kNoSlot. Control side.
   size_t Find(uint32_t ip) const noexcept;
 
   // The slot holding `ip`, claiming one for it when it has none: the first
-  // tombstone the probe passes, else the empty slot it stops at. kNoSlot when
-  // every slot is claimed and none is a tombstone.
+  // from its home that holds no value (empty, or a claim no transaction
+  // published). kNoSlot when every slot holds a value.
   size_t Claim(uint32_t ip) noexcept;
 
   // Empties `ip`'s slot, returning what was there.
   const Entry *Clear(uint32_t ip) noexcept;
+
+  // Gives up `ip`'s claim of `slot`: the passes it counted are taken back, and
+  // the slot holds no key.
+  void Release(uint32_t ip, size_t slot) noexcept;
 
   class UpsertOp final : public bess::dataplane::StagedOp {
    public:
@@ -145,8 +169,8 @@ class EntriesResource final : public bess::dataplane::Resource {
       // The key, claimed again *now*: Reserve's claim of it is not the one this
       // op can publish into. A sibling op of the same transaction -- another
       // address of the same session, whose probe passes a slot this op claimed
-      // and left value-less -- may have taken it as a tombstone and stored its
-      // own key there (`Claim`), so publishing into the slot Reserve recorded
+      // and left value-less -- may have taken it over and stored its own key
+      // there (`Claim`), so publishing into the slot Reserve recorded
       // would put both addresses in one slot and lose one of them (and retire
       // one entry more than the transaction declared room for, which the
       // engine treats as a fatal footprint violation). Re-claiming by key is
@@ -156,9 +180,9 @@ class EntriesResource final : public bess::dataplane::Resource {
       // nothing else moves in between.
       const size_t slot = owner_.Claim(ip_);
       if (slot == kNoSlot) {
-        // Every slot holds a key and none is a tombstone: Reserve established
-        // room, so this is unreachable -- and if it ever happens, the entry
-        // must still be freed, which retiring it does (nothing has seen it).
+        // Every slot holds a value: Reserve established room, so this is
+        // unreachable -- and if it ever happens, the entry must still be
+        // freed, which retiring it does (nothing has seen it).
         retirer.Retire(std::move(entry_));
         return;
       }
@@ -213,7 +237,7 @@ class EntriesResource final : public bess::dataplane::Resource {
   std::vector<Slot> slots_;
   size_t mask_ = 0;
   // Control side, under the engine's lock: the slots that hold a value. A slot
-  // holding a key and no value is a tombstone, not an entry.
+  // holding a key and no value is a claim, not an entry.
   size_t live_ = 0;
 };
 
@@ -236,42 +260,42 @@ inline EntriesResource::EntriesResource(std::string name, size_t max_entries)
       slots_(SlotCount(max_entries)),
       mask_(slots_.size() - 1) {}
 
-inline const Entry *EntriesResource::Lookup(uint32_t ip) const noexcept {
+inline EntriesResource::Walk EntriesResource::Probe(uint32_t ip) const noexcept {
   if (ip == 0) {
-    return nullptr;
+    return {nullptr, 0};
   }
   size_t i = Hash(ip);
-  for (size_t n = 0; n <= mask_; n++) {
+  for (size_t n = 1; n <= mask_ + 1; n++) {
     const uint32_t key = slots_[i].key.load(std::memory_order_acquire);
-    if (key == 0) {
-      return nullptr;
-    }
     if (key == ip) {
       const Entry *entry = slots_[i].value.load(std::memory_order_acquire);
       // The entry carries its own address, and the packet path reads it (the
       // reply's sender address): between the two loads a later transaction may
-      // reuse this slot for another address -- a key that held no value is what
-      // a claim takes -- so an entry for a *different* address is not this
-      // key's and the probe goes on. Both loads are acquire: the value a worker
-      // gets is either this key's entry or the next transaction's.
+      // reuse this slot for another address -- an erased key's slot, or a key
+      // that held no value, is what a claim takes -- so an entry for a
+      // *different* address is not this key's and the probe goes on. Both
+      // loads are acquire: the value a worker gets is either this key's entry
+      // or the next transaction's.
       if (entry != nullptr && entry->ip == ip) {
-        return entry;
+        return {entry, n};
       }
+    }
+    if (slots_[i].passed.load(std::memory_order_acquire) == 0) {
+      return {nullptr, n};
     }
     i = (i + 1) & mask_;
   }
-  return nullptr;
+  return {nullptr, mask_ + 1};
 }
 
 inline size_t EntriesResource::Find(uint32_t ip) const noexcept {
   size_t i = Hash(ip);
   for (size_t n = 0; n <= mask_; n++) {
-    const uint32_t key = slots_[i].key.load(std::memory_order_acquire);
-    if (key == 0) {
-      break;
-    }
-    if (key == ip) {
+    if (slots_[i].key.load(std::memory_order_acquire) == ip) {
       return i;
+    }
+    if (slots_[i].passed.load(std::memory_order_acquire) == 0) {
+      break;
     }
     i = (i + 1) & mask_;
   }
@@ -279,33 +303,30 @@ inline size_t EntriesResource::Find(uint32_t ip) const noexcept {
 }
 
 inline size_t EntriesResource::Claim(uint32_t ip) noexcept {
-  size_t i = Hash(ip);
-  size_t dead = kNoSlot;
+  if (const size_t held = Find(ip); held != kNoSlot) {
+    return held;
+  }
+  const size_t home = Hash(ip);
+  size_t i = home;
   for (size_t n = 0; n <= mask_; n++) {
     const uint32_t key = slots_[i].key.load(std::memory_order_relaxed);
-    if (key == ip) {
-      return i;
-    }
-    if (key == 0) {
-      // A slot no key has used: the probe's end. Take the first tombstone
-      // passed (it costs the table nothing) or this one.
-      const size_t target = dead != kNoSlot ? dead : i;
-      slots_[target].key.store(ip, std::memory_order_release);
-      return target;
-    }
-    if (dead == kNoSlot &&
+    if (key == 0 ||
         slots_[i].value.load(std::memory_order_relaxed) == nullptr) {
-      dead = i;
+      // Empty, or a claim no transaction published (it costs the table
+      // nothing). Every slot before it counts the pass, so a probe for `ip`
+      // goes on to it; the counts precede the key's release store.
+      if (key != 0) {
+        Release(key, i);
+      }
+      for (size_t j = home; j != i; j = (j + 1) & mask_) {
+        slots_[j].passed.fetch_add(1, std::memory_order_relaxed);
+      }
+      slots_[i].key.store(ip, std::memory_order_release);
+      return i;
     }
     i = (i + 1) & mask_;
   }
-  // Every slot holds a key: the only room is a tombstone, and the probe has
-  // passed all of them.
-  if (dead == kNoSlot) {
-    return kNoSlot;
-  }
-  slots_[dead].key.store(ip, std::memory_order_release);
-  return dead;
+  return kNoSlot;
 }
 
 inline const Entry *EntriesResource::Clear(uint32_t ip) noexcept {
@@ -313,13 +334,22 @@ inline const Entry *EntriesResource::Clear(uint32_t ip) noexcept {
   if (slot == kNoSlot) {
     return nullptr;
   }
-  if (const Entry *old =
-          slots_[slot].value.exchange(nullptr, std::memory_order_acq_rel);
-      old != nullptr) {
+  const Entry *old =
+      slots_[slot].value.exchange(nullptr, std::memory_order_acq_rel);
+  if (old != nullptr) {
     live_--;
-    return old;
   }
-  return nullptr;
+  Release(ip, slot);
+  return old;
+}
+
+inline void EntriesResource::Release(uint32_t ip, size_t slot) noexcept {
+  // Only `ip`'s own passes go: a live key's probe still counts in every slot
+  // before its own, so a worker mid-probe for it walks on to it.
+  for (size_t j = Hash(ip); j != slot; j = (j + 1) & mask_) {
+    slots_[j].passed.fetch_sub(1, std::memory_order_relaxed);
+  }
+  slots_[slot].key.store(0, std::memory_order_release);
 }
 
 inline bool EntriesResource::Contains(
@@ -360,8 +390,8 @@ EntriesResource::Reserve(const bess::dataplane::Op &op) {
 
   // The slot the entry will be published in, claimed now: the room it needs is
   // the table's, and this is the only step that can find none. A key the table
-  // already holds needs nothing -- Claim returns its slot, a tombstone's
-  // included.
+  // already holds needs nothing -- Claim returns its slot, an unpublished
+  // claim's included.
   const size_t slot = Claim(ip);
   if (slot == kNoSlot) {
     return std::unexpected("the entries table is full (" +
@@ -370,8 +400,8 @@ EntriesResource::Reserve(const bess::dataplane::Op &op) {
   const bool existed =
       slots_[slot].value.load(std::memory_order_acquire) != nullptr;
   // From the table's slab: may add a chunk, admitted first (a refusal throws
-  // utils::MemoryRefused and refuses the transaction; the claim above stays a
-  // tombstone, which a later claim reuses).
+  // utils::MemoryRefused and refuses the transaction; the claim above keeps no
+  // value, and a later claim takes it over).
   Owned entry = slab_->Make(Entry{ip, *mac});
   // Room for one replacement, always: what an upsert publishes over is only
   // known when it publishes (a sibling op of the same transaction may have put
