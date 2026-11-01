@@ -2789,14 +2789,28 @@
   {
    "id": "status-45",
    "scope": "status",
-   "evidence": [],
+   "evidence": [
+    "TestLiveEndMarkerIsRelayedBehindItsGPDUs",
+    "datapath/gtpu_datapath_test.cc",
+    "datapath/upf_appliance_sessions_test.cc"
+   ],
    "result": {
-    "state": "gap",
-    "evidence": {}
+    "state": "ok",
+    "evidence": {
+     "TestLiveEndMarkerIsRelayedBehindItsGPDUs": {
+      "state": "skip"
+     },
+     "datapath/gtpu_datapath_test.cc": {
+      "state": "ok"
+     },
+     "datapath/upf_appliance_sessions_test.cc": {
+      "state": "ok"
+     }
+    }
    },
    "clause": "8.2.64",
    "part": "procedures",
-   "title": "the appliance and session-major targets do not relay End Markers yet: `UpfAppliance` accepts an F-TEID admission entry's `end_marker_relays`, and `UpfSessionAppliance` a session whose F-TEIDs name them -- refusing either would fail the whole Session Modification of a Mode 4 or Mode 6 handover -- and counts each relay in `get_drops`' `end_marker_relay_unsupported` (one warning per such entry or session), but neither stores nor performs it; the graph target's `GtpuDecap` relay (status-44) is not ported to either packet path",
+   "title": "**fixed**: the appliance and session-major targets relay a received End Marker (TS 29.281 7.3.2) through the GTP-U tunnels its F-TEID's PDRs forward into, in the packet path, as the graph target's `GtpuDecap` does (status-44). `UpfAppliance`'s `<appliance>/fteids` and an `UpfSessionAppliance` session's F-TEIDs decode an entry's `end_marker_relays` with `GtpuDecap`'s codec (`fteid_codec.h`), and a session-major update replaces a kept F-TEID's relays when its tunnels move. The End Marker joins the burst's F-TEID lookup, is recorded for REEMR and dropped, and each relay becomes an End Marker with that tunnel's TEID from its local address to its peer, routed by the transport Router in its domain and emitted after the burst, so it leaves behind the G-PDUs its burst carried ahead of it",
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
@@ -2804,18 +2818,18 @@
    ],
    "message": "End Marker and its reception report",
    "statement": "Table 8.2.64-1 NOTE 2: \"The SGW-U/I-UPF shall store the GTP-U message type for a GTP-U signalling message which is required to be forwarded, e.g. for an End Marker message.\"",
-   "detail": "the appliance and session-major targets do not relay End Markers yet: `UpfAppliance` accepts an F-TEID admission entry's `end_marker_relays`, and `UpfSessionAppliance` a session whose F-TEIDs name them -- refusing either would fail the whole Session Modification of a Mode 4 or Mode 6 handover -- and counts each relay in `get_drops`' `end_marker_relay_unsupported` (one warning per such entry or session), but neither stores nor performs it; the graph target's `GtpuDecap` relay (status-44) is not ported to either packet path",
-   "effect": "on `-target appliance` and `-target session-major`, the target RAN, the target UPF or an upstream I-UPF of a Mode 4/6 handover sees no End Marker on its tunnel and falls back to its own timer before switching to the new path",
+   "detail": "**fixed**: the appliance and session-major targets relay a received End Marker (TS 29.281 7.3.2) through the GTP-U tunnels its F-TEID's PDRs forward into, in the packet path, as the graph target's `GtpuDecap` does (status-44). `UpfAppliance`'s `<appliance>/fteids` and an `UpfSessionAppliance` session's F-TEIDs decode an entry's `end_marker_relays` with `GtpuDecap`'s codec (`fteid_codec.h`), and a session-major update replaces a kept F-TEID's relays when its tunnels move. The End Marker joins the burst's F-TEID lookup, is recorded for REEMR and dropped, and each relay becomes an End Marker with that tunnel's TEID from its local address to its peer, routed by the transport Router in its domain and emitted after the burst, so it leaves behind the G-PDUs its burst carried ahead of it",
+   "effect": "on `-target appliance` and `-target session-major`, the target RAN, the target UPF and an upstream I-UPF of a Mode 4/6 handover see the old path end on their own tunnel, after the old path's last G-PDU, as on the graph target",
    "extra": [
     {
      "name": "evidence",
-     "value": "`datapath/gtpu_datapath_test.cc` (`ApplianceFteid.AModificationWithRelaysCommitsAndCountsEachRelay`: an entry naming two relays and its modification naming three commit, the count reaches five, and the record the packet path reads carries none); `datapath/upf_appliance_sessions_test.cc` (`SessionStore.AModificationWithRelaysCommitsAndCountsEachRelay`: a session update naming three relays commits, the count reads three, the session reads back with none, a refused session counts nothing)"
+     "value": "`TestLiveEndMarkerIsRelayedBehindItsGPDUs` (`UPF_TARGET=appliance` and `UPF_TARGET=session-major ci/session-path.sh`: after a modification moves an F-TEID's tunnel and adds a second, one burst of 16 G-PDUs and an End Marker on it leaves N3 as the 16 G-PDUs in the moved tunnel, then one End Marker per tunnel with that tunnel's TEID; on the parent, which counted relays, no End Marker leaves), `datapath/gtpu_datapath_test.cc` (`ApplianceFteid.AModificationWithRelaysHandsEachRelayToThePacketPath`: the entry's relays reach the record the packet path reads and are replaced in place by a modification), `datapath/upf_appliance_sessions_test.cc` (`SessionStore.AModificationWithRelaysHandsEachRelayToThePacketPath`: a session update's relays reach the kept F-TEID's record, are replaced and removed in place, and read back)"
     }
    ],
    "kind": "conformance",
    "block": 8,
-   "claim": "the appliance and session-major targets count, but do not perform, End Marker relays",
    "spec_version": "16.9.1",
+   "claim": "the appliance and session-major targets relay End Markers behind their G-PDUs",
    "release": "16",
    "file": "docs/spec/29.244-v16.9.1.txt",
    "message_spec": "TS 29.244",

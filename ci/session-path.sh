@@ -49,7 +49,7 @@ PIDFILE=$(mktemp "$TMPDIR/upf-path-XXXXXX.pid")
 
 bessd_start "$LOG" "$PIDFILE" || exit 1
 cleanup() {
-  rm -f "${RENDERED:-}" "${MARKER_SOCK:-}"  # rendered per run, not left behind
+  rm -f "${RENDERED:-}" "${MARKER_SOCK:-}" "${RELAY_SOCK:-}"  # rendered per run, not left behind
   bessd_stop
 }
 trap cleanup EXIT
@@ -70,11 +70,17 @@ sed "s|/tmp/upf-end-marker.sock|$MARKER_SOCK|" "$GRAPH" >"$RENDERED"
 "$BESSCTL" -s "$SERVER" validate "$RENDERED" >/dev/null
 bessd_apply "$RENDERED"
 
+# The appliance graphs' End Marker relay tap (relay_tap), rendered with the
+# marker socket; the relay test skips without it (the graph target's relay is
+# ci/iface-path.sh's and ci/veth-layouts.sh's).
+RELAY_SOCK=
+if [ "$TARGET" != graph ]; then RELAY_SOCK=$MARKER_SOCK.relay; fi
+
 # The Go half: the control arm (counters zero), the session, then the counters
 # again. Run from the repository root so the module and its workspace resolve.
 cd "$ROOT"
-MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_ROUTE_MODE=${ROUTE_MODE:-hop} \
-  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCarriesNothingOutsideAPortRange|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveSessionSendsTheEndMarkerOnSNDEM|TestLiveErrorIndicationBecomesAnERIRReport|TestLiveEndMarkerBecomesAnEMRRReport|TestLiveGBRSplitsTheMeter' -count=1 -v
+MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER UPF_END_MARKER_SOCK=$MARKER_SOCK UPF_RELAY_SOCK=$RELAY_SOCK UPF_ROUTE_MODE=${ROUTE_MODE:-hop} \
+  $GO test ./internal/session/ -run 'TestLiveSessionCarriesPackets.*|TestLiveSessionCarriesNothingOutsideAPortRange|TestLiveSessionCountsTheRulesATURReasures|TestLiveQuotaEvaluationStopsTheTraffic|TestLiveSessionSendsTheEndMarkerOnSNDEM|TestLiveErrorIndicationBecomesAnERIRReport|TestLiveEndMarkerBecomesAnEMRRReport|TestLiveEndMarkerIsRelayedBehindItsGPDUs|TestLiveGBRSplitsTheMeter' -count=1 -v
 
 # The packet half: the graph's Dumps in the daemon's log, per dump (the helper
 # is shared with ci/n4-path.sh; see its header for why a dump is scoped).

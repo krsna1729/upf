@@ -5,6 +5,15 @@ ports:
   driver: UnixSocketPort
   arg:
     path: /tmp/upf-end-marker.sock.1
+# The End Marker relay test's tap (TestLiveEndMarkerIsRelayedBehindItsGPDUs):
+# it writes an N3 burst in, and reads back, in order, what N3 sends toward
+# its relay peer. It waits for the "yes" before it writes. The lanes render
+# the path's /tmp/upf-end-marker.sock prefix as they render cp_marker's.
+- name: relay_tap
+  driver: UnixSocketPort
+  arg:
+    path: /tmp/upf-end-marker.sock.relay
+    confirm_connect: true
 modules:
 - name: upf
   mclass: UpfAppliance
@@ -80,6 +89,22 @@ modules:
   arg:
     templates:
     - AgAAAAYBAgAAAAYCCABFuAAlAAFAAEARH9EICAgICi0AAhOIADUAEQAAaGVsbG8tdXBm
+# N3 frames toward the relay test's peer (10.20.30.77, outer IPv4
+# destination) go to its tap; the rest go on.
+- name: n3_peer
+  mclass: ExactMatch
+  arg:
+    fields:
+    - {offset: 30, num_bytes: 4}
+    default_gate: 0
+- name: relay_in
+  mclass: PortInc
+  arg:
+    port: relay_tap
+- name: relay_out
+  mclass: PortOut
+  arg:
+    port: relay_tap
 # Capture only fixture IPv4 G-PDUs; N3 also carries unknown-TEID replies.
 - name: n3_data
   mclass: ExactMatch
@@ -135,8 +160,16 @@ connections:
 - upstream: upf
   downstream: dump_n6
   ogate: 0
+- upstream: relay_in
+  downstream: upf
+  igate: 0
 - upstream: upf
+  downstream: n3_peer
+  ogate: 1
+- upstream: n3_peer
   downstream: n3_data
+- upstream: n3_peer
+  downstream: relay_out
   ogate: 1
 - upstream: n3_data
   downstream: dump_d
@@ -173,3 +206,6 @@ resources:
   n3_data/rules:
   - key: {fields: [{value_int: 255}]}
     value: {gate: 0}
+  n3_peer/rules:
+  - key: {fields: [{value_bin: "ChQeTQ=="}]}  # 10.20.30.77
+    value: {gate: 1}

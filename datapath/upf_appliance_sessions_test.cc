@@ -28,6 +28,7 @@
 #include "dataplane/resource.h"
 #include "flow/shared_exact_index.h"
 #include "gate.h"
+#include "gtpu_admission.h"
 #include "meter/meter_resource.h"
 #include "rcu/rcu_ptr.h"
 #include "utils/logging.h"
@@ -335,42 +336,81 @@ TEST(SessionStore, InsertUpdateEraseDriveTheTablesAndVersions) {
   EXPECT_FALSE(s.sessions->Contains(dp::EncodeKey(kSession)));
 }
 
-// The session-major path does not relay End Markers yet. A session whose
-// F-TEIDs name relays is still applied -- a refusal would fail the whole
-// Session Modification of a Mode 4/6 handover -- and each relay is counted,
-// not kept: the modification's three relays commit, the count reads three,
-// the session reads back with none, and a refused session counts nothing.
-TEST(SessionStore, AModificationWithRelaysCommitsAndCountsEachRelay) {
+// A Mode 4/6 Session Modification moves the tunnels an F-TEID's PDRs forward
+// into, so the session's F-TEID entry names other End Marker relays. The
+// relays reach the record the packet path reads for the F-TEID (FteidRelays,
+// what RelayEndMarkers emits per received End Marker), each with its TEID,
+// addresses and transport domain, and read back; the next modification
+// replaces them in place on the kept F-TEID (the same record, not a
+// reinsert), one that forwards into no tunnel leaves none, and a malformed
+// relay refuses the session.
+TEST(SessionStore, AModificationWithRelaysHandsEachRelayToThePacketPath) {
   Store s;
   ASSERT_TRUE(Applied(s.Put(Image(false))));
+  const auto key = Image(false).fteids[0].id;
+  const auto record = [&](const upf::datapath::EndMarkerRelays **relays) {
+    uint64_t value = 0;
+    const bool hit = s.index->LookupBatch(reinterpret_cast<const std::byte *>(key.data()),
+                                          key.size(), &value, 1) != 0;
+    *relays = upf::datapath::FteidRelays(hit, value);
+    return value;
+  };
+  const upf::datapath::EndMarkerRelays *relays = nullptr;
+  const uint64_t before = record(&relays);
+  ASSERT_NE(before, 0u);
+  EXPECT_EQ(relays, nullptr);
+
   upf::pb::UpfSession wire;
   s.sessions->ForEachLive([&wire](uint32_t id, const upf::pb::UpfSession &value) {
     if (id == kSession) wire = value;
   });
   ASSERT_EQ(wire.fteids_size(), 1);
-  for (uint32_t i = 0; i < 3; ++i) {
-    auto *r = wire.mutable_fteids(0)->mutable_entry()->add_end_marker_relays();
-    r->set_teid(0x77000001 + i);
-    r->set_local_address(std::string("\xc0\x00\x02\x01", 4));
-    r->set_peer_address(std::string("\xc6\x33\x64\x05", 4));
-    r->set_transport_route_domain(1);
+  const auto modify = [&](std::vector<uint32_t> teids) {
+    auto *entry = wire.mutable_fteids(0)->mutable_entry();
+    entry->clear_end_marker_relays();
+    for (const uint32_t teid : teids) {
+      auto *r = entry->add_end_marker_relays();
+      r->set_teid(teid);
+      r->set_local_address(std::string("\xc0\x00\x02\x01", 4));
+      r->set_peer_address(std::string("\xc6\x33\x64\x05", 4));
+      r->set_transport_route_domain(teid & 3);
+    }
+    auto decoded = upf::appliance::DecodeSession(wire);
+    ASSERT_TRUE(decoded.has_value()) << decoded.error();
+    ASSERT_TRUE(Applied(s.Put(*decoded)));
+  };
+  const auto teids_of = [](const upf::datapath::EndMarkerRelays *r) {
+    std::vector<uint32_t> out;
+    for (size_t i = 0; r != nullptr && i < r->size(); ++i) out.push_back((*r)[i].teid);
+    return out;
+  };
+
+  modify({0x77000001, 0x77000002, 0x77000003});
+  EXPECT_EQ(record(&relays), before) << "the kept F-TEID keeps its record";
+  ASSERT_NE(relays, nullptr);
+  EXPECT_EQ(teids_of(relays), (std::vector<uint32_t>{0x77000001, 0x77000002, 0x77000003}));
+  for (const auto &r : *relays) {
+    EXPECT_EQ(r.family, 4);
+    EXPECT_EQ(std::vector<uint8_t>(r.local.begin() + 12, r.local.end()), (std::vector<uint8_t>{192, 0, 2, 1}));
+    EXPECT_EQ(std::vector<uint8_t>(r.peer.begin() + 12, r.peer.end()), (std::vector<uint8_t>{198, 51, 100, 5}));
+    EXPECT_EQ(r.transport_route_domain, r.teid & 3);
   }
-  std::atomic<uint64_t> unsupported{0};
-  auto decoded = upf::appliance::DecodeSession(wire, unsupported);
-  ASSERT_TRUE(decoded.has_value()) << decoded.error();
-  EXPECT_EQ(unsupported.load(), 3u);
-  ASSERT_TRUE(Applied(s.Put(*decoded)));
-  EXPECT_TRUE(s.fteids->Contains(dp::EncodeKey(Image(false).fteids[0].id)));
   upf::pb::UpfSession back;
   s.sessions->ForEachLive([&back](uint32_t id, const upf::pb::UpfSession &value) {
     if (id == kSession) back = value;
   });
   ASSERT_EQ(back.fteids_size(), 1);
-  EXPECT_EQ(back.fteids(0).entry().end_marker_relays_size(), 0);
+  EXPECT_EQ(back.fteids(0).entry().SerializeAsString(), wire.fteids(0).entry().SerializeAsString());
 
-  wire.mutable_fteids(0)->mutable_entry()->set_direction(2);
-  EXPECT_FALSE(upf::appliance::DecodeSession(wire, unsupported).has_value());
-  EXPECT_EQ(unsupported.load(), 3u);
+  modify({0x77000009});
+  EXPECT_EQ(record(&relays), before);
+  EXPECT_EQ(teids_of(relays), (std::vector<uint32_t>{0x77000009}));
+  modify({});
+  EXPECT_EQ(record(&relays), before);
+  EXPECT_EQ(relays, nullptr);
+
+  wire.mutable_fteids(0)->mutable_entry()->add_end_marker_relays()->set_teid(5);
+  EXPECT_FALSE(upf::appliance::DecodeSession(wire).has_value()) << "a relay without addresses";
 }
 
 TEST(SessionStore, OwnershipAndShapeRefusals) {

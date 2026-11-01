@@ -29,7 +29,7 @@
 #include "utils/endian.h"
 #include "utils/dpdk_memory.h"
 #include "utils/ether.h"
-#include "upf_appliance_fteid.h"
+#include "fteid_codec.h"
 
 namespace {
 using bess::flow::SharedExactIndex;
@@ -634,54 +634,78 @@ TEST(FteidResource, AnUpsertReplacesTheEndMarkerRelays) {
   EXPECT_EQ(resource.LiveCount(), 1u);
 }
 
-// UpfAppliance does not relay End Markers yet. An F-TEID entry that names
-// relays is still admitted -- a refusal would fail the whole Session
-// Modification of a Mode 4/6 handover -- and each relay is counted, not
-// stored: the establishment's two and the modification's three come to five,
-// and the record the packet path reads carries none.
-TEST(ApplianceFteid, AModificationWithRelaysCommitsAndCountsEachRelay) {
+// UpfAppliance's `<appliance>/fteids` decodes an entry as GtpuDecap's does
+// (fteid_codec.h): its End Marker relays reach the record the packet path
+// reads for the F-TEID (FteidRelays, what RelayEndMarkers emits per received
+// End Marker) with their TEIDs, addresses and domains; a Session Modification
+// that moves the tunnels replaces them on the same record, the entry reads
+// back as written, and a malformed relay refuses the entry.
+TEST(ApplianceFteid, AModificationWithRelaysHandsEachRelayToThePacketPath) {
   TestIndex table(2);
   ASSERT_NE(table.index, nullptr);
   upf::datapath::FteidResource resource("upf/fteids", *table.index,
                                         table.domain, 2);
   const auto key = Key(1, 4, 77, 1);
-  std::atomic<uint64_t> unsupported{0};
-  auto entry = [](int relays, uint32_t context) {
+  auto entry = [](std::vector<uint32_t> teids, uint32_t context) {
     upf::pb::FteidEntry e;
     e.set_direction(1);
     e.set_context_id(context);
-    for (int i = 0; i < relays; ++i) {
+    for (const uint32_t teid : teids) {
       auto *r = e.add_end_marker_relays();
-      r->set_teid(0x77000001 + i);
+      r->set_teid(teid);
       r->set_local_address(std::string("\xc0\x00\x02\x01", 4));
       r->set_peer_address(std::string("\xc6\x33\x64\x05", 4));
-      r->set_transport_route_domain(1);
+      r->set_transport_route_domain(teid & 3);
     }
     return e;
   };
   auto apply = [&](const upf::pb::FteidEntry &e) {
-    auto value = upf::appliance::DecodeFteidEntry(e, unsupported);
+    auto value = upf::datapath::DecodeFteidEntry(e);
     ASSERT_TRUE(value.has_value()) << value.error();
     auto reservation = resource.Reserve(bess::dataplane::Op::Upsert(
-        resource.name(), bess::dataplane::EncodeKey(key), std::move(*value)));
+        resource.name(), bess::dataplane::EncodeKey(key), std::any(std::move(*value))));
     ASSERT_TRUE(reservation.has_value()) << reservation.error();
     bess::dataplane::Retirer retirer;
     reservation->staged->Publish(retirer);
   };
+  auto relays_now = [&](uint64_t *value) {
+    bool hit = false;
+    *value = TableValue(*table.index, key, &hit);
+    return upf::datapath::FteidRelays(hit, *value);
+  };
+  auto teids_of = [](const upf::datapath::EndMarkerRelays *r) {
+    std::vector<uint32_t> out;
+    for (size_t i = 0; r != nullptr && i < r->size(); ++i) out.push_back((*r)[i].teid);
+    return out;
+  };
 
-  apply(entry(2, 7));
-  EXPECT_EQ(unsupported.load(), 2u);
-  apply(entry(3, 7));
-  EXPECT_EQ(unsupported.load(), 5u);
+  apply(entry({0x77000001, 0x77000002}, 7));
+  uint64_t first = 0;
+  EXPECT_EQ(teids_of(relays_now(&first)), (std::vector<uint32_t>{0x77000001, 0x77000002}));
+  apply(entry({0x77000003, 0x77000004, 0x77000005}, 7));
+  uint64_t value = 0;
+  const auto *relays = relays_now(&value);
+  EXPECT_EQ(value, first) << "the modification keeps the F-TEID's record";
+  ASSERT_EQ(teids_of(relays), (std::vector<uint32_t>{0x77000003, 0x77000004, 0x77000005}));
+  for (const auto &r : *relays) {
+    EXPECT_EQ(r.family, 4);
+    EXPECT_EQ(std::vector<uint8_t>(r.local.begin() + 12, r.local.end()), (std::vector<uint8_t>{192, 0, 2, 1}));
+    EXPECT_EQ(std::vector<uint8_t>(r.peer.begin() + 12, r.peer.end()), (std::vector<uint8_t>{198, 51, 100, 5}));
+    EXPECT_EQ(r.transport_route_domain, r.teid & 3);
+  }
   EXPECT_EQ(resource.LiveCount(), 1u);
-  bool hit = false;
-  const uint64_t value = TableValue(*table.index, key, &hit);
-  ASSERT_TRUE(hit);
-  EXPECT_EQ(upf::datapath::FteidRelays(hit, value), nullptr);
+  std::vector<upf::pb::FteidEntry> read;
+  resource.ForEach([&read](const FteidId &, const upf::datapath::FteidRecord &r) {
+    read.push_back(upf::datapath::EncodeFteidEntry(r));
+  });
+  ASSERT_EQ(read.size(), 1u);
+  EXPECT_EQ(read[0].SerializeAsString(),
+            entry({0x77000003, 0x77000004, 0x77000005}, 7).SerializeAsString());
 
-  // A refused entry counts nothing.
-  EXPECT_FALSE(upf::appliance::DecodeFteidEntry(entry(4, 0), unsupported).has_value());
-  EXPECT_EQ(unsupported.load(), 5u);
+  auto malformed = entry({0x77000006}, 7);
+  malformed.mutable_end_marker_relays(0)->set_peer_address(std::string(16, '\x01'));
+  EXPECT_FALSE(upf::datapath::DecodeFteidEntry(malformed).has_value()) << "mixed families";
+  EXPECT_FALSE(upf::datapath::DecodeFteidEntry(entry({0x77000006}, 0)).has_value());
 }
 
 using upf::datapath::EndMarkerEvent;

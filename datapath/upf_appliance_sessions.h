@@ -187,13 +187,11 @@ std::expected<upf::datapath::FteidId, std::string> DecodeFteidKey(const upf::pb:
 upf::pb::FteidKey EncodeFteidKey(const upf::datapath::FteidId &id);
 std::expected<Tunnel, std::string> DecodeTunnel(const upf::pb::TunnelEntry &value);
 upf::pb::TunnelEntry EncodeTunnel(const Tunnel &tunnel);
-// End Marker relays (an F-TEID entry's end_marker_relays) are not ported to
-// the session-major path: a session that names them is accepted -- refusing
-// it would fail a Mode 4/6 handover's whole Session Modification -- its
-// F-TEIDs carry none, and each relay is added to `unsupported_relays` once the
-// session decodes (a refused one counts nothing).
-std::expected<SessionValue, std::string> DecodeSession(const upf::pb::UpfSession &session,
-                                                       std::atomic<uint64_t> &unsupported_relays);
+// Each F-TEID entry decodes as GtpuDecap's does (fteid_codec.h), its End
+// Marker relays included: the packet path relays a received End Marker
+// through them, and an update that changes a kept F-TEID's relays replaces
+// them in the same transaction.
+std::expected<SessionValue, std::string> DecodeSession(const upf::pb::UpfSession &session);
 
 class SessionResource final : public bess::dataplane::Resource {
  public:

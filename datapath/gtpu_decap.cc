@@ -26,6 +26,7 @@
 #include "utils/endian.h"
 #include "utils/dpdk_memory.h"
 #include "utils/ether.h"
+#include "fteid_codec.h"
 #include "gtpu_admission.h"
 #include "worker.h"
 namespace dataplane = bess::dataplane;
@@ -95,30 +96,9 @@ CommandResponse GtpuDecap::Init(const upf::pb::GtpuDecapArg &arg) {
           },
           [](const upf::pb::FteidEntry &value)
               -> std::expected<std::any, std::string> {
-            if (value.direction() > 1)
-              return std::unexpected("direction must be 0 (UL) or 1 (DL)");
-            if (value.context_id() == 0)
-              return std::unexpected("context_id must be nonzero");
-            upf::datapath::FteidRecord record{
-                static_cast<uint8_t>(value.direction()), value.context_id(), {}};
-            for (const auto &relay : value.end_marker_relays()) {
-              const size_t length = relay.local_address().size();
-              if (relay.teid() == 0 || (length != 4 && length != 16) ||
-                  relay.peer_address().size() != length)
-                return std::unexpected(
-                    "an end_marker_relays entry needs a teid and a local and peer "
-                    "address of one family (4 or 16 bytes)");
-              upf::datapath::EndMarkerRelay r;
-              r.teid = relay.teid();
-              r.family = length == 4 ? 4 : 6;
-              std::memcpy(r.local.data() + 16 - length,
-                          relay.local_address().data(), length);
-              std::memcpy(r.peer.data() + 16 - length,
-                          relay.peer_address().data(), length);
-              r.transport_route_domain = relay.transport_route_domain();
-              record.relays.push_back(r);
-            }
-            return std::any(std::move(record));
+            auto record = upf::datapath::DecodeFteidEntry(value);
+            if (!record) return std::unexpected(record.error());
+            return std::any(std::move(*record));
           },
           [this](const auto &visit) {
             resource_->ForEach([&visit](const upf::datapath::FteidId &id,
@@ -137,19 +117,7 @@ CommandResponse GtpuDecap::Init(const upf::pb::GtpuDecapArg &arg) {
               key.set_local_address(
                   reinterpret_cast<const char *>(id.data() + off),
                   id[4] == 4 ? 4 : 16);
-              upf::pb::FteidEntry value;
-              value.set_direction(record.direction);
-              value.set_context_id(record.context_id);
-              for (const auto &r : record.relays) {
-                const size_t length = r.family == 4 ? 4 : 16;
-                auto *relay = value.add_end_marker_relays();
-                relay->set_teid(r.teid);
-                relay->set_local_address(
-                    reinterpret_cast<const char *>(r.local.data() + 16 - length), length);
-                relay->set_peer_address(
-                    reinterpret_cast<const char *>(r.peer.data() + 16 - length), length);
-                relay->set_transport_route_domain(r.transport_route_domain);
-              }
+              const upf::pb::FteidEntry value = upf::datapath::EncodeFteidEntry(record);
               visit(key, value);
             });
           }));

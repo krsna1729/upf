@@ -93,9 +93,8 @@ enum class Reason : size_t {
   kNeighborTxFull, kNeighborAlloc, kNeighborPublish, kBufferEvicted,
   kBufferExpired, kBufferDropped, kBufferRequestFull, kBufferStateFull,
   kNeighborConsumed,
-  // Not a packet: an End Marker relay an F-TEID entry named, which the
-  // appliance does not perform yet (upf_appliance_fteid.h).
-  kEndMarkerRelayUnsupported,
+  // Not a packet: an End Marker relay no packet buffer was left for.
+  kEndMarkerRelayUnsent,
   kSessionGone,
   kCount
 };
@@ -150,6 +149,10 @@ class UpfAppliance : public Module {
   bool SlowIngress(Context *, bess::PacketRef, uint16_t ingress, uint16_t vlan, State &);
   void ControlGtpu(Context *, bess::PacketRef, State &);
   void Transport(bess::PacketBatch *, State *, size_t);
+  // The relays of the burst's End Markers (`markers`, positions in the burst
+  // whose F-TEID lookup is hits/values), as new frames through Transport,
+  // emitted after the burst's own frames.
+  void RelayEndMarkers(Context *, uint64_t markers, uint64_t hits, const uint64_t *values);
   void ClassifyPdr(bess::PacketBatch *, State *, size_t, bool downlink);
   void MeterCountRoute(Context *, bess::PacketBatch *, State *, size_t);
   void Finish(Context *, bess::PacketBatch *, State *, size_t);

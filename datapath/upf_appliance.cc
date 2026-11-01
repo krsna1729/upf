@@ -223,7 +223,7 @@ CommandResponse UpfAppliance::CommandGetDrops(const bess::pb::EmptyArg &) {
     "arp_unknown", "nd_unknown", "neighbor_input_full", "neighbor_tx_full", "neighbor_alloc",
     "neighbor_publish", "buffer_evicted", "buffer_expired", "buffer_dropped",
     "buffer_request_full", "buffer_state_full", "neighbor_consumed",
-    "end_marker_relay_unsupported", "session_gone"};
+    "end_marker_relay_unsent", "session_gone"};
   static_assert(std::size(names) == static_cast<size_t>(Reason::kCount));
   upb::UpfApplianceCommandGetDropsResponse out;
   for (size_t i = 0; i < std::size(names); ++i) {
