@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <thread>
 
 #include "dataplane/resource.h"
@@ -306,6 +307,44 @@ TEST(SessionStore, InsertUpdateEraseDriveTheTablesAndVersions) {
   EXPECT_FALSE(s.fteids->Contains(dp::EncodeKey(Image(false).fteids[0].id)));
   EXPECT_EQ(s.sessions->Active(kSession), SessionResource::kGone);
   EXPECT_FALSE(s.sessions->Contains(dp::EncodeKey(kSession)));
+}
+
+// The session-major path does not relay End Markers yet. A session whose
+// F-TEIDs name relays is still applied -- a refusal would fail the whole
+// Session Modification of a Mode 4/6 handover -- and each relay is counted,
+// not kept: the modification's three relays commit, the count reads three,
+// the session reads back with none, and a refused session counts nothing.
+TEST(SessionStore, AModificationWithRelaysCommitsAndCountsEachRelay) {
+  Store s;
+  ASSERT_TRUE(Applied(s.Put(Image(false))));
+  upf::pb::UpfSession wire;
+  s.sessions->ForEachLive([&wire](uint32_t id, const upf::pb::UpfSession &value) {
+    if (id == kSession) wire = value;
+  });
+  ASSERT_EQ(wire.fteids_size(), 1);
+  for (uint32_t i = 0; i < 3; ++i) {
+    auto *r = wire.mutable_fteids(0)->mutable_entry()->add_end_marker_relays();
+    r->set_teid(0x77000001 + i);
+    r->set_local_address(std::string("\xc0\x00\x02\x01", 4));
+    r->set_peer_address(std::string("\xc6\x33\x64\x05", 4));
+    r->set_transport_route_domain(1);
+  }
+  std::atomic<uint64_t> unsupported{0};
+  auto decoded = upf::appliance::DecodeSession(wire, unsupported);
+  ASSERT_TRUE(decoded.has_value()) << decoded.error();
+  EXPECT_EQ(unsupported.load(), 3u);
+  ASSERT_TRUE(Applied(s.Put(*decoded)));
+  EXPECT_TRUE(s.fteids->Contains(dp::EncodeKey(Image(false).fteids[0].id)));
+  upf::pb::UpfSession back;
+  s.sessions->ForEachLive([&back](uint32_t id, const upf::pb::UpfSession &value) {
+    if (id == kSession) back = value;
+  });
+  ASSERT_EQ(back.fteids_size(), 1);
+  EXPECT_EQ(back.fteids(0).entry().end_marker_relays_size(), 0);
+
+  wire.mutable_fteids(0)->mutable_entry()->set_direction(2);
+  EXPECT_FALSE(upf::appliance::DecodeSession(wire, unsupported).has_value());
+  EXPECT_EQ(unsupported.load(), 3u);
 }
 
 TEST(SessionStore, OwnershipAndShapeRefusals) {

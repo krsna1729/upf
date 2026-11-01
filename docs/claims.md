@@ -28,11 +28,11 @@ No evidence in this tree.
 
 ### status-45 · TS 29.244 V16.9.1 §8.2.64 · gap
 
-the appliance target counts, but does not perform, End Marker relays
+the appliance and session-major targets count, but do not perform, End Marker relays
 
-the appliance target does not relay End Markers yet: `UpfAppliance` accepts an F-TEID admission entry's `end_marker_relays` -- refusing it would fail the whole Session Modification of a Mode 4 or Mode 6 handover -- and counts each relay it names in `get_drops`' `end_marker_relay_unsupported` (one warning per such entry), but neither stores nor performs it; the graph target's `GtpuDecap` relay (status-44) is not ported to the appliance's packet path
+the appliance and session-major targets do not relay End Markers yet: `UpfAppliance` accepts an F-TEID admission entry's `end_marker_relays`, and `UpfSessionAppliance` a session whose F-TEIDs name them -- refusing either would fail the whole Session Modification of a Mode 4 or Mode 6 handover -- and counts each relay in `get_drops`' `end_marker_relay_unsupported` (one warning per such entry or session), but neither stores nor performs it; the graph target's `GtpuDecap` relay (status-44) is not ported to either packet path
 
-on `-target appliance`, the target RAN, the target UPF or an upstream I-UPF of a Mode 4/6 handover sees no End Marker on its tunnel and falls back to its own timer before switching to the new path
+on `-target appliance` and `-target session-major`, the target RAN, the target UPF or an upstream I-UPF of a Mode 4/6 handover sees no End Marker on its tunnel and falls back to its own timer before switching to the new path
 
 No evidence in this tree.
 

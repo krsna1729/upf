@@ -616,8 +616,16 @@ CommandResponse UpfAppliance::InitSessions(
             if (key.session_id() == 0) return std::unexpected("session id 0 names no session");
             return dataplane::EncodeKey(key.session_id());
           },
-          [](const upf::pb::UpfSession &value) -> std::expected<std::any, std::string> {
-            auto decoded = DecodeSession(value);
+          [this](const upf::pb::UpfSession &value) -> std::expected<std::any, std::string> {
+            int relays = 0;
+            for (const auto &f : value.fteids()) relays += f.entry().end_marker_relays_size();
+            if (relays > 0)
+              LOG(WARNING) << name() << ": a session's F-TEIDs name " << relays
+                           << " End Marker relay(s); the session-major appliance does not relay "
+                              "End Markers yet, so they are counted "
+                              "(end_marker_relay_unsupported), not performed";
+            auto decoded = DecodeSession(
+                value, reasons_[static_cast<size_t>(Reason::kEndMarkerRelayUnsupported)]);
             if (!decoded) return std::unexpected(decoded.error());
             return std::any(std::move(*decoded));
           },
