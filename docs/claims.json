@@ -2796,7 +2796,7 @@
    },
    "clause": "8.2.64",
    "part": "procedures",
-   "title": "the appliance target does not relay End Markers yet: `UpfAppliance` accepts an F-TEID admission entry's `end_marker_relays` -- refusing it would fail the whole Session Modification of a Mode 4 or Mode 6 handover -- and counts each relay it names in `get_drops`' `end_marker_relay_unsupported` (one warning per such entry), but neither stores nor performs it; the graph target's `GtpuDecap` relay (status-44) is not ported to the appliance's packet path",
+   "title": "the appliance and session-major targets do not relay End Markers yet: `UpfAppliance` accepts an F-TEID admission entry's `end_marker_relays`, and `UpfSessionAppliance` a session whose F-TEIDs name them -- refusing either would fail the whole Session Modification of a Mode 4 or Mode 6 handover -- and counts each relay in `get_drops`' `end_marker_relay_unsupported` (one warning per such entry or session), but neither stores nor performs it; the graph target's `GtpuDecap` relay (status-44) is not ported to either packet path",
    "declared": "",
    "spec": "TS 29.244",
    "messages": [
@@ -2804,17 +2804,17 @@
    ],
    "message": "End Marker and its reception report",
    "statement": "Table 8.2.64-1 NOTE 2: \"The SGW-U/I-UPF shall store the GTP-U message type for a GTP-U signalling message which is required to be forwarded, e.g. for an End Marker message.\"",
-   "detail": "the appliance target does not relay End Markers yet: `UpfAppliance` accepts an F-TEID admission entry's `end_marker_relays` -- refusing it would fail the whole Session Modification of a Mode 4 or Mode 6 handover -- and counts each relay it names in `get_drops`' `end_marker_relay_unsupported` (one warning per such entry), but neither stores nor performs it; the graph target's `GtpuDecap` relay (status-44) is not ported to the appliance's packet path",
-   "effect": "on `-target appliance`, the target RAN, the target UPF or an upstream I-UPF of a Mode 4/6 handover sees no End Marker on its tunnel and falls back to its own timer before switching to the new path",
+   "detail": "the appliance and session-major targets do not relay End Markers yet: `UpfAppliance` accepts an F-TEID admission entry's `end_marker_relays`, and `UpfSessionAppliance` a session whose F-TEIDs name them -- refusing either would fail the whole Session Modification of a Mode 4 or Mode 6 handover -- and counts each relay in `get_drops`' `end_marker_relay_unsupported` (one warning per such entry or session), but neither stores nor performs it; the graph target's `GtpuDecap` relay (status-44) is not ported to either packet path",
+   "effect": "on `-target appliance` and `-target session-major`, the target RAN, the target UPF or an upstream I-UPF of a Mode 4/6 handover sees no End Marker on its tunnel and falls back to its own timer before switching to the new path",
    "extra": [
     {
      "name": "evidence",
-     "value": "`datapath/gtpu_datapath_test.cc` (`ApplianceFteid.AModificationWithRelaysCommitsAndCountsEachRelay`: an entry naming two relays and its modification naming three commit, the count reaches five, and the record the packet path reads carries none)"
+     "value": "`datapath/gtpu_datapath_test.cc` (`ApplianceFteid.AModificationWithRelaysCommitsAndCountsEachRelay`: an entry naming two relays and its modification naming three commit, the count reaches five, and the record the packet path reads carries none); `datapath/upf_appliance_sessions_test.cc` (`SessionStore.AModificationWithRelaysCommitsAndCountsEachRelay`: a session update naming three relays commits, the count reads three, the session reads back with none, a refused session counts nothing)"
     }
    ],
    "kind": "conformance",
    "block": 8,
-   "claim": "the appliance target counts, but does not perform, End Marker relays",
+   "claim": "the appliance and session-major targets count, but do not perform, End Marker relays",
    "spec_version": "16.9.1",
    "release": "16",
    "file": "docs/spec/29.244-v16.9.1.txt",

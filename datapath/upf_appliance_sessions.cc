@@ -229,13 +229,16 @@ upf::pb::TunnelEntry EncodeTunnel(const Tunnel &tunnel) {
   return value;
 }
 
-std::expected<SessionValue, std::string> DecodeSession(const upf::pb::UpfSession &in) {
+std::expected<SessionValue, std::string> DecodeSession(const upf::pb::UpfSession &in,
+                                                       std::atomic<uint64_t> &unsupported_relays) {
   SessionValue v;
+  uint64_t relays = 0;
   for (const auto &f : in.fteids()) {
     auto id = DecodeFteidKey(f.key());
     if (!id) return std::unexpected("F-TEID: " + id.error());
     if (f.entry().direction() > 1) return std::unexpected("F-TEID direction must be 0 (UL) or 1 (DL)");
     v.fteids.push_back({*id, {static_cast<uint8_t>(f.entry().direction()), f.entry().context_id()}});
+    relays += static_cast<uint64_t>(f.entry().end_marker_relays_size());
   }
   for (const auto &q : in.qers()) {
     auto qer = DecodeQer(q);
@@ -260,6 +263,7 @@ std::expected<SessionValue, std::string> DecodeSession(const upf::pb::UpfSession
     if (!pdr) return std::unexpected(pdr.error());
     v.pdrs.push_back(std::move(*pdr));
   }
+  if (relays != 0) unsupported_relays.fetch_add(relays, std::memory_order_relaxed);
   return v;
 }
 
