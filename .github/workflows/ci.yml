@@ -212,17 +212,29 @@ jobs:
           key: bess-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-v4
 
       # The plugin is small, but a cache saves meson setup on every run and
-      # keeps a pin bump's rebuild incremental.
+      # keeps a pin bump's rebuild incremental. The key hashes the plugin's
+      # sources, not datapath/build: hashed at save time the build output made
+      # every key unique, so no run ever hit one exactly. A fallback restore
+      # (restore-keys) may come from any branch's run, built after this
+      # checkout, so its objects can be newer than these sources and ninja
+      # would keep that branch's plugin; the build step touches the sources
+      # after a fallback, and ninja rebuilds what they make.
       - name: Restore plugin build
+        id: plugin-cache
         uses: actions/cache/restore@v6
         with:
           path: datapath/build
-          key: plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('datapath/**') }}-v1
+          key: plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('datapath/**', '!datapath/build/**') }}-v2
           restore-keys: |
             plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-
 
       - name: Build the plugin
+        env:
+          PLUGIN_CACHE_EXACT: ${{ steps.plugin-cache.outputs.cache-hit }}
         run: |
+          if [ -d datapath/build ] && [ "$PLUGIN_CACHE_EXACT" != true ]; then
+            find datapath -path datapath/build -prune -o -type f -exec touch {} +
+          fi
           # bess-dev.pc lives under stage/lib/pkgconfig or the host's multiarch
           # directory (lib/<triplet>/pkgconfig); find it rather than assuming.
           stage_pc=$(find "$PWD/build/bess/stage/lib" -type d -name pkgconfig | paste -sd: -)
@@ -235,10 +247,11 @@ jobs:
           ninja -C datapath/build
 
       - name: Save plugin build
+        if: steps.plugin-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: datapath/build
-          key: plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('datapath/**') }}-v1
+          key: plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('datapath/**', '!datapath/build/**') }}-v2
 
       - name: Gating lanes (push and pull request)
         if: github.event_name != 'schedule'
