@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -371,6 +372,23 @@ func TestABufferingFlowsOwnNumbersAreWrittenToTheStore(t *testing.T) {
 	if !erased {
 		t.Errorf("the deletion wrote no erase for %s's entry for action %d: the entry outlives the session",
 			flowsRes(cfg.Buffering), flow)
+	}
+}
+
+// TestTheBufferStoreCoversTheActionIdSpace holds deploy/buffer-path.yaml's
+// store against the ids the compiler keys its flows by. writeFlowEntry keys a
+// flow's entry by the PDR's ActionId, which the action pool hands out up to
+// MaxActions-1; the store's flows resource takes ids 1..flow_capacity and
+// refuses an entry past it (BESS PacketStoreArg.flow_capacity, BP-6), so a
+// store narrower than the action space refuses a buffering session's flow
+// entry once its ActionId lands above the capacity.
+func TestTheBufferStoreCoversTheActionIdSpace(t *testing.T) {
+	graph := filepath.Join("..", "..", "deploy", "buffer-path.yaml")
+	capacity := graphArg(t, graph, "buf", "flow_capacity")
+	highest := Config{}.withDefaults().MaxActions - 1
+	if uint64(capacity) < uint64(highest) {
+		t.Errorf("%s's store takes flow ids 1..%d; the compiler keys flows by ActionIds up to %d",
+			graph, capacity, highest)
 	}
 }
 

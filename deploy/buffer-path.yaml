@@ -171,9 +171,12 @@ modules:
   - name: cnt_buf
     mclass: UrrCount
     arg: {capacity: 65536}
+  # flow_capacity: the flows resource takes ids 1..flow_capacity, and its keys
+  # are ActionIds, so it covers the compiler's whole ActionId space (MaxActions,
+  # 1<<16, ids 1..65535). Declared rather than defaulted: it is a UPF decision.
   - name: buf
     mclass: PacketStore
-    arg: {key_attrs: ["action_id"], max_packets: 65536, max_packets_per_flow: 64, timeout_ms: 5000}
+    arg: {key_attrs: ["action_id"], max_packets: 65536, max_packets_per_flow: 64, timeout_ms: 5000, flow_capacity: 65536}
   - name: cnt_dl
     mclass: UrrCount
     arg: {capacity: 65536}
