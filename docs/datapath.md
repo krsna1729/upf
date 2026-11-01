@@ -115,6 +115,12 @@ per reason). Files: `upf_appliance.{h,cc}` (args, interface admission, commands)
 routers, resolvers, ARP/ND, transport routing, End Marker inputs), `_buffer.cc`
 (`PacketStore`), `_selftest.cc`.
 
+Not ported yet: the End Marker relay `GtpuDecap` performs on gate 3. The
+appliance accepts an F-TEID entry's `end_marker_relays` (a refusal would fail a
+Mode 4/6 handover's whole Session Modification), counts each one in
+`get_drops`' `end_marker_relay_unsupported`, and stores none
+(`upf_appliance_fteid.h`; claims status-45).
+
 Per burst: strip one VLAN tag; own ARP/NS is answered before the MAC is matched
 (slow path); interface match by (ingress gate, VLAN, destination MAC); N3/N9
 frames go through `ParseGtpuAdmission` and **one** F-TEID `LookupBatch`, then

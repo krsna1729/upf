@@ -5,12 +5,14 @@
 #include <algorithm>
 #include <any>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <span>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -27,6 +29,7 @@
 #include "utils/endian.h"
 #include "utils/dpdk_memory.h"
 #include "utils/ether.h"
+#include "upf_appliance_fteid.h"
 
 namespace {
 using bess::flow::SharedExactIndex;
@@ -629,6 +632,56 @@ TEST(FteidResource, AnUpsertReplacesTheEndMarkerRelays) {
   Publish(resource, key, 1, 7);
   EXPECT_EQ(relays_now(), nullptr);
   EXPECT_EQ(resource.LiveCount(), 1u);
+}
+
+// UpfAppliance does not relay End Markers yet. An F-TEID entry that names
+// relays is still admitted -- a refusal would fail the whole Session
+// Modification of a Mode 4/6 handover -- and each relay is counted, not
+// stored: the establishment's two and the modification's three come to five,
+// and the record the packet path reads carries none.
+TEST(ApplianceFteid, AModificationWithRelaysCommitsAndCountsEachRelay) {
+  TestIndex table(2);
+  ASSERT_NE(table.index, nullptr);
+  upf::datapath::FteidResource resource("upf/fteids", *table.index,
+                                        table.domain, 2);
+  const auto key = Key(1, 4, 77, 1);
+  std::atomic<uint64_t> unsupported{0};
+  auto entry = [](int relays, uint32_t context) {
+    upf::pb::FteidEntry e;
+    e.set_direction(1);
+    e.set_context_id(context);
+    for (int i = 0; i < relays; ++i) {
+      auto *r = e.add_end_marker_relays();
+      r->set_teid(0x77000001 + i);
+      r->set_local_address(std::string("\xc0\x00\x02\x01", 4));
+      r->set_peer_address(std::string("\xc6\x33\x64\x05", 4));
+      r->set_transport_route_domain(1);
+    }
+    return e;
+  };
+  auto apply = [&](const upf::pb::FteidEntry &e) {
+    auto value = upf::appliance::DecodeFteidEntry(e, unsupported);
+    ASSERT_TRUE(value.has_value()) << value.error();
+    auto reservation = resource.Reserve(bess::dataplane::Op::Upsert(
+        resource.name(), bess::dataplane::EncodeKey(key), std::move(*value)));
+    ASSERT_TRUE(reservation.has_value()) << reservation.error();
+    bess::dataplane::Retirer retirer;
+    reservation->staged->Publish(retirer);
+  };
+
+  apply(entry(2, 7));
+  EXPECT_EQ(unsupported.load(), 2u);
+  apply(entry(3, 7));
+  EXPECT_EQ(unsupported.load(), 5u);
+  EXPECT_EQ(resource.LiveCount(), 1u);
+  bool hit = false;
+  const uint64_t value = TableValue(*table.index, key, &hit);
+  ASSERT_TRUE(hit);
+  EXPECT_EQ(upf::datapath::FteidRelays(hit, value), nullptr);
+
+  // A refused entry counts nothing.
+  EXPECT_FALSE(upf::appliance::DecodeFteidEntry(entry(4, 0), unsupported).has_value());
+  EXPECT_EQ(unsupported.load(), 5u);
 }
 
 using upf::datapath::EndMarkerEvent;
