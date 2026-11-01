@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -178,11 +179,13 @@ func TestLiveSessionCarriesNothingOutsideAPortRange(t *testing.T) {
 	}()
 	// The uplink is not constrained by the downlink filter: its packets
 	// crossing is what says the session reached the packet path at all.
-	waitForPackets(t, ctx, client, "rt", 10*time.Second)
+	waitForPackets(t, ctx, client, "rt")
+	// The window is a count of the downlink source's packets, not a time: every
+	// one of them is a port-53 frame the 54-60 range must refuse.
 	before := gatePackets(t, ctx, client, "enc")
-	time.Sleep(time.Second)
+	produced := waitForSource(t, ctx, client, "src_dn")
 	if n := gatePackets(t, ctx, client, "enc") - before; n != 0 {
-		t.Errorf("a range of 54-60 let %v downlink packets to port 53 through", n)
+		t.Errorf("a range of 54-60 let %v of %v downlink packets to port 53 through", n, produced)
 	}
 }
 
@@ -231,8 +234,8 @@ func carriesPackets(t *testing.T, req *message.SessionEstablishmentRequest, cont
 		}
 	}()
 
-	up := waitForPackets(t, ctx, client, "rt", 10*time.Second)
-	down := waitForPackets(t, ctx, client, "enc", 10*time.Second)
+	up := waitForPackets(t, ctx, client, "rt")
+	down := waitForPackets(t, ctx, client, "enc")
 	t.Logf("uplink packets leaving toward N6: %v, downlink packets leaving toward N3: %v", up, down)
 	if up == 0 || down == 0 {
 		t.Errorf("a direction carried nothing: up %v, down %v", up, down)
@@ -341,27 +344,65 @@ func gatePacketsAt(t *testing.T, ctx context.Context, client *bess.Client, modul
 	return 0
 }
 
+// liveWait is the hang guard of a live test's waits. Each wait is on the
+// condition the test asserts (a counter reaching a count), so a run on a
+// loaded host only takes longer; this deadline only ends a run that would
+// never see it.
+const liveWait = 2 * time.Minute
+
+// waitUntil reads cond until it holds. Each reading is a round trip to the
+// daemon, so the loop is paced by the daemon's answers, not by a sleep; it
+// fails the test with what() if liveWait passes first.
+func waitUntil(t *testing.T, cond func() bool, what func() string) {
+	t.Helper()
+	deadline := time.Now().Add(liveWait)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("not within %s: %s", liveWait, what())
+		}
+	}
+}
+
+// sourceWindow is how many packets a source must produce for a window in
+// which a chain is expected to carry nothing: 2048 bursts of the graph's 32.
+const sourceWindow = 1 << 16
+
+// waitForSource waits until the source module has produced sourceWindow
+// packets more than when it was called, and returns how many it produced: the
+// window a "carried nothing" assertion is measured over is that count of the
+// source's packets, not an interval a busy host might fill with none.
+func waitForSource(t *testing.T, ctx context.Context, client *bess.Client, source string) float64 {
+	t.Helper()
+	start := gatePackets(t, ctx, client, source)
+	var now float64
+	waitUntil(t, func() bool {
+		now = gatePackets(t, ctx, client, source)
+		return now-start >= sourceWindow
+	}, func() string {
+		return fmt.Sprintf("%s produced %v packets, want %d: the graph's source stopped", source, now-start, sourceWindow)
+	})
+	return now - start
+}
+
 // waitForPackets waits until the module's output gate has counted a packet, or
 // fails with what that means: the source is running whether or not a session
 // exists, so a chain that never counts is a rule, an action, a meter, a route
 // or a tunnel record that did not reach the packet path.
-func waitForPackets(t *testing.T, ctx context.Context, client *bess.Client, module string, within time.Duration) float64 {
+func waitForPackets(t *testing.T, ctx context.Context, client *bess.Client, module string) float64 {
 	t.Helper()
 	// The counters are cumulative: a test that is not the daemon's first (the
 	// prefix arm) judges its session by growth, so the baseline is taken here.
 	before := gatePackets(t, ctx, client, module)
-	deadline := time.Now().Add(within)
-	for {
-		if n := gatePackets(t, ctx, client, module); n > before {
-			return n - before
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s emitted no packet within %s: the graph's source runs continuously, "+
-				"so the session's state did not reach the packet path; output counters: %v",
-				module, within, chainCounters(t, ctx, client))
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	var n float64
+	waitUntil(t, func() bool {
+		n = gatePackets(t, ctx, client, module)
+		return n > before
+	}, func() string {
+		return fmt.Sprintf("%s emitted no packet: the graph's source runs continuously, "+
+			"so the session's state did not reach the packet path; output counters: %v",
+			module, chainCounters(t, ctx, client))
+	})
+	return n - before
 }
 
 // pathUrrEstablishment is pathEstablishment with the URR given measuring the
@@ -475,14 +516,12 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 	// baseline's own reading happens between the two samples) is what the next
 	// evaluation reports.
 	start := octetsOf(t, ctx, client, "cnt_ul")
-	deadline := time.Now().Add(10 * time.Second)
-	for octetsOf(t, ctx, client, "cnt_ul") < start+4*quota {
-		if time.Now().After(deadline) {
-			t.Fatalf("the counter did not grow past the quota within 10s: %d octets", octetsOf(t, ctx, client, "cnt_ul"))
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	counted = octetsOf(t, ctx, client, "cnt_ul")
+	waitUntil(t, func() bool {
+		counted = octetsOf(t, ctx, client, "cnt_ul")
+		return counted >= start+4*quota
+	}, func() string {
+		return fmt.Sprintf("the counter did not grow past the quota: %d octets from %d", counted, start)
+	})
 
 	reports, err := c.Evaluate(ctx, upFSEID(t, resp), time.Now())
 	if err != nil {
@@ -501,24 +540,36 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 			report.Up.Octets, quota)
 	}
 
-	// The enforcement reached the packet path: over the same interval the
-	// source keeps producing and the meter sees nothing.
-	produced := gatePackets(t, ctx, client, "src_up")
+	// The enforcement reached the packet path: while the source produces
+	// sourceWindow more packets, the meter sees none of them.
+	//
+	// The window opens once the worker has finished every batch it classified
+	// before the commit. The commit publishes the drop and returns; it starts
+	// the grace period that frees the old rule without waiting for it
+	// (TransactionEngine::Apply), so a batch already past the classifier
+	// leaves through the meter with the rule it looked up -- one burst, seen
+	// whenever the worker is preempted mid-batch. That batch left the source
+	// before the commit, so it is in this reading; one worker runs a source's
+	// batches one after another, so a source count past it is a later batch,
+	// and every earlier one has left the meter.
+	fence := gatePackets(t, ctx, client, "src_up")
+	var moved float64
+	waitUntil(t, func() bool {
+		moved = gatePackets(t, ctx, client, "src_up")
+		return moved > fence
+	}, func() string {
+		return fmt.Sprintf("src_up stayed at %v packets: the graph's source stopped", moved)
+	})
 	forwarded := gatePackets(t, ctx, client, "mt_ul")
-	time.Sleep(500 * time.Millisecond)
-	producedAfter := gatePackets(t, ctx, client, "src_up")
-	forwardedAfter := gatePackets(t, ctx, client, "mt_ul")
-	if producedAfter == produced {
-		t.Fatalf("the graph's source stopped producing (%v packets): this test says nothing about the drop", produced)
-	}
-	if forwardedAfter != forwarded {
+	produced := waitForSource(t, ctx, client, "src_up")
+	if forwardedAfter := gatePackets(t, ctx, client, "mt_ul"); forwardedAfter != forwarded {
 		t.Errorf("after the quota ran out %v more packets reached the meter; "+
-			"the PDRs that name the URR must drop (source produced %v in the same interval)",
-			forwardedAfter-forwarded, producedAfter-produced)
+			"the PDRs that name the URR must drop (the source produced %v meanwhile)",
+			forwardedAfter-forwarded, produced)
 	}
 	t.Logf("the report: %d packets, %d octets, trigger %v; the source produced %v packets "+
 		"after the enforcement and the meter saw none",
-		report.Up.Packets, report.Up.Octets, report.Trigger, producedAfter-produced)
+		report.Up.Packets, report.Up.Octets, report.Trigger, produced)
 }
 
 // evaluateAt is Evaluate at a chosen instant: the live arm of the reporting
@@ -657,8 +708,7 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 	// reading that is not torn.
 	const innerOctets = 37
 	var packets, octets uint64
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	waitUntil(t, func() bool {
 		counts := countersOf(t, ctx, client, "cnt_ul")
 		if len(counts) > 1 {
 			t.Fatalf("cnt_ul measures %d rules, and the session has one URR on one PDR: %v",
@@ -667,16 +717,12 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 		for _, count := range counts {
 			packets, octets = count[0], count[1]
 		}
-		if packets != 0 && octets == innerOctets*packets {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the uplink chain carried no packet the URR measures within 10s "+
-				"(or its octets never matched its packets: %d octets for %d packets); "+
-				"output counters: %v", octets, packets, chainCounters(t, ctx, client))
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		return packets != 0 && octets == innerOctets*packets
+	}, func() string {
+		return fmt.Sprintf("the uplink chain carried no packet the URR measures "+
+			"(or its octets never matched its packets: %d octets for %d packets); "+
+			"output counters: %v", octets, packets, chainCounters(t, ctx, client))
+	})
 
 	// The inner IPv4 packet's Total Length: the graph's uplink frame holds
 	// 10.45.0.2:5000 -> 8.8.8.8:53 with a 9-byte payload, 20 + 8 + 9. The
@@ -784,10 +830,11 @@ func instancedUplinkEstablishment(cpSEID uint64, ueIP string, upTEID uint32, ins
 // uplink streams, one per session (TEIDs 0x11223344 and 0x11223345, bursts 32
 // and 4), so the router's two output gates say which stream left by which exit:
 // the internet session's packets by gate 0, the ims session's by gate 2, which
-// is that instance's next hop. The window the exits are measured over is fixed
+// is that instance's next hop. The window the exits are measured over starts
 // once both are moving: a snapshot taken the instant the second stream starts
 // says nothing, and the ratio over a window is the streams' own 8 (measured
-// 8.00, three runs of 2 s).
+// 8.00, three runs of 2 s). The window is a count: it ends once the ims exit
+// has carried instanceWindow packets.
 //
 // The instance is what a deployment classifies each packet's flow by, and on
 // the uplink the packet's own tag is the tunnel it arrived on: one UE address
@@ -856,44 +903,65 @@ func TestLiveTwoInstancesRouteIndependently(t *testing.T) {
 	// Each stream leaves by its own instance's exit, and the two exits' counts
 	// say which is which: the streams' bursts differ by 8, so the internet
 	// session's gate must outgrow the ims one's. A single rule would send both
-	// streams to one gate.
-	beforeN6 := gatePacketsAt(t, ctx, client, "rt", "0")
-	beforeN9 := gatePacketsAt(t, ctx, client, "rt", "2")
-	deadline := time.Now().Add(10 * time.Second)
+	// streams to one gate. Both exits are read from one metrics snapshot, so
+	// the pair is one instant's.
+	exits := func() (n6, n9 float64) {
+		samples, err := client.SDK().Metrics(ctx)
+		if err != nil {
+			t.Fatalf("reading metrics: %v", err)
+		}
+		seen := 0
+		for _, s := range samples {
+			labels := s.GetLabels()
+			if s.GetName() != "bess_gate_packets_total" || labels["module"] != "rt" || labels["direction"] != "out" {
+				continue
+			}
+			switch labels["gate"] {
+			case "0":
+				n6, seen = s.GetValue(), seen+1
+			case "2":
+				n9, seen = s.GetValue(), seen+1
+			}
+		}
+		if seen != 2 {
+			t.Fatalf("the daemon reports %d of rt's output gates 0 and 2: %v", seen, chainCounters(t, ctx, client))
+		}
+		return n6, n9
+	}
+	beforeN6, beforeN9 := exits()
 	var n6, n9 float64
-	for {
-		n6 = gatePacketsAt(t, ctx, client, "rt", "0") - beforeN6
-		n9 = gatePacketsAt(t, ctx, client, "rt", "2") - beforeN9
-		if n6 > 0 && n9 > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the two instances' exits carried %v and %v packets in 10s, want both moving: %v",
-				n6, n9, chainCounters(t, ctx, client))
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitUntil(t, func() bool {
+		n6, n9 = exits()
+		return n6 > beforeN6 && n9 > beforeN9
+	}, func() string {
+		return fmt.Sprintf("the two instances' exits carried %v and %v packets, want both moving: %v",
+			n6-beforeN6, n9-beforeN9, chainCounters(t, ctx, client))
+	})
 	// Both exits are moving, so the two streams' own rates can be compared over
-	// a fixed window instead of at the instant the second one starts: the
-	// streams' bursts differ by 8, and a single rule would send both to one
-	// gate, whichever session wrote last.
-	window := 2 * time.Second
+	// a window instead of at the instant the second one starts: the streams'
+	// bursts differ by 8, and a single rule would send both to one gate,
+	// whichever session wrote last.
+	const instanceWindow = 1 << 16
 	startN6, startN9 := n6, n9
-	time.Sleep(window)
-	winN6 := gatePacketsAt(t, ctx, client, "rt", "0") - beforeN6 - startN6
-	winN9 := gatePacketsAt(t, ctx, client, "rt", "2") - beforeN9 - startN9
-	if winN6 == 0 || winN9 == 0 {
-		t.Fatalf("in %v the exits carried %v and %v packets, want both moving: %v",
-			window, winN6, winN9, chainCounters(t, ctx, client))
+	waitUntil(t, func() bool {
+		n6, n9 = exits()
+		return n9-startN9 >= instanceWindow
+	}, func() string {
+		return fmt.Sprintf("the ims exit carried %v packets, want %d: %v", n9-startN9, instanceWindow, chainCounters(t, ctx, client))
+	})
+	winN6, winN9 := n6-startN6, n9-startN9
+	if winN6 == 0 {
+		t.Fatalf("while the ims exit carried %v packets the internet exit carried none: %v",
+			winN9, chainCounters(t, ctx, client))
 	}
-	t.Logf("in %v: gate 0 carried %v packets, gate 2 %v, ratio %.2f (the streams' bursts differ by 8)",
-		window, winN6, winN9, winN6/winN9)
+	t.Logf("gate 0 carried %v packets while gate 2 carried %v, ratio %.2f (the streams' bursts differ by 8)",
+		winN6, winN9, winN6/winN9)
 	// The ratio is not itself the proof of separation -- the two rules' keys
 	// are -- but it says both streams are flowing and neither is leaking onto
 	// the other's exit, which is what a single shared rule would do. Measured
-	// 8.00 on three runs of this window.
+	// 8.00 on three runs of a 2 s window.
 	if ratio := winN6 / winN9; ratio < 6 || ratio > 10 {
-		t.Errorf("the exits carried %v and %v packets in %v (ratio %.2f), want the streams' own 8: one exit per stream",
-			winN6, winN9, window, ratio)
+		t.Errorf("the exits carried %v and %v packets (ratio %.2f), want the streams' own 8: one exit per stream",
+			winN6, winN9, ratio)
 	}
 }
