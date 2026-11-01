@@ -4,6 +4,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/krsna1729/upf/internal/scaletest"
 )
 
 // The contexts pool spans 2^31 and has no grace: its walk outlives the
@@ -28,26 +30,22 @@ func TestAZeroGracePoolReusesAReleasedIDBeforeTheWalkEnds(t *testing.T) {
 // id, a timestamp and a map entry.
 func TestAGracePoolHoldsAReleasedIDInAtMostEightBytes(t *testing.T) {
 	const n = 4 << 20
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	p := newIDPool(2*n, time.Second)
-	now := time.Unix(0, 0)
-	p.now = func() time.Time { return now }
-	for range n {
-		id, err := p.alloc()
-		if err != nil {
-			t.Fatal(err)
+	var p *idPool
+	perID := scaletest.HeapPerItem(t, n, func(n int) {
+		p = newIDPool(uint32(2*n), time.Second)
+		now := time.Unix(0, 0)
+		p.now = func() time.Time { return now }
+		for range n {
+			id, err := p.alloc()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.release(id)
 		}
-		p.release(id)
-	}
-	runtime.GC()
-	runtime.ReadMemStats(&after)
+	})
 	if len(p.freed) != n {
 		t.Fatalf("the pool queued %d of %d releases", len(p.freed), n)
 	}
-	perID := float64(int64(after.HeapInuse)-int64(before.HeapInuse)) / n
-	t.Logf("%.1f B per released id", perID)
 	if perID > 8 {
 		t.Errorf("the pool holds %.1f B per released id, want at most 8", perID)
 	}

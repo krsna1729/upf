@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"github.com/krsna1729/upf/internal/bess"
+	"github.com/krsna1729/upf/internal/scaletest"
 )
 
 // recorder is an Applier that keeps every transaction, so a test can read what
@@ -50,6 +51,10 @@ type recorder struct {
 	// usage-report tick's cost is measured by (one read per module rather than
 	// one per session, report_test.go).
 	calls []readCall
+	// ops counts what the fake served, by name: "Apply" for each transaction
+	// it took, and a counting module's name for each reading of it (a peek
+	// included), so a scale test bounds them with scaletest.RPCsAtMost.
+	ops scaletest.Ops
 	// entries is the fake's own state for the counting modules: what Apply has
 	// written and not erased (see Apply).
 	entries map[string]bool
@@ -130,6 +135,7 @@ func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 		r.entries[key] = true
 	}
 	r.txns = append(r.txns, changes)
+	r.ops.Add("Apply")
 	return nil
 }
 
@@ -157,6 +163,7 @@ type readCall struct {
 // recorded either way, so a test can count them.
 func (r *recorder) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
 	r.calls = append(r.calls, readCall{module: module, rules: len(actionIDs)})
+	r.ops.Add(module)
 	if r.readFail != nil {
 		return nil, r.readFail
 	}

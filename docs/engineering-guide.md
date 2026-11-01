@@ -85,9 +85,8 @@ Each miss below passed every unit test and lane, and showed only at
     counts. Each audit finding above names such a test.
 12. **Justify each remaining O(N) step with `// scale: <bound>`** on the
     line or the line above: what bounds N (config, a constant, a module
-    count) and the test. A planned gate (BESS `tools/check_scaling.py`, with
-    a Go helper package `internal/scaletest`) will enforce it; neither
-    exists yet.
+    count) and the test. A planned gate (BESS `tools/check_scaling.py`) will
+    enforce it in this repository; it does not run here yet.
 
 ## 3. 3GPP compliance
 
@@ -227,3 +226,4 @@ entries, tick, or packet path:
 - [ ] Derived keys are built once, compact, without `fmt.Sprint` or JSON.
 - [ ] Plugin memory is admitted and written; nothing is sized for 64 workers by default.
 - [ ] Each remaining O(N) step has a `// scale:` bound and a count-based test.
+- [ ] Count-based tests use `internal/scaletest`: `Ops` and `RPCsAtMost` for a fake's calls, `AllocsFollowChange` at n = 64 and 8000, `HeapPerItem`, `MessageBytesAtMost` for the 64 MiB reply bound.

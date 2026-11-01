@@ -13,6 +13,8 @@ import (
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/krsna1729/upf/internal/scaletest"
 )
 
 // TestUintFieldOnASchemaWithoutIt is the fallback a daemon running an older
@@ -178,20 +180,18 @@ func countArgFiles(t *testing.T, withTable bool) *protoregistry.Files {
 // rule, so building a get_counts argument costs a constant per call, not an
 // allocation per ActionId (an id boxed into an interface is one).
 func TestACountRequestDoesNotAllocatePerRule(t *testing.T) {
-	const rules = 10_000
 	client := &Client{files: countArgFiles(t, true)}
-	ids := make([]uint32, rules)
-	for i := range ids {
-		ids[i] = uint32(1000 + i)
-	}
-	allocs := testing.AllocsPerRun(10, func() {
-		if _, _, err := client.countRequest("upf/counters_ul", true, ids); err != nil {
-			t.Fatal(err)
+	scaletest.AllocsFollowChange(t, func(rules int) func() {
+		ids := make([]uint32, rules)
+		for i := range ids {
+			ids[i] = uint32(1000 + i)
 		}
-	})
-	if allocs > rules/100 {
-		t.Errorf("an argument naming %d rules made %.0f allocations, want ≤ %d", rules, allocs, rules/100)
-	}
+		return func() {
+			if _, _, err := client.countRequest("upf/counters_ul", true, ids); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}, [2]int{64, 8000}, 0)
 }
 
 // TestACountReplyDecodesWithOneAllocation: a get_counts reply is read off the

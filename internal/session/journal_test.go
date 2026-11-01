@@ -13,6 +13,8 @@ import (
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
+
+	"github.com/krsna1729/upf/internal/scaletest"
 )
 
 // checkpointJournal opens a fresh journal for a test and returns it with the
@@ -327,9 +329,7 @@ func TestTheCheckpointHoldsSessionsNotHistory(t *testing.T) {
 	if err := c2.Restore(restart); err != nil {
 		t.Fatalf("replaying the checkpoint: %v", err)
 	}
-	if applies := len(rec.txns); applies > 11 {
-		t.Errorf("the replay applied %d transactions for 10 sessions, want at most 11", applies)
-	}
+	scaletest.RPCsAtMost(t, &rec.ops, "Apply", 11)
 	if held := c2.Stats().Sessions; held != 10 {
 		t.Errorf("the replay restored %d sessions, want 10", held)
 	}
@@ -386,16 +386,17 @@ func TestACompactedCheckpointKeepsWhatTheModificationsMade(t *testing.T) {
 	}
 }
 
-// syncCounter is a journal file that counts its fsyncs. The first one waits
-// until every writer has written, which is the moment a group commit is for:
-// the writers queued behind one fsync share the next. (The wait gives up
-// after a second, so a journal that syncs under the lock its writes take
-// fails the count instead of hanging.)
+// syncCounter is a journal file that counts its fsyncs in ops, as "Sync". The
+// first one waits until every writer has written, which is the moment a group
+// commit is for: the writers queued behind one fsync share the next. (The wait
+// gives up after a second, so a journal that syncs under the lock its writes
+// take fails the count instead of hanging.)
 type syncCounter struct {
-	mu            sync.Mutex
-	writes, syncs int
-	want          int
-	written       chan struct{}
+	mu      sync.Mutex
+	writes  int
+	want    int
+	written chan struct{}
+	ops     scaletest.Ops
 }
 
 func (f *syncCounter) Write(b []byte) (int, error) {
@@ -408,11 +409,7 @@ func (f *syncCounter) Write(b []byte) (int, error) {
 }
 
 func (f *syncCounter) Sync() error {
-	f.mu.Lock()
-	f.syncs++
-	first := f.syncs == 1
-	f.mu.Unlock()
-	if first {
+	if f.ops.Add("Sync") == 1 {
 		select {
 		case <-f.written:
 		case <-time.After(time.Second):
@@ -445,7 +442,5 @@ func TestTheJournalSharesItsFsyncs(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
-	if f.syncs > 2 {
-		t.Errorf("%d records took %d fsyncs, want at most 2", writers, f.syncs)
-	}
+	scaletest.RPCsAtMost(t, &f.ops, "Sync", 2)
 }
