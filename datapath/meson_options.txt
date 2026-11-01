@@ -1,0 +1,2 @@
+option('bench', type: 'boolean', value: false,
+       description: 'Build the A/B bench: its modules in the plugin and the upf_ab client')

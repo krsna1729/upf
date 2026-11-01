@@ -625,6 +625,15 @@ decap, responder, and encap paths, including malformed and unknown G-PDUs.
 must use the current endpoint-keyed graph; measurements from the earlier
 bare-TEID admission path are not comparable.
 
+`ci/bench-ab.sh` runs the A/B bench (`datapath/bench/upf_ab.cc`, built with
+`meson setup -Dbench=true`): N sessions programmed through the SDK, seeded
+uplink and downlink streams from `UpfBenchGen` (`datapath/bench/bench_gen.cc`)
+into either the graph or `UpfAppliance`, and `UpfHashSink` digests. It compares
+the graph with the appliance, or a parent build with a commit
+(`--baseline-plugin`), in alternating rounds, each arm in its own daemon, and
+times nothing until both arms give identical output digests and per-rule
+counts. The bench modules exist only in a `-Dbench=true` build.
+
 The fixed graph proof is `deploy/smoke-gtpu.yaml` plus `ci/smoke-gtpu.sh`: Dumps
 check packet bytes, and `MetadataTest` modules force offsets for write-only
 attributes. BESS gate capture is the runtime tap when needed; the graph does not

@@ -407,3 +407,38 @@ message UpfApplianceCommandGetDropsResponse {
   message DropCount { string reason = 1; uint64 count = 2; }
   repeated DropCount drops = 1;
 }
+
+// The A/B bench's modules (bench/bench_gen.cc; built with -Dbench=true).
+// UpfBenchGen spreads one template frame over N sessions (uniform random).
+message UpfBenchGenArg {
+  uint32 mode = 1;            // 0 uplink G-PDU, 1 downlink N6 frame
+  uint32 sessions = 2;        // N
+  uint32 teid_base = 3;       // session s: TEID teid_base + s
+  uint32 ue_base = 4;         // session s: UE IPv4 ue_base + s
+  uint32 miss_per_mille = 5;  // packets addressed to session N + s instead
+  uint64 seed = 6;
+}
+
+// Restart the generator stream; with limit > 0 it forwards exactly that many
+// packets and frees the rest.
+message UpfBenchGenCommandArmArg {
+  uint64 seed = 1;
+  uint64 limit = 2;
+}
+message UpfBenchGenCommandArmResponse {
+  uint64 forwarded = 1;  // before the restart
+}
+
+// UpfHashSink: an order-insensitive digest of every packet the sink took
+// (count, sum and xor of a 64-bit hash of the bytes).
+message UpfHashSinkArg {}
+message UpfHashSinkCommandDigestArg {
+  bool reset = 1;
+  bool enable = 2;  // hash the packets from now on (else only free them)
+}
+message UpfHashSinkCommandDigestResponse {
+  uint64 packets = 1;
+  uint64 sum = 2;
+  uint64 xsum = 3;
+  uint64 bytes = 4;
+}

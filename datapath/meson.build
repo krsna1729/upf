@@ -44,8 +44,13 @@ upf_proto = custom_target(
 # One plugin, one library: the modules are registered together (BESS_PLUGIN
 # names the library, ADD_MODULE the classes), and the manifest loads them by
 # class name from this single .so.
+# -Dbench=true adds the A/B bench's traffic and digest modules
+# (bench/bench_gen.cc) and builds its client (bench/upf_ab.cc); off by default,
+# so the shipped plugin carries no bench module.
+bench = get_option('bench')
 upf_datapath = shared_module(
   'upf_datapath',
+  (bench ? ['bench/bench_gen.cc'] : []) +
   ['arp_responder.cc', 'atsss_steer.cc', 'gtpu_decap.cc', 'gtpu_responder.cc', 'gtpu_encap.cc',
    'urr_count.cc',
    # UpfAppliance: the whole user plane in one module.
@@ -57,6 +62,19 @@ upf_datapath = shared_module(
   install: true,
   install_dir: modules_dir,
 )
+
+# The A/B bench (bench/upf_ab.cc): a BESS C++ SDK client that runs two plugin
+# builds (or the graph against the appliance) on identical seeded streams in
+# alternating rounds; ci/bench-ab.sh runs it.
+if bench
+  executable(
+    'upf_ab',
+    ['bench/upf_ab.cc'],
+    include_directories: include_directories('bench'),
+    dependencies: [dependency('bess-sdk', required: true), protobuf_dep],
+    link_args: ['-Wl,--disable-new-dtags'],
+  )
+endif
 
 # Focused parser, admission-key, F-TEID and ARP entries resource and outer-wire
 # unit tests, and the per-packet helpers the modules and UpfAppliance share
