@@ -54,6 +54,10 @@ and `color=green|yellow|red`; the graph arm retains its meter gate counters.
 Both test manifests include the production outer transport Router. This
 intentionally changes the old graph lane's outer IPv4 TTL expectation from
 64 to 63; the exact DSCP/header byte assertion is identical for both targets.
+The appliance manifests also carry `relay_tap`, a `UnixSocketPort` through
+which `TestLiveEndMarkerIsRelayedBehindItsGPDUs` writes one N3 burst (G-PDUs,
+then an End Marker) and reads back, in order, what N3 sends toward the
+relay's peer.
 
 
 | logical table | graph resource | appliance resource (`-appliance upf`) |
@@ -120,12 +124,17 @@ per reason). Files: `upf_appliance.{h,cc}` (args, interface admission, commands)
 routers, resolvers, ARP/ND, transport routing, End Marker inputs), `_buffer.cc`
 (`PacketStore`), `_selftest.cc`.
 
-Not ported yet: the End Marker relay `GtpuDecap` performs on gate 3. The
-appliance accepts an F-TEID entry's `end_marker_relays`, and the session-major
-appliance a session whose F-TEIDs name them (a refusal would fail a Mode 4/6
-handover's whole Session Modification); both count each one in `get_drops`'
-`end_marker_relay_unsupported` and store none (`upf_appliance_fteid.h`,
-`DecodeSession`; claims status-45).
+End Marker relay (TS 29.244 Table 8.2.64-1 NOTE 2), both layouts: an F-TEID
+entry's `end_marker_relays` decode as `GtpuDecap`'s do (`fteid_codec.h`; a
+session-major update replaces a kept F-TEID's relays when its tunnels move).
+An End Marker joins the burst's one F-TEID `LookupBatch`; it is recorded for
+REEMR (`drain_end_markers`) and dropped (`control_end_marker`), and each relay
+its entry names becomes a new End Marker frame with that tunnel's TEID, local
+and peer address, routed through the transport Router in its domain. The
+relays are emitted after the burst (`RelayEndMarkers`, after `Finish`), so a
+relay leaves behind the G-PDUs its burst carried ahead of it, as the graph's
+`em_relay` Queue has them. A relay no packet buffer is left for is counted as
+`end_marker_relay_unsent`.
 
 Per burst: strip one VLAN tag; own ARP/NS is answered before the MAC is matched
 (slow path); interface match by (ingress gate, VLAN, destination MAC); N3/N9

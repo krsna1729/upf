@@ -30,7 +30,7 @@ void UpfAppliance::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   gtpu::ParsedGtpu parsed[kBurst]{};
   gtpu::FteidId keys[kBurst]{};
   uint64_t values[kBurst];
-  uint64_t candidates = 0;
+  uint64_t candidates = 0, markers = 0;
   const uint16_t ingress = ctx->current_igate;
   const upf::pb::UpfApplianceMarkerInput *marker = nullptr;
   for (const auto &m : marker_inputs_) if (m.ingress_gate() == ingress) { marker = &m; break; }
@@ -77,6 +77,12 @@ void UpfAppliance::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
       case gtpu::GtpuParseKind::kMalformed:
         Drop(s, Reason::kMalformedGtpu); break;
       case gtpu::GtpuParseKind::kControl:
+        // An End Marker is looked up too: its F-TEID's entry names the
+        // tunnels it is relayed through (RelayEndMarkers).
+        if (parsed[i].info.message_type == gtpu::kGtpuEndMarker) {
+          keys[i] = parsed[i].key;
+          markers |= uint64_t{1} << i;
+        }
         ControlGtpu(ctx, p, s); break;
       case gtpu::GtpuParseKind::kGpdu:
         keys[i] = parsed[i].key;
@@ -86,7 +92,7 @@ void UpfAppliance::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   }
   // Exactly one F-TEID bulk admission for this ingress burst, pending entries
   // included in the unknown-tunnel control path rather than admitted.
-  const uint64_t hits = candidates ? fteids_->LookupBatch(
+  const uint64_t hits = (candidates | markers) ? fteids_->LookupBatch(
       reinterpret_cast<const std::byte *>(keys), sizeof(keys[0]), values, n) : 0;
   for (uint64_t m = candidates; m; m &= m - 1) {
     const size_t i = __builtin_ctzll(m);
@@ -117,6 +123,52 @@ void UpfAppliance::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   MeterCountRoute(ctx, batch, states, n);
   Transport(batch, states, n);
   Finish(ctx, batch, states, n);
+  if (markers) [[unlikely]] RelayEndMarkers(ctx, markers, hits, values);
+}
+
+// TS 29.244 Table 8.2.64-1 NOTE 2: each End Marker on an F-TEID whose entry
+// names relays leaves once per relay, rewritten to that tunnel (its TEID,
+// from its local address to its peer) and routed in its transport domain like
+// the encap's tunnels. The received one was logged and dropped by ControlGtpu.
+// The relays are emitted after Finish has emitted the burst, and one packet at
+// a time: EmitPacket appends each to its gate's pending batch, behind the
+// burst's frames on that gate, whether the burst left through that batch or
+// as a whole (EmitBatch's one-gate case, already queued, ogate hooks run).
+// So a relay leaves behind the G-PDUs its burst carried ahead of it, as the
+// graph's em_relay Queue has them (the next scheduler round).
+[[gnu::noinline]] void UpfAppliance::RelayEndMarkers(Context *ctx, uint64_t markers, uint64_t hits,
+                                                     const uint64_t *values) {
+  bess::PacketBatch out;
+  out.clear();
+  State states[kBurst]{};
+  const auto flush = [&] {
+    const size_t k = out.cnt();
+    Transport(&out, states, k);
+    for (size_t j = 0; j < k; ++j)
+      EmitPacket(ctx, out.packet(j), states[j].lane == Lane::kOutput ? states[j].output_gate : DROP_GATE);
+    out.clear();
+    std::fill_n(states, k, State{});
+  };
+  for (uint64_t m = markers; m; m &= m - 1) {
+    const size_t i = __builtin_ctzll(m);
+    const auto *relays = gtpu::FteidRelays(((hits >> i) & 1) != 0, values[i]);
+    for (size_t r = 0; relays != nullptr && r < relays->size(); ++r) {
+      const auto &relay = (*relays)[r];
+      if (static_cast<size_t>(out.cnt()) == kBurst) flush();
+      bess::PacketHandle handle =
+          current_worker.packet_pool()->Alloc(gtpu::EndMarkerFrameBytes(relay.family));
+      if (handle == nullptr) { Count(Reason::kEndMarkerRelayUnsent); continue; }
+      // A relay's family and TEID were checked when its entry was decoded
+      // (fteid_codec.h), the only cases the writer refuses.
+      CHECK(gtpu::WriteEndMarker(bess::PacketRef(handle).head_data<uint8_t *>(), relay.family,
+                                 relay.local.data(), relay.peer.data(), relay.teid));
+      auto &s = states[out.cnt()];
+      s.lane = Lane::kTransport;
+      s.transport_route_domain = relay.transport_route_domain;
+      out.add(handle);
+    }
+  }
+  if (out.cnt() != 0) flush();
 }
 
 void UpfAppliance::ControlGtpu(Context *ctx, bess::PacketRef p, State &s) {

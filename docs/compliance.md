@@ -79,6 +79,10 @@ once per marker sent, with the outgoing tunnel's TEID, from its local endpoint
 to its peer, and no session chain counts it. The one sent to S1's uplink
 F-TEID, whose FAR ends at N6, is relayed nowhere.
 `TestEndMarkerRelaysAreWrittenWithTheirFTEIDsAdmission` checks the relays the compiler writes. The
+appliance and session-major targets relay from the same entries in their own
+packet path, emitting the relays after the burst the marker arrived in
+(`TestLiveEndMarkerIsRelayedBehindItsGPDUs`: 16 G-PDUs and the marker in one
+burst leave as the 16 G-PDUs, then one End Marker per tunnel). The
 End Marker the UP function builds itself when the SMF asks (SNDEM) is
 unchanged.
 

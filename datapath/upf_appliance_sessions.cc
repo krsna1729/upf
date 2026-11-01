@@ -9,6 +9,7 @@
 
 #include "dataplane/action_id.h"
 #include "gate.h"
+#include "fteid_codec.h"
 #include "utils/logging.h"
 
 namespace upf::appliance {
@@ -229,16 +230,14 @@ upf::pb::TunnelEntry EncodeTunnel(const Tunnel &tunnel) {
   return value;
 }
 
-std::expected<SessionValue, std::string> DecodeSession(const upf::pb::UpfSession &in,
-                                                       std::atomic<uint64_t> &unsupported_relays) {
+std::expected<SessionValue, std::string> DecodeSession(const upf::pb::UpfSession &in) {
   SessionValue v;
-  uint64_t relays = 0;
   for (const auto &f : in.fteids()) {
     auto id = DecodeFteidKey(f.key());
     if (!id) return std::unexpected("F-TEID: " + id.error());
-    if (f.entry().direction() > 1) return std::unexpected("F-TEID direction must be 0 (UL) or 1 (DL)");
-    v.fteids.push_back({*id, {static_cast<uint8_t>(f.entry().direction()), f.entry().context_id()}});
-    relays += static_cast<uint64_t>(f.entry().end_marker_relays_size());
+    auto record = upf::datapath::DecodeFteidEntry(f.entry());
+    if (!record) return std::unexpected("F-TEID: " + record.error());
+    v.fteids.push_back({*id, std::move(*record)});
   }
   for (const auto &q : in.qers()) {
     auto qer = DecodeQer(q);
@@ -263,7 +262,6 @@ std::expected<SessionValue, std::string> DecodeSession(const upf::pb::UpfSession
     if (!pdr) return std::unexpected(pdr.error());
     v.pdrs.push_back(std::move(*pdr));
   }
-  if (relays != 0) unsupported_relays.fetch_add(relays, std::memory_order_relaxed);
   return v;
 }
 
@@ -784,7 +782,9 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   for (size_t i = v->actions.size(); i < limits_.max_actions; ++i)
     const_cast<ActionConfig &>(Config(session, version, static_cast<uint8_t>(i))) = ActionConfig{};
 
-  // F-TEIDs: unchanged ones untouched, gone ones erased, new ones inserted.
+  // F-TEIDs: gone ones erased, new ones inserted, kept ones untouched unless
+  // their End Marker relays changed -- the tunnels the F-TEID's PDRs forward
+  // into moved -- which the F-TEID resource replaces whole.
   for (const auto &old : m.fteids) {
     const auto it = std::ranges::find(v->fteids, old.id, &SessionValue::Fteid::id);
     if (it == v->fteids.end()) {
@@ -793,6 +793,9 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
     } else if (it->record.direction != old.record.direction ||
                it->record.context_id != old.record.context_id) {
       return std::unexpected("an F-TEID keeps its direction and context; erase the session to change them");
+    } else if (it->record.relays != old.record.relays) {
+      if (auto ok = add_fteid(staged->fteid_upserts_, dp::Op::Upsert({}, dp::EncodeKey(it->id), std::any(it->record))); !ok)
+        return std::unexpected(ok.error());
     }
   }
   for (const auto &f : v->fteids) {
@@ -849,6 +852,7 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
                  staged->fteids_mirror_.capacity() * sizeof(SessionValue::Fteid) +
                  staged->slots_.capacity() * sizeof(uint32_t) + v->actions.size() * kNodeBytes;
   for (const Rule &rule : staged->rules_mirror_) bytes += rule.key.capacity() + 1;
+  for (const auto &f : staged->fteids_mirror_) bytes += f.record.relays.capacity() * sizeof(upf::datapath::EndMarkerRelay);
   if (growth_ != nullptr) growth_->Grow(bytes, bytes);
   staged->bytes_ = bytes;
   staged->actions_count_ = static_cast<uint8_t>(v->actions.size());
@@ -876,8 +880,7 @@ upf::pb::UpfSession SessionResource::Read(uint32_t session) const {
   for (const auto &f : m.fteids) {
     auto *o = out.add_fteids();
     *o->mutable_key() = EncodeFteidKey(f.id);
-    o->mutable_entry()->set_direction(f.record.direction);
-    o->mutable_entry()->set_context_id(f.record.context_id);
+    *o->mutable_entry() = upf::datapath::EncodeFteidEntry(f.record);
   }
   for (uint8_t q = 0; q < m.qers; ++q) {
     const uint32_t ref = ref_at(q);
