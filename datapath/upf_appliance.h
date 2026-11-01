@@ -92,6 +92,9 @@ enum class Reason : size_t {
   kNeighborTxFull, kNeighborAlloc, kNeighborPublish, kBufferEvicted,
   kBufferExpired, kBufferDropped, kBufferRequestFull, kBufferStateFull,
   kNeighborConsumed,
+  // Not a packet: an End Marker relay an F-TEID entry named, which the
+  // appliance does not perform yet (upf_appliance_fteid.h).
+  kEndMarkerRelayUnsupported,
   kCount
 };
 }  // namespace upf::appliance

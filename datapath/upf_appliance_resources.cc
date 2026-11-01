@@ -15,6 +15,7 @@
 #include <format>
 #include "utils/ip.h"
 #include "utils/time.h"
+#include "upf_appliance_fteid.h"
 
 namespace dataplane = bess::dataplane;
 namespace {
@@ -212,14 +213,16 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
             id[24] = static_cast<uint8_t>(key.teid());
             return dataplane::EncodeKey(id);
           },
-          [](const upf::pb::FteidEntry &value)
+          [this](const upf::pb::FteidEntry &value)
               -> std::expected<std::any, std::string> {
-            if (value.direction() > 1)
-              return std::unexpected("direction must be 0 (UL) or 1 (DL)");
-            if (value.context_id() == 0)
-              return std::unexpected("context_id must be nonzero");
-            return std::any(upf::datapath::FteidRecord{
-                static_cast<uint8_t>(value.direction()), value.context_id()});
+            if (value.end_marker_relays_size() > 0)
+              LOG(WARNING) << name() << ": an F-TEID entry names "
+                           << value.end_marker_relays_size()
+                           << " End Marker relay(s); UpfAppliance does not relay "
+                              "End Markers yet, so they are counted "
+                              "(end_marker_relay_unsupported), not performed";
+            return upf::appliance::DecodeFteidEntry(
+                value, reasons_[static_cast<size_t>(Reason::kEndMarkerRelayUnsupported)]);
           },
           [this](const auto &visit) {
             fteid_resource_->ForEach([&visit](const upf::datapath::FteidId &id,

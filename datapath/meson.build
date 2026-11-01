@@ -71,7 +71,8 @@ if gtest_dep.found() and bess_static_dep.found()
   # librte_telemetry, ...) from the same unexported directory.
   gtpu_datapath_test = executable(
     'gtpu_datapath_test',
-    ['gtpu_datapath_test.cc', 'packet_helpers_test.cc', 'upf_appliance_frame_test.cc'],
+    ['gtpu_datapath_test.cc', 'packet_helpers_test.cc', 'upf_appliance_frame_test.cc',
+     upf_proto[0], upf_proto[1]],
     include_directories: include_directories('.'),
     dependencies: [bess_static_dep, protobuf_dep, gtest_dep],
     link_args: ['-Wl,--disable-new-dtags'],

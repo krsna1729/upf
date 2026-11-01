@@ -5,7 +5,7 @@ requirement, the evidence it cites and the last run's verdict are one record.
 Edit the JSON and re-run; never this file. Named tests and the narrative sit in
 the JSON, not here.
 
-**55 claims · 52 ok · 1 gap · 2 skip · 0 fail**
+**56 claims · 52 ok · 2 gap · 2 skip · 0 fail**
 
 `ok` proved by the evidence named · `gap` a documented missing capability ·
 `skip` needs an environment this run lacks · `FAIL` a regression.
@@ -23,6 +23,16 @@ Packet Rate: a QER capping packets per time unit, and its queryable status
 Packet Rate is a procedure of its own: a QER that caps packets per time unit, plus a status the CP function can query and the UP reports. None of it is read here -- go-pfcp does carry the IEs, so this is the tree's gap and not the library's -- and the substrate is now in the fork: a Meter's `cost: PACKETS` charges one a packet through the same buckets, bursts and colouring (BESS fork PR #45), and the ordered-id action (PR #44) lets a flow's packet rate and the session's bit rate share one lookup
 
 a serving-PLMN or APN rate control the SMF provisions is invisible to this UPF: a UE can exceed a packet rate the CP asked to cap. The remaining work is the compiler reading the QER's Packet Rate IEs into such a meter, and the Query Packet Rate Status exchange on the reporting side
+
+No evidence in this tree.
+
+### status-45 · TS 29.244 V16.9.1 §8.2.64 · gap
+
+the appliance target counts, but does not perform, End Marker relays
+
+the appliance target does not relay End Markers yet: `UpfAppliance` accepts an F-TEID admission entry's `end_marker_relays` -- refusing it would fail the whole Session Modification of a Mode 4 or Mode 6 handover -- and counts each relay it names in `get_drops`' `end_marker_relay_unsupported` (one warning per such entry), but neither stores nor performs it; the graph target's `GtpuDecap` relay (status-44) is not ported to the appliance's packet path
+
+on `-target appliance`, the target RAN, the target UPF or an upstream I-UPF of a Mode 4/6 handover sees no End Marker on its tunnel and falls back to its own timer before switching to the new path
 
 No evidence in this tree.
 
