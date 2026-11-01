@@ -14,6 +14,7 @@ import (
 	"github.com/wmnsk/go-pfcp/message"
 
 	"github.com/krsna1729/upf/internal/bess"
+	"github.com/krsna1729/upf/internal/scaletest"
 )
 
 // TestATickReadsEachCounterModuleOnce is the shape upfd's loop depends on
@@ -179,24 +180,22 @@ func measuredRules(t *testing.T, c *Compiler, seids []uint64) []bess.RuleCount {
 	return out
 }
 
-// The daemon's message bound, as boundedReader applies it: a reply over 64 MiB
-// is refused, and a counted rule is 34 B of it on the wire (UG-B1).
-const (
-	messageBound = 64 << 20
-	ruleOnWire   = 34
-)
+// A counted rule is 34 B of a get_counts reply on the wire (UG-B1).
+const ruleOnWire = 34
 
 // boundedReader is a counting module behind the daemon's message bound: a
-// reading whose reply would pass messageBound is refused, and a reading that
-// names no rule answers every rule the module holds. It counts the calls, the
-// refusals, the most rules one call named, and how often each ActionId was
-// named. Its reply slice is reused, so what a tick allocates is the tick's.
+// reading whose reply would pass scaletest.MessageBound is refused (and
+// counted as "refused" in bound), and a reading that names no rule answers
+// every rule the module holds. It counts the calls, the most rules one call
+// named, and how often each ActionId was named. Its reply slice is reused, so
+// what a tick allocates is the tick's.
 type boundedReader struct {
 	*recorder
-	held          []uint32
-	named         []uint8
-	refused, most int
-	reply         []bess.RuleCount
+	held  []uint32
+	named []uint8
+	most  int
+	reply []bess.RuleCount
+	bound scaletest.MessageBytesAtMost
 }
 
 func (r *boundedReader) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
@@ -205,9 +204,8 @@ func (r *boundedReader) RuleCounts(_ context.Context, module string, actionIDs .
 	if len(actionIDs) == 0 {
 		actionIDs = r.held
 	}
-	if size := len(actionIDs) * ruleOnWire; size > messageBound {
-		r.refused++
-		return nil, fmt.Errorf("a reply of %d B is over the %d B message bound", size, messageBound)
+	if err := r.bound.Reply(len(actionIDs) * ruleOnWire); err != nil {
+		return nil, err
 	}
 	r.reply = r.reply[:0]
 	for _, id := range actionIDs {
@@ -280,9 +278,10 @@ func TestATickReadsEveryRuleUnderTheMessageBound(t *testing.T) {
 	c, reader := boundedTick(t, sessions, perSession)
 	c.EvaluateAll(context.Background(), time.Unix(1_700_000_000, 0))
 
-	if reader.refused != 0 || reader.most > countChunk {
-		t.Errorf("%d of %d readings refused, the largest naming %d rules: want none refused, each ≤ %d",
-			reader.refused, len(reader.calls), reader.most, countChunk)
+	scaletest.RPCsAtMost(t, &reader.bound.Ops, "refused", 0)
+	if reader.most > countChunk {
+		t.Errorf("of %d readings the largest named %d rules: want each ≤ %d",
+			len(reader.calls), reader.most, countChunk)
 	}
 	unread := 0
 	for _, n := range reader.named[1:] {
@@ -366,7 +365,9 @@ func TestAReportTakenBackIsDecidedAgain(t *testing.T) {
 // TestATickCostsOnlyTheSessionsThatMeasure is UG-R1 and UG-R2: the tick walks
 // the sessions with a URR, not the whole table, and once each has taken its
 // baseline a tick allocates a constant rather than per session -- the linked
-// groups are cached, and a counter module's name is not rebuilt per rule.
+// groups are cached, and a counter module's name is not rebuilt per rule. The
+// tick's allocations do not grow from 64 measured sessions to 8000, nor from
+// 64 sessions that measure nothing beside them to 8000.
 func TestATickCostsOnlyTheSessionsThatMeasure(t *testing.T) {
 	build := func(measured, plain int) *Compiler {
 		c := New(testConfig(), &recorder{}, quietLogger())
@@ -387,16 +388,15 @@ func TestATickCostsOnlyTheSessionsThatMeasure(t *testing.T) {
 		return c
 	}
 	now := time.Now()
-	allocs := func(c *Compiler) float64 {
-		return testing.AllocsPerRun(5, func() { c.EvaluateAll(context.Background(), now) })
-	}
-	few, many, mixed := build(100, 0), build(400, 0), build(100, 900)
-	if got := len(mixed.measured); got != 100 {
-		t.Errorf("the tick walks %d of %d sessions, want the 100 with a URR", got, len(mixed.sessions))
-	}
-	if a, b, m := allocs(few), allocs(many), allocs(mixed); b > a || m > a {
-		t.Errorf("a tick allocates %v at 100 measured sessions, %v at 400 and %v beside 900 that measure nothing; want no growth",
-			a, b, m)
+	tick := func(c *Compiler) func() { return func() { c.EvaluateAll(context.Background(), now) } }
+	scaletest.AllocsFollowChange(t, func(n int) func() { return tick(build(n, 0)) }, [2]int{64, 8000}, 0)
+	var mixed *Compiler
+	scaletest.AllocsFollowChange(t, func(n int) func() {
+		mixed = build(64, n)
+		return tick(mixed)
+	}, [2]int{64, 8000}, 0)
+	if got := len(mixed.measured); got != 64 {
+		t.Errorf("the tick walks %d of %d sessions, want the 64 with a URR", got, len(mixed.sessions))
 	}
 	cfg := testConfig()
 	cfg.Appliance = "upf"

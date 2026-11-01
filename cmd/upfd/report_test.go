@@ -21,6 +21,7 @@ import (
 
 	"github.com/krsna1729/upf/internal/bess"
 	"github.com/krsna1729/upf/internal/n4"
+	"github.com/krsna1729/upf/internal/scaletest"
 	"github.com/krsna1729/upf/internal/session"
 )
 
@@ -531,14 +532,14 @@ func TestTheReportQueueIsBoundedPerSession(t *testing.T) {
 }
 
 // windowSender is a reportSender that accepts every report and counts what the
-// loop sends: the calls, by UR-SEQN, and the most in flight at once. A call
-// after the first waits briefly for company, so a loop that pipelines is seen
-// doing it and one that sends one at a time is seen not to (the wait is given
-// up for good after the first that finds none).
+// loop sends in ops: every call as "Report", a first window's (UR-SEQN 0) also
+// as "first-window Report"; and the most in flight at once. A call after the
+// first waits briefly for company, so a loop that pipelines is seen doing it
+// and one that sends one at a time is seen not to (the wait is given up for
+// good after the first that finds none).
 type windowSender struct {
 	mu            sync.Mutex
-	calls         int
-	bySeqn        map[uint32]int
+	ops           scaletest.Ops
 	inFlight, max int
 	alone         bool
 	company       *sync.Cond
@@ -551,12 +552,14 @@ func (s *windowSender) Report(_ context.Context, _ uint64, ies ...*ie.IE) (n4.Re
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls++
-	s.bySeqn[seqn]++
+	calls := s.ops.Add("Report")
+	if seqn == 0 {
+		s.ops.Add("first-window Report")
+	}
 	s.inFlight++
 	s.max = max(s.max, s.inFlight)
 	s.company.Broadcast()
-	if s.calls > 1 && !s.alone && s.inFlight < 2 {
+	if calls > 1 && !s.alone && s.inFlight < 2 {
 		timer := time.AfterFunc(time.Second, func() {
 			s.mu.Lock()
 			s.alone = true
@@ -583,7 +586,7 @@ func TestATickSendsEveryDueReportPipelined(t *testing.T) {
 			fmt.Sprintf("10.46.%d.%d", i/250, i%250+1), 0x0b000000+uint32(i)))
 	}
 	compiler := loopSession(t, ests...)
-	sender := &windowSender{bySeqn: map[uint32]int{}}
+	sender := &windowSender{}
 	sender.company = sync.NewCond(&sender.mu)
 	stats := &reportStats{}
 	logs := &logCapture{}
@@ -602,7 +605,9 @@ func TestATickSendsEveryDueReportPipelined(t *testing.T) {
 	if got := stats.dropped.Load(); got != 0 {
 		t.Errorf("%d of %d due reports were dropped, want none", got, sessions)
 	}
-	if got := sender.bySeqn[0]; got != sessions {
+	// One first-window report per session: none lost, none sent twice.
+	scaletest.RPCsAtMost(t, &sender.ops, "first-window Report", sessions)
+	if got := sender.ops.Count("first-window Report"); got < sessions {
 		t.Errorf("%d first-window reports were sent, want one per session (%d)", got, sessions)
 	}
 	if sender.max < 2 {

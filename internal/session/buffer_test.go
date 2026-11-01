@@ -15,6 +15,7 @@ import (
 	"github.com/wmnsk/go-pfcp/message"
 
 	"github.com/krsna1729/upf/internal/bess"
+	"github.com/krsna1729/upf/internal/scaletest"
 )
 
 // bufferingConfig is the test graph with the buffering branch deploy/upf.yaml
@@ -824,18 +825,10 @@ func TestATickReadsEveryBufferingSessionInOneReading(t *testing.T) {
 		stamped = append(stamped, bess.RuleCount{ActionID: flow, Packets: 1, First: arrived, Last: arrived})
 	}
 	rec.counts = map[string][]bess.RuleCount{"cnt_buf": stamped}
-	rec.calls = nil
+	rec.ops.Reset()
 
 	owed := c.EvaluateDownlinks(context.Background())
-	reads := 0
-	for _, call := range rec.calls {
-		if call.module == "cnt_buf" {
-			reads++
-		}
-	}
-	if reads > 1 {
-		t.Errorf("the tick read the buffering counters %d times for %d sessions, want 1", reads, sessions)
-	}
+	scaletest.RPCsAtMost(t, &rec.ops, "cnt_buf", 1)
 	if len(owed) != sessions {
 		t.Fatalf("%d sessions owe a report, want %d", len(owed), sessions)
 	}
