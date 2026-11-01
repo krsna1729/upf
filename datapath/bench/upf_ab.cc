@@ -480,7 +480,7 @@ class Study {
               : R"({"decap": {"max_fteids": )" + capj + R"(}, "encap": {"max_tunnels": )" + capj +
                     R"(}, "counters": {"capacity": )" + capj +
                     R"(, "worker_planes": 1}, "meter": {"capacity": )" + capj + R"(, "levels": 2},)";
-      Mod(b, "upf", "UpfAppliance",
+      Mod(b, "upf", session_layout() ? "UpfSessionAppliance" : "UpfAppliance",
           sized + R"( "pdr_ul": {"max_tuples": )" + ul_tuples +
           R"(}, "pdr_dl": {"max_tuples": )" + dl_tuples +
           R"(}, "router": {"max_next_hops": 4096},)"
@@ -620,6 +620,11 @@ class Study {
     const std::string meterv =
         R"({"tr_tcm": {"committed_rate": "1000000000000", "committed_burst": "1000000000",)"
         R"( "peak_rate": "1000000000000", "peak_burst": "1000000000"}})";
+    // A session's QER: the profile and the qer_id that is its bucket's
+    // identity (UpfSessionQer), nonzero and unique in the session.
+    const auto QerOf = [](const std::string &profile, int qer_id) {
+      return profile.substr(0, profile.size() - 1) + R"(, "qer_id": )" + std::to_string(qer_id) + "}";
+    };
     if (session_layout()) {
       // Session id s + 1. The PDR keys are the packed bytes of the masked
       // layout's keys (UL: UE source, admission context; DL: UE
@@ -639,7 +644,7 @@ class Study {
       const std::string value =
           R"({"fteids": [{"key": {"address_family": 4, "endpoint_id": 1, "local_address": "wAACAQ==", "teid": )" +
           std::to_string(teid) + R"(}, "entry": {"context_id": )" + std::to_string(ctx) +
-          R"(, "direction": 0}}], "qers": [)" + meterv + ", " + meterv +
+          R"(, "direction": 0}}], "qers": [)" + QerOf(meterv, 1) + ", " + QerOf(meterv, 2) +
           R"(], "actions": [{"action_id": )" + std::to_string(a_ul) +
           R"(, "next_hop_id": 1, "pdr_qer": 1, "count": true}, {"action_id": )" + std::to_string(a_dl) +
           R"(, "next_hop_id": 2, "pdr_qer": 2, "count": true, "tunnel": {"local_address": "wAACAQ==",)"
