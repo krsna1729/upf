@@ -2263,12 +2263,12 @@ func TestAFARsTransportLevelMarkingReachesTheTunnelRecord(t *testing.T) {
 	}
 }
 
-// graphMaxTuples is what a deploy graph declares for one module's max_tuples:
-// the number of distinct masks that table may hold at once (WildcardMatch
-// refuses a new one beyond it with ENOSPC; module_msg.proto's WildcardMatchArg).
-// It reads the manifest's own text, so the number a rule shape is held against
-// is the one the deployment actually carries.
-func graphMaxTuples(t *testing.T, path, module string) int {
+// graphArg is the number a deploy graph declares for one argument of one
+// module, as its own line (`max_tuples: 16`) or inside the module's flow-style
+// arg map (`arg: {..., flow_capacity: 65536}`). It reads the manifest's own
+// text, so the number a test holds the compiler against is the one the
+// deployment actually carries.
+func graphArg(t *testing.T, path, module, key string) int {
 	t.Helper()
 	text, err := os.ReadFile(path)
 	if err != nil {
@@ -2281,18 +2281,30 @@ func graphMaxTuples(t *testing.T, path, module string) int {
 			in = name == module
 			continue
 		}
-		if !in {
+		if !in || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if rest, ok := strings.CutPrefix(line, "max_tuples:"); ok {
-			n, err := strconv.Atoi(strings.TrimSpace(rest))
+		for rest := line; ; {
+			i := strings.Index(rest, key+":")
+			if i < 0 {
+				break
+			}
+			if i > 0 && !strings.ContainsRune(" {,", rune(rest[i-1])) {
+				rest = rest[i+len(key)+1:]
+				continue
+			}
+			value := strings.TrimSpace(rest[i+len(key)+1:])
+			if end := strings.IndexAny(value, ",}"); end >= 0 {
+				value = strings.TrimSpace(value[:end])
+			}
+			n, err := strconv.Atoi(value)
 			if err != nil {
-				t.Fatalf("%s: %s's max_tuples is not a number: %v", path, module, err)
+				t.Fatalf("%s: %s's %s is not a number: %v", path, module, key, err)
 			}
 			return n
 		}
 	}
-	t.Fatalf("%s declares no max_tuples for %s", path, module)
+	t.Fatalf("%s declares no %s for %s", path, key, module)
 	return 0
 }
 
@@ -2339,7 +2351,7 @@ func TestTheUplinkMaskBudgetCoversTheRuleShapes(t *testing.T) {
 	t.Logf("one session's uplink rules use %d distinct masks", len(shapes))
 	for _, graph := range []string{"upf.yaml", "session-live.yaml", "session-path.yaml",
 		"session-instances.yaml", "buffer-path.yaml"} {
-		budget := graphMaxTuples(t, filepath.Join("..", "..", "deploy", graph), "pdr_ul")
+		budget := graphArg(t, filepath.Join("..", "..", "deploy", graph), "pdr_ul", "max_tuples")
 		if len(shapes) > budget {
 			t.Errorf("%s declares max_tuples %d for pdr_ul, and one session's rules already use %d masks",
 				graph, budget, len(shapes))
