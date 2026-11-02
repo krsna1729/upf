@@ -94,6 +94,7 @@
 #include <vector>
 
 #include "bess/sdk/client.h"
+#include "bench_sizing.h"
 #include "schema_types.h"
 
 extern char **environ;
@@ -321,10 +322,11 @@ class Study {
   // Exactly one packet path, with no graph modules in the appliance lifetime.
   void Apply() {
     const uint32_t n = o_.sessions;
-    // ActionIds are global across directions: UL=2s+1, DL=2s+2.
-    const uint64_t cap = std::max<uint64_t>(
-        65536, 2 * uint64_t{n} + (o_.churn > 0 ? 2048 : 16));
+    // ActionIds are global across directions: UL=2s+1, DL=2s+2. F-TEIDs are
+    // one per session in every layout (bench_sizing.h).
+    const uint64_t cap = upf::bench::ActionCapacity(n, o_.churn > 0);
     const std::string capj = std::to_string(cap);
+    const std::string fteidj = std::to_string(upf::bench::FteidCapacity(n, o_.churn > 0));
     const std::string ul_tuples = std::to_string(std::max(uint32_t{16}, o_.mask_mix + 1));
     const std::string dl_tuples = std::to_string(std::max(uint32_t{8}, o_.mask_mix + 1));
     bess::sdk::PipelineBuilder b;
@@ -375,7 +377,7 @@ class Study {
         R"({"fields": [{"offset": 12, "num_bytes": 2}], "default_gate": 1})");
     Mod(b, "n3_ipv6_sort", "ExactMatch",
         R"({"fields": [{"offset": 12, "num_bytes": 2}], "default_gate": 1})");
-    Mod(b, "decap0", "GtpuDecap", R"({"max_fteids": )" + capj + "}");
+    Mod(b, "decap0", "GtpuDecap", R"({"max_fteids": )" + fteidj + "}");
     Mod(b, "mt_ul_read", "MetadataTest",
         R"({"read": {"endpoint_id": 4, "fteid_context": 4, "qfi": 1}})");
     const std::string tuple =
@@ -480,14 +482,14 @@ class Study {
     else {
       // Session layout: QERs and tunnels are sized per session (two of
       // each per session here), so meter.capacity and encap.max_tunnels
-      // stay 0; the session ids need N (+1024 churn) slots, the action-id
-      // spaces (F-TEIDs, buffer_counters) keep `cap`.
+      // stay 0; the session ids and the F-TEIDs need N (+1024 churn) slots,
+      // the action-id space (buffer_counters) keeps `cap`.
       const std::string sized =
           session_layout()
-              ? R"({"decap": {"max_fteids": )" + capj + R"(}, "counters": {"capacity": )" + capj +
+              ? R"({"decap": {"max_fteids": )" + fteidj + R"(}, "counters": {"capacity": )" + capj +
                     R"(, "worker_planes": 1}, "meter": {"levels": 2}, "session": {"capacity": )" +
                     std::to_string(SessionCapacity()) + R"(, "max_actions": 2, "max_qers": 2},)"
-              : R"({"decap": {"max_fteids": )" + capj + R"(}, "encap": {"max_tunnels": )" + capj +
+              : R"({"decap": {"max_fteids": )" + fteidj + R"(}, "encap": {"max_tunnels": )" + capj +
                     R"(}, "counters": {"capacity": )" + capj +
                     R"(, "worker_planes": 1}, "meter": {"capacity": )" + capj + R"(, "levels": 2},)";
       Mod(b, "upf", session_layout() ? "UpfSessionAppliance" : "UpfAppliance",
@@ -741,9 +743,7 @@ class Study {
   // A mixed session adds two SDF PDRs; the session layout bundles them too.
   uint32_t EntriesPerSession() const { return session_layout() ? 1 : o_.mask_mix ? 10 : 8; }
   // Session ids 1..N, and N+1..N+1024 for churn; self_test uses the last id.
-  uint64_t SessionCapacity() const {
-    return std::max<uint64_t>(65536, uint64_t{o_.sessions} + (o_.churn > 0 ? 2048 : 16));
-  }
+  uint64_t SessionCapacity() const { return upf::bench::SessionCapacity(o_.sessions, o_.churn > 0); }
 
   // The daemon's memory as the kernel reports it (/proc/<pid>/status, the
   // pid from bessd's pid file), tagged with this arm.

@@ -819,7 +819,7 @@ structure this design uses, so the arithmetic below is that table at this shape
 | 2 QER | `MeterSet` | 64 B state + 8 B pointer | 144 MB (1,048,576 meters measure 64 MiB) |
 | 2 URR | `CounterSet` block | 4 KiB for three counters (each slot per worker: 64 slots) | the wall: 8 GB if each URR owns a full per-worker block |
 | 1 MAR (ATSSS, P1) | per-session record | not measured, small | about 64 MB |
-| 1 distinct F-TEID | `GtpuDecap/<module>/fteids` exact key plus direction record | not measured: fixed-width key and shared exact-index overhead | capacity must be measured at target scale |
+| 1 distinct F-TEID | `GtpuDecap/<module>/fteids` exact key plus direction record | index: 72 B per bucket position, 101-202 B per admitted key (below) | 72 MiB up to 747,094 keys, 144 MiB up to 1,494,204 |
 
 The table is not the whole footprint. This capacity model assumes one distinct
 F-TEID per session: at 10^6 sessions, it therefore needs 1M exact F-TEID keys,
@@ -827,16 +827,30 @@ F-TEID per session: at 10^6 sessions, it therefore needs 1M exact F-TEID keys,
 Route/FIB entry count is deployment-specific; FIBs are per route domain, not
 per session.
 
-The low-hundreds-of-bytes/session target is not yet demonstrated. F-TEID index
-overhead is not measured. The table's 4 KiB per URR figure implies 8 KiB/session
+The low-hundreds-of-bytes/session target is not yet demonstrated. The F-TEID
+index (`SharedExactIndex`, an `rte_hash`) is sized from `max_fteids`, the live
+cap: BESS's `ConcurrentExactTable::CapacityFor` takes 3/4 of a power of two P
+less 5% headroom, and the table costs 72 B x P (48 B key slots for 3/4 P,
+buckets 8 B, free ring 4 B and QSBR defer queue 24 B per power-of-two
+position). So a key costs 101 B just below a power of two and 202 B just above
+it, and `max_fteids` should be the admitted sessions times the F-TEID keys a
+session holds (one per local F-TEID and address family), not the action-id
+capacity. The table's 4 KiB per URR figure implies 8 KiB/session
 for two URRs if each owns a full per-worker block; the actual counter placement
 and target worker count must be measured before claiming the memory budget.
 
 There is one downlink LPM per route domain, not per session, because `rte_lpm`'s
 `tbl24` costs 64 MiB fixed per table (the arithmetic is in "N3, N6, N9"). LPM
 instances are bounded by the domain count, so the number of domains must stay
-small. The fixed cost and realistic prefix distribution are measurements to
-make; what is settled is the shape.
+small. Measured on the transport router (the strict-budget grid, BESS
+941feb51): a domain with IPv4 and IPv6 tables is 100.3 MiB whatever its route
+count -- `rte_lpm` 64.25 MiB plus `rte_fib6` 36.0 MiB (a 2^24-entry tbl24 at 2
+bytes, 8192 tbl8 groups) -- and a `Router` builds its default domain at
+creation besides each domain a route names, so `upf_ab`'s one transport domain
+costs 200.8 MiB, and `deploy/appliance.yaml`'s two come to about 301 MiB by the
+same arithmetic. Their routes are all /0, which BESS keeps beside the DPDK
+structure: the tbl24s are never written. Realistic prefix distributions are
+still to measure.
 
 **The control plane has two O(total sessions) operations**, and they fail
 before the dataplane footprint above becomes the limit. They are both ours, and
