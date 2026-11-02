@@ -16,7 +16,7 @@
 //          [--mem-backing auto|hugepages|normal] [--mem-hugepage-mb MB]
 //          [--bessd-arg ARG]... [--verify K] [--churn TX_PER_S] [--counters]
 //          [--layout masked|session] [--only graph|appliance] [--updates U]
-//          [--mask-mix K]
+//          [--rewrite] [--mask-mix K]
 //          [--baseline-plugin DIR --baseline-layout masked|session]
 //          [--graph-plugin DIR]
 //
@@ -42,10 +42,19 @@
 // comparison then. After each load the daemon's VmRSS/VmHWM/HugetlbPages are
 // printed; a refused load commit prints its error and whether the daemon
 // still answers before it is stopped. --updates U re-upserts U sessions with
-// their current values while UL traffic runs, after an arm's verification:
-// the masked layouts commit beside the workers; the session layout rewrites
-// the session's stride in place, which its resource refuses while a worker
-// runs (shown once), so each update pauses, commits and resumes the workers.
+// their current values while UL traffic runs, after an arm's verification;
+// every layout commits them beside the running workers (the session layout
+// writes the session's inactive version and flips it, UpfSessionAppliance's
+// live rewrite).
+//
+// --rewrite modifies sessions back to back for the whole of each direction's
+// exact-stream verification: one session per transaction, ids cycled 0..N-1,
+// each pass toggling its meters' committed_burst (1000000000 / 1000000001, a
+// real modify whose rates never bind, so the expected stream and per-rule
+// counts are unchanged). It prints the modifies/s and commit p50/p99, and the
+// packets lost (expected minus delivered), delivered to another sink, and the
+// rules whose packet/octet delta is not exactly the replay's; any of those
+// fails the run, as without --rewrite. The timing windows are unaffected.
 //
 // --mask-mix K (0 default, 1..64 enabled) adds one higher-priority SDF PDR
 // per direction/session, with K distinct mask shapes distributed by s%K.
@@ -120,6 +129,7 @@ struct Opt {
   std::string only = "both";      // both | graph | appliance
   uint32_t updates = 0;           // update-cost samples per arm
   uint32_t mask_mix = 0;          // 0 unchanged; 1..64 SDF mask shapes across sessions
+  bool rewrite = false;           // one-session modifies throughout each exact run
   std::string memory_report;      // study: script PORT PID LABEL OUT, run at memory samples
   uint32_t report_every = 100000; // strict budget: memory sample every K loaded sessions
   bool after_refusal = false;     // strict budget: probe the live daemon after a refused load
@@ -527,7 +537,7 @@ class Study {
   // The 8 entries one compiler session writes (internal/session, dumped by
   // the study's TestZZDumpSession), for session s -- or, for the
   // session-layout appliance, the same session as ONE "upf/sessions" entry.
-  void SessionOps(bess::sdk::Transaction &tx, uint32_t s, bool erase) {
+  void SessionOps(bess::sdk::Transaction &tx, uint32_t s, bool erase, bool variant = false) {
     Entries(s, erase, [&](const std::string &res, const gp::Message &key, const gp::Message *value) {
       if (value != nullptr) Must(tx.Upsert(R(res), key, *value), "upsert " + res);
       else Must(tx.Erase(R(res), key), "erase " + res);
@@ -614,11 +624,15 @@ class Study {
                 {4, 48 + (shape % 4), 63 - (shape % 4)}};
     return p;
   }
-  void Entries(uint32_t s, bool erase, const Emit &emit) {
+  // variant (--rewrite): the session's meters carry committed_burst
+  // 1000000001 instead of 1000000000 -- a real modify of the live session
+  // whose stream and counters are unchanged (the rates never bind).
+  void Entries(uint32_t s, bool erase, const Emit &emit, bool variant = false) {
     const uint32_t ue = kUeBase + s, teid = kTeidBase + s, ctx = s + 1;
     const uint32_t a_ul = 2 * s + 1, a_dl = 2 * s + 2;
     const std::string meterv =
-        R"({"tr_tcm": {"committed_rate": "1000000000000", "committed_burst": "1000000000",)"
+        std::string(R"({"tr_tcm": {"committed_rate": "1000000000000", "committed_burst": ")") +
+        (variant ? "1000000001" : "1000000000") + R"(",)"
         R"( "peak_rate": "1000000000000", "peak_burst": "1000000000"}})";
     // A session's QER: the profile and the qer_id that is its bucket's
     // identity (UpfSessionQer), nonzero and unique in the session.
@@ -998,9 +1012,40 @@ ArmResult RunExact(Study &st, const std::string &dir, uint64_t k) {
   Must(st.client().ResumeWorkers(), "resume");
   st.Burst("src_" + sfx, 32);
   const auto t0 = Clock::now();
+  // --rewrite: modify sessions back to back while this exact stream runs --
+  // session ids cycled 0..N-1, each pass toggling the meter variant -- so the
+  // assertions below count what the rewrites lost or misdelivered.
+  uint64_t rewrites = 0;
+  std::vector<double> rw_lat;
+  std::string rw_error;
+  std::jthread rewriter;
+  if (st.o_.rewrite) {
+    rewriter = std::jthread([&](std::stop_token stop) {
+      try {
+        for (uint64_t i = 0; !stop.stop_requested(); ++i) {
+          const uint32_t s = static_cast<uint32_t>(i % st.o_.sessions);
+          auto tx = st.client().NewTransaction();
+          st.SessionOps(tx, s, false, (i / st.o_.sessions) % 2 == 0);
+          const auto c0 = Clock::now();
+          Must(tx.Commit(), "rewrite commit");
+          rw_lat.push_back(std::chrono::duration<double, std::micro>(Clock::now() - c0).count());
+          ++rewrites;
+        }
+      } catch (const std::exception &e) {
+        rw_error = e.what();
+      }
+    });
+  }
   while (GatePackets(st.Metrics(), "gen_" + sfx) - g0 < static_cast<double>(k)) {
     if (Clock::now() - t0 > std::chrono::seconds(120)) throw std::runtime_error("exact run stalled");
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  double rw_secs = 0;
+  if (rewriter.joinable()) {
+    rewriter.request_stop();
+    rewriter.join();
+    rw_secs = std::chrono::duration<double>(Clock::now() - t0).count();
+    if (!rw_error.empty()) throw std::runtime_error(rw_error);
   }
   st.Burst("src_" + sfx, 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -1031,17 +1076,41 @@ ArmResult RunExact(Study &st, const std::string &dir, uint64_t k) {
     ++expected[s];
     ++hits;
   }
-  size_t touched = 0;
+  size_t touched = 0, wrong = 0, unexpected = 0;
   for (uint32_t s = 0; s < st.o_.sessions; ++s) {
     const uint32_t id = 2 * s + (dir == "ul" ? 1 : 2);
     if (!before.contains(id)) throw std::runtime_error("missing rule id " + std::to_string(id));
-    if (expected[s] == 0) continue;
+    if (expected[s] == 0) {
+      unexpected += r.delta.contains(id);
+      continue;
+    }
     ++touched;
     if (!r.delta.contains(id) ||
         r.delta.at(id) != std::pair<uint64_t, uint64_t>{expected[s], 37 * expected[s]})
-      throw std::runtime_error("incorrect packet/octet delta for rule " + std::to_string(id));
+      ++wrong;
   }
   const Digest &out = r.sinks.at(dir == "ul" ? "sink_n6" : "sink_n3");
+  if (st.o_.rewrite) {
+    // lost: expected deliveries missing from the egress sink; misdelivered:
+    // packets in any other sink, and rules whose packet/octet delta is not
+    // exactly the replay's (a packet counted against the wrong session).
+    uint64_t other = 0;
+    for (const auto &[name, d] : r.sinks)
+      if (&d != &out) other += d.packets;
+    std::sort(rw_lat.begin(), rw_lat.end());
+    std::printf("rewrite %s %s: %llu one-session modifies (%u entries each) under %llu packets in %.2f s:"
+                " %.0f modifies/s, commit p50 %.0f us p99 %.0f us; expected %llu delivered %llu lost %lld,"
+                " other-sink packets %llu, rules with a wrong delta %zu (+%zu unexpected)\n",
+                st.ArmName().c_str(), dir.c_str(), (unsigned long long)rewrites, st.EntriesPerSession(),
+                (unsigned long long)k, rw_secs, rw_secs > 0 ? rewrites / rw_secs : 0.0,
+                rw_lat.empty() ? 0.0 : rw_lat[rw_lat.size() / 2],
+                rw_lat.empty() ? 0.0 : rw_lat[rw_lat.size() * 99 / 100], (unsigned long long)hits,
+                (unsigned long long)out.packets, (long long)hits - (long long)out.packets,
+                (unsigned long long)other, wrong, unexpected);
+    std::fflush(stdout);
+    if (other != 0) throw std::runtime_error("rewrite: packets delivered to another sink");
+  }
+  if (wrong != 0) throw std::runtime_error("incorrect packet/octet delta for " + std::to_string(wrong) + " rules");
   if (r.delta.size() != touched || hits == 0 || out.packets != hits ||
       out.bytes != hits * (dir == "ul" ? 51 : 87))
     throw std::runtime_error("verification output/count assertions failed");
@@ -1053,47 +1122,29 @@ ArmResult RunExact(Study &st, const std::string &dir, uint64_t k) {
 
 // Update cost (--updates U): sessions 0..U-1 re-upserted with their current
 // values (an update of a live session; packets and counters unchanged) while
-// the UL source runs at --burst. Leaves the workers paused, as RunExact does.
+// the UL source runs at --burst, each committed beside the running workers.
+// Leaves the workers paused, as RunExact does.
 void UpdateCost(Study &st, uint32_t u) {
   if (u == 0) return;
   const std::string sfx = "ul_" + st.arm();
-  const bool pause = st.session_layout();
   Must(st.client().ResumeWorkers(), "resume");
   st.Burst("src_" + sfx, st.o_.burst);
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  if (pause) {
-    // The resource contract: an in-place update is refused beside a running worker.
-    auto tx = st.client().NewTransaction();
-    st.SessionOps(tx, 0, false);
-    auto r = tx.Commit();
-    if (r) throw std::runtime_error("session-layout update applied while a worker ran");
-    std::printf("update %s beside running workers: refused (%s)\n", st.ArmName().c_str(),
-                r.error().message.c_str());
-  }
-  std::vector<double> total, commit;
+  std::vector<double> commit;
   for (uint32_t i = 0; i < u; ++i) {
     auto tx = st.client().NewTransaction();
     st.SessionOps(tx, i % st.o_.sessions, false);
     const auto t0 = Clock::now();
-    if (pause) Must(st.client().PauseWorkers(), "pause for update");
-    const auto t1 = Clock::now();
     Must(tx.Commit(), "update commit");
-    const auto t2 = Clock::now();
-    if (pause) Must(st.client().ResumeWorkers(), "resume after update");
-    const auto t3 = Clock::now();
-    commit.push_back(std::chrono::duration<double, std::micro>(t2 - t1).count());
-    total.push_back(std::chrono::duration<double, std::micro>(t3 - t0).count());
+    commit.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
   }
   st.Burst("src_" + sfx, 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   Must(st.client().PauseWorkers(), "pause");
-  std::sort(total.begin(), total.end());
   std::sort(commit.begin(), commit.end());
-  std::printf("update %s: %u one-session updates (%u entries each)%s: total p50 %.0f us p99 %.0f us,"
+  std::printf("update %s: %u one-session updates (%u entries each), beside running workers:"
               " commit p50 %.0f us p99 %.0f us\n",
               st.ArmName().c_str(), u, st.EntriesPerSession(),
-              pause ? ", each pause+commit+resume" : ", beside running workers",
-              total[total.size() / 2], total[total.size() * 99 / 100],
               commit[commit.size() / 2], commit[commit.size() * 99 / 100]);
   std::fflush(stdout);
 }
@@ -1266,6 +1317,7 @@ int main(int argc, char **argv) {
     else if (a == "--teardown") o.teardown = true;
     else if (a == "--updates") o.updates = static_cast<uint32_t>(std::stoul(val()));
     else if (a == "--mask-mix") o.mask_mix = static_cast<uint32_t>(std::stoul(val()));
+    else if (a == "--rewrite") o.rewrite = true;
     else throw std::runtime_error("unknown flag " + a);
   }
   if (o.mem_backing != "auto" && o.mem_backing != "hugepages" && o.mem_backing != "normal") {
