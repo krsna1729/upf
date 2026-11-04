@@ -2,7 +2,17 @@
 
 package main
 
-import "testing"
+import (
+	"bytes"
+	"io"
+	"log/slog"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/wmnsk/go-pfcp/ie"
+	"github.com/wmnsk/go-pfcp/message"
+)
 
 // What a real SMF does with a pinned F-TEID: it makes the value unique itself,
 // one per session. A bench that pins one value for a whole phase measures the
@@ -46,6 +56,86 @@ func TestSessionParamsPinOneValuePerSession(t *testing.T) {
 	for i, p := range sessionParams(4, 0, base, gnbs, "192.0.2.1") {
 		if p.GnBIP != gnbs[i%2] {
 			t.Errorf("session %d's gNB is %s, want %s", i, p.GnBIP, gnbs[i%2])
+		}
+	}
+}
+
+func TestQueuedResponsesOwnTheirDatagrams(t *testing.T) {
+	peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	c, err := dial(peer.LocalAddr().String(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.close()
+
+	messages := []*message.SessionEstablishmentResponse{
+		message.NewSessionEstablishmentResponse(0, 0, 0x1111, 27, 0,
+			ie.NewCause(ie.CauseRequestAccepted),
+			ie.NewFSEID(0xaaaa, net.IPv4(192, 0, 2, 1), nil)),
+		message.NewSessionEstablishmentResponse(0, 0, 0x2222, 28, 0,
+			ie.NewCause(ie.CauseSessionContextNotFound),
+			ie.NewFSEID(0xbbbb, net.IPv4(192, 0, 2, 2), nil)),
+	}
+	var got []message.Message
+	for _, m := range messages {
+		ch := make(chan message.Message, 1)
+		c.mu.Lock()
+		c.wait[m.Sequence()] = ch
+		c.mu.Unlock()
+		b, err := wire(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := peer.WriteToUDP(b, c.conn.LocalAddr().(*net.UDPAddr)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case response := <-ch:
+			// Do not consume its IEs until the next response has been read
+			// into the same receive buffer. The channel orders both reads.
+			got = append(got, response)
+		case <-time.After(time.Second):
+			t.Fatal("response was not queued")
+		}
+	}
+	for i, m := range got {
+		response, ok := m.(*message.SessionEstablishmentResponse)
+		if !ok {
+			t.Fatalf("response %d has type %T", i, m)
+		}
+		if response.Sequence() != messages[i].Sequence() || response.SEID() != messages[i].SEID() {
+			t.Errorf("response %d changed its sequence or header SEID", i)
+		}
+		fseid, err := response.UPFSEID.FSEID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantFSEID, _ := messages[i].UPFSEID.FSEID()
+		if fseid.SEID != wantFSEID.SEID || !fseid.IPv4Address.Equal(wantFSEID.IPv4Address) {
+			t.Errorf("response %d F-SEID = %+v, want %+v", i, fseid, wantFSEID)
+		}
+		cause, err := response.Cause.Cause()
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantCause, _ := messages[i].Cause.Cause()
+		if cause != wantCause {
+			t.Errorf("response %d cause = %d, want %d", i, cause, wantCause)
+		}
+		want, err := wire(messages[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		actual, err := wire(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(actual, want) {
+			t.Errorf("response %d payload changed after receive-buffer reuse", i)
 		}
 	}
 }
