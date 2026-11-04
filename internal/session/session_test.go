@@ -161,33 +161,31 @@ type readCall struct {
 	rules  int
 }
 
-// RuleCounts answers the rules asked for; a rule the fake does not hold reads
-// zero, which is what a module with no traffic says. Naming no rule is the
-// module's own reading of **every rule it holds**, which is what the daemon's
-// get_counts answers for an empty action_ids (urr_count.cc). The call is
-// recorded either way, so a test can count them.
-func (r *recorder) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
+// AppendRuleCounts answers the rules asked for; a rule the fake does not hold
+// reads zero, which is what a module with no traffic says. Naming no rule is
+// the module's own reading of **every rule it holds**, which is what the
+// daemon's get_counts answers for an empty action_ids (urr_count.cc). The call
+// is recorded either way, so a test can count them.
+func (r *recorder) AppendRuleCounts(_ context.Context, dst []bess.RuleCount, module string,
+	actionIDs ...uint32) ([]bess.RuleCount, error) {
 	r.calls = append(r.calls, readCall{module: module, rules: len(actionIDs)})
 	r.ops.Add(module)
 	if r.readFail != nil {
-		return nil, r.readFail
+		return dst, r.readFail
 	}
 	if len(actionIDs) == 0 {
-		out := make([]bess.RuleCount, 0, len(r.counts[module]))
-		out = append(out, r.counts[module]...)
-		return out, nil
+		return append(dst, r.counts[module]...), nil
 	}
 	held := map[uint32]bess.RuleCount{}
 	for _, count := range r.counts[module] {
 		held[count.ActionID] = count
 	}
-	out := make([]bess.RuleCount, 0, len(actionIDs))
 	for _, id := range actionIDs {
 		count := held[id]
 		count.ActionID = id
-		out = append(out, count)
+		dst = append(dst, count)
 	}
-	return out, nil
+	return dst, nil
 }
 
 // DrainErrors answers a GtpuResponder's Error Indication log (ErrorReader): the
@@ -212,13 +210,14 @@ func (r *recorder) DrainEndMarkers(_ context.Context, module string) ([]bess.End
 	return out, 0, nil
 }
 
-// PeekRuleCounts is RuleCounts without the window restart (WindowReader): the
-// DDN path's reading, which the fake answers from the same table.
+// PeekRuleCounts is AppendRuleCounts without the window restart
+// (WindowReader): the DDN path's reading, which the fake answers from the same
+// table.
 func (r *recorder) PeekRuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
 	if r.readFail != nil {
 		return nil, r.readFail
 	}
-	return r.RuleCounts(context.Background(), module, actionIDs...)
+	return r.AppendRuleCounts(context.Background(), nil, module, actionIDs...)
 }
 
 func (r *recorder) last() []bess.Change {

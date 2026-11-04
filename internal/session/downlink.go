@@ -198,7 +198,7 @@ func (c *Compiler) peekBuffering(ctx context.Context, ids []uint32) ([]bess.Rule
 	if c.peek != nil {
 		return c.peek.PeekRuleCounts(ctx, c.target.Counts(BufferCounters), ids...)
 	}
-	return c.counters.RuleCounts(ctx, c.target.Counts(BufferCounters), ids...)
+	return c.counters.AppendRuleCounts(ctx, nil, c.target.Counts(BufferCounters), ids...)
 }
 
 // ConfirmDownlinks marks the reports a caller has delivered, which is what stops
@@ -230,7 +230,7 @@ func (c *Compiler) ConfirmDownlinks(ctx context.Context, seid uint64, pdrs []uin
 	}
 	c.mu.Unlock()
 	if c.counters != nil && len(ids) > 0 {
-		if _, err := c.counters.RuleCounts(ctx, c.target.Counts(BufferCounters), ids...); err != nil {
+		if _, err := c.counters.AppendRuleCounts(ctx, nil, c.target.Counts(BufferCounters), ids...); err != nil {
 			// The stamps stay where they are, so this flow's report is offered
 			// again: a duplicate report is better than one nobody took.
 			c.log.Warn("session: the buffering counters were not read back", "seid", seid, "error", err)

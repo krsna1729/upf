@@ -194,25 +194,24 @@ type boundedReader struct {
 	held  []uint32
 	named []uint8
 	most  int
-	reply []bess.RuleCount
 	bound scaletest.MessageBytesAtMost
 }
 
-func (r *boundedReader) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
+func (r *boundedReader) AppendRuleCounts(_ context.Context, dst []bess.RuleCount, module string,
+	actionIDs ...uint32) ([]bess.RuleCount, error) {
 	r.calls = append(r.calls, readCall{module: module, rules: len(actionIDs)})
 	r.most = max(r.most, len(actionIDs))
 	if len(actionIDs) == 0 {
 		actionIDs = r.held
 	}
 	if err := r.bound.Reply(len(actionIDs) * ruleOnWire); err != nil {
-		return nil, err
+		return dst, err
 	}
-	r.reply = r.reply[:0]
 	for _, id := range actionIDs {
 		r.named[id]++
-		r.reply = append(r.reply, bess.RuleCount{ActionID: id, Packets: 1, Octets: 100})
+		dst = append(dst, bess.RuleCount{ActionID: id, Packets: 1, Octets: 100})
 	}
-	return r.reply, nil
+	return dst, nil
 }
 
 // boundedTick is a compiler holding sessions × perSession rules its URRs

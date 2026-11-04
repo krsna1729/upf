@@ -84,17 +84,17 @@ func (f *fakeDataplane) snapshot() (int, []bess.Change) {
 // the one rule it measures. Naming no rule is the module's own reading of every
 // rule it holds, which is the read the reporting tick makes (report.go's
 // EvaluateAll).
-func (f *fakeDataplane) RuleCounts(_ context.Context, module string, actionIDs ...uint32) ([]bess.RuleCount, error) {
+func (f *fakeDataplane) AppendRuleCounts(_ context.Context, dst []bess.RuleCount, module string,
+	actionIDs ...uint32) ([]bess.RuleCount, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(actionIDs) == 0 {
 		actionIDs = f.rules[module]
 	}
-	out := make([]bess.RuleCount, 0, len(actionIDs))
 	for _, id := range actionIDs {
-		out = append(out, bess.RuleCount{ActionID: id, Packets: f.octets / 37, Octets: f.octets})
+		dst = append(dst, bess.RuleCount{ActionID: id, Packets: f.octets / 37, Octets: f.octets})
 	}
-	return out, nil
+	return dst, nil
 }
 
 // spent is the traffic the counters have counted since the test started.

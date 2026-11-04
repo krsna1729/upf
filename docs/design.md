@@ -922,8 +922,9 @@ addressed:
    ceiling the answer is **fewer rules per read and not a bigger message**.
    **This tree splits it so:** `EvaluateAll` names at most `countChunk` =
    65,536 ActionIds per call (≤ 3.3 MiB even at a rule's widest 52 B), decodes
-   each reply off the wire (`bess.decodeCounts`) and lands the answers in one
-   slice indexed by ActionId that the report loop keeps from tick to tick;
+   each reply off the wire into a slice it reuses (`bess.appendCounts`), and
+   lands the answers in one slice indexed by ActionId that the report loop
+   keeps from tick to tick;
    `TestATickReadsEveryRuleUnderTheMessageBound` reads 2.1M rules behind a fake
    that refuses any reply over 64 MiB, where the whole-module read was refused
    every tick. Nothing about the loop is O(sessions) in round trips. The

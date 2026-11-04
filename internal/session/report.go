@@ -488,7 +488,8 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 		for rules := ids[module]; len(rules) > 0; {
 			chunk := rules[:min(len(rules), countChunk)]
 			rules = rules[len(chunk):]
-			read, err := counters.RuleCounts(ctx, module, chunk...)
+			read, err := counters.AppendRuleCounts(ctx, c.tickRead[:0], module, chunk...)
+			c.tickRead = read
 			if err != nil {
 				failed = append(failed, module)
 				failures[module] = fmt.Errorf("reading %s: %w", module, err)
@@ -714,7 +715,7 @@ func readingOf(rule bess.RuleCount) reading {
 func readRules(ctx context.Context, reader CounterReader, ids map[string][]uint32) (readings, error) {
 	cells := map[uint32]reading{}
 	for module, rules := range ids {
-		read, err := reader.RuleCounts(ctx, module, rules...)
+		read, err := reader.AppendRuleCounts(ctx, nil, module, rules...)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", module, err)
 		}

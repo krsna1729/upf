@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -283,32 +284,37 @@ type RuleCount struct {
 	Last     time.Time
 }
 
-// RuleCounts asks a counting module for the counters of the named rules, or of
-// every rule it holds when none are named, through the module's own get_counts
-// action, and for the next window: the module clears each rule's first-packet
-// stamp when a reading asks it to, so a diagnostic read of the same command
-// (an operator's, a test's) finds the window's first packet where the last
-// report left it. The message names are the plugin's
-// (datapath/upf_datapath.proto), so a graph without that module -- or one built
-// against another schema -- is an error here and not an empty reading: a
-// reporter that read silence as zero usage would report nothing forever.
+// AppendRuleCounts asks a counting module for the counters of the named rules,
+// or of every rule it holds when none are named, through the module's own
+// get_counts action, and for the next window, and appends them to dst: a
+// caller that reads every tick hands back the slice it was given, and the
+// readings -- one per counted rule of every session -- cost nothing new. The
+// module clears each rule's first-packet stamp when a reading asks it to, so
+// a diagnostic read of the same command (an operator's, a test's) finds the
+// window's first packet where the last report left it. The message names are
+// the plugin's (datapath/upf_datapath.proto), so a graph without that module
+// -- or one built against another schema -- is an error here and not an empty
+// reading: a reporter that read silence as zero usage would report nothing
+// forever.
 //
 // counters is a module whose one counter table the command reads (UrrCount,
 // "cnt_ul"), or "<module>/<table>" for a module that owns several (the
 // appliance's "upf/counters_ul"): the table is then the argument's `table`
 // field, which a one-table module's argument does not carry at all.
-func (c *Client) RuleCounts(ctx context.Context, counters string, actionIDs ...uint32) ([]RuleCount, error) {
-	return c.ruleCounts(ctx, counters, true, actionIDs...)
+func (c *Client) AppendRuleCounts(ctx context.Context, dst []RuleCount, counters string,
+	actionIDs ...uint32) ([]RuleCount, error) {
+	return c.ruleCounts(ctx, dst, counters, true, actionIDs...)
 }
 
-// PeekRuleCounts is RuleCounts without opening the next window: the module keeps
-// each rule's first-packet stamp, so the caller that has not yet done what the
-// stamp is for can read again. The Downlink Data Report path reads this way --
-// a report the SMF never took must be offered again, and a reading that cleared
-// the stamp would lose it -- and clears it by reading the ordinary way once the
-// report is delivered (ConfirmDownlinks).
+// PeekRuleCounts is AppendRuleCounts without opening the next window, into a
+// slice of its own: the module keeps each rule's first-packet stamp, so the
+// caller that has not yet done what the stamp is for can read again. The
+// Downlink Data Report path reads this way -- a report the SMF never took must
+// be offered again, and a reading that cleared the stamp would lose it -- and
+// clears it by reading the ordinary way once the report is delivered
+// (ConfirmDownlinks).
 func (c *Client) PeekRuleCounts(ctx context.Context, counters string, actionIDs ...uint32) ([]RuleCount, error) {
-	return c.ruleCounts(ctx, counters, false, actionIDs...)
+	return c.ruleCounts(ctx, nil, counters, false, actionIDs...)
 }
 
 // countRequest builds the command's module and argument. Graph requests omit
@@ -353,34 +359,35 @@ func (c *Client) countRequest(counters string, restart bool, actionIDs []uint32)
 	return module, arg, nil
 }
 
-func (c *Client) ruleCounts(ctx context.Context, counters string, restart bool,
+// ruleCounts appends the reading to dst, and returns dst as it was on an error.
+func (c *Client) ruleCounts(ctx context.Context, dst []RuleCount, counters string, restart bool,
 	actionIDs ...uint32) ([]RuleCount, error) {
 	module, arg, err := c.countRequest(counters, restart, actionIDs)
 	if err != nil {
-		return nil, err
+		return dst, err
 	}
 	result, err := c.sdk.InvokeAction(ctx, module, "get_counts", arg)
 	if err != nil {
-		return nil, fmt.Errorf("bess: %s get_counts: %w", counters, err)
+		return dst, fmt.Errorf("bess: %s get_counts: %w", counters, err)
 	}
 	if result.MessageName() != "upf.pb.UrrCountCommandGetCountsResponse" {
-		return nil, fmt.Errorf("bess: %s get_counts answered %s", counters, result.GetTypeUrl())
+		return dst, fmt.Errorf("bess: %s get_counts answered %s", counters, result.GetTypeUrl())
 	}
-	out, err := decodeCounts(result.GetValue())
+	out, err := appendCounts(dst, result.GetValue())
 	if err != nil {
-		return nil, fmt.Errorf("bess: %s get_counts: %w", counters, err)
+		return dst, fmt.Errorf("bess: %s get_counts: %w", counters, err)
 	}
 	return out, nil
 }
 
-// decodeCounts is a UrrCountCommandGetCountsResponse read straight off the
-// wire, by upf_datapath.proto's field numbers: the dynamic message it replaces
-// cost several allocations per rule, and a tick reads every counted rule. The
-// reading's clock -- the monotonic stamp the per-rule stamps are in and the
-// wall clock at the same instant -- follows the rules on the wire, so it is
-// found first. A field the daemon's plugin predates is absent and reads 0: the
-// times are then unknown, never invented.
-func decodeCounts(b []byte) ([]RuleCount, error) {
+// appendCounts appends a UrrCountCommandGetCountsResponse read straight off
+// the wire, by upf_datapath.proto's field numbers, to dst: the dynamic message
+// it replaces cost several allocations per rule, and a tick reads every
+// counted rule. The reading's clock -- the monotonic stamp the per-rule stamps
+// are in and the wall clock at the same instant -- follows the rules on the
+// wire, so it is found first. A field the daemon's plugin predates is absent
+// and reads 0: the times are then unknown, never invented.
+func appendCounts(dst []RuleCount, b []byte) ([]RuleCount, error) {
 	var mono, wall uint64
 	rules := 0
 	for rest := b; len(rest) > 0; {
@@ -398,7 +405,7 @@ func decodeCounts(b []byte) ([]RuleCount, error) {
 			wall = v
 		}
 	}
-	out := make([]RuleCount, 0, rules)
+	out := slices.Grow(dst, rules)
 	for rest := b; len(rest) > 0; {
 		num, typ, _, rule, n := consumeField(rest)
 		rest = rest[n:]

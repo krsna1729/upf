@@ -745,7 +745,7 @@ func TestLiveSessionCountsTheRulesATURReasures(t *testing.T) {
 		ids = append(ids, id)
 	}
 	counter := newTarget(liveConfig()).Counts(CountersUplink)
-	rules, err := client.RuleCounts(ctx, counter, ids...)
+	rules, err := client.AppendRuleCounts(ctx, nil, counter, ids...)
 	if err != nil {
 		t.Fatalf("reading cnt_ul with its stamps: %v", err)
 	}
