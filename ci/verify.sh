@@ -120,6 +120,8 @@ if [ -n "$TESTS_JSON" ] || { [ "$LANES_ONLY" -eq 0 ] && [ "$RENDER" -eq 0 ]; }; 
     # Each test binary under its package's memory row, two at a time
     # (ci/go-test.sh, ci/test-memory.tsv).
     GO_BIN=$GO_BIN ci/go-test.sh -count=1 -json > "$OUT/go-test.json" 2> "$OUT/go-test.err"
+    # Each binary's peak against its row, from the wrapper's line in the events.
+    grep -o '"Output":"run_capped: [^"]*' "$OUT/go-test.json" | cut -d'"' -f4 | sed 's/\\n$//'
   fi
   if [ -n "$(printf '%s\n' "$tests" | grep .)" ]; then
     python3 - "$OUT/go-test.json" "$OUT/tests.tsv" <<'PY'
