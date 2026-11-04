@@ -169,7 +169,8 @@ sudo ip neigh replace "$UE" lladdr "$N6_MAC" dev "$VETH_PEER" nud permanent
 
 export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-sudo -E env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+bessd_launcher || exit 1
+"${BESSD_LAUNCH[@]}" sudo -E env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
   "$BESSD" --mem_backing=normal -p "$BESS_PORT" -i "$WORK/bessd.pid" -modules="$PLUG" -f >"$LOG" 2>&1 &
 BESSD_PID=$!
 BESSD_STARTED=1
@@ -430,7 +431,7 @@ check "the routed outer tunnel carries the FAR's TEID" \
 # The compiler's own test for what "per domain" means here: two instances that
 # serve one prefix are two rules for one filter, each keyed on its own domain.
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} \
-  $GO test "$ROOT/internal/session/" -run '^TestTwoInstancesRouteIndependently$' -count=1 -v \
+  $GO test "${GO_TEST_EXEC[@]}" "$ROOT/internal/session/" -run '^TestTwoInstancesRouteIndependently$' -count=1 -v \
   >"$WORK/compiler.log" 2>&1 || {
   echo "veth-port: the compiler's per-domain test failed; output follows" >&2
   cat "$WORK/compiler.log" >&2
@@ -446,6 +447,9 @@ echo "veth-port: port    $(grep -F 'upf_port driver' "$WORK/status.txt")"
 echo "veth-port: device  $(tr -d '\n' <"$WORK/telemetry.json")"
 echo "veth-port: rule    $(tr -d '\n' <"$WORK/pdr_dl_rule.json")"
 
+# The daemon's peak against this lane's declaration (ci/test-memory.tsv),
+# read while it runs: sudo is $BESSD_PID, the pid file names the daemon.
+bessd_mem_check "$(tr -d '\000' <"$WORK/bessd.pid")" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "veth-port: ok (one port, four queues, three interfaces with their own route domains, and the compiler's rule selected by one of them)"
 fi

@@ -55,7 +55,7 @@ bessd_apply "$GRAPH"
 # workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ -run 'TestLiveTwoInstancesRouteIndependently' -count=1 -v
+  $GO test "${GO_TEST_EXEC[@]}" ./internal/session/ -run 'TestLiveTwoInstancesRouteIndependently' -count=1 -v
 
 # The packet half: the G-PDUs' own bytes, per dump (the helper is shared with
 # ci/session-path.sh; see its header for why a dump is scoped).

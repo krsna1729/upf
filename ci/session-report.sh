@@ -87,7 +87,7 @@ kill -0 "$UPFD_PID" 2>/dev/null || {
 # The SMF's half: it establishes the measured session, receives the report and
 # answers it -- the answer is the acknowledgement the controller logs.
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_N4_TARGET=127.0.0.1:$N4_PORT \
-  $GO test "$ROOT/internal/n4/" -run 'TestLiveUsageReportReachesTheSMF' -count=1 -v || {
+  $GO test "${GO_TEST_EXEC[@]}" "$ROOT/internal/n4/" -run 'TestLiveUsageReportReachesTheSMF' -count=1 -v || {
   echo "session-report: the reporting test failed; upfd's log follows" >&2
   cat "$UPFD_LOG" >&2
   exit 1

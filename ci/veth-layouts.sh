@@ -96,6 +96,9 @@ bc() { "$BESSCTL" -s "$SERVER" "$@"; }
 
 stop_bessd() {
   [ "$BESSD_STARTED" = 1 ] || return 0
+  local mem=0
+  # sudo is $BESSD_PID; the pid file names the daemon itself.
+  bessd_mem_check "$(tr -d '\000' <"$WORK/bessd.pid" 2>/dev/null)" || mem=1
   if bc status >/dev/null 2>&1; then
     bc shutdown >/dev/null 2>&1 || true
   fi
@@ -120,6 +123,7 @@ stop_bessd() {
     return 1
   fi
   echo "bessd shut down cleanly"
+  return "$mem"
 }
 
 remove_veths() {
@@ -308,7 +312,8 @@ start_bessd() {
     fail "another BESS daemon already answers at $SERVER"
   fi
   export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-  sudo -E env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+  bessd_launcher || fail "no memory declaration for this lane"
+  "${BESSD_LAUNCH[@]}" sudo -E env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
     "$BESSD" --mem_backing=normal -p "$BESS_PORT" -i "$WORK/bessd.pid" -modules="$PLUG" -f >"$LOG" 2>&1 &
   BESSD_PID=$!
   BESSD_STARTED=1

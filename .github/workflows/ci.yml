@@ -73,6 +73,25 @@ jobs:
         with:
           go-version: '1.27.2'
           cache-dependency-path: go.sum
+      # Each test binary runs in a `systemd-run --user --scope` of its own
+      # (ci/run_capped.py). A hosted runner's user has no user manager until
+      # it lingers; without one the wrapper falls back to wait4's ru_maxrss
+      # and no kernel limit is set.
+      - name: User manager for the test scopes
+        run: |
+          sudo loginctl enable-linger "$USER"
+          for _ in $(seq 1 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      # The wrapper by bytes (a hog over its row fails, under it passes, in a
+      # scope and with wait4 alone), the gate's own cases, then the gate: every
+      # package, meson test and lane has a row (docs/engineering-guide.md,
+      # "Test memory").
+      - name: Test memory declarations
+        run: |
+          UPF_TEST_MEM_REQUIRE_SCOPE=1 ci/run_capped.py --self-test
+          ci/check-test-memory.py --self-test
+          ci/check-test-memory.py
       - name: Go vet
         run: go vet ./...
       - name: Go tests and claims' unit evidence
@@ -93,6 +112,14 @@ jobs:
         with:
           go-version: '1.27.2'
           cache-dependency-path: go.sum
+      # The lanes' daemons and Go tests run in scopes of their own
+      # (ci/bess-env.sh, ci/run_capped.py): as in Units.
+      - name: User manager for the test scopes
+        run: |
+          sudo loginctl enable-linger "$USER"
+          for _ in $(seq 1 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
 
       - name: Pinned BESS
         id: pin
@@ -253,6 +280,13 @@ jobs:
           path: datapath/build
           key: plugin-${{ steps.pin.outputs.sha }}-${{ runner.arch }}-${{ hashFiles('datapath/**', '!datapath/build/**') }}-v2
 
+      # The plugin's unit tests, each under its memory row (the default test
+      # setup's wrapper, ci/run_capped.py), and the built tests' declarations.
+      - name: Datapath unit tests
+        run: |
+          meson test -C datapath/build --print-errorlogs
+          ci/check-test-memory.py --build-dir datapath/build
+
       - name: Gating lanes (push and pull request)
         if: github.event_name != 'schedule'
         env:
@@ -280,7 +314,7 @@ jobs:
           LANE_TIMEOUT: '1800'
         run: |
           mkdir -p build/run/verify
-          go test -race -json -count=1 ./cmd/... ./internal/... > build/run/race.json
+          GO_BIN=go ci/go-test.sh -race -json -count=1 > build/run/race.json
           # Reuse the race run's test events; do not run the unit pass twice.
           ci/verify.sh --tests-json build/run/race.json --lanes-only --benches
 

@@ -26,6 +26,10 @@ DPDK_LIB=${DPDK_LIB:-$BESS/dpdk/install/lib}
 # The repo pins the SDK in go.mod; a go.work would substitute another copy.
 export GOWORK=off
 
+# A lane's own `go test` runs each test binary under its package's memory row
+# (ci/run_capped.py, ci/test-memory.tsv), as the unit pass does.
+GO_TEST_EXEC=(-exec "$ROOT/ci/run_capped.py")
+
 free_port() {
   local p
   while :; do
@@ -44,15 +48,89 @@ SERVER=${SERVER:-127.0.0.1:$BESS_PORT}
 # bessd writes its crash report to /tmp/bessd_crash.log, one path for every
 # daemon on the host: match the pid before crediting it to this run.
 check_clean_shutdown() {
-  local rc=0
+  local rc=0 mem=0
+  bessd_mem_check "$1" || mem=1
   kill "$1" 2>/dev/null || true
   wait "$1" 2>/dev/null || rc=$?
   if [ "$rc" = 0 ]; then
     echo "ok: bessd shut down cleanly"
-    return 0
+    return "$mem"
   fi
   echo "FAIL: bessd exited with status $rc on shutdown (crash report: /tmp/bessd_crash.log, check its pid against $1)" >&2
   return 1
+}
+
+# The daemon's memory, per lane (docs/engineering-guide.md, "Test memory").
+# Each lane declares the most its bessd may hold resident, in MiB, as a row
+# "lane <name> <MiB>" in ci/test-memory.tsv; ci/check-test-memory.py fails a
+# lane CI runs that has none. bessd_launcher puts the daemon in a transient
+# `systemd-run --user --scope` of its own with MemoryMax at the kill limit
+# (1.5x the declaration, at least 32 MiB above, as ci/run_capped.py) and no
+# swap; bessd_mem_check reads that scope's memory.peak before the daemon is
+# stopped (the scope goes away with it), or, with no user manager, the
+# daemon's VmHWM, and fails above the declaration. The lanes run with
+# --mem_backing=normal, so the daemon's pools are ordinary pages the cgroup
+# charges. UPF_TEST_MEM_MEASURE=1 calibrates: kill limit 3000 MiB, never fail.
+# The printed line avoids the daemon's name: ci/verify.sh reads any line naming
+# it as a lane that must also print the clean-shutdown line.
+LANE=${UPF_LANE:-$(basename "$0" .sh)}
+
+mem_declared() {
+  awk -v k="$1" -v n="$2" '$1 == k && $2 == n && $3 ~ /^[0-9]+$/ { print $3; exit }' \
+    "$ROOT/ci/test-memory.tsv"
+}
+
+# bessd_launcher: sets BESSD_LAUNCH to the command prefix that starts the
+# daemon in its own scope (empty with no user manager), and BESSD_MEM_LIMIT.
+bessd_launcher() {
+  local declared
+  declared=$(mem_declared lane "$LANE")
+  BESSD_LAUNCH=()
+  if [ "${UPF_TEST_MEM_MEASURE:-0}" = 1 ]; then
+    BESSD_MEM_LIMIT=3000
+  elif [ -z "$declared" ]; then
+    echo "lane-mem: $LANE: no memory declaration: add \"lane $LANE <MiB>\" to ci/test-memory.tsv" >&2
+    return 1
+  else
+    BESSD_MEM_LIMIT=$(( declared * 3 / 2 > declared + 32 ? declared * 3 / 2 : declared + 32 ))
+  fi
+  if [ "${UPF_TEST_MEM_NO_SCOPE:-0}" != 1 ] && systemd-run --user --scope -q true 2>/dev/null; then
+    # systemd-run --scope execs the command in place: $! is still the daemon.
+    BESSD_LAUNCH=(systemd-run --user --scope -q "--unit=upf-lane-$LANE-$$-$RANDOM"
+      -p "MemoryMax=${BESSD_MEM_LIMIT}M" -p MemorySwapMax=0 -p OOMPolicy=continue --)
+  fi
+}
+
+# bessd_mem_check <pid>: the daemon's peak against the lane's declaration, once
+# per daemon; call it while the daemon still runs. Returns 1 above it.
+bessd_mem_check() {
+  local pid=$1 declared cg peak how
+  [ -n "$pid" ] && [ "${BESSD_MEM_CHECKED:-}" != "$pid" ] || return 0
+  BESSD_MEM_CHECKED=$pid
+  declared=$(mem_declared lane "$LANE")
+  declared=${declared:-0}
+  if [ ! -r "/proc/$pid/cgroup" ]; then
+    echo "lane-mem: $LANE: the daemon ($pid) exited before its peak was read (status 137 is the kernel's kill at ${BESSD_MEM_LIMIT:-?} MiB)" >&2
+    return 1
+  fi
+  cg=$(cut -d: -f3- "/proc/$pid/cgroup")
+  case $cg in
+    */upf-lane-"$LANE"-*.scope)
+      peak=$(cat "/sys/fs/cgroup$cg/memory.peak" 2>/dev/null) && how="cgroup memory.peak" ;;
+  esac
+  if [ -z "${how:-}" ]; then
+    peak=$(awk '/^VmHWM:/ { print $2 * 1024 }' "/proc/$pid/status" 2>/dev/null)
+    how="VmHWM, no cgroup of its own"
+  fi
+  awk -v lane="$LANE" -v d="$declared" -v p="${peak:-0}" -v how="$how" \
+      -v limit="$([ "$how" = "cgroup memory.peak" ] && echo "${BESSD_MEM_LIMIT:-?}" || echo none)" \
+      -v measure="${UPF_TEST_MEM_MEASURE:-0}" 'BEGIN {
+    printf "lane-mem: %s: declared %d MiB, peak %.1f MiB (%s; kill limit %s)\n", lane, d, p / 1048576, how, limit
+    if (measure != 1 && p > d * 1048576) {
+      printf "lane-mem: %s: FAILED: declared %d MiB, peak %.1f MiB\n", lane, d, p / 1048576 > "/dev/stderr"
+      exit 1
+    }
+  }'
 }
 
 # The daemon lifecycle every lane repeats: one copy. A lane sets PLUG to the
@@ -82,7 +160,8 @@ bessd_start() {
   if [ "${BESSD_STDBUF:-0}" = 1 ]; then
     launch=(stdbuf -oL -eL)
   fi
-  "${launch[@]}" "$STAGE/bin/bessd" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$pidfile" \
+  bessd_launcher || return 1
+  "${BESSD_LAUNCH[@]}" "${launch[@]}" "$STAGE/bin/bessd" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$pidfile" \
     -modules="$PLUG" -f "$@" >"$log" 2>&1 &
   BESSD_PID=$!
 }
@@ -103,6 +182,7 @@ bessd_apply() {
 
 bessd_stop() {
   [ -n "${BESSD_PID:-}" ] || return 0
+  bessd_mem_check "$BESSD_PID" || true
   kill "$BESSD_PID" 2>/dev/null || true
   for _ in 1 2 3 4 5; do
     kill -0 "$BESSD_PID" 2>/dev/null || break

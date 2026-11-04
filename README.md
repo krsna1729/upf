@@ -124,8 +124,13 @@ Run the lane that proves the path you touched:
 | `ci/bench-n4.sh` | the N4 envelope: establish / modify / delete rates |
 
 Every lane starts its own `bessd` on free ports, writes under `build/run/`, and
-fails unless the daemon shuts down cleanly. A datapath change that no lane
-observes is not proven.
+fails unless the daemon shuts down cleanly and stays within its memory row.
+A datapath change that no lane observes is not proven.
+
+Every test, package and lane declares its memory in `ci/test-memory.tsv`,
+and CI fails one without a row or above it (`ci/check-test-memory.py`;
+docs/engineering-guide.md, "Test memory"). `ci/go-test.sh` is the unit pass
+as CI runs it, each test binary under its row.
 
 ### The rules that keep it honest
 

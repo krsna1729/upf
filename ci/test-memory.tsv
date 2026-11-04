@@ -1,0 +1,98 @@
+# The most memory each test may use, in MiB (docs/engineering-guide.md,
+# "Test memory"). One row per test: <kind> <name> <MiB>.
+#
+#   go       a Go test package, by directory: the test binary's peak, under
+#            `go test -exec ci/run_capped.py` (the compile is the go command's,
+#            outside the cgroup)
+#   go-race  the same package's binary built with -race (the weekly run)
+#   meson    a datapath meson test (datapath/meson.build passes it as
+#            UPF_TEST_MEM_MB; ci/run_capped.py is the default test setup's
+#            wrapper)
+#   lane     a ci/ lane's bessd (ci/bess-env.sh: bessd_launcher,
+#            bessd_mem_check)
+#
+# ci/run_capped.py and ci/bess-env.sh run each in a cgroup at 1.5x its row (at
+# least 32 MiB above) and fail it when its peak is above the row;
+# ci/check-test-memory.py fails when a test has no row, when a row is above the
+# 1024 MiB ceiling without a "# above the ceiling: <reason>" line just above
+# it, or when `go test -p 2` could hold more than 2048 MiB at once.
+#
+# Calibration: the larger of the two peaks the wrapper can report -- the
+# scope's memory.peak and, with no user manager, wait4's ru_maxrss (a lane's
+# daemon: its VmHWM) -- times 1.25, rounded up to 8 MiB. The two differ: a
+# test binary's own pages count in ru_maxrss, but the kernel charges a page to
+# the cgroup that first read it (cgroup-v2.rst, "Memory Ownership": the go
+# command's, which linked the binary), so a small package's memory.peak is a
+# few MiB and its ru_maxrss ~18.
+#
+# Measured 2026-11-04 on this tree (base b03aa8f), Go 1.27.2, GOMAXPROCS=2,
+# BESS pin 941feb51, each run alone in its own capped scope with
+# UPF_TEST_MEM_MEASURE=1 (UPF_TEST_MEM_NO_SCOPE=1 for the second peak); the
+# commands are in docs/engineering-guide.md, "Test memory". After each row:
+# memory.peak / ru_maxrss (or VmHWM), MiB.
+
+# kind   name                 MiB
+go       cmd/n4bench          24      # 2.7 / 18.4
+go       cmd/upfd             48      # 23.3 / 36.8
+go       internal/bess        40      # 12.3 (session-live) / 27.9
+go       internal/n4          32      # 5.2 / 20.0
+go       internal/n4sim       24      # 2.4 / 18.6
+go       internal/routing     24      # 2.2 / 18.3
+go       internal/scaletest   24      # 5.8 / 18.4
+# above the ceiling: it holds 2.1M counted rules (~1.3 GB live heap, gctrace)
+# because one reply of every rule passes the daemon's 64 MiB message bound
+# only at about 2M (UG-B1; design.md cites the test at that scale). In its
+# package's run the package peaked at 1878-1890 MiB (memory.peak, three runs),
+# past what `go test -p 2` may hold; ci/go-test.sh runs it by itself instead,
+# and skips it in the package's run.
+go       internal/session:TestATickReadsEveryRuleUnderTheMessageBound  1736  # 1378.4 / 1387.5
+go       internal/session     424     # 328.5 / 334.8, without that test
+go-race  cmd/n4bench          40      # 15.4 / 26.0
+go-race  cmd/upfd             136     # 85.5 / 108.7
+go-race  internal/bess        64      # 34.1 / 49.7
+go-race  internal/n4          40      # 21.1 / 30.7
+go-race  internal/n4sim       32      # 15.1 / 19.9
+go-race  internal/routing     32      # 15.5 / 20.8
+go-race  internal/scaletest   40      # 27.1 / 31.0
+# above the ceiling: no one test carries it. Under -race the TestATick tests
+# alone peak at 618.5 MiB and the package without them at 858.0 MiB
+# (memory.peak; the 2.1M-rule test skips under -race); the package's 282
+# tests together reach it, and a smaller row would mean splitting the package.
+go-race  internal/session     1264    # 1010.2 (835.8 earlier) / 990.7
+
+meson    gtpu_datapath            152     # 94.2 / 116.5
+meson    upf_appliance_sessions   184     # 123.8 / 146.1
+
+# A lane's row bounds its bessd (--mem_backing=normal). bessd alone with no
+# graph peaks at 707 MiB with its default pool (--buffers=262144, bess
+# core/runtime/opts.cc:259) and at 129 MiB with --buffers=32768; the lanes run
+# the default pool, as deployed. Each row above the ceiling is that pool plus
+# the lane's graph.
+# above the ceiling: the default packet pool and the smoke graph
+lane     smoke-gtpu           1056    # 783.5 / 838.6
+# above the ceiling: the default packet pool and the atsss-steer graph
+lane     atsss-steer          1048    # 773.9 / 838.1
+# above the ceiling: the default packet pool and the meter-compose graph
+lane     meter-compose        1048    # 772.5 / 837.9
+# above the ceiling: the default packet pool and the session-path graph
+lane     session-path         1384    # 1036.8 / 1102.3
+# above the ceiling: the default packet pool and the route-path graph
+lane     route-path           1384    # 1039.3 / 1101.2
+# above the ceiling: the default packet pool and the iface-path graph
+lane     iface-path           1384    # 1044.8 / 1105.0
+# above the ceiling: the default packet pool and the two-instance graph
+lane     session-instances    1384    # 1042.1 / 1101.3
+# above the ceiling: the default packet pool and the session-live graph
+lane     session-live         1384    # 1040.6 / 1101.8
+# above the ceiling: the default packet pool and the n4-path graph
+lane     n4-path              1384    # 1040.2 / 1101.7
+# above the ceiling: the default packet pool and the session-report graph
+lane     session-report       1384    # 1040.3 / 1102.3
+# above the ceiling: the default packet pool and the buffer-path graph
+lane     buffer-path          1392    # 1045.2 / 1107.8
+# above the ceiling: the default packet pool, the graph and an af_packet port
+lane     veth-layouts         1848    # 1415.2 / 1472.5
+# above the ceiling: the default packet pool, the graph and an af_packet port
+lane     veth-port            1848    # 1414.4 / 1477.8
+# above the ceiling: the default packet pool, the graph and an af_packet port
+lane     veth-transport       1848    # 1412.3 / 1472.3
