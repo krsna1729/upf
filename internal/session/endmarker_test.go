@@ -522,11 +522,11 @@ func TestLeavingTunnelsCapturesSharedPDRAndMARRoutedEndpoints(t *testing.T) {
 	localN9 := netip.MustParseAddr("192.0.2.9")
 	old := &far{id: 2, hasOuter: true, teid: 0x11223344, peer: netip.MustParseAddr("10.20.30.2")}
 	s := &Session{
-		FARs: map[uint32]*far{2: old},
-		PDRs: map[uint16]*pdr{
+		FARs: idMapOf(map[uint32]*far{2: old}),
+		PDRs: idMapOf(map[uint16]*pdr{
 			1: {id: 1, farID: 2, tunnelLocalAddress: localN3, transportRouteDomain: 1},
 			2: {id: 2, farID: 2, tunnelLocalAddress: localN3, transportRouteDomain: 1},
-		},
+		}),
 		MARs: map[uint16]*mar{
 			1: {
 				accesses:              [2]marAccess{{hasFarID: true, farID: 2}},
@@ -565,11 +565,11 @@ func TestLeavingTunnelsDoesNotEndAnUnchangedRoutedEndpoint(t *testing.T) {
 		hasOuter: true, teid: 0x11223344, peer: netip.MustParseAddr("10.20.30.2"),
 	}
 	s := &Session{
-		FARs: map[uint32]*far{2: old},
-		PDRs: map[uint16]*pdr{
+		FARs: idMapOf(map[uint32]*far{2: old}),
+		PDRs: idMapOf(map[uint16]*pdr{
 			1: {id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, instance: "internet",
 				tunnelLocalAddress: local, transportRouteDomain: 2},
-		},
+		}),
 	}
 	for _, update := range []farReq{
 		{id: 2, hasFwd: true},

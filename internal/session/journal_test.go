@@ -373,16 +373,16 @@ func TestACompactedCheckpointKeepsWhatTheModificationsMade(t *testing.T) {
 	if now == nil {
 		t.Fatalf("the replay holds no session at SEID %d", seid)
 	}
-	if *now.FARs[2] != *was.FARs[2] {
-		t.Errorf("the replayed FAR 2 is %+v, want %+v", *now.FARs[2], *was.FARs[2])
+	if *now.FARs.at(2) != *was.FARs.at(2) {
+		t.Errorf("the replayed FAR 2 is %+v, want %+v", *now.FARs.at(2), *was.FARs.at(2))
 	}
-	q, want := now.QERs[1], was.QERs[1]
+	q, want := now.QERs.at(1), was.QERs.at(1)
 	if q.gateUL != want.gateUL || q.gateDL != want.gateDL || q.mbUL != want.mbUL || q.mbDL != want.mbDL {
 		t.Errorf("the replayed QER 1 gates %d/%d at %d/%d, want %d/%d at %d/%d",
 			q.gateUL, q.gateDL, q.mbUL, q.mbDL, want.gateUL, want.gateDL, want.mbUL, want.mbDL)
 	}
-	if len(now.PDRs) != len(was.PDRs) {
-		t.Errorf("the replay holds %d PDRs, want %d", len(now.PDRs), len(was.PDRs))
+	if now.PDRs.len() != was.PDRs.len() {
+		t.Errorf("the replay holds %d PDRs, want %d", now.PDRs.len(), was.PDRs.len())
 	}
 }
 

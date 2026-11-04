@@ -634,10 +634,13 @@ type Session struct {
 	CPSEID    uint64 // the CP function's F-SEID, for events and reports
 	UEIP      netip.Addr
 
-	PDRs map[uint16]*pdr
-	FARs map[uint32]*far
-	QERs map[uint32]*qer
-	URRs map[uint32]*urr
+	// The session's rules by id: sorted slices for the handful a session
+	// names, a map past idMapSmall (idmap.go). A Go map per kind cost 192 B of
+	// header and first group to hold one or two pointers.
+	PDRs idMap[uint16, *pdr]
+	FARs idMap[uint32, *far]
+	QERs idMap[uint32, *qer]
+	URRs idMap[uint32, *urr]
 	// BARs are what the SMF asks a buffering FAR to hold (TS 29.244 7.5.2.6):
 	// the DL Buffering Duration and the DL Buffering Suggested Packet Count,
 	// referenced by the FARs' BAR ID (8.2.55). They are a map rather than a
@@ -729,10 +732,10 @@ type Session struct {
 // model fails every later message the same way, the SMF's retry included.
 type modelSnapshot struct {
 	ueIP netip.Addr
-	pdrs map[uint16]*pdr
-	fars map[uint32]*far
-	qers map[uint32]*qer
-	urrs map[uint32]*urr
+	pdrs idMap[uint16, *pdr]
+	fars idMap[uint32, *far]
+	qers idMap[uint32, *qer]
+	urrs idMap[uint32, *urr]
 	bars map[uint8]*bar
 	mars map[uint16]*mar
 
@@ -743,7 +746,12 @@ type modelSnapshot struct {
 	removedQERs    []*qer
 }
 
+// cloneEntries copies m and each entry it points at; an empty m stays nil, as
+// a session's maps are until something is written to them.
 func cloneEntries[K comparable, V any](m map[K]*V) map[K]*V {
+	if len(m) == 0 {
+		return nil
+	}
 	out := make(map[K]*V, len(m))
 	for k, v := range m {
 		cp := *v
@@ -756,8 +764,8 @@ func cloneEntries[K comparable, V any](m map[K]*V) map[K]*V {
 func (s *Session) snapshot() modelSnapshot {
 	return modelSnapshot{
 		ueIP: s.UEIP,
-		pdrs: cloneEntries(s.PDRs), fars: cloneEntries(s.FARs), qers: cloneEntries(s.QERs),
-		urrs: cloneEntries(s.URRs), bars: cloneEntries(s.BARs),
+		pdrs: cloneIDMap(s.PDRs), fars: cloneIDMap(s.FARs), qers: cloneIDMap(s.QERs),
+		urrs: cloneIDMap(s.URRs), bars: cloneEntries(s.BARs),
 		mars:    cloneEntries(s.MARs),
 		removed: slices.Clone(s.removed), stale: slices.Clone(s.stale), ending: slices.Clone(s.ending),
 		removedMARs:    slices.Clone(s.removedMARs),
@@ -1548,10 +1556,10 @@ func (c *Compiler) forget(s *Session) {
 // it has a URR, EvaluateDownlinks if a PDR buffers and notifies. Only adds:
 // the ticks drop what no longer qualifies. The caller holds the lock.
 func (c *Compiler) track(s *Session) {
-	if len(s.URRs) > 0 {
+	if s.URRs.len() > 0 {
 		c.measured[s.LocalSEID] = struct{}{}
 	}
-	for _, p := range s.PDRs {
+	for _, p := range s.PDRs.all() {
 		if p.notify {
 			c.buffering[s.LocalSEID] = struct{}{}
 			return
@@ -1561,7 +1569,7 @@ func (c *Compiler) track(s *Session) {
 
 // removal is the transaction that erases a session's records (remove).
 func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
-	changes := make([]bess.Change, 0, 4*len(s.PDRs)+2)
+	changes := make([]bess.Change, 0, 4*s.PDRs.len()+2)
 	// One erase per (resource, key): a session's PDRs name the same records --
 	// the meter of a QER in each direction, and one F-TEID when two uplink PDRs
 	// carry it -- so erasing per PDR would name the same record several times
@@ -1723,7 +1731,7 @@ func (c *Compiler) settle(s *Session) {
 	// still names is one the transaction *wrote* rather than erased (compile
 	// skips the erase for those), and it stays claimed.
 	live := map[string]bool{}
-	for _, p := range s.PDRs {
+	for _, p := range s.PDRs.all() {
 		dir := c.direction(p)
 		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
 			for _, key := range keys {
@@ -1733,7 +1741,7 @@ func (c *Compiler) settle(s *Session) {
 	}
 	// The ARP claims of the session's own subscriber addresses, held with the
 	// entries they write (arpEntry.claim).
-	for _, p := range s.PDRs {
+	for _, p := range s.PDRs.all() {
 		if e, ok := c.arpEntryOf(p); ok {
 			live[e.claim()] = true
 		}

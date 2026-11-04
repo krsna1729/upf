@@ -788,7 +788,7 @@ func TestTheDownlinkReportIsOwedOncePerBufferingEpisode(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
 	}
-	if c.sessions[seid].PDRs[2].buffer {
+	if c.sessions[seid].PDRs.at(2).buffer {
 		t.Fatal("the PDR still buffers after a FORW FAR")
 	}
 	mod = message.NewSessionModificationRequest(0, 0, seid, 8, 0,

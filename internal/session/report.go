@@ -429,7 +429,7 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 		c.mu.Lock()
 		for _, seid := range seids[start:min(start+tickHold, len(seids))] {
 			s := c.sessions[seid]
-			if s == nil || len(s.URRs) == 0 {
+			if s == nil || s.URRs.len() == 0 {
 				delete(c.measured, seid)
 				continue
 			}
@@ -811,7 +811,7 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 		states := held[:0]
 		anyDue := false
 		for _, uid := range members {
-			u := s.URRs[uid]
+			u := s.URRs.at(uid)
 			up, down, first, last := c.countsOf(s, uid, counts)
 			st := memberState{uid: uid, rawUp: up, rawDown: down}
 			st.endMarker = endMarkerArrived(s, uid, markers)
@@ -890,7 +890,7 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 		// leads (its reason is the group's), the rest are carried with it, and
 		// all of them share the group's one UR-SEQN -- the lowest id's, so it
 		// is the same sequence however the members are ordered.
-		seqn := s.URRs[members[0]].seqn
+		seqn := s.URRs.at(members[0]).seqn
 		lead := 0
 		for i := range states {
 			if states[i].due {
@@ -903,7 +903,7 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 			SEID: s.LocalSEID, CPSEID: s.CPSEID, URRID: l.uid,
 			Trigger: l.trigger, Seqn: seqn,
 			Up: l.up, Down: l.down,
-			Duration: l.window, First: l.first, Last: l.last, Enforcing: s.URRs[l.uid].enforcing,
+			Duration: l.window, First: l.first, Last: l.last, Enforcing: s.URRs.at(l.uid).enforcing,
 			RawUp: l.rawUp, RawDown: l.rawDown, DecidedAt: now, EndMarker: l.endMarker,
 		}
 		for i, st := range states {
@@ -913,10 +913,10 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 			r.Linked = append(r.Linked, LinkedUsage{
 				URRID: st.uid, Up: st.up, Down: st.down,
 				Duration: st.window, First: st.first, Last: st.last,
-				Enforcing: s.URRs[st.uid].enforcing,
+				Enforcing: s.URRs.at(st.uid).enforcing,
 				RawUp:     st.rawUp, RawDown: st.rawDown, EndMarker: st.endMarker,
 			})
-			if s.URRs[st.uid].enforcing {
+			if s.URRs.at(st.uid).enforcing {
 				r.Enforcing = true
 			}
 		}
@@ -927,14 +927,14 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 		// Where it was is kept with the report, for a report the SMF never
 		// gets (Unreport).
 		for _, st := range states {
-			u := s.URRs[st.uid]
+			u := s.URRs.at(st.uid)
 			r.bases = append(r.bases, urrBase{uid: st.uid, reported: u.reported, lastUp: u.lastUp,
 				lastDown: u.lastDown, windowFirst: u.windowFirst, windowLast: u.windowLast})
 			u.reported, u.lastUp, u.lastDown = now, st.rawUp, st.rawDown
 			u.windowFirst, u.windowLast = time.Time{}, time.Time{}
 		}
 		reports = append(reports, r)
-		s.URRs[members[0]].seqn++
+		s.URRs.at(members[0]).seqn++
 	}
 	return reports, stopped
 }
@@ -965,7 +965,7 @@ func linkedGroups(s *Session) [][]uint32 {
 		return x
 	}
 	for _, id := range ids {
-		for _, lid := range s.URRs[id].linked {
+		for _, lid := range s.URRs.at(id).linked {
 			if _, ok := parent[lid]; ok {
 				// resolve refuses a link the session cannot resolve, so a
 				// missing one here is a session that never compiled; the guard
@@ -1073,12 +1073,7 @@ func (u *urr) due(up, down Usage, window, windowActive time.Duration) (Trigger, 
 // urrIDsInOrder is a session's URR ids, low to high: a session with several
 // URRs reports them in one order whatever the map's is.
 func urrIDsInOrder(s *Session) []uint32 {
-	ids := make([]uint32, 0, len(s.URRs))
-	for id := range s.URRs {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-	return ids
+	return s.URRs.ids()
 }
 
 // windowBase is which reading a window opens from (windowsOf): the base of the
@@ -1139,12 +1134,12 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 	defer c.mu.Unlock()
 	var out []urrWindow
 	for _, members := range linkedGroups(s) {
-		seqn := s.URRs[members[0]].seqn
+		seqn := s.URRs.at(members[0]).seqn
 		for _, uid := range members {
 			if uids != nil && !slices.Contains(uids, uid) {
 				continue
 			}
-			u := s.URRs[uid]
+			u := s.URRs.at(uid)
 			nowUp, nowDown, f, l := c.countsOf(s, uid, counts)
 			fromUp, fromDown, fromAt := u.lastUp, u.lastDown, u.reported
 			if base == sinceDelivery {
@@ -1195,7 +1190,7 @@ func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) 
 	defer c.mu.Unlock()
 	bumped := map[uint32]bool{}
 	for _, w := range windows {
-		u := s.URRs[w.uid]
+		u := s.URRs.at(w.uid)
 		if u == nil || !u.reported.Equal(w.reportedAt) {
 			// Gone, or a reporting tick reported it since this reading: moving
 			// the base back would report the same usage twice.
@@ -1205,7 +1200,7 @@ func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) 
 		u.reported, u.lastUp, u.lastDown = now, w.rawUp, w.rawDown
 		u.deliveredUp, u.deliveredDown, u.deliveredAt = w.rawUp, w.rawDown, now
 		u.windowFirst, u.windowLast = time.Time{}, time.Time{}
-		if lead := s.URRs[w.groupLeader]; lead != nil && !bumped[w.groupLeader] {
+		if lead := s.URRs.at(w.groupLeader); lead != nil && !bumped[w.groupLeader] {
 			bumped[w.groupLeader] = true
 			lead.seqn++
 		}
@@ -1228,16 +1223,16 @@ func (c *Compiler) Unreport(r Report) bool {
 		return false
 	}
 	for _, b := range r.bases {
-		if u := s.URRs[b.uid]; u == nil || !u.reported.Equal(r.DecidedAt) {
+		if u := s.URRs.at(b.uid); u == nil || !u.reported.Equal(r.DecidedAt) {
 			return false
 		}
 	}
 	for _, b := range r.bases {
-		u := s.URRs[b.uid]
+		u := s.URRs.at(b.uid)
 		u.reported, u.lastUp, u.lastDown = b.reported, b.lastUp, b.lastDown
 		u.windowFirst, u.windowLast = b.windowFirst, b.windowLast
 	}
-	if holder := s.URRs[r.bases[0].uid]; holder.seqn == r.Seqn+1 {
+	if holder := s.URRs.at(r.bases[0].uid); holder.seqn == r.Seqn+1 {
 		holder.seqn--
 	}
 	return true
@@ -1263,7 +1258,7 @@ func (c *Compiler) ConfirmReport(ctx context.Context, r Report) {
 		return
 	}
 	delivered := func(uid uint32, up, down Usage) {
-		u := s.URRs[uid]
+		u := s.URRs.at(uid)
 		if u == nil {
 			return
 		}
@@ -1283,7 +1278,7 @@ func (c *Compiler) ConfirmReport(ctx context.Context, r Report) {
 // URR goes with the session. The reading happens before the dataplane erases
 // the session's rules; the caller sends the answer only if the erase succeeds.
 func (c *Compiler) terminationReports(ctx context.Context, s *Session, now time.Time) []*ie.IE {
-	if len(s.URRs) == 0 {
+	if s.URRs.len() == 0 {
 		return nil
 	}
 	windows, err := c.windowsOf(ctx, s, nil, now, sinceDelivery)

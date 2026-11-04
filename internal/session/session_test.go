@@ -2004,7 +2004,7 @@ func TestAnUpdatePDRWithoutPrecedenceKeepsTheMatchingOrder(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the update answered cause %d", got)
 	}
-	if got := sessionOf(t, c, upFSEID(t, resp)).PDRs[3].precedence; got != 20 {
+	if got := sessionOf(t, c, upFSEID(t, resp)).PDRs.at(3).precedence; got != 20 {
 		t.Errorf("the updated PDR's precedence is %d, want the stored 20", got)
 	}
 	general, ok := ruleWithQFI(rec.last(), qfiField(t), []byte{0}, []byte{0})
@@ -2042,7 +2042,7 @@ func TestAnUpdatePDRKeepsWhatItLeavesOut(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("an Update PDR naming only the precedence answered cause %d", got)
 	}
-	p := sessionOf(t, c, seid).PDRs[1]
+	p := sessionOf(t, c, seid).PDRs.at(1)
 	if p.srcIfc != ie.SrcInterfaceAccess || p.ueIP != netip.MustParseAddr("10.45.0.2") || p.teid != 0x11223344 {
 		t.Errorf("the PDI read as interface %d, UE %v, TEID %#x; want the stored Access, 10.45.0.2, 0x11223344",
 			p.srcIfc, p.ueIP, p.teid)
@@ -2407,7 +2407,7 @@ func TestAQuotaExhaustedURRDropsItsPDRs(t *testing.T) {
 	// there because only the counter reading says a quota is used up; see
 	// docs/design.md, "Usage".)
 	c.mu.Lock()
-	c.findByCP(0x3021).URRs[7].enforcing = true
+	c.findByCP(0x3021).URRs.at(7).enforcing = true
 	c.mu.Unlock()
 
 	// An update that changes nothing about the PDR: whatever the SMF sends, the
@@ -2437,7 +2437,7 @@ func TestAQuotaExhaustedURRDropsItsPDRs(t *testing.T) {
 		t.Fatalf("the modification that provisions a new quota answered cause %d", got)
 	}
 	c.mu.Lock()
-	enforcing := c.findByCP(0x3021).URRs[7].enforcing
+	enforcing := c.findByCP(0x3021).URRs.at(7).enforcing
 	c.mu.Unlock()
 	if enforcing {
 		t.Error("a new quota left the URR enforcing: the traffic would never come back")
@@ -3373,12 +3373,12 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 			endpointID: endpoint, endpointFamily: 4, endpointIPv4: addr,
 			endpointFamilies: []uint8{4}}
 	}
-	first := &Session{LocalSEID: 1, PDRs: map[uint16]*pdr{}}
+	first := &Session{LocalSEID: 1}
 	firstPDR := makePDR(1, 1, firstAddr)
-	first.PDRs[1] = firstPDR
-	second := &Session{LocalSEID: 2, PDRs: map[uint16]*pdr{}}
+	first.PDRs.set(1, firstPDR)
+	second := &Session{LocalSEID: 2}
 	secondPDR := makePDR(1, 2, secondAddr)
-	second.PDRs[1] = secondPDR
+	second.PDRs.set(1, secondPDR)
 
 	c.mu.Lock()
 	if err := c.claimFTEID(first, firstPDR); err != nil {
@@ -4393,7 +4393,7 @@ func TestEvaluateTakesTheFirstReadingAsItsBaseline(t *testing.T) {
 		t.Fatalf("the first reading reported %+v: the inherited totals are not this URR's usage", reports)
 	}
 	c.mu.Lock()
-	enforcing := c.findByCP(0x3041).URRs[7].enforcing
+	enforcing := c.findByCP(0x3041).URRs.at(7).enforcing
 	c.mu.Unlock()
 	if enforcing {
 		t.Error("the inherited totals exhausted the quota: the window must start at the first reading")
@@ -4518,7 +4518,7 @@ func TestEvaluateAllWalksEverySession(t *testing.T) {
 	}
 	var measured *pdr
 	c.mu.Lock()
-	for _, p := range c.findByCP(0x3050).PDRs {
+	for _, p := range c.findByCP(0x3050).PDRs.all() {
 		measured = p
 	}
 	c.mu.Unlock()
@@ -4665,7 +4665,7 @@ func TestAURRIsReadIntoTheSession(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	u := sessionOf(t, c, upFSEID(t, resp)).URRs[7]
+	u := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
 	if u == nil {
 		t.Fatal("the session holds no URR 7")
 	}
@@ -4708,7 +4708,7 @@ func TestAOneOctetReportingTriggersIsRead(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("a one-octet Reporting Triggers answered cause %d", got)
 	}
-	u := sessionOf(t, c, upFSEID(t, resp)).URRs[7]
+	u := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
 	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
 		t.Errorf("the triggers read as %+v, want PERIO alone", u)
 	}
@@ -4822,16 +4822,16 @@ func TestZeroIsALegalRuleID(t *testing.T) {
 	}
 	seid := upFSEID(t, resp)
 	s := c.sessions[seid]
-	if s.PDRs[0] == nil {
+	if s.PDRs.at(0) == nil {
 		t.Fatal("the session holds no PDR 0")
 	}
 	// The uplink PDR's FAR is FAR 0's, and its QER is QER 0's: the ids are the
 	// SMF's references, and a wrong one would be a rule the SMF did not send.
-	if s.PDRs[0].farID != 0 || s.PDRs[0].meterID != s.QERs[0].meterUL {
+	if s.PDRs.at(0).farID != 0 || s.PDRs.at(0).meterID != s.QERs.at(0).meterUL {
 		t.Errorf("PDR 0 resolved to FAR %d and meter %d, want FAR 0 and QER 0's meter %d",
-			s.PDRs[0].farID, s.PDRs[0].meterID, s.QERs[0].meterUL)
+			s.PDRs.at(0).farID, s.PDRs.at(0).meterID, s.QERs.at(0).meterUL)
 	}
-	if s.PDRs[0].drop {
+	if s.PDRs.at(0).drop {
 		t.Error("the PDR drops although its FAR 0 forwards")
 	}
 
@@ -4870,7 +4870,7 @@ func TestARemovedQERsMeterReturnsAtTeardown(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	seid := upFSEID(t, resp)
-	meter := c.sessions[seid].QERs[1].meterUL
+	meter := c.sessions[seid].QERs.at(1).meterUL
 	if meter == 0 {
 		t.Fatal("the QER of the establishment has no uplink meter")
 	}
@@ -4896,11 +4896,11 @@ func TestARemovedQERsMeterReturnsAtTeardown(t *testing.T) {
 		t.Fatalf("the modification that re-pointed the PDR answered cause %d", got)
 	}
 	s := c.sessions[seid]
-	if s.QERs[1] != nil {
+	if s.QERs.at(1) != nil {
 		t.Error("the removed QER is still in the session")
 	}
-	if s.PDRs[1].meterID != 0 {
-		t.Errorf("the PDR still meters under %d, and the QER that owned it is gone", s.PDRs[1].meterID)
+	if s.PDRs.at(1).meterID != 0 {
+		t.Errorf("the PDR still meters under %d, and the QER that owned it is gone", s.PDRs.at(1).meterID)
 	}
 
 	// A removal of a QER the session never held says nothing and changes
@@ -4959,8 +4959,8 @@ func TestRemovingAQERAPDRStillNamesUnlinksIt(t *testing.T) {
 	if m := meterOf(); m != 0 {
 		t.Errorf("the PDR still meters under %d after its QER was removed", m)
 	}
-	if s := sessionOf(t, c, seid); s.QERs[1] != nil || len(s.PDRs[1].qerIDs) != 0 {
-		t.Errorf("the session holds QER 1 (%v) or PDR 1 still names %v", s.QERs[1] != nil, s.PDRs[1].qerIDs)
+	if s := sessionOf(t, c, seid); s.QERs.at(1) != nil || len(s.PDRs.at(1).qerIDs) != 0 {
+		t.Errorf("the session holds QER 1 (%v) or PDR 1 still names %v", s.QERs.at(1) != nil, s.PDRs.at(1).qerIDs)
 	}
 }
 
@@ -4991,7 +4991,7 @@ func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	s := sessionOf(t, c, upFSEID(t, resp))
-	s.URRs[7].enforcing = true // as the reporter leaves it after a quota exhaustion
+	s.URRs.at(7).enforcing = true // as the reporter leaves it after a quota exhaustion
 
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewUpdateURR(
@@ -5003,7 +5003,7 @@ func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
 	}
-	u := sessionOf(t, c, upFSEID(t, resp)).URRs[7]
+	u := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
 	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
 		t.Errorf("the triggers read as %+v, want PERIO alone", u)
 	}
@@ -5052,7 +5052,7 @@ func TestRemoveURRAfterAnUpdatePDRDropsIt(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the removal answered cause %d", got)
 	}
-	if s := sessionOf(t, c, upFSEID(t, resp)); s.URRs[7] != nil {
+	if s := sessionOf(t, c, upFSEID(t, resp)); s.URRs.at(7) != nil {
 		t.Error("the session still holds the removed URR")
 	}
 }
@@ -5095,7 +5095,7 @@ func TestARemoveURROfALinkedToURRIsRefused(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("removing a URR another URR links to answered cause %d, want a rule failure", got)
 	}
-	if s := sessionOf(t, c, upFSEID(t, resp)); s.URRs[7] == nil {
+	if s := sessionOf(t, c, upFSEID(t, resp)); s.URRs.at(7) == nil {
 		t.Fatal("the refused removal took the linked-to URR out of the model")
 	}
 }
