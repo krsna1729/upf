@@ -154,32 +154,43 @@ func (c *Client) Message(typ string, fields map[string]any) (proto.Message, erro
 	return messageOf(md, typ, fields)
 }
 
-// wire is Message for a message that is only marshalled -- a change's key or
-// value, an action's argument. Its fields go on already encoded (encode),
-// appended to buf, as the message's unknown fields, which a dynamic message
-// marshals verbatim; countRequest's action ids ride the same way. Reading a
-// field of the message reads its default. Building it field by field was most
-// of what a session establishment allocated.
-//
-// Each message holds its own capped piece of buf, never written again: the
-// pieces stay valid whatever buf's later growth does. A type with required
-// fields of its own takes Message's path, because the marshal's required-field
-// check cannot see a field carried as unknown.
+// wire is Message for an action's argument, which is only marshalled: its
+// fields go on already encoded (encoded), as the message's unknown fields,
+// which a dynamic message marshals verbatim; countRequest's action ids ride
+// the same way. Reading a field of the message reads its default. A type with
+// required fields of its own takes Message's path, because the marshal's
+// required-field check cannot see a field carried as unknown.
 func (c *Client) wire(buf []byte, typ string, fields map[string]any) (proto.Message, []byte, error) {
 	md, err := c.descriptor(typ)
 	if err != nil {
 		return nil, buf, err
 	}
-	if fields != nil && md.RequiredNumbers().Len() == 0 {
-		start := len(buf)
-		if b, ok := encode(buf, md, fields); ok {
+	if md.RequiredNumbers().Len() == 0 {
+		if piece, ok, b := encoded(buf, md, fields); ok {
 			m := dynamicpb.NewMessage(md)
-			m.SetUnknown(b[start:len(b):len(b)])
+			m.SetUnknown(piece)
 			return m, b, nil
 		}
 	}
 	m, err := messageOf(md, typ, fields)
 	return m, buf, err
+}
+
+// encoded is fields as md's wire form, appended to buf, where encode converts
+// them; the bytes Message would marshal to. Building a message field by field
+// only to marshal it was most of what a session establishment allocated. The
+// piece is capped and never written again, so it stays valid whatever buf's
+// later growth does, for as long as anyone holds it.
+func encoded(buf []byte, md protoreflect.MessageDescriptor, fields map[string]any) ([]byte, bool, []byte) {
+	if fields == nil {
+		return nil, false, buf
+	}
+	start := len(buf)
+	b, ok := encode(buf, md, fields)
+	if !ok {
+		return nil, false, buf // what encode wrote past len(buf) is no one's
+	}
+	return b[start:len(b):len(b)], true, b
 }
 
 func (c *Client) descriptor(typ string) (protoreflect.MessageDescriptor, error) {
@@ -589,7 +600,9 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 
 	tx := c.sdk.Transaction()
 	// Every key and value of the transaction is encoded into this one buffer
-	// (wire): a few growths per transaction, not several per message.
+	// (encoded) and handed to the SDK as bytes: a few growths per transaction,
+	// and no message built per key or value only to be marshalled. A change
+	// whose fields encode does not convert goes the way Message builds it.
 	buf := make([]byte, 0, 64*len(changes))
 	for i, ch := range changes {
 		r, err := c.Resource(ch.Resource)
@@ -601,12 +614,22 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 				return fmt.Errorf("change %d: resource %q is a singleton: it has no key to erase",
 					i, ch.Resource)
 			}
-			var v proto.Message
-			v, buf, err = c.wire(buf, r.ValueType, ch.Value)
+			vmd, err := c.descriptor(r.ValueType)
 			if err != nil {
 				return fmt.Errorf("change %d: %w", i, err)
 			}
-			if err := tx.Set(r, v); err != nil {
+			var v []byte
+			var ok bool
+			if v, ok, buf = encoded(buf, vmd, ch.Value); ok {
+				err = tx.SetEncoded(r, v)
+			} else {
+				m, merr := messageOf(vmd, r.ValueType, ch.Value)
+				if merr != nil {
+					return fmt.Errorf("change %d: %w", i, merr)
+				}
+				err = tx.Set(r, m)
+			}
+			if err != nil {
 				return fmt.Errorf("change %d (%s): %w", i, ch.Resource, err)
 			}
 			continue
@@ -614,23 +637,48 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 		if ch.Key == nil {
 			return fmt.Errorf("change %d: resource %q is a map: it needs a key", i, ch.Resource)
 		}
-		var k proto.Message
-		k, buf, err = c.wire(buf, r.KeyType, ch.Key)
+		kmd, err := c.descriptor(r.KeyType)
 		if err != nil {
 			return fmt.Errorf("change %d: %w", i, err)
 		}
+		var k []byte
+		var kok bool
+		k, kok, buf = encoded(buf, kmd, ch.Key)
 		if ch.Value == nil {
-			if err := tx.Erase(r, k); err != nil {
+			if kok {
+				err = tx.EraseEncoded(r, k)
+			} else {
+				km, merr := messageOf(kmd, r.KeyType, ch.Key)
+				if merr != nil {
+					return fmt.Errorf("change %d: %w", i, merr)
+				}
+				err = tx.Erase(r, km)
+			}
+			if err != nil {
 				return fmt.Errorf("change %d (%s): %w", i, ch.Resource, err)
 			}
 			continue
 		}
-		var v proto.Message
-		v, buf, err = c.wire(buf, r.ValueType, ch.Value)
+		vmd, err := c.descriptor(r.ValueType)
 		if err != nil {
 			return fmt.Errorf("change %d: %w", i, err)
 		}
-		if err := tx.Upsert(r, k, v); err != nil {
+		var v []byte
+		var vok bool
+		if v, vok, buf = encoded(buf, vmd, ch.Value); kok && vok {
+			err = tx.UpsertEncoded(r, k, v)
+		} else {
+			km, merr := messageOf(kmd, r.KeyType, ch.Key)
+			if merr != nil {
+				return fmt.Errorf("change %d: %w", i, merr)
+			}
+			vm, merr := messageOf(vmd, r.ValueType, ch.Value)
+			if merr != nil {
+				return fmt.Errorf("change %d: %w", i, merr)
+			}
+			err = tx.Upsert(r, km, vm)
+		}
+		if err != nil {
 			return fmt.Errorf("change %d (%s): %w", i, ch.Resource, err)
 		}
 	}
