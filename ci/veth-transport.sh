@@ -175,7 +175,8 @@ PEER_MAC=$(nsx cat "/sys/class/net/$PEER/address" | tr '[:upper:]' '[:lower:]')
 
 # --- the daemon and the graph ------------------------------------------------
 export LD_LIBRARY_PATH=$STAGE/lib:$DPDK_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-sudo -E env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+bessd_launcher || exit 1
+"${BESSD_LAUNCH[@]}" sudo -E env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
   "$BESSD" --mem_backing=normal -p "$BESS_PORT" -i "$WORK/bessd.pid" -modules="$PLUG" -f >"$LOG" 2>&1 &
 BESSD_PID=$!
 BESSD_STARTED=1
@@ -483,6 +484,9 @@ else
 fi
 
 echo "veth-transport: neighbors $(bc action rt_transport get_neighbors 2>/dev/null | tr -d '\n ')"
+# The daemon's peak against this lane's declaration (ci/test-memory.tsv),
+# read while it runs: sudo is $BESSD_PID, the pid file names the daemon.
+bessd_mem_check "$(tr -d '\000' <"$WORK/bessd.pid")" || FAIL=1
 if [ "$FAIL" = 0 ]; then
   echo "veth-transport: ok (ARP and ND resolution, IPv4 and IPv6 outer hop count once with the inner untouched, End Markers through the transport Router, a MAC change followed, an unreachable gateway failed closed)"
 fi

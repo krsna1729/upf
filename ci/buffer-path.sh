@@ -112,7 +112,7 @@ kill -0 "$UPFD_PID" 2>/dev/null || {
 
 # The SMF's half: the DDN over N4, with this test as the SMF.
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_N4_TARGET=127.0.0.1:$N4_PORT \
-  $GO test "$ROOT/internal/n4/" -run 'TestLiveDownlinkReportReachesTheSMF' -count=1 -v || {
+  $GO test "${GO_TEST_EXEC[@]}" "$ROOT/internal/n4/" -run 'TestLiveDownlinkReportReachesTheSMF' -count=1 -v || {
   echo "buffer-path: the downlink report test failed; upfd's log follows" >&2
   cat "$UPFD_LOG" >&2
   exit 1
@@ -126,7 +126,7 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_N4_TARGET=127.0.0.1:$N4_PORT \
 # script's stdout rather than only in the file. The tests build their own
 # controller (New(cfg, client, log)), so upfd is not the one releasing.
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=127.0.0.1:$BESS_PORT \
-  $GO test "$ROOT/internal/session/" -count=1 -v \
+  $GO test "${GO_TEST_EXEC[@]}" "$ROOT/internal/session/" -count=1 -v \
   -run 'TestLiveSession(BuffersAndReleasesTheHeldPackets|HoldsNothingAfterTheBufferingDurationPasses)' \
   2>&1 | tee "$WORK/session-test.log" || {
   echo "buffer-path: the buffering tests failed (their output is above); upfd's log follows" >&2

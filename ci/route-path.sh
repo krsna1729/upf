@@ -13,4 +13,5 @@
 # modules are absent.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-GRAPH=$ROOT/deploy/route-path.yaml ROUTE_MODE=destination exec "$ROOT/ci/session-path.sh"
+# UPF_LANE: the memory row is this lane's (ci/test-memory.tsv), not session-path's.
+UPF_LANE=route-path GRAPH=$ROOT/deploy/route-path.yaml ROUTE_MODE=destination exec "$ROOT/ci/session-path.sh"

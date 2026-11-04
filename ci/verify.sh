@@ -117,7 +117,9 @@ if [ -n "$TESTS_JSON" ] || { [ "$LANES_ONLY" -eq 0 ] && [ "$RENDER" -eq 0 ]; }; 
       echo "verify: no Go toolchain (set GO_BIN)" >&2
       exit 2
     fi
-    "$GO_BIN" test ./cmd/... ./internal/... -count=1 -json > "$OUT/go-test.json" 2> "$OUT/go-test.err"
+    # Each test binary under its package's memory row, two at a time
+    # (ci/go-test.sh, ci/test-memory.tsv).
+    GO_BIN=$GO_BIN ci/go-test.sh -count=1 -json > "$OUT/go-test.json" 2> "$OUT/go-test.err"
   fi
   if [ -n "$(printf '%s\n' "$tests" | grep .)" ]; then
     python3 - "$OUT/go-test.json" "$OUT/tests.tsv" <<'PY'

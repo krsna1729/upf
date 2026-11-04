@@ -78,6 +78,20 @@ if bench
   )
 endif
 
+# Every test declares the most memory it may use, in MiB: its row
+# "meson <name> <MiB>" in ../ci/test-memory.tsv, passed as UPF_TEST_MEM_MB.
+# ci/run_capped.py, the default test setup's wrapper, runs it in a cgroup at
+# 1.5x that and fails it when its peak is above it; ci/check-test-memory.py
+# fails a test with no row (docs/engineering-guide.md, "Test memory").
+test_memory_mb = {}
+foreach line : import('fs').read('../ci/test-memory.tsv').split('\n')
+  row = line.split()
+  if row.length() >= 3 and row[0] == 'meson'
+    test_memory_mb += {row[1]: row[2].to_int()}
+  endif
+endforeach
+add_test_setup('capped', exe_wrapper: find_program('../ci/run_capped.py'), is_default: true)
+
 # Focused parser, admission-key, F-TEID and ARP entries resource and outer-wire
 # unit tests, and the per-packet helpers the modules and UpfAppliance share
 # (packet_helpers_test.cc: GTP-U control, ATSSS selection, ARP proxy). The
@@ -98,7 +112,8 @@ if gtest_dep.found() and bess_static_dep.found()
     dependencies: [bess_static_dep, protobuf_dep, gtest_dep],
     link_args: ['-Wl,--disable-new-dtags'],
   )
-  test('gtpu_datapath', gtpu_datapath_test)
+  test('gtpu_datapath', gtpu_datapath_test,
+    env: {'UPF_TEST_MEM_MB': test_memory_mb.get('gtpu_datapath', 0).to_string()})
 
   # UpfSessionAppliance's session store driven through Reserve/Publish under
   # a reader thread. Its token buckets live in the session slots, so it also
@@ -116,6 +131,7 @@ if gtest_dep.found() and bess_static_dep.found()
       dependencies: [bess_meter_dep, bess_static_dep, protobuf_dep, gtest_dep],
       link_args: ['-Wl,--disable-new-dtags'],
     )
-    test('upf_appliance_sessions', sessions_test)
+    test('upf_appliance_sessions', sessions_test,
+      env: {'UPF_TEST_MEM_MB': test_memory_mb.get('upf_appliance_sessions', 0).to_string()})
   endif
 endif

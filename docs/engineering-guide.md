@@ -179,6 +179,146 @@ Prose follows the same rule: a doc claimed the daemon quiesces workers
 (3e70d72). The commit that falsifies a claim corrects it. A deployment names
 only tracked files (266fc30). Write `[INFERENCE]` for what no check shows.
 
+### Test memory
+
+**A new test must declare its memory.** Every Go test package (plain and
+`-race`), every datapath meson test and every lane CI runs has a row
+`<kind> <name> <MiB>` in `ci/test-memory.tsv`: the most it may hold
+resident. `ci/check-test-memory.py` fails CI (Units job,
+`.github/workflows/ci.yml`) when one has no row, when a row above the 1024
+MiB ceiling has no `# above the ceiling: <reason>` line, when the two largest
+Go package rows add up to more than 2048 MiB (`go test -p 2`), when a test's
+own row (below) is above 2048 MiB or names no test, or when this table
+disagrees with the file. Its cases: `ci/check-test-memory.py --self-test`.
+
+How a row is held (each piece names its enforcer):
+
+- **Go.** `ci/go-test.sh` runs `go test -exec ci/run_capped.py`, two packages
+  at a time; `ci/verify.sh` (the unit pass) and the weekly `-race` run use
+  it, and the lanes' own `go test` calls pass the same `-exec`
+  (`GO_TEST_EXEC`, `ci/bess-env.sh`). The go command compiles and links
+  outside the cgroup, so a row is the test binary's peak, not the compiler's.
+  The row is the binary's package directory, `go-race` for a `-race` binary
+  (`ci/run_capped.py`, `go_row`). A test too large to share the `-p 2` bound
+  gets a row of its own, `go <dir>:<Test>`: `ci/go-test.sh` skips it in the
+  package's run and runs it by itself, held to that row.
+- **meson.** `datapath/meson.build` reads the `meson` rows and passes each
+  test's as `UPF_TEST_MEM_MB`; `ci/run_capped.py` is the default test setup's
+  `exe_wrapper`. CI runs `meson test -C datapath/build`, then the gate with
+  `--build-dir`, which checks every built test carries its row.
+- **Lanes.** `bessd_start` (`ci/bess-env.sh`) starts the daemon through
+  `bessd_launcher`, in a scope of its own; `check_clean_shutdown`, or
+  `bessd_mem_check` where a lane has no clean-shutdown check, reads its peak
+  before it stops and fails the lane above the row:
+  `lane-mem: <lane>: FAILED: declared X MiB, peak Y MiB`. The row bounds the
+  daemon only: the lane's Go tests are held to their package rows, and `upfd`
+  has none.
+
+`ci/run_capped.py` runs the test in a `systemd-run --user --scope` with
+`MemoryMax` at 1.5x the row (at least 32 MiB above), no swap and
+`OOMPolicy=continue`, reads the scope's `memory.peak` inside it before the
+scope exits, and fails above the row: `run_capped: <name>: FAILED: declared X
+MiB, peak Y MiB`. With no user manager it falls back to `wait4`'s
+`ru_maxrss`, the largest single process. It does not use `RLIMIT_AS`: Go's
+runtime reserves address space ahead of use. `internal/session`'s binary held
+2955 MiB of address space and 1237 MiB resident 1.5 s into its 2.1M-rule
+test, so an address-space limit at its row fails a reservation, not a use
+(VmSize and VmHWM from `/proc`, 2026-11-04). `ci/run_capped.py --self-test`
+(Units job) checks this by bytes: a process that touches 32 MiB passes a
+64 MiB row; one that touches 64 MiB fails a 48 MiB row with its peak; one
+that touches 160 MiB is killed at the 80 MiB kill limit; and, with `wait4`
+alone, the same cases pass or fail by peak.
+
+**Calibrate a new row** at the larger of the two peaks the wrapper can
+report -- the scope's `memory.peak`, and `wait4`'s `ru_maxrss` (a lane's
+daemon: its VmHWM) for a run with no user manager -- times 1.25, rounded up
+to 8 MiB (`ci/check-test-memory.py --calibrate LOG...` computes it from the
+wrapper's lines). The two differ: a small Go package's binary shows 2-6 MiB
+in `memory.peak` and about 18 MiB in `ru_maxrss`, because the kernel charges
+a page to the cgroup that first read it (the kernel's cgroup-v2.rst, "Memory
+Ownership"), and the go command read the binary when it linked it. Measure
+each run alone in a capped scope with `UPF_TEST_MEM_MEASURE=1` (kill limit
+3000 MiB, never fails), and again with `UPF_TEST_MEM_NO_SCOPE=1` as well:
+
+```
+go test -c -o build/run/testbin/plain/ ./cmd/... ./internal/...      # -race: .../race/
+(cd internal/session && UPF_TEST_MEM_MEASURE=1 ../../ci/run_capped.py \
+  ../../build/run/testbin/plain/session.test -test.count=1)
+UPF_TEST_MEM_MEASURE=1 meson test -C datapath/build -j1
+UPF_TEST_MEM_MEASURE=1 ci/smoke-gtpu.sh
+```
+
+The rows below were measured that way on 2026-11-04: branch
+`test/memory-bounds` on b03aa8f, Go 1.27.2 at `GOMAXPROCS=2`, BESS pin
+941feb51, the plugin built `buildtype=release`. A package's peak is the
+largest of its unit runs and the lanes' runs of it; a lane's `memory.peak` is
+the larger of two runs (00:54 and 11:08 IST) where two ran.
+
+| Row | Declared MiB | `memory.peak` MiB | `ru_maxrss` / VmHWM MiB |
+|---|---|---|---|
+| `go internal/session:TestATickReadsEveryRuleUnderTheMessageBound` | 1736 | 1378.4 | 1387.5 |
+| `lane veth-port` | 1848 | 1414.4 | 1477.8 |
+| `lane veth-layouts` | 1848 | 1415.2 | 1472.5 |
+| `lane veth-transport` | 1848 | 1412.3 | 1472.3 |
+| `lane buffer-path` | 1392 | 1045.2 | 1107.8 |
+| `lane iface-path` | 1384 | 1044.8 | 1105.0 |
+| `lane session-path` | 1384 | 1036.8 | 1102.3 |
+| `lane session-report` | 1384 | 1040.3 | 1102.3 |
+| `lane session-live` | 1384 | 1040.6 | 1101.8 |
+| `lane n4-path` | 1384 | 1040.2 | 1101.7 |
+| `lane session-instances` | 1384 | 1042.1 | 1101.3 |
+| `lane route-path` | 1384 | 1039.3 | 1101.2 |
+| `go-race internal/session` | 1264 | 1010.2 | 990.7 |
+| `lane smoke-gtpu` | 1056 | 783.5 | 838.6 |
+| `lane atsss-steer` | 1048 | 773.9 | 838.1 |
+| `lane meter-compose` | 1048 | 772.5 | 837.9 |
+| `meson upf_appliance_sessions` | 184 | 123.8 | 146.1 |
+| `meson gtpu_datapath` | 152 | 94.2 | 116.5 |
+| `go-race cmd/upfd` | 136 | 85.5 | 108.7 |
+| `go-race internal/bess` | 64 | 34.1 | 49.7 |
+| `go cmd/upfd` | 48 | 23.3 | 36.8 |
+| `go internal/session` | 424 | 328.5 | 334.8 |
+| `go internal/bess` | 40 | 12.3 | 27.9 |
+| `go-race cmd/n4bench` | 40 | 15.4 | 26.0 |
+| `go-race internal/n4` | 40 | 21.1 | 30.7 |
+| `go-race internal/scaletest` | 40 | 27.1 | 31.0 |
+| `go internal/n4` | 32 | 5.2 | 20.0 |
+| `go-race internal/n4sim` | 32 | 15.1 | 19.9 |
+| `go-race internal/routing` | 32 | 15.5 | 20.8 |
+| `go cmd/n4bench` | 24 | 2.7 | 18.4 |
+| `go internal/n4sim` | 24 | 2.4 | 18.6 |
+| `go internal/routing` | 24 | 2.2 | 18.3 |
+| `go internal/scaletest` | 24 | 5.8 | 18.4 |
+
+The reasons for the rows above the ceiling are next to them in
+`ci/test-memory.tsv`. In short: `TestATickReadsEveryRuleUnderTheMessageBound`
+holds 2.1M rules (UG-B1's 64 MiB reply bound is crossed only at that scale);
+in its package's run the package peaked at 1878-1890 MiB, so it has its own
+row and runs by itself, and `internal/session` without it is 424. Under
+`-race` no one test carries `internal/session` past the ceiling (the
+`TestATick` tests alone 618.5 MiB, the package without them 858.0 MiB, the
+same day). A lane's bessd runs its default packet pool, 707 MiB for
+the daemon alone with no graph (129 MiB with `--buffers=32768`; measured
+2026-11-04 with `bessd --mem_backing=normal -f` in a scope, `memory.peak` once
+it answered).
+
+**The smallest machine for the suite**, from these rows: CI's phases run one
+after another, so the suite needs its largest phase. That is a veth lane:
+one daemon of at most 1848 MiB beside its Go test, `internal/session` at most
+424, so 2272 MiB declared (1477.8 + 31.4 measured), and `upfd`, which has no
+row. The others: the unit pass at `-p 2`, 472 MiB declared
+(`internal/session` + `cmd/upfd`), then the 2.1M-rule test by itself, 1736;
+the weekly `-race` pass, 1264 + 136; `meson test`, both tests at once, 336;
+the other lanes, at most 1392 + 424. Builds are not in these numbers.
+
+**Sizing `upfd` and bessd for a deployment** is not what these rows say:
+they bound tests. For `upfd`, the per-session cost and the pod fits are
+measured in design.md, "`upfd`'s own memory and establishment rate" (#36,
+357ca0d): about 3.5 GiB at 1M sessions with the cgroup-derived GOMEMLIMIT,
+and 150K sessions in a 2 GiB pod (upfd 768 + bessd 1280 MiB). For bessd, see
+the BESS
+[limits, "Sizing a deployment"](https://github.com/krsna1729/bess/blob/develop/docs/limits.md#sizing-a-deployment).
+
 ## 6. Measurement
 
 1. **Pair the runs (ABBA) in one session.** A paired A/B settled that an N4

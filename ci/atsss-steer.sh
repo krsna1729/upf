@@ -98,6 +98,8 @@ for w in both failover none erased preferred2 recovered; do
   esac
 done
 
+# The daemon's peak against this lane's declaration (ci/test-memory.tsv).
+bessd_mem_check "$BESSD_PID" || fail=$((fail + 1))
 if [ "$fail" -ne 0 ]; then
   echo "atsss-steer: $fail checks failed" >&2
   exit 1

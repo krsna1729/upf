@@ -43,7 +43,7 @@ bessd_apply "$ROOT/deploy/session-live.yaml"
 # the module and its workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ -run 'TestLiveSessionProgramsTheDaemon|TestLiveStartupSweepErasesStaleSessions|TestLiveSessionSharedRecords|TestLiveSessionSharesOneFTEIDPerCHOOSEID' -count=1 -v -cover || {
+  $GO test "${GO_TEST_EXEC[@]}" ./internal/session/ -run 'TestLiveSessionProgramsTheDaemon|TestLiveStartupSweepErasesStaleSessions|TestLiveSessionSharedRecords|TestLiveSessionSharesOneFTEIDPerCHOOSEID' -count=1 -v -cover || {
   echo "session-live: failed; the daemon's log is $LOG" >&2
   exit 1
 }
@@ -52,7 +52,7 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
 # the daemon that is up. Coverage is asked for here rather than in the unit run,
 # because without a daemon these tests skip and the package reports nothing.
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/bess/ -run 'TestLive' -count=1 -v -cover || {
+  $GO test "${GO_TEST_EXEC[@]}" ./internal/bess/ -run 'TestLive' -count=1 -v -cover || {
   echo "session-live: the client's live tests failed; the daemon's log is $LOG" >&2
   exit 1
 }
@@ -62,11 +62,14 @@ MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
 # numbers are what the role of each fake-free part is judged by (docs/design.md,
 # "Where that time goes").
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test ./internal/session/ ./internal/bess/ -run '^$' -bench 'BenchmarkLive' \
+  $GO test "${GO_TEST_EXEC[@]}" ./internal/session/ ./internal/bess/ -run '^$' -bench 'BenchmarkLive' \
   -benchtime "${LIVE_BENCHTIME:-200x}" -benchmem || {
   echo "session-live: a live benchmark failed; the daemon's log is $LOG" >&2
   exit 1
 }
+
+# The daemon's peak against this lane's declaration (ci/test-memory.tsv).
+bessd_mem_check "$BESSD_PID" || exit 1
 
 # The run's own files, not a result: a failed run keeps them (the message above
 # says where), a green one leaves nothing behind -- the other CI scripts do the
