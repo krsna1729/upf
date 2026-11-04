@@ -1553,7 +1553,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// in one transaction.
 	seen := map[string]bool{}
 	add := func(ch bess.Change) {
-		k := ch.Resource + "\x00" + fmt.Sprint(ch.Key)
+		k := changeID(ch.Resource, ch.Key)
 		if seen[k] {
 			return
 		}

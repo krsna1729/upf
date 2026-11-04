@@ -174,7 +174,7 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
 		}
 		for _, key := range keys {
-			owners[c.res(pdrTable(p.downlink()))+"\x00"+fmt.Sprint(key)] = p
+			owners[changeID(c.res(pdrTable(p.downlink())), key)] = p
 		}
 	}
 
@@ -248,7 +248,7 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 				}
 				a[field] = uint32(pos)
 			}
-		} else if p := owners[ch.Resource+"\x00"+fmt.Sprint(ch.Key)]; p != nil && counted[p.actionID] {
+		} else if p := owners[changeID(ch.Resource, ch.Key)]; p != nil && counted[p.actionID] {
 			id = p.actionID
 			action(id)
 		}

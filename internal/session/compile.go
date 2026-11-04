@@ -2606,7 +2606,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// The action record and the tunnel keyed by it are per-PDR: those always go.
 	erased := map[string]bool{}
 	erase := func(ch bess.Change) {
-		k := ch.Resource + "\x00" + fmt.Sprint(ch.Key)
+		k := changeID(ch.Resource, ch.Key)
 		if erased[k] {
 			return
 		}
@@ -3040,7 +3040,7 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 	changes := make([]bess.Change, 0, 2*len(s.MARs)+1)
 	seen := map[string]bool{}
 	add := func(ch bess.Change) {
-		key := ch.Resource + "\x00" + fmt.Sprint(ch.Key)
+		key := changeID(ch.Resource, ch.Key)
 		if seen[key] {
 			return
 		}
@@ -3151,10 +3151,17 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 	values := make([]map[string]any, 0, len(fields))
 	masks := make([]map[string]any, 0, len(fields))
 	var ranges []map[string]any
+	// Every field's mask and value in one allocation, each a capped piece of
+	// it: the pieces live exactly as long as the key that holds them.
+	total := 0
+	for _, f := range fields {
+		total += f.width()
+	}
+	mem := make([]byte, 2*total)
 	for i, f := range fields {
 		width := f.width()
-		mask := make([]byte, width)
-		value := make([]byte, width)
+		mask, value := mem[:width:width], mem[width:2*width:2*width]
+		mem = mem[2*width:]
 		m, ok, err := p.matchValue(f)
 		if err != nil {
 			return nil, fmt.Errorf("the PDI's %s: %w", f, err)
@@ -3232,19 +3239,28 @@ func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 // field of a table has the table's fixed width, so within one table (the caller
 // prefixes the resource) two keys have one identity only if they are one key.
 func ruleID(key map[string]any) string {
-	var b []byte
+	n := 0
 	for _, list := range [...]string{"masks", "values"} {
 		for _, f := range key[list].([]map[string]any) {
-			b = append(b, f["value_bin"].([]byte)...)
+			n += len(f["value_bin"].([]byte))
 		}
 	}
 	ranges, _ := key["ranges"].([]map[string]any)
-	for _, r := range ranges {
-		b = binary.BigEndian.AppendUint32(b, r["field"].(uint32))
-		b = binary.BigEndian.AppendUint64(b, r["low"].(uint64))
-		b = binary.BigEndian.AppendUint64(b, r["high"].(uint64))
+	n += 20 * len(ranges)
+	var b strings.Builder
+	b.Grow(n) // the one allocation: the identity's own bytes
+	for _, list := range [...]string{"masks", "values"} {
+		for _, f := range key[list].([]map[string]any) {
+			b.Write(f["value_bin"].([]byte))
+		}
 	}
-	return string(b)
+	var num [8]byte
+	for _, r := range ranges {
+		b.Write(binary.BigEndian.AppendUint32(num[:0], r["field"].(uint32)))
+		b.Write(binary.BigEndian.AppendUint64(num[:0], r["low"].(uint64)))
+		b.Write(binary.BigEndian.AppendUint64(num[:0], r["high"].(uint64)))
+	}
+	return b.String()
 }
 
 // match is one field's constraint: the bits a PDI fixes, and the mask that says
