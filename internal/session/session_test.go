@@ -249,15 +249,15 @@ func find0(changes []bess.Change, resource string, keyField string, keyValue any
 
 // rules is every rule change of a transaction, with its key decoded: the key
 // message (WildcardMatchRuleKey) carries one FieldData per field, values and
-// masks in two parallel lists.
+// masks in two parallel lists, each FieldData its value_bin bytes.
 func rules(changes []bess.Change) []rule {
 	out := make([]rule, 0, len(changes))
 	for _, c := range changes {
 		if !strings.HasPrefix(c.Resource, "pdr_") || !strings.HasSuffix(c.Resource, "/rules") {
 			continue
 		}
-		values, _ := c.Key["values"].([]map[string]any)
-		masks, _ := c.Key["masks"].([]map[string]any)
+		values, _ := c.Key["values"].([][]byte)
+		masks, _ := c.Key["masks"].([][]byte)
 		out = append(out, rule{change: c, values: values, masks: masks})
 	}
 	return out
@@ -276,15 +276,15 @@ func changesFor(changes []bess.Change, resource string) []bess.Change {
 
 type rule struct {
 	change bess.Change
-	values []map[string]any
-	masks  []map[string]any
+	values [][]byte
+	masks  [][]byte
 }
 
 // mask is the mask of the rule's field at index i.
-func (r rule) mask(i int) []byte { b, _ := r.masks[i]["value_bin"].([]byte); return b }
+func (r rule) mask(i int) []byte { return r.masks[i] }
 
 // value is the value of the rule's field at index i.
-func (r rule) value(i int) []byte { b, _ := r.values[i]["value_bin"].([]byte); return b }
+func (r rule) value(i int) []byte { return r.values[i] }
 
 // result is the classifier's result record: what a matching packet carries
 // into the downstream modules (action id, two meter levels, next hop, and --
@@ -5266,8 +5266,8 @@ func TestDualStackFTEIDIsOneContextNotTwoRuleSets(t *testing.T) {
 		t.Fatalf("compiled %d keys, want 2 SDFs × 2 QFIs", len(keys))
 	}
 	for _, key := range keys {
-		values, _ := key["values"].([]map[string]any)
-		if got := values[0]["value_bin"].([]byte); !bytes.Equal(got, []byte{0, 0, 0, 5}) {
+		values, _ := key["values"].([][]byte)
+		if got := values[0]; !bytes.Equal(got, []byte{0, 0, 0, 5}) {
 			t.Errorf("rule keys context %v, want the PDR's context 5", got)
 		}
 	}

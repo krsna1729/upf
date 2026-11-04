@@ -3146,10 +3146,12 @@ func rulePriority(precedence uint32) int64 {
 func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 	// The table's key message is WildcardMatchRuleKey: one FieldData per
 	// field, values and masks in two parallel lists, and the ranges by field
-	// index (protobuf JSON, which is how the SDK builds it: a bytes field is
-	// base64).
-	values := make([]map[string]any, 0, len(fields))
-	masks := make([]map[string]any, 0, len(fields))
+	// index. A FieldData here is its bytes field, value_bin, alone, so each
+	// list is a [][]byte, an element per field (internal/bess's form for a
+	// list of such messages): a map per field was most of what a key
+	// allocated.
+	lists := make([][]byte, 2*len(fields))
+	values, masks := lists[:len(fields):len(fields)], lists[len(fields):]
 	var ranges []map[string]any
 	// Every field's mask and value in one allocation, each a capped piece of
 	// it: the pieces live exactly as long as the key that holds them.
@@ -3158,11 +3160,12 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 		total += f.width()
 	}
 	mem := make([]byte, 2*total)
+	sd := p.oriented()
 	for i, f := range fields {
 		width := f.width()
 		mask, value := mem[:width:width], mem[width:2*width:2*width]
 		mem = mem[2*width:]
-		m, ok, err := p.matchValue(f)
+		m, ok, err := p.matchValue(f, sd)
 		if err != nil {
 			return nil, fmt.Errorf("the PDI's %s: %w", f, err)
 		}
@@ -3173,8 +3176,7 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 			copy(mask, m.mask)
 			copy(value, m.value)
 		}
-		values = append(values, map[string]any{"value_bin": value})
-		masks = append(masks, map[string]any{"value_bin": mask})
+		values[i], masks[i] = value, mask
 	}
 	key := map[string]any{"values": values, "masks": masks}
 	if len(ranges) > 0 {
@@ -3241,8 +3243,8 @@ func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 func ruleID(key map[string]any) string {
 	n := 0
 	for _, list := range [...]string{"masks", "values"} {
-		for _, f := range key[list].([]map[string]any) {
-			n += len(f["value_bin"].([]byte))
+		for _, f := range key[list].([][]byte) {
+			n += len(f)
 		}
 	}
 	ranges, _ := key["ranges"].([]map[string]any)
@@ -3250,8 +3252,8 @@ func ruleID(key map[string]any) string {
 	var b strings.Builder
 	b.Grow(n) // the one allocation: the identity's own bytes
 	for _, list := range [...]string{"masks", "values"} {
-		for _, f := range key[list].([]map[string]any) {
-			b.Write(f["value_bin"].([]byte))
+		for _, f := range key[list].([][]byte) {
+			b.Write(f)
 		}
 	}
 	var num [8]byte
@@ -3389,13 +3391,14 @@ func pref(p netip.Prefix) (match, error) {
 // destination); a field the PDI names is constrained; and one it names in a
 // form a 4-byte mask cannot carry is a session the SMF is told to fix, not one
 // whose rule quietly matches everything.
-func (p *pdr) matchValue(f Field) (match, bool, error) {
+//
+// sd is p.oriented(), the filter as the packets this PDR selects carry it (the
+// SMF provisions the downlink form on both PDRs, and an ACCESS PDR's is
+// swapped, 5.2.1A.2A): a key orients it once, not once per field.
+func (p *pdr) matchValue(f Field, sd *sdfFilter) (match, bool, error) {
 	if p.sdf != nil && p.sdf.bare {
 		return match{}, false, fmt.Errorf("%w: SDF Filter ID %d was never resolved to a flow description", errNotExpressible, p.sdf.id)
 	}
-	// The filter as the packets this PDR selects carry it: the SMF provisions
-	// the downlink form on both PDRs, and an ACCESS PDR's is swapped (5.2.1A.2A).
-	sd := p.oriented()
 	switch f {
 	case SrcIP:
 		// The uplink's UE address is the source unless the (swapped) filter

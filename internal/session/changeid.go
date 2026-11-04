@@ -54,15 +54,17 @@ func appendIdentity(b []byte, v any) []byte {
 		}
 		return b
 	case []byte:
+		return appendByteList(b, x)
+	case []uint32:
 		b = binary.AppendUvarint(append(b, 'l'), uint64(len(x)))
 		for _, e := range x {
 			b = appendInt(b, uint64(e), false)
 		}
 		return b
-	case []uint32:
+	case [][]byte:
 		b = binary.AppendUvarint(append(b, 'l'), uint64(len(x)))
 		for _, e := range x {
-			b = appendInt(b, uint64(e), false)
+			b = appendByteList(b, e) // not appendIdentity: a []byte in an any is an allocation
 		}
 		return b
 	case []map[string]any:
@@ -86,6 +88,15 @@ func appendIdentity(b []byte, v any) []byte {
 	s := fmt.Sprint(v)
 	b = binary.AppendUvarint(append(b, '?'), uint64(len(s)))
 	return append(b, s...)
+}
+
+// appendByteList writes a []byte as the list of integers fmt prints it as.
+func appendByteList(b, x []byte) []byte {
+	b = binary.AppendUvarint(append(b, 'l'), uint64(len(x)))
+	for _, e := range x {
+		b = appendInt(b, uint64(e), false)
+	}
+	return b
 }
 
 func appendInt(b []byte, n uint64, neg bool) []byte {

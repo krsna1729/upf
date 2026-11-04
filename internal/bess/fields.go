@@ -26,6 +26,11 @@ import (
 // refuse or rewrite (out of range, invalid UTF-8, a field named twice, two
 // members of one oneof). m may then be half set; the caller discards it and
 // takes the JSON path, so the answer, error or message, is always protojson's.
+//
+// One form is fill's own, with no JSON form: a [][]byte for a repeated message
+// field whose message has one bytes field (soleBytes) is the list of those
+// messages with that field alone set -- []map[string]any{{name: b}, ...}
+// without a map per element. A rule key's values and masks are that.
 func fill(m protoreflect.Message, fields map[string]any) bool {
 	md := m.Descriptor()
 	if strings.HasPrefix(string(md.FullName()), "google.protobuf.") {
@@ -103,6 +108,24 @@ func fillList(l protoreflect.List, fd protoreflect.FieldDescriptor, v any) bool 
 		return true
 	case []byte:
 		return false // base64 in JSON: a string, not a list
+	case [][]byte:
+		if fd.Message() == nil {
+			break // a bytes list: each element a scalar, below
+		}
+		inner := soleBytes(fd.Message())
+		if inner == nil || s == nil {
+			return false
+		}
+		for _, x := range s {
+			val, ok := scalar(inner, x)
+			if x == nil || !ok {
+				return false
+			}
+			e := l.NewElement()
+			e.Message().Set(inner, val)
+			l.Append(e)
+		}
+		return true
 	}
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Slice || rv.IsNil() {

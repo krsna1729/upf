@@ -56,7 +56,7 @@ func TestCoreUplinkPDRMatchesUEAsSourceAndSelectsUplinkChain(t *testing.T) {
 		{field: SrcIP, want: []byte{10, 45, 0, 2}, match: true},
 		{field: DstIP, match: false},
 	} {
-		got, matches, err := p.matchValue(tc.field)
+		got, matches, err := p.matchValue(tc.field, p.oriented())
 		if err != nil {
 			t.Fatalf("matchValue(%s): %v", tc.field, err)
 		}
