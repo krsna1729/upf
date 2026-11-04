@@ -11,8 +11,8 @@ import (
 
 // idMapSmall is how many entries an idMap holds in its sorted slice before it
 // moves them to a map: a session names a handful of rules of each kind, and a
-// slice of them is 8 B of id and pointer each where a Go map's first group is
-// 144 B and its header 48. Past it the map's constant-time insert is what
+// slice of them is 16 B of id and pointer each on amd64, where a Go map's
+// first group is 144 B and its header 48. Past it the map's constant-time insert is what
 // keeps a session of thousands of PDRs from costing O(n) per insert.
 const idMapSmall = 16
 
