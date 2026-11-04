@@ -194,10 +194,12 @@ func TestACountRequestDoesNotAllocatePerRule(t *testing.T) {
 	}, [2]int{64, 8000}, 0)
 }
 
-// TestACountReplyDecodesWithOneAllocation: a get_counts reply is read off the
-// wire into one slice -- every field of every rule, each stamp placed on the
-// wall clock by the reading's own clock pair, which follows the rules.
-func TestACountReplyDecodesWithOneAllocation(t *testing.T) {
+// TestACountReplyDecodesIntoTheSliceItIsGiven: a get_counts reply is read off
+// the wire and appended to the caller's slice -- every field of every rule,
+// each stamp placed on the wall clock by the reading's own clock pair, which
+// follows the rules -- and a tick that hands back last tick's slice allocates
+// nothing for its 10,000 rules.
+func TestACountReplyDecodesIntoTheSliceItIsGiven(t *testing.T) {
 	const rules = 10_000
 	const mono, wall = uint64(5_000_000_000), uint64(1_700_000_000_000_000_000)
 	var reply []byte
@@ -214,16 +216,20 @@ func TestACountReplyDecodesWithOneAllocation(t *testing.T) {
 		reply = protowire.AppendTag(reply, protowire.Number(field+2), protowire.VarintType)
 		reply = protowire.AppendVarint(reply, v)
 	}
-	got, err := decodeCounts(reply)
-	if err != nil || len(got) != rules {
-		t.Fatalf("decoded %d rules (%v), want %d", len(got), err, rules)
+	prior := RuleCount{ActionID: 1}
+	got, err := appendCounts([]RuleCount{prior}, reply)
+	if err != nil || len(got) != 1+rules {
+		t.Fatalf("decoded %d rules after the one held (%v), want %d", len(got)-1, err, rules)
+	}
+	if got[0] != prior {
+		t.Errorf("appending replaced the rule held before: %+v", got[0])
 	}
 	want := RuleCount{ActionID: 1007, Packets: 7, Octets: 700,
 		First: time.Unix(0, int64(wall)-1000), Last: time.Unix(0, int64(wall)-10)}
-	if got[7] != want {
-		t.Errorf("rule 7 decoded as %+v, want %+v", got[7], want)
+	if got[1+7] != want {
+		t.Errorf("rule 7 decoded as %+v, want %+v", got[1+7], want)
 	}
-	if allocs := testing.AllocsPerRun(10, func() { _, _ = decodeCounts(reply) }); allocs > 1 {
-		t.Errorf("a reply of %d rules made %.0f allocations, want 1", rules, allocs)
+	if allocs := testing.AllocsPerRun(10, func() { got, _ = appendCounts(got[:0], reply) }); allocs > 0 {
+		t.Errorf("a reply of %d rules into last tick's slice made %.0f allocations, want 0", rules, allocs)
 	}
 }

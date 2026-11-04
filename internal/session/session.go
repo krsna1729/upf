@@ -53,7 +53,10 @@ type Applier interface {
 // ever asks. counters is where the target says the table is read
 // (Target.Counts): a module, or "<module>/<table>".
 type CounterReader interface {
-	RuleCounts(ctx context.Context, counters string, actionIDs ...uint32) ([]bess.RuleCount, error)
+	// AppendRuleCounts appends the reading to dst and returns it (dst as it
+	// was on an error), so a reader every tick reuses one slice.
+	AppendRuleCounts(ctx context.Context, dst []bess.RuleCount, counters string,
+		actionIDs ...uint32) ([]bess.RuleCount, error)
 }
 
 // WindowReader is CounterReader without opening the next window: the same
@@ -455,12 +458,16 @@ type Compiler struct {
 	// answers a running total, and only an increase is news. Only EvaluateAll
 	// touches them, from the one report loop.
 	markersDropped, errorsDropped uint64
-	// tickIDs and tickCounts are EvaluateAll's buffers, kept from tick to
-	// tick: the ActionIds a tick names, by the module that counts them, and
-	// what the reading answered, indexed by ActionId. Only EvaluateAll touches
-	// them, from the one report loop.
+	// tickIDs, tickCounts and tickRead are EvaluateAll's buffers, kept from
+	// tick to tick: the ActionIds a tick names, by the module that counts
+	// them, what the reading answered, indexed by ActionId, and the reading
+	// of one chunk as it arrives: one RuleCount per rule, 7.2 MB a tick at
+	// 100K sessions when it was new every time, and at most a chunk's
+	// (countChunk rules, 4.5 MiB) kept whatever the session count. Only
+	// EvaluateAll touches them, from the one report loop.
 	tickIDs    map[string][]uint32
 	tickCounts []reading
+	tickRead   []bess.RuleCount
 	// peek is the same counter reader without the window restart, when the
 	// dataplane offers it (WindowReader): the DDN path's reading.
 	peek WindowReader
