@@ -129,8 +129,17 @@ func fillList(l protoreflect.List, fd protoreflect.FieldDescriptor, v any) bool 
 }
 
 // scalar converts v to fd's kind where protojson would read the JSON form of v
-// to the same value.
+// to the same value. A bytes value is a copy: the message keeps it.
 func scalar(fd protoreflect.FieldDescriptor, v any) (protoreflect.Value, bool) {
+	val, ok := scalarValue(fd, v)
+	if ok && fd.Kind() == protoreflect.BytesKind {
+		val = protoreflect.ValueOfBytes(bytes.Clone(val.Bytes()))
+	}
+	return val, ok
+}
+
+// scalarValue is scalar without the copy: a bytes value is v itself.
+func scalarValue(fd protoreflect.FieldDescriptor, v any) (protoreflect.Value, bool) {
 	switch fd.Kind() {
 	case protoreflect.BoolKind:
 		b, ok := v.(bool)
@@ -142,7 +151,7 @@ func scalar(fd protoreflect.FieldDescriptor, v any) (protoreflect.Value, bool) {
 		return protoreflect.ValueOfString(s), ok && utf8.ValidString(s)
 	case protoreflect.BytesKind:
 		b, ok := v.([]byte)
-		return protoreflect.ValueOfBytes(bytes.Clone(b)), ok && b != nil
+		return protoreflect.ValueOfBytes(b), ok && b != nil
 	case protoreflect.EnumKind:
 		s, ok := v.(string)
 		if !ok {
@@ -158,6 +167,11 @@ func scalar(fd protoreflect.FieldDescriptor, v any) (protoreflect.Value, bool) {
 	if !ok {
 		return protoreflect.Value{}, false
 	}
+	return scalarInt(fd, n, neg)
+}
+
+// scalarInt is an integer of magnitude n converted to fd's kind, where it fits.
+func scalarInt(fd protoreflect.FieldDescriptor, n uint64, neg bool) (protoreflect.Value, bool) {
 	switch fd.Kind() {
 	case protoreflect.Uint32Kind, protoreflect.Fixed32Kind:
 		return protoreflect.ValueOfUint32(uint32(n)), !neg && n <= math.MaxUint32

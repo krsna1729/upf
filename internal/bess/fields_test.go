@@ -66,6 +66,14 @@ func fieldsSchema(t *testing.T) protoreflect.MessageDescriptor {
 				oneof(f("by_name", 16, descriptorpb.FieldDescriptorProto_TYPE_STRING, opt, "")),
 				f("labels", 17, descriptorpb.FieldDescriptorProto_TYPE_MESSAGE, rep, ".t.All.LabelsEntry"),
 				f("json_named", 18, T, opt, ""),
+				f("f32", 19, descriptorpb.FieldDescriptorProto_TYPE_FIXED32, opt, ""),
+				f("sf32", 20, descriptorpb.FieldDescriptorProto_TYPE_SFIXED32, opt, ""),
+				f("sf64", 21, descriptorpb.FieldDescriptorProto_TYPE_SFIXED64, opt, ""),
+				f("s64", 22, descriptorpb.FieldDescriptorProto_TYPE_SINT64, opt, ""),
+				f("flags", 23, descriptorpb.FieldDescriptorProto_TYPE_BOOL, rep, ""),
+				f("names", 24, descriptorpb.FieldDescriptorProto_TYPE_STRING, rep, ""),
+				f("modes", 25, descriptorpb.FieldDescriptorProto_TYPE_ENUM, rep, ".t.Mode"),
+				f("blobs", 26, descriptorpb.FieldDescriptorProto_TYPE_BYTES, rep, ""),
 			},
 				OneofDecl: []*descriptorpb.OneofDescriptorProto{{Name: proto.String("target")}},
 				NestedType: []*descriptorpb.DescriptorProto{{
@@ -85,31 +93,34 @@ func fieldsSchema(t *testing.T) protoreflect.MessageDescriptor {
 	return file.Messages().ByName("All")
 }
 
-// fill must answer exactly what the JSON path answers, or step aside: every
-// input either converts on both paths to equal messages, or fill reports false
-// and the JSON path's own answer -- message or error -- stands. The shapes the
-// session compiler writes must take the fast path, or it buys nothing.
-func TestFillMatchesProtojson(t *testing.T) {
-	md := fieldsSchema(t)
+// fieldCases are the inputs fill and encode must agree on with protojson.
+// fast marks the compiler's shapes: fill must convert them itself, or it buys
+// nothing.
+func fieldCases() []fieldCase {
 	field := func(b ...byte) map[string]any { return map[string]any{"value_bin": b} }
-	cases := []struct {
-		name string
-		in   map[string]any
-		fast bool // the compiler's shapes: fill must convert them itself
-	}{
+	return []fieldCase{
 		{"scalars", map[string]any{"u32": uint32(7), "u64": uint64(1 << 40), "i32": int32(-3),
 			"i64": int64(-1 << 40), "flag": true, "name": "n6", "blob": []byte{1, 2}, "fixed": uint64(9),
 			"s32": -5}, true},
 		{"untyped ints", map[string]any{"u32": 0, "u64": 5, "i64": -1, "i32": math.MinInt32}, true},
+		{"every integer kind", map[string]any{"f32": uint32(math.MaxUint32), "sf32": int32(math.MinInt32),
+			"sf64": int64(-7), "s64": int64(math.MinInt64), "s32": math.MaxInt32, "i64": int64(math.MaxInt64)}, true},
+		{"zero values", map[string]any{"u32": uint32(0), "flag": false, "name": "", "blob": []byte{},
+			"mode": "MODE_HOP", "s64": 0}, true},
 		{"rule key", map[string]any{"one": field(0xff), "many": []map[string]any{field(1), field(2, 3)},
 			"ids": []uint32{4, 5}}, true},
+		{"empty bytes in a nested message", map[string]any{"many": []map[string]any{{"value_bin": []byte{}}, field(0)}}, true},
+		{"scalar lists", map[string]any{"flags": []bool{true, false}, "names": []string{"a", ""},
+			"modes": []string{"MODE_DESTINATION", "MODE_HOP"}, "blobs": [][]byte{{1}, {}}, "ids": []uint32{0, 1 << 31}}, true},
 		{"enum by name", map[string]any{"mode": "MODE_DESTINATION"}, true},
 		{"empty", map[string]any{}, true},
 		{"empty nested", map[string]any{"one": map[string]any{}}, true},
 		{"oneof member", map[string]any{"by_id": uint32(3)}, true},
+		{"oneof member at zero", map[string]any{"by_id": uint32(0)}, true},
 		{"any slice", map[string]any{"ids": []any{uint32(1), 2}, "many": []any{field(9)}}, true},
 		{"json name", map[string]any{"jsonNamed": uint32(4)}, true},
 		{"empty list", map[string]any{"ids": []uint32{}}, true},
+		{"a long nested message", map[string]any{"one": field(make([]byte, 300)...)}, true},
 
 		{"uint32 overflow", map[string]any{"u32": uint64(1 << 32)}, false},
 		{"negative unsigned", map[string]any{"u64": -1}, false},
@@ -117,6 +128,7 @@ func TestFillMatchesProtojson(t *testing.T) {
 		{"int32 underflow", map[string]any{"i32": int64(math.MinInt32) - 1}, false},
 		{"invalid utf8", map[string]any{"name": "\xff"}, false},
 		{"unknown field", map[string]any{"nope": 1}, false},
+		{"unknown nested field", map[string]any{"one": map[string]any{"nope": 1}}, false},
 		{"field named twice", map[string]any{"json_named": uint32(1), "jsonNamed": uint32(2)}, false},
 		{"two oneof members", map[string]any{"by_id": uint32(1), "by_name": "x"}, false},
 		{"json.Number", map[string]any{"u64": json.Number("18446744073709551615")}, false},
@@ -124,6 +136,10 @@ func TestFillMatchesProtojson(t *testing.T) {
 		{"nil bytes", map[string]any{"blob": []byte(nil)}, false},
 		{"nil list", map[string]any{"ids": []uint32(nil)}, false},
 		{"bytes for a list", map[string]any{"ids": []byte{1}}, false},
+		{"ints for a message list", map[string]any{"many": []uint32{1}}, false},
+		{"ints for a bool list", map[string]any{"flags": []uint32{1}}, false},
+		{"maps for a scalar list", map[string]any{"ids": []map[string]any{{}}}, false},
+		{"nil message in a list", map[string]any{"many": []map[string]any{nil}}, false},
 		{"double", map[string]any{"rate": 1.5}, false},
 		{"int for double", map[string]any{"rate": 2}, false},
 		{"enum number", map[string]any{"mode": 1}, false},
@@ -132,7 +148,20 @@ func TestFillMatchesProtojson(t *testing.T) {
 		{"nil message", map[string]any{"one": nil}, false},
 		{"string for int", map[string]any{"u32": "7"}, false},
 	}
-	for _, c := range cases {
+}
+
+type fieldCase struct {
+	name string
+	in   map[string]any
+	fast bool
+}
+
+// fill must answer exactly what the JSON path answers, or step aside: every
+// input either converts on both paths to equal messages, or fill reports false
+// and the JSON path's own answer -- message or error -- stands.
+func TestFillMatchesProtojson(t *testing.T) {
+	md := fieldsSchema(t)
+	for _, c := range fieldCases() {
 		t.Run(c.name, func(t *testing.T) {
 			fast := dynamicpb.NewMessage(md)
 			ok := fill(fast, c.in)
