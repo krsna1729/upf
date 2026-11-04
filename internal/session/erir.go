@@ -42,7 +42,7 @@ func (c *Compiler) errorReports(seid uint64, s *Session, indications map[uint32]
 		return nil
 	}
 	var owed []ErrorIndication
-	for _, f := range s.FARs {
+	for _, f := range s.FARs.all() {
 		if f.hasOuter && f.teid != 0 && indications[f.teid] {
 			owed = append(owed, ErrorIndication{TEID: f.teid, Addr: f.peer})
 		}

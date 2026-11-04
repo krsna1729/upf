@@ -165,7 +165,7 @@ func (c *Compiler) EvaluateDownlinks(ctx context.Context) []Downlink {
 			// Not marked here: the caller confirms what the SMF took
 			// (ConfirmDownlinks), so a report nobody received is offered
 			// again instead of being lost.
-			if p := s.PDRs[f.pdr]; p != nil && p.actionID == f.action && !p.ddnSent {
+			if p := s.PDRs.at(f.pdr); p != nil && p.actionID == f.action && !p.ddnSent {
 				d.PDRs = append(d.PDRs, p.id)
 			}
 		}
@@ -222,7 +222,7 @@ func (c *Compiler) ConfirmDownlinks(ctx context.Context, seid uint64, pdrs []uin
 	}
 	var ids []uint32
 	for _, id := range pdrs {
-		if p := s.PDRs[id]; p != nil && p.actionID != 0 {
+		if p := s.PDRs.at(id); p != nil && p.actionID != 0 {
 			p.ddnSent = true
 			ids = append(ids, p.actionID)
 			continue
@@ -242,11 +242,11 @@ func (c *Compiler) ConfirmDownlinks(ctx context.Context, seid uint64, pdrs []uin
 // downlink FAR that names it with Apply Action BUFF and not FORW (8.2.26), the
 // state resolve writes for the idle-UE case. The caller holds the lock.
 func barHoldsAFlow(s *Session, id uint8) bool {
-	for _, p := range s.PDRs {
+	for _, p := range s.PDRs.all() {
 		if !p.buffer {
 			continue
 		}
-		if f := s.FARs[p.farID]; f != nil && f.hasBAR && f.barID == id {
+		if f := s.FARs.at(p.farID); f != nil && f.hasBAR && f.barID == id {
 			return true
 		}
 	}
@@ -327,7 +327,7 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 			if !p.buffer {
 				continue
 			}
-			if f := s.FARs[p.farID]; f == nil || !f.hasBAR || f.barID != b.id {
+			if f := s.FARs.at(p.farID); f == nil || !f.hasBAR || f.barID != b.id {
 				continue
 			}
 			changes = append(changes, c.writeFlowEntry(s.BARs[b.id], p)...)

@@ -35,7 +35,7 @@ func TestARefusedModificationLeavesTheSessionAsItWas(t *testing.T) {
 	if got := cause(t, c.Modify(namesUnknownURR(2, seid))); got != ie.CauseRuleCreationModificationFailure {
 		t.Fatalf("a PDR naming URR 55 answered cause %d, want a rule failure", got)
 	}
-	if ids := sessionOf(t, c, seid).PDRs[1].urrIDs; len(ids) != 1 || ids[0] != 7 {
+	if ids := sessionOf(t, c, seid).PDRs.at(1).urrIDs; len(ids) != 1 || ids[0] != 7 {
 		t.Errorf("the refused update left PDR 1 naming URRs %v, want its own 7", ids)
 	}
 	benign := message.NewSessionModificationRequest(0, 0, seid, 3, 0,
@@ -80,7 +80,7 @@ func TestARefusedModificationGivesBackTheMetersAndTEIDsItTook(t *testing.T) {
 	if got := len(c.meters.freed) - metersBefore; got != 2 {
 		t.Errorf("%d meters were given back, want the refused QER's uplink and downlink pair", got)
 	}
-	if s := c.sessions[seid]; s.QERs[9] != nil || s.PDRs[5] != nil {
+	if s := c.sessions[seid]; s.QERs.at(9) != nil || s.PDRs.at(5) != nil {
 		t.Error("the refused request's QER or PDR is in the model")
 	}
 }

@@ -240,19 +240,19 @@ func boundedTick(t *testing.T, sessions, perSession int) (*Compiler, *boundedRea
 		s := *model
 		s.LocalSEID = seid + 1 + uint64(i)
 		s.cachedPDRs = nil
-		s.PDRs = make(map[uint16]*pdr, perSession)
+		s.PDRs = idMap[uint16, *pdr]{}
 		pdrs := make([]pdr, perSession)
 		for j := range pdrs {
 			pdrs[j] = *measured
 			pdrs[j].id = uint16(j + 1)
 			pdrs[j].actionID = uint32(len(reader.held) + 1)
 			reader.held = append(reader.held, pdrs[j].actionID)
-			s.PDRs[pdrs[j].id] = &pdrs[j]
+			s.PDRs.set(pdrs[j].id, &pdrs[j])
 		}
-		s.URRs = make(map[uint32]*urr, len(model.URRs))
-		for id, u := range model.URRs {
+		s.URRs = idMap[uint32, *urr]{}
+		for id, u := range model.URRs.all() {
 			own := *u
-			s.URRs[id] = &own
+			s.URRs.set(id, &own)
 		}
 		c.sessions[s.LocalSEID] = &s
 		c.track(&s)
@@ -293,7 +293,7 @@ func TestATickReadsEveryRuleUnderTheMessageBound(t *testing.T) {
 	}
 	baselined := 0
 	for _, s := range c.sessions {
-		if s.URRs[7].baselined {
+		if s.URRs.at(7).baselined {
 			baselined++
 		}
 	}

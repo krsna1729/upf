@@ -168,7 +168,7 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 	// and a measured one keeps that action (and so its URR cells) in the
 	// entry, as the masked layout keeps its counter entry.
 	owners := map[string]*pdr{}
-	for _, p := range s.PDRs {
+	for _, p := range s.PDRs.all() {
 		keys, err := p.ruleKeys(c.direction(p).PDRFields)
 		if err != nil {
 			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
