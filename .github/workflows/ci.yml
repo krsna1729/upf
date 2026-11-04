@@ -285,6 +285,7 @@ jobs:
       - name: Datapath unit tests
         run: |
           meson test -C datapath/build --print-errorlogs
+          grep -h 'run_capped:' datapath/build/meson-logs/testlog.txt
           ci/check-test-memory.py --build-dir datapath/build
 
       - name: Gating lanes (push and pull request)
