@@ -289,7 +289,7 @@ func TestTheAssociationEndingClearsTheCheckpoint(t *testing.T) {
 func TestTheCheckpointHoldsSessionsNotHistory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "checkpoint")
 	j, _ := checkpointJournal(t, path)
-	c := New(testConfig(), &recorder{}, quietLogger())
+	c := New(testConfig(), &recorder{forget: true}, quietLogger())
 	c.Checkpoint(j)
 	for n := range 10 {
 		if got := cause(t, c.Establish(establishment(uint64(0x9a00+n), fmt.Sprintf("10.45.1.%d", n+1)))); got != ie.CauseRequestAccepted {
