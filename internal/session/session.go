@@ -391,6 +391,14 @@ type Config struct {
 	// session is one "<module>/sessions" entry (sessionmajor.go). Nil is the
 	// appliance's masked layout, or the graph.
 	Sessions *SessionLayout
+
+	// Admit, when set, is asked before a new session is established: false
+	// refuses it with cause 75 (no resources available) before anything is
+	// allocated. A repeated establishment and a checkpoint replay are not new
+	// sessions and are not asked. Modifications and deletions never are: a
+	// deletion is how the SMF gives memory back. upfd's is its heap check
+	// (cmd/upfd/admission.go).
+	Admit func() bool
 }
 
 // downlink is whether this PDR's packets travel toward the UE. Source

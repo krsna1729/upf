@@ -44,6 +44,9 @@ type peerState interface {
 //	upf_sessions                       the sessions the session layer holds now
 //	upf_sessions_{established,modified,deleted}_total
 //	upf_sessions_refused_total         requests answered with a cause but accepted
+//	upf_sessions_unadmitted_total      establishments refused for heap room (-heap-admission; also refused)
+//	upf_go_heap_live_bytes             the heap the last collection kept live
+//	upf_go_memory_limit_bytes          the Go memory limit the heap is held under, when there is one
 //	upf_end_markers_total{outcome}     End Markers sent, or failed (the graph's port took none)
 //	upf_buffer_flows_total{outcome}    release/drop commands accepted, or refused (accepted, not completed)
 //	upf_usage_reports_total{outcome}   sent, refused, held (no answer yet), dropped, cancelled (the session ended first)
@@ -53,7 +56,7 @@ type peerState interface {
 // A session is a cache of what the SMF asked for, so these are the SMF's own
 // view of this node rather than the dataplane's; the usage a report carries is
 // the graph's, and `ci/bench-n4.sh` measures the wire.
-func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportStats) http.Handler {
+func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportStats, heap *heapGauge) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var b strings.Builder
 		stats := sessions.Stats()
@@ -73,6 +76,18 @@ func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportS
 		fmt.Fprintf(&b, "# HELP upf_sessions_refused_total Session requests answered with a cause other than accepted.\n")
 		fmt.Fprintf(&b, "# TYPE upf_sessions_refused_total counter\n")
 		fmt.Fprintf(&b, "upf_sessions_refused_total %d\n", stats.Refused)
+		fmt.Fprintf(&b, "# HELP upf_sessions_unadmitted_total Establishments refused because the live heap had no room for another session (-heap-admission); each is also counted in upf_sessions_refused_total.\n")
+		fmt.Fprintf(&b, "# TYPE upf_sessions_unadmitted_total counter\n")
+		fmt.Fprintf(&b, "upf_sessions_unadmitted_total %d\n", stats.Unadmitted)
+		live, limit := heap.read()
+		fmt.Fprintf(&b, "# HELP upf_go_heap_live_bytes The heap the last garbage collection kept live.\n")
+		fmt.Fprintf(&b, "# TYPE upf_go_heap_live_bytes gauge\n")
+		fmt.Fprintf(&b, "upf_go_heap_live_bytes %d\n", live)
+		fmt.Fprintf(&b, "# HELP upf_go_memory_limit_bytes The Go memory limit the heap is held under.\n")
+		fmt.Fprintf(&b, "# TYPE upf_go_memory_limit_bytes gauge\n")
+		if limit > 0 {
+			fmt.Fprintf(&b, "upf_go_memory_limit_bytes %d\n", limit)
+		}
 		fmt.Fprintf(&b, "# HELP upf_end_markers_total End Marker packets by outcome: sent, or refused by the graph's port.\n")
 		fmt.Fprintf(&b, "# TYPE upf_end_markers_total counter\n")
 		fmt.Fprintf(&b, "upf_end_markers_total{outcome=\"sent\"} %d\n", stats.Markers)

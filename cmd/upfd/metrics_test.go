@@ -48,7 +48,7 @@ func TestTheMetricsEndpointReportsTheNodesNumbers(t *testing.T) {
 
 	peer := fakePeer{node: "smf.example", addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8805}, associated: true}
 	rec := httptest.NewRecorder()
-	metricsHandler(compiler, peer, reports).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	metricsHandler(compiler, peer, reports, newHeapGauge()).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	if rec.Code != 200 {
 		t.Fatalf("the endpoint answered %d", rec.Code)
 	}
@@ -76,7 +76,7 @@ func TestTheMetricsEndpointReportsTheNodesNumbers(t *testing.T) {
 
 	// Every sample it writes is something it measured: no peer means no peer.
 	rec = httptest.NewRecorder()
-	metricsHandler(compiler, fakePeer{}, reports).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	metricsHandler(compiler, fakePeer{}, reports, newHeapGauge()).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	body = rec.Body.String()
 	if !strings.Contains(body, "upf_pfcp_associated 0\n") {
 		t.Errorf("an unassociated node does not report 0; it reports:\n%s", body)
@@ -88,7 +88,7 @@ func TestTheMetricsEndpointReportsTheNodesNumbers(t *testing.T) {
 	// A run with no session layer (no -bess) reports zeros rather than
 	// panicking: the endpoint is startable before a dataplane is.
 	rec = httptest.NewRecorder()
-	metricsHandler(nil, peer, reports).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	metricsHandler(nil, peer, reports, newHeapGauge()).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	if !strings.Contains(rec.Body.String(), "upf_sessions 0\n") {
 		t.Errorf("a node with no session layer reports something other than zero sessions:\n%s", rec.Body.String())
 	}
@@ -99,7 +99,7 @@ func TestTheMetricsEndpointReportsTheNodesNumbers(t *testing.T) {
 // after "listening"; the address the endpoint reports is the listener's own, so
 // :0 (any free port) is a real answer.
 func TestTheMetricsAddressIsBoundAtStartup(t *testing.T) {
-	srv, ln, err := metricsServer("127.0.0.1:0", metricsHandler(nil, fakePeer{}, &reportStats{}))
+	srv, ln, err := metricsServer("127.0.0.1:0", metricsHandler(nil, fakePeer{}, &reportStats{}, newHeapGauge()))
 	if err != nil {
 		t.Fatalf("127.0.0.1:0 was refused: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestTheMetricsAddressIsBoundAtStartup(t *testing.T) {
 	}
 	// The port is taken now, by that listener: a second one on it must fail
 	// here rather than in a goroutine after the node has said it is listening.
-	if _, _, err := metricsServer(ln.Addr().String(), metricsHandler(nil, fakePeer{}, &reportStats{})); err == nil {
+	if _, _, err := metricsServer(ln.Addr().String(), metricsHandler(nil, fakePeer{}, &reportStats{}, newHeapGauge())); err == nil {
 		t.Error("a port already in use was accepted")
 	}
 	_ = srv
@@ -117,7 +117,7 @@ func TestTheMetricsAddressIsBoundAtStartup(t *testing.T) {
 	// (run() only builds a server when the flag is set) -- but an address
 	// without one would listen somewhere the operator did not name.
 	for _, bad := range []string{"127.0.0.1", ""} {
-		if _, _, err := metricsServer(bad, metricsHandler(nil, fakePeer{}, &reportStats{})); err == nil {
+		if _, _, err := metricsServer(bad, metricsHandler(nil, fakePeer{}, &reportStats{}, newHeapGauge())); err == nil {
 			t.Errorf("%q was accepted as an address", bad)
 		}
 	}

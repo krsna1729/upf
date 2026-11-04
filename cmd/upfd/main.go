@@ -142,6 +142,11 @@ func run() error {
 		"how many PFCP session messages are handled at once, each session's in the order "+
 			"they arrived (1: one at a time, in the socket's read loop). More lets the "+
 			"dataplane transactions of different sessions overlap")
+	heapAdmission := flag.Float64("heap-admission", defaultHeapAdmission,
+		"refuse new sessions (cause 75, no resources available) while the heap the last "+
+			"collection kept live is over this share of the Go memory limit (the cgroup's, "+
+			"less a headroom, or GOMEMLIMIT); modifications and deletions are never refused "+
+			"for it. 0: admit every session")
 	urrInterval := flag.Duration("urr-interval", 0,
 		"how often to read every session's usage counters and report what each URR owes "+
 			"over N4 (0: never, so URRs measure and report nothing)")
@@ -229,6 +234,10 @@ func run() error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 	applyMemoryLimit(log)
+	if *heapAdmission < 0 || *heapAdmission > 1 {
+		return fmt.Errorf("-heap-admission %v is 0..1", *heapAdmission)
+	}
+	heap := newHeapGauge()
 
 	id := *nodeID
 	if id == "" {
@@ -316,6 +325,12 @@ func run() error {
 			// listens on, when it names one.
 			if a, err := netip.ParseAddr(host); err == nil && !a.IsUnspecified() {
 				graph.N4Addr = a
+			}
+		}
+		if fraction := *heapAdmission; fraction > 0 {
+			graph.Admit = func() bool {
+				live, limit := heap.read()
+				return heapAdmits(live, limit, fraction)
 			}
 		}
 		cfg.Sessions = session.New(graph, client, log)
@@ -440,7 +455,7 @@ func run() error {
 	// The management endpoint: this node's own numbers, so an operator reads
 	// them from the same place a scraper does. It is off unless asked for.
 	if *metricsAddr != "" {
-		mux, ln, err := metricsServer(*metricsAddr, metricsHandler(compiler, srv, reports))
+		mux, ln, err := metricsServer(*metricsAddr, metricsHandler(compiler, srv, reports, heap))
 		if err != nil {
 			return err
 		}

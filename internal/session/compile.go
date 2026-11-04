@@ -519,7 +519,7 @@ var urrUnsupported = map[ie.IEType]string{
 
 // Establish implements n4.SessionHandler.
 func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.Message {
-	resp := c.establish(req)
+	resp := c.establish(req, true)
 	if answerCause(resp) != ie.CauseRequestAccepted {
 		c.stats.refused.Add(1)
 	}
@@ -527,7 +527,9 @@ func (c *Compiler) Establish(req *message.SessionEstablishmentRequest) message.M
 }
 
 // establish is the establishment itself; Establish counts what it answered.
-func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.Message {
+// admit says whether a new session is put to Config.Admit: a checkpoint replay
+// (Restore) is the SMF's existing session, not a new one.
+func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit bool) message.Message {
 	ies := establishmentIEs(req)
 	cpSEID, err := cpFSEID(ies)
 	if err != nil {
@@ -551,6 +553,14 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest) message.M
 		c.mu.Unlock()
 		c.log.Info("session: establishment repeated", "cp_seid", cpSEID, "seid", s.LocalSEID)
 		return c.establishResponse(req, s.CPSEID, s.LocalSEID, ie.CauseRequestAccepted, created)
+	}
+	// A new session: refused before an id is taken when the node has no room
+	// for it. Admit runs under c.mu, so it reads nothing of the compiler.
+	if admit && c.cfg.Admit != nil && !c.cfg.Admit() {
+		c.mu.Unlock()
+		c.stats.unadmitted.Add(1)
+		c.log.Debug("session: establishment not admitted", "cp_seid", cpSEID)
+		return c.establishResponse(req, cpSEID, 0, ie.CauseNoResourcesAvailable, nil)
 	}
 	local := c.nextSEID
 	c.nextSEID++
