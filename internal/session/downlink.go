@@ -349,7 +349,7 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 // transaction that carried the change has landed, not before. The caller holds
 // the lock and reads this before settle clears the list.
 func endedFlows(s *Session) []uint32 {
-	return append([]uint32(nil), s.ending...)
+	return append([]uint32(nil), s.pending.endingFlows()...)
 }
 
 // removedFlows is the flows a modification took off the graph: their PDRs are
@@ -357,7 +357,7 @@ func endedFlows(s *Session) []uint32 {
 // dropped instead. The caller holds the lock, before settle clears the list.
 func removedFlows(s *Session) []uint32 {
 	var out []uint32
-	for _, old := range s.removed {
+	for _, old := range s.pending.removedPDRs() {
 		if old.buffer && old.actionID != 0 {
 			out = append(out, old.actionID)
 		}
