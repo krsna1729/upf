@@ -277,17 +277,19 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 // packedKey is a WildcardMatch rule key's values and masks as the session
 // entry's packed bytes, in the table's field order.
 func packedKey(key map[string]any) ([]byte, []byte, error) {
-	values, _ := key["values"].([]map[string]any)
-	masks, _ := key["masks"].([]map[string]any)
+	values, _ := key["values"].([][]byte)
+	masks, _ := key["masks"].([][]byte)
 	if len(values) != len(masks) {
 		return nil, nil, fmt.Errorf("a rule key with %d values and %d masks", len(values), len(masks))
 	}
-	var value, mask []byte
+	n := 0
+	for _, v := range values {
+		n += len(v)
+	}
+	value, mask := make([]byte, 0, n), make([]byte, 0, n)
 	for i := range values {
-		v, _ := values[i]["value_bin"].([]byte)
-		m, _ := masks[i]["value_bin"].([]byte)
-		value = append(value, v...)
-		mask = append(mask, m...)
+		value = append(value, values[i]...)
+		mask = append(mask, masks[i]...)
 	}
 	return value, mask, nil
 }

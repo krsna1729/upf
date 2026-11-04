@@ -130,6 +130,9 @@ func encodeList(b []byte, fd protoreflect.FieldDescriptor, v any) ([]byte, bool)
 		}
 		return ok
 	}
+	if s, ok := v.([][]byte); ok && fd.Message() != nil {
+		return encodeSoleBytes(b, fd, s)
+	}
 	switch s := v.(type) {
 	case []uint32:
 		if s == nil {
@@ -178,6 +181,53 @@ func encodeList(b []byte, fd protoreflect.FieldDescriptor, v any) ([]byte, bool)
 		b = insertLen(b, start)
 	}
 	return b, true
+}
+
+// encodeSoleBytes appends a repeated message field from a [][]byte, each
+// element a message with only its bytes field set (soleBytes), on fillList's
+// terms.
+func encodeSoleBytes(b []byte, fd protoreflect.FieldDescriptor, s [][]byte) ([]byte, bool) {
+	inner := soleBytes(fd.Message())
+	if inner == nil || s == nil {
+		return b, false
+	}
+	for _, x := range s {
+		if x == nil {
+			return b, false
+		}
+		b = protowire.AppendTag(b, fd.Number(), protowire.BytesType)
+		if len(x) == 0 && !inner.HasPresence() {
+			b = append(b, 0) // an empty message, as a dynamic one leaves the field out
+			continue
+		}
+		b = protowire.AppendVarint(b, uint64(protowire.SizeTag(inner.Number())+protowire.SizeBytes(len(x))))
+		b = protowire.AppendBytes(protowire.AppendTag(b, inner.Number(), protowire.BytesType), x)
+	}
+	return b, true
+}
+
+// soleBytes is md's bytes field when md has exactly one, singular, and no
+// required fields: the message a [][]byte element stands for in a repeated
+// field of md, that field set and no other (a WildcardMatch rule key's
+// FieldData, whose bytes field is a oneof member beside an integer), or nil.
+func soleBytes(md protoreflect.MessageDescriptor) protoreflect.FieldDescriptor {
+	if strings.HasPrefix(string(md.FullName()), "google.protobuf.") {
+		return nil // BytesValue: a JSON string of its own, not this
+	}
+	if md.RequiredNumbers().Len() > 0 {
+		return nil
+	}
+	var sole protoreflect.FieldDescriptor
+	fds := md.Fields()
+	for i := range fds.Len() {
+		if fd := fds.Get(i); fd.Kind() == protoreflect.BytesKind {
+			if sole != nil || fd.IsList() {
+				return nil
+			}
+			sole = fd
+		}
+	}
+	return sole
 }
 
 // insertLen puts the length of b[start:] in front of it, as a varint.

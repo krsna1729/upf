@@ -47,6 +47,15 @@ func fieldsSchema(t *testing.T) protoreflect.MessageDescriptor {
 			{Name: proto.String("Field"), Field: []*descriptorpb.FieldDescriptorProto{
 				f("value_bin", 1, descriptorpb.FieldDescriptorProto_TYPE_BYTES, opt, ""),
 			}},
+			// util_msg.proto's FieldData, a WildcardMatch rule key's field.
+			{Name: proto.String("Data"), Field: []*descriptorpb.FieldDescriptorProto{
+				oneof(f("value_bin", 1, descriptorpb.FieldDescriptorProto_TYPE_BYTES, opt, "")),
+				oneof(f("value_int", 2, descriptorpb.FieldDescriptorProto_TYPE_UINT64, opt, "")),
+			}, OneofDecl: []*descriptorpb.OneofDescriptorProto{{Name: proto.String("encoding")}}},
+			{Name: proto.String("Pair"), Field: []*descriptorpb.FieldDescriptorProto{
+				f("a", 1, descriptorpb.FieldDescriptorProto_TYPE_BYTES, opt, ""),
+				f("b", 2, descriptorpb.FieldDescriptorProto_TYPE_BYTES, opt, ""),
+			}},
 			{Name: proto.String("All"), Field: []*descriptorpb.FieldDescriptorProto{
 				f("u32", 1, T, opt, ""),
 				f("u64", 2, descriptorpb.FieldDescriptorProto_TYPE_UINT64, opt, ""),
@@ -74,6 +83,8 @@ func fieldsSchema(t *testing.T) protoreflect.MessageDescriptor {
 				f("names", 24, descriptorpb.FieldDescriptorProto_TYPE_STRING, rep, ""),
 				f("modes", 25, descriptorpb.FieldDescriptorProto_TYPE_ENUM, rep, ".t.Mode"),
 				f("blobs", 26, descriptorpb.FieldDescriptorProto_TYPE_BYTES, rep, ""),
+				f("data", 27, descriptorpb.FieldDescriptorProto_TYPE_MESSAGE, rep, ".t.Data"),
+				f("pairs", 28, descriptorpb.FieldDescriptorProto_TYPE_MESSAGE, rep, ".t.Pair"),
 			},
 				OneofDecl: []*descriptorpb.OneofDescriptorProto{{Name: proto.String("target")}},
 				NestedType: []*descriptorpb.DescriptorProto{{
@@ -121,6 +132,10 @@ func fieldCases() []fieldCase {
 		{"json name", map[string]any{"jsonNamed": uint32(4)}, true},
 		{"empty list", map[string]any{"ids": []uint32{}}, true},
 		{"a long nested message", map[string]any{"one": field(make([]byte, 300)...)}, true},
+		{"rule key as byte lists", map[string]any{"data": [][]byte{{1}, {}, {2, 3}},
+			"ids": []uint32{4, 5}}, true},
+		{"empty bytes in a byte list", map[string]any{"many": [][]byte{{}, {0}}}, true},
+		{"empty byte list", map[string]any{"data": [][]byte{}}, true},
 
 		{"uint32 overflow", map[string]any{"u32": uint64(1 << 32)}, false},
 		{"negative unsigned", map[string]any{"u64": -1}, false},
@@ -140,6 +155,9 @@ func fieldCases() []fieldCase {
 		{"ints for a bool list", map[string]any{"flags": []uint32{1}}, false},
 		{"maps for a scalar list", map[string]any{"ids": []map[string]any{{}}}, false},
 		{"nil message in a list", map[string]any{"many": []map[string]any{nil}}, false},
+		{"nil in a byte list", map[string]any{"data": [][]byte{{1}, nil}}, false},
+		{"nil byte list", map[string]any{"data": [][]byte(nil)}, false},
+		{"byte list for a message of two bytes fields", map[string]any{"pairs": [][]byte{{1}}}, false},
 		{"double", map[string]any{"rate": 1.5}, false},
 		{"int for double", map[string]any{"rate": 2}, false},
 		{"enum number", map[string]any{"mode": 1}, false},
@@ -156,6 +174,18 @@ type fieldCase struct {
 	fast bool
 }
 
+// jsonForms is, by case name, the input as protojson reads it where the case
+// uses a form of fill's own (a [][]byte of sole-bytes messages).
+func jsonForms() map[string]map[string]any {
+	field := func(b ...byte) map[string]any { return map[string]any{"value_bin": b} }
+	return map[string]map[string]any{
+		"rule key as byte lists": {"data": []map[string]any{field(1), field([]byte{}...), field(2, 3)},
+			"ids": []uint32{4, 5}},
+		"empty bytes in a byte list": {"many": []map[string]any{field([]byte{}...), field(0)}},
+		"empty byte list":            {"data": []map[string]any{}},
+	}
+}
+
 // fill must answer exactly what the JSON path answers, or step aside: every
 // input either converts on both paths to equal messages, or fill reports false
 // and the JSON path's own answer -- message or error -- stands.
@@ -168,7 +198,11 @@ func TestFillMatchesProtojson(t *testing.T) {
 			if ok != c.fast {
 				t.Fatalf("fill took the fast path: %v, want %v", ok, c.fast)
 			}
-			raw, err := json.Marshal(c.in)
+			jsonIn := c.in
+			if alt, ok := jsonForms()[c.name]; ok {
+				jsonIn = alt
+			}
+			raw, err := json.Marshal(jsonIn)
 			if err != nil {
 				t.Fatal(err)
 			}
