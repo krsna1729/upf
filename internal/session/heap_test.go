@@ -33,6 +33,9 @@ func countedEstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishm
 // the compiler's own maps are amortised.
 func TestASessionHoldsAtMostItsBytes(t *testing.T) {
 	const n = 20000
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
 	var c *Compiler
 	per := scaletest.HeapPerItem(t, n, func(n int) {
 		c = New(testConfig(), &discardApplier{}, quietLogger())
@@ -43,10 +46,16 @@ func TestASessionHoldsAtMostItsBytes(t *testing.T) {
 			}
 		}
 	})
-	// 4,543-4,665 B before a session's rule maps were sorted slices and its
-	// unused maps nil; 3,609-3,757 B after (three runs each).
-	if per > 4100 {
-		t.Errorf("a session holds %.0f B of heap, want at most 4100", per)
+	runtime.ReadMemStats(&after)
+	live := float64(int64(after.HeapAlloc)-int64(before.HeapAlloc)) / n
+	t.Logf("%.1f B of live objects per session", live)
+	if live > 2550 {
+		t.Errorf("a session retains %.0f B of live objects, want at most 2550", live)
+	}
+	// Before the layout changes: 4,543-4,665 B. After rule maps, PDR
+	// derived fields, pending state and URR padding: 3,050-3,224 B.
+	if per > 3500 {
+		t.Errorf("a session holds %.0f B of heap, want at most 3500", per)
 	}
 	runtime.KeepAlive(c)
 }

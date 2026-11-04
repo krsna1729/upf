@@ -1163,12 +1163,8 @@ type qer struct {
 // spec's TOVOL/ULVOL/DLVOL are three flags, not a sum -- and the flags matter
 // because a limit the SMF did not provision must not fire.
 type volumeLimit struct {
-	hasTotal bool
-	total    uint64 // octets
-	hasUL    bool
-	ul       uint64
-	hasDL    bool
-	dl       uint64
+	total, ul, dl          uint64 // octets
+	hasTotal, hasUL, hasDL bool
 }
 
 // empty reports whether the SMF provisioned no limit at all.
@@ -1195,7 +1191,8 @@ func (v volumeLimit) reached(ul, dl uint64) bool {
 // map of its own would have to chase session deletion, modification and the
 // refusal rollback to stay in step with it.
 type urr struct {
-	id uint32
+	id   uint32
+	seqn uint32 // UR-SEQN of the next report (5.2.2.3), initially 0
 
 	// The Measurement Method (8.2.40): VOLUM, DURAT or both. EVENT is refused
 	// when the URR is read (this UP detects no events), so at least one of
@@ -1225,6 +1222,13 @@ type urr struct {
 	// the session is resolved (compile.go, `resolve`).
 	linkedReporting bool
 
+	// Keep presence and window-state flags together: spreading them between
+	// 8-byte counters and times adds padding to every session's URRs.
+	hasTimeTh, hasTimeQuota bool
+	enforcing               bool // a reached quota compiles its PDRs to drop
+	stamped                 bool // the current window has packet timestamps
+	baselined               bool // the first counter reading has set its base
+
 	// period is the Measurement Period (8.2.42) in seconds, with periodic set.
 	period time.Duration
 
@@ -1233,27 +1237,18 @@ type urr struct {
 	// this URR compile to a drop (enforcing).
 	volThreshold  volumeLimit
 	timeThreshold time.Duration
-	hasTimeTh     bool
 	volQuota      volumeLimit
 	timeQuota     time.Duration
-	hasTimeQuota  bool
 
 	// linked are the URR's Linked URR IDs (TS 29.244 8.2.55): the URRs this one
 	// reports with. A session's URRs joined by these edges are one linked group
 	// and share one UR-SEQN (report.go, "the group").
 	linked []uint32
 
-	// enforcing is set by the reporting task when a quota is exhausted: the
-	// PDRs that name this URR then drop. A modification that provisions a new
-	// quota or threshold clears it, which is how the SMF re-opens the traffic.
-	enforcing bool
-
-	// The reporting task's bookkeeping. reported is where the last report of
-	// this URR ended, so a report carries the usage of the interval it covers
-	// and the next periodic one has a period to measure; seqn is the UR-SEQN
-	// of the next report (5.2.2.3: the first report of a URR is 0).
+	// reported is where the last report ended, so the next periodic report
+	// has a period to measure. Keep time.Time's monotonic clock component:
+	// wall-clock changes must not change the duration of a quota.
 	reported time.Time
-	seqn     uint32
 
 	// windowFirst and windowLast are the *current* reporting window's own first
 	// and last counted packet. The dataplane stamps a tick's own first packet (a
@@ -1263,7 +1258,6 @@ type urr struct {
 	// all: a graph whose counters carry none falls back to the window's length.
 	windowFirst time.Time
 	windowLast  time.Time
-	stamped     bool
 
 	// lastUp and lastDown are the counters these PDRs had counted when the last
 	// report was made, so that report's successor covers the usage after it
@@ -1272,7 +1266,6 @@ type urr struct {
 	// first reading is the baseline, because the cells of a reused ActionId are
 	// another rule's totals.
 	lastUp, lastDown Usage
-	baselined        bool
 
 	// deliveredUp, deliveredDown and deliveredAt are the reading the SMF was
 	// last *told* up to, and when that window opened. lastUp/lastDown move as
