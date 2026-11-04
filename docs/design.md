@@ -993,6 +993,23 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   event, peak 349 MiB; the live heap read 0.76 of the limit at the end, because
   the sessions admitted between two collections are not yet in the reading.
   The pod figures below were measured before admission.
+- **Session-model layout.** The controller keeps small rule sets in sorted
+  slices, promoting to maps after 16 entries; unused BAR/MAR/CHOOSE-ID maps
+  stay nil. PDRs derive endpoint addresses and tunnel resources rather than
+  retaining copies; transaction-removal lists exist only while pending.
+  Removed QER ownership still lasts until deletion. URR fields are packed
+  without replacing `time.Time` or changing monotonic duration behavior.
+  `TestASessionHoldsAtMostItsBytes` bounds the whole retained model at
+  2,550 B of live objects and 3,500 B of heap spans per session for 20K
+  sessions with 2 PDRs, 2 FARs, 1 QER and 1 URR.
+  A disposable runtime-metrics probe at that count measured live bytes
+  74,097,904 → 50,097,568 and scannable heap 59,354,496 → 39,994,496
+  (`.scratch/evidence/go-garbage/dsa-layout/{before,after}.json`).
+  These are controller-model measurements, not RSS or pod capacity.
+  With this layout and admission 0.7, the capped live run
+  `150000-establish-cap380-dsa` admitted 102,729 sessions and answered
+  47,271 with PFCP cause 75. Its upfd scope was 380 MiB, memory peak
+  369,504,256 B (352.4 MiB), with `memory.events` max/oom/oom_kill all zero.
 - **Budget.** Without a limit, RSS ≈ 30 MiB + N × 3.1 KB × (1 + GOGC/100).
   With the limit, the floor is about 30 MiB + N × 3.1 KB, plus ~15% for the
   collector to keep pace.
