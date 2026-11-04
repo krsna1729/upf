@@ -32,7 +32,8 @@ require (
 
 // go-pfcp carries every IE parser on the N4 path. The fork is upstream main
 // (typed IE types, readable names) plus the open IE parser fixes for #142 and
-// #145, bounded IE nesting, and a lock-free grouped lookup. A malformed PFD
-// Contents, SDF Filter or neighbour IE is refused rather than panicking the
-// daemon. It keeps the upstream module path, hence the replace form.
-replace github.com/wmnsk/go-pfcp => github.com/krsna1729/go-pfcp v0.0.25-upf.4
+// #145, bounded IE nesting, a lock-free grouped lookup, and each level of IEs
+// parsed into two blocks. A malformed PFD Contents, SDF Filter or neighbour IE
+// is refused rather than panicking the daemon. It keeps the upstream module
+// path, hence the replace form.
+replace github.com/wmnsk/go-pfcp => github.com/krsna1729/go-pfcp v0.0.25-upf.5
