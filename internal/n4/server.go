@@ -358,13 +358,7 @@ func (s *Server) Serve() error {
 		if n == 0 {
 			continue
 		}
-		b := buf[:n]
-		if s.work != nil {
-			// A worker answers the message after this loop has read the next
-			// datagram into buf, and the parsed IEs point into the bytes.
-			b = bytes.Clone(b)
-		}
-		s.handle(b, from)
+		s.handle(buf[:n], from)
 	}
 }
 
@@ -409,6 +403,14 @@ func (s *Server) handle(b []byte, from net.Addr) {
 		s.log.Info("n4: unsupported PFCP version", "from", from, "version", v)
 		s.reply(from, message.NewVersionNotSupportedResponse(sequenceNumber(b)))
 		return
+	}
+	// Parsed IEs borrow b, and Serve reads the next datagram into the same
+	// buffer. A session worker answers its message later, and a Session Report
+	// Response's Update BAR goes to the Report call waiting on another
+	// goroutine (onReportResponse): both need their own copy. Every other
+	// message is answered before handle returns.
+	if s.work != nil || b[1] == message.MsgTypeSessionReportResponse {
+		b = bytes.Clone(b)
 	}
 	msg, err := message.Parse(b)
 	if err != nil {

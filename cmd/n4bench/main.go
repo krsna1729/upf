@@ -22,6 +22,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -166,7 +167,10 @@ func (c *client) read() {
 		if err != nil {
 			return
 		}
-		m, err := message.Parse(buf[:n])
+		// Parsed IE payloads borrow their input, and the answer goes to the
+		// waiting request's goroutine while this loop reads the next datagram
+		// into buf: the message must own its bytes.
+		m, err := message.Parse(bytes.Clone(buf[:n]))
 		if err != nil {
 			c.log.Warn("unparsable datagram", "err", err)
 			continue
