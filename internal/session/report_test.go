@@ -370,7 +370,7 @@ func TestAReportTakenBackIsDecidedAgain(t *testing.T) {
 // 64 sessions that measure nothing beside them to 8000.
 func TestATickCostsOnlyTheSessionsThatMeasure(t *testing.T) {
 	build := func(measured, plain int) *Compiler {
-		c := New(testConfig(), &recorder{}, quietLogger())
+		c := New(testConfig(), &recorder{forget: true}, quietLogger())
 		for i := range measured {
 			ue := fmt.Sprintf("10.1.%d.%d", i/250, i%250+1)
 			resp := c.Establish(urrSession(uint64(1+i), uint32(0x1000+i), ue, 1, fullURR(1)))

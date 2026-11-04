@@ -75,6 +75,15 @@ check_clean_shutdown() {
 # it as a lane that must also print the clean-shutdown line.
 LANE=${UPF_LANE:-$(basename "$0" .sh)}
 
+# The lanes' packet pool: 32768 buffers, not bessd's default 262144 (bess
+# core/runtime/opts.cc:259). A lane sends a few frames at a time; the default
+# pool is most of what its daemon holds. bessd alone with no graph peaks at
+# 707 MiB with the default and 129 MiB with --buffers=32768 (memory.peak,
+# 2026-11-04); the lanes' rows in ci/test-memory.tsv are measured with it. A
+# lane that needs more passes its own --buffers to bessd_start: the last one
+# wins.
+BESSD_POOL=(--buffers=32768)
+
 mem_declared() {
   awk -v k="$1" -v n="$2" '$1 == k && $2 == n && $3 ~ /^[0-9]+$/ { print $3; exit }' \
     "$ROOT/ci/test-memory.tsv"
@@ -110,7 +119,7 @@ bessd_mem_check() {
   declared=$(mem_declared lane "$LANE")
   declared=${declared:-0}
   if [ ! -r "/proc/$pid/cgroup" ]; then
-    echo "lane-mem: $LANE: the daemon ($pid) exited before its peak was read (status 137 is the kernel's kill at ${BESSD_MEM_LIMIT:-?} MiB)" >&2
+    echo "lane-mem: $LANE: the daemon ($pid) exited before its peak was read (an exit status of 137 would be the kernel's kill at ${BESSD_MEM_LIMIT:-?} MiB)" >&2
     return 1
   fi
   cg=$(cut -d: -f3- "/proc/$pid/cgroup")
@@ -162,7 +171,7 @@ bessd_start() {
   fi
   bessd_launcher || return 1
   "${BESSD_LAUNCH[@]}" "${launch[@]}" "$STAGE/bin/bessd" --mem_backing=normal -skip_root_check -p "$BESS_PORT" -i "$pidfile" \
-    -modules="$PLUG" -f "$@" >"$log" 2>&1 &
+    -modules="$PLUG" -f "${BESSD_POOL[@]}" "$@" >"$log" 2>&1 &
   BESSD_PID=$!
 }
 

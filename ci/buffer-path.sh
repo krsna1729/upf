@@ -83,7 +83,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-bessd_start "$LOG" "$WORK/bessd.pid" || exit 1
+# The graph's PacketStore needs a pool of twice its max_packets (65536) plus
+# its 4096-slot ingress ring, 135168 buffers, or it refuses to start (BESS
+# 941feb51 core/modules/packet_store.cc:209-219); bessd takes only a power of
+# two (core/runtime/opts.cc:248-258), so this lane runs 262144, the default,
+# not the lanes' 32768 (ci/bess-env.sh).
+bessd_start "$LOG" "$WORK/bessd.pid" --buffers=262144 || exit 1
 if ! bessd_wait 60 0.5; then
   echo "buffer-path: the daemon did not come up; log follows" >&2
   tail -30 "$LOG" >&2

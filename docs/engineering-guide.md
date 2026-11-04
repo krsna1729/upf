@@ -212,7 +212,9 @@ How a row is held (each piece names its enforcer):
   before it stops and fails the lane above the row:
   `lane-mem: <lane>: FAILED: declared X MiB, peak Y MiB`. The row bounds the
   daemon only: the lane's Go tests are held to their package rows, and `upfd`
-  has none.
+  has none. The lanes' daemons run a pool of 32768 packet buffers, not the
+  default 262144 (`BESSD_POOL`, `ci/bess-env.sh`); a lane whose graph needs
+  more passes its own `--buffers` (`ci/buffer-path.sh`).
 
 `ci/run_capped.py` runs the test in a `systemd-run --user --scope` with
 `MemoryMax` at 1.5x the row (at least 32 MiB above), no swap and
@@ -251,33 +253,34 @@ UPF_TEST_MEM_MEASURE=1 ci/smoke-gtpu.sh
 The rows below were measured that way on 2026-11-04: branch
 `test/memory-bounds` on b03aa8f, Go 1.27.2 at `GOMAXPROCS=2`, BESS pin
 941feb51, the plugin built `buildtype=release`. A package's peak is the
-largest of its unit runs and the lanes' runs of it; a lane's `memory.peak` is
-the larger of two runs (00:54 and 11:08 IST) where two ran.
+largest of its unit runs and the lanes' runs of it; a range is several runs.
+The lanes ran 12:20-12:33 IST with the 32768-buffer pool; `internal/session`
+ran 12:39-12:44.
 
 | Row | Declared MiB | `memory.peak` MiB | `ru_maxrss` / VmHWM MiB |
 |---|---|---|---|
 | `go internal/session:TestATickReadsEveryRuleUnderTheMessageBound` | 1736 | 1378.4 | 1387.5 |
-| `lane veth-port` | 1848 | 1414.4 | 1477.8 |
-| `lane veth-layouts` | 1848 | 1415.2 | 1472.5 |
-| `lane veth-transport` | 1848 | 1412.3 | 1472.3 |
-| `lane buffer-path` | 1392 | 1045.2 | 1107.8 |
-| `lane iface-path` | 1384 | 1044.8 | 1105.0 |
-| `lane session-path` | 1384 | 1036.8 | 1102.3 |
-| `lane session-report` | 1384 | 1040.3 | 1102.3 |
-| `lane session-live` | 1384 | 1040.6 | 1101.8 |
-| `lane n4-path` | 1384 | 1040.2 | 1101.7 |
-| `lane session-instances` | 1384 | 1042.1 | 1101.3 |
-| `lane route-path` | 1384 | 1039.3 | 1101.2 |
-| `go-race internal/session` | 1264 | 1010.2 | 990.7 |
-| `lane smoke-gtpu` | 1056 | 783.5 | 838.6 |
-| `lane atsss-steer` | 1048 | 773.9 | 838.1 |
-| `lane meter-compose` | 1048 | 772.5 | 837.9 |
+| `lane buffer-path` | 1392 | 1044.2 | 1107.5 |
+| `lane veth-port` | 728 | 512.7 | 581.2 |
+| `lane veth-layouts` | 720 | 510.7 | 574.6 |
+| `lane veth-transport` | 720 | 510.7 | 575.0 |
+| `lane iface-path` | 664 | 461.5 | 528.2 |
+| `lane session-report` | 664 | 462.5 | 526.2 |
+| `lane n4-path` | 664 | 460.9 | 526.1 |
+| `lane session-instances` | 664 | 458.8 | 526.1 |
+| `lane route-path` | 664 | 458.6 | 525.6 |
+| `lane session-path` | 664 | 459.0 | 525.3 |
+| `lane session-live` | 664 | 460.9 | 525.3 |
+| `go-race internal/session` | 504 | 301.0-399.0 | 317.6 |
+| `lane smoke-gtpu` | 328 | 206.4 | 261.8 |
+| `lane atsss-steer` | 328 | 194.7 | 262.4 |
+| `lane meter-compose` | 328 | 194.7 | 262.0 |
 | `meson upf_appliance_sessions` | 184 | 123.8 | 146.1 |
+| `go internal/session` | 168 | 99.8-129.2 | 109.6 |
 | `meson gtpu_datapath` | 152 | 94.2 | 116.5 |
 | `go-race cmd/upfd` | 136 | 85.5 | 108.7 |
 | `go-race internal/bess` | 64 | 34.1 | 49.7 |
 | `go cmd/upfd` | 48 | 23.3 | 36.8 |
-| `go internal/session` | 424 | 328.5 | 334.8 |
 | `go internal/bess` | 40 | 12.3 | 27.9 |
 | `go-race cmd/n4bench` | 40 | 15.4 | 26.0 |
 | `go-race internal/n4` | 40 | 21.1 | 30.7 |
@@ -290,26 +293,49 @@ the larger of two runs (00:54 and 11:08 IST) where two ran.
 | `go internal/routing` | 24 | 2.2 | 18.3 |
 | `go internal/scaletest` | 24 | 5.8 | 18.4 |
 
-The reasons for the rows above the ceiling are next to them in
-`ci/test-memory.tsv`. In short: `TestATickReadsEveryRuleUnderTheMessageBound`
-holds 2.1M rules (UG-B1's 64 MiB reply bound is crossed only at that scale);
-in its package's run the package peaked at 1878-1890 MiB, so it has its own
-row and runs by itself, and `internal/session` without it is 424. Under
-`-race` no one test carries `internal/session` past the ceiling (the
-`TestATick` tests alone 618.5 MiB, the package without them 858.0 MiB, the
-same day). A lane's bessd runs its default packet pool, 707 MiB for
-the daemon alone with no graph (129 MiB with `--buffers=32768`; measured
-2026-11-04 with `bessd --mem_backing=normal -f` in a scope, `memory.peak` once
-it answered).
+The two rows above the ceiling have their reasons next to them in
+`ci/test-memory.tsv`:
+
+- **`TestATickReadsEveryRuleUnderTheMessageBound`** holds 2.1M rules, because
+  UG-B1's 64 MiB reply bound is crossed only at that scale. It has its own
+  row and runs by itself.
+- **buffer-path's PacketStore** refuses a pool under 135168 buffers, and bessd
+  takes only a power of two, so that lane runs the default 262144.
+
+What the pool costs: bessd alone with no graph peaks at 707 MiB with the
+default pool and at 129 MiB with `--buffers=32768` (`bessd --mem_backing=normal
+-f` in a scope, `memory.peak` once it answered, 2026-11-04). The pool change
+took the lanes' daemons down in `memory.peak`, measured before (00:54 and
+11:08-11:14 IST) and after (12:20-12:25 IST):
+
+- the lanes other than buffer-path and veth-*: from 772.5-1044.8 MiB to
+  194.7-462.5 MiB;
+- the veth lanes: from 1412.3-1415.2 MiB to 510.7-512.7 MiB.
+
+`internal/session`'s scale tests used to keep every transaction in their fake
+dataplane, and they now do not (`recorder.forget`, `session_test.go`). Each
+test was measured alone, before and after, in `memory.peak` MiB:
+
+| Test | Plain | `-race` |
+|---|---|---|
+| `TestTheCheckpointHoldsSessionsNotHistory` | 249.3 to 10.6 | 828.5 to 35.2 |
+| `TestATickCostsOnlyTheSessionsThatMeasure` | 203.8 to 65.1 | 644.3 to 164.1 |
 
 **The smallest machine for the suite**, from these rows: CI's phases run one
-after another, so the suite needs its largest phase. That is a veth lane:
-one daemon of at most 1848 MiB beside its Go test, `internal/session` at most
-424, so 2272 MiB declared (1477.8 + 31.4 measured), and `upfd`, which has no
-row. The others: the unit pass at `-p 2`, 472 MiB declared
-(`internal/session` + `cmd/upfd`), then the 2.1M-rule test by itself, 1736;
-the weekly `-race` pass, 1264 + 136; `meson test`, both tests at once, 336;
-the other lanes, at most 1392 + 424. Builds are not in these numbers.
+after another, so the suite needs its largest phase. That phase is the
+2.1M-rule test by itself: 1736 MiB declared, 1387.5 measured. The other
+phases:
+
+| Phase | Declared MiB |
+|---|---|
+| buffer-path's daemon beside its Go test (`internal/session`) | 1392 + 168 (1107.5 + 31.3 measured) |
+| A veth lane's daemon beside the same Go test | 728 + 168 |
+| The other lanes | at most 664 + 168 |
+| The weekly `-race` pass, `internal/session` + `cmd/upfd` at `-p 2` | 504 + 136 |
+| `meson test`, both tests at once | 336 |
+| The unit pass at `-p 2` | 168 + 48 |
+
+`upfd`, started by some lanes, has no row. Builds are not in these numbers.
 
 **Sizing `upfd` and bessd for a deployment** is not what these rows say:
 they bound tests. For `upfd`, the per-session cost and the pod fits are

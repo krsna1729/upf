@@ -66,6 +66,9 @@ type recorder struct {
 	dropped   []string
 	cleared   []string
 	storeFail error
+	// forget keeps no transactions, for a scale test that reads none: there
+	// the thousands kept would be the test's heap, not the compiler's.
+	forget bool
 }
 
 // ReleaseFlow and DropFlow are the packet store's commands (StoreCommands): the
@@ -134,7 +137,9 @@ func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 		}
 		r.entries[key] = true
 	}
-	r.txns = append(r.txns, changes)
+	if !r.forget {
+		r.txns = append(r.txns, changes)
+	}
 	r.ops.Add("Apply")
 	return nil
 }
