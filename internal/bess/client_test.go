@@ -113,13 +113,13 @@ func TestCounterCommandTableSelection(t *testing.T) {
 				if err != nil || module != "upf" {
 					t.Fatalf("appliance command: module %q, error %v", module, err)
 				}
-				m := arg.ProtoReflect()
+				m := onTheWire(t, arg).ProtoReflect()
 				if got := m.Get(m.Descriptor().Fields().ByName("table")).String(); got != table {
 					t.Errorf("selected table %q, want %q", got, table)
 				}
 				m.Clear(m.Descriptor().Fields().ByName("table"))
-				if !proto.Equal(onTheWire(t, arg), want) {
-					t.Errorf("appliance changed other arguments: got %v, want %v", arg, want)
+				if !proto.Equal(m.Interface(), want) {
+					t.Errorf("appliance changed other arguments: got %v, want %v", m, want)
 				}
 			}
 		}

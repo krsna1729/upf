@@ -146,6 +146,42 @@ func (c *Client) ResourceNames() []string {
 // Message builds a message of the named protobuf type from field values, which
 // are named as the JSON form of the message (the same names a manifest uses).
 func (c *Client) Message(typ string, fields map[string]any) (proto.Message, error) {
+	md, err := c.descriptor(typ)
+	if err != nil {
+		return nil, err
+	}
+	return messageOf(md, typ, fields)
+}
+
+// wire is Message for a message that is only marshalled -- a change's key or
+// value, an action's argument. Its fields go on already encoded (encode),
+// appended to buf, as the message's unknown fields, which a dynamic message
+// marshals verbatim; countRequest's action ids ride the same way. Reading a
+// field of the message reads its default. Building it field by field was most
+// of what a session establishment allocated.
+//
+// Each message holds its own capped piece of buf, never written again: the
+// pieces stay valid whatever buf's later growth does. A type with required
+// fields of its own takes Message's path, because the marshal's required-field
+// check cannot see a field carried as unknown.
+func (c *Client) wire(buf []byte, typ string, fields map[string]any) (proto.Message, []byte, error) {
+	md, err := c.descriptor(typ)
+	if err != nil {
+		return nil, buf, err
+	}
+	if fields != nil && md.RequiredNumbers().Len() == 0 {
+		start := len(buf)
+		if b, ok := encode(buf, md, fields); ok {
+			m := dynamicpb.NewMessage(md)
+			m.SetUnknown(b[start:len(b):len(b)])
+			return m, b, nil
+		}
+	}
+	m, err := messageOf(md, typ, fields)
+	return m, buf, err
+}
+
+func (c *Client) descriptor(typ string) (protoreflect.MessageDescriptor, error) {
 	c.mu.Lock()
 	files := c.files
 	c.mu.Unlock()
@@ -160,6 +196,10 @@ func (c *Client) Message(typ string, fields map[string]any) (proto.Message, erro
 	if !ok {
 		return nil, fmt.Errorf("bess: %s is not a message", typ)
 	}
+	return md, nil
+}
+
+func messageOf(md protoreflect.MessageDescriptor, typ string, fields map[string]any) (proto.Message, error) {
 	m := dynamicpb.NewMessage(md)
 	if fields == nil || fill(m, fields) {
 		return m, nil
@@ -279,11 +319,12 @@ func (c *Client) countRequest(counters string, restart bool, actionIDs []uint32)
 	if table != "" {
 		argFields["table"] = table
 	}
-	arg, err := c.Message("upf.pb.UrrCountCommandGetCountsArg", argFields)
+	arg, _, err := c.wire(nil, "upf.pb.UrrCountCommandGetCountsArg", argFields)
 	if err != nil {
 		return module, nil, err
 	}
-	// The ids go on already encoded, as the packed field the daemon reads:
+	// The ids go on already encoded, as the packed field the daemon reads,
+	// after the argument's other fields (wire carries those encoded too):
 	// Message's map boxes each id into an interface, and so does dynamicpb's
 	// own List.Append when it type-checks one -- an allocation per rule, and a
 	// tick names every counted rule. The dynamic message carries the bytes as
@@ -299,7 +340,9 @@ func (c *Client) countRequest(counters string, restart bool, actionIDs []uint32)
 		for _, id := range actionIDs {
 			size += protowire.SizeVarint(uint64(id))
 		}
-		raw := make([]byte, 0, protowire.SizeTag(fd.Number())+protowire.SizeBytes(size))
+		head := m.GetUnknown()
+		raw := make([]byte, 0, len(head)+protowire.SizeTag(fd.Number())+protowire.SizeBytes(size))
+		raw = append(raw, head...)
 		raw = protowire.AppendTag(raw, fd.Number(), protowire.BytesType)
 		raw = protowire.AppendVarint(raw, uint64(size))
 		for _, id := range actionIDs {
@@ -477,7 +520,7 @@ type Change struct {
 // type and fields come from the daemon's own schema, as every message this
 // client builds does.
 func (c *Client) ReleaseFlow(ctx context.Context, module string, id uint32) error {
-	arg, err := c.Message("bess.pb.PacketStoreCommandReleaseArg",
+	arg, _, err := c.wire(nil, "bess.pb.PacketStoreCommandReleaseArg",
 		map[string]any{"id": id, "gate": 0})
 	if err != nil {
 		return err
@@ -495,7 +538,7 @@ func (c *Client) ReleaseFlow(ctx context.Context, module string, id uint32) erro
 // Dropping is what frees the packets: erasing the flow's `flows` entry is
 // configuration only.
 func (c *Client) DropFlow(ctx context.Context, module string, id uint32) error {
-	arg, err := c.Message("bess.pb.PacketStoreCommandDropArg", map[string]any{"id": id})
+	arg, _, err := c.wire(nil, "bess.pb.PacketStoreCommandDropArg", map[string]any{"id": id})
 	if err != nil {
 		return err
 	}
@@ -511,7 +554,7 @@ func (c *Client) DropFlow(ctx context.Context, module string, id uint32) error {
 // episode they belonged to. Like the other two it is accepted, not completed:
 // the store's own task frees what it holds on a later run.
 func (c *Client) ClearStore(ctx context.Context, module string) error {
-	arg, err := c.Message("bess.pb.PacketStoreCommandClearArg", map[string]any{})
+	arg, _, err := c.wire(nil, "bess.pb.PacketStoreCommandClearArg", map[string]any{})
 	if err != nil {
 		return err
 	}
@@ -538,6 +581,9 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 	defer func() { <-c.inFlight }()
 
 	tx := c.sdk.Transaction()
+	// Every key and value of the transaction is encoded into this one buffer
+	// (wire): a few growths per transaction, not several per message.
+	buf := make([]byte, 0, 64*len(changes))
 	for i, ch := range changes {
 		r, err := c.Resource(ch.Resource)
 		if err != nil {
@@ -548,7 +594,8 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 				return fmt.Errorf("change %d: resource %q is a singleton: it has no key to erase",
 					i, ch.Resource)
 			}
-			v, err := c.Message(r.ValueType, ch.Value)
+			var v proto.Message
+			v, buf, err = c.wire(buf, r.ValueType, ch.Value)
 			if err != nil {
 				return fmt.Errorf("change %d: %w", i, err)
 			}
@@ -560,7 +607,8 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 		if ch.Key == nil {
 			return fmt.Errorf("change %d: resource %q is a map: it needs a key", i, ch.Resource)
 		}
-		k, err := c.Message(r.KeyType, ch.Key)
+		var k proto.Message
+		k, buf, err = c.wire(buf, r.KeyType, ch.Key)
 		if err != nil {
 			return fmt.Errorf("change %d: %w", i, err)
 		}
@@ -570,7 +618,8 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 			}
 			continue
 		}
-		v, err := c.Message(r.ValueType, ch.Value)
+		var v proto.Message
+		v, buf, err = c.wire(buf, r.ValueType, ch.Value)
 		if err != nil {
 			return fmt.Errorf("change %d: %w", i, err)
 		}
