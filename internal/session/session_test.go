@@ -3365,29 +3365,31 @@ func TestAnUnknownOutcomeKeepsTheIDs(t *testing.T) {
 // releasing one key must not return the TEID to the allocator while another
 // endpoint still uses it.
 func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
-	c := New(testConfig(), &recorder{}, quietLogger())
-	firstAddr := netip.MustParseAddr("192.0.2.1")
 	secondAddr := netip.MustParseAddr("192.0.2.2")
-	makePDR := func(id uint16, endpoint uint32, addr netip.Addr) *pdr {
+	cfg := testConfig()
+	second := cfg.FTEIDEndpoints[0]
+	second.ID, second.IPv4 = 2, secondAddr
+	cfg.FTEIDEndpoints = append(cfg.FTEIDEndpoints, second)
+	c := New(cfg, &recorder{}, quietLogger())
+	makePDR := func(id uint16, endpoint uint32) *pdr {
 		return &pdr{id: id, srcIfc: ie.SrcInterfaceAccess, teid: 0x77,
-			endpointID: endpoint, endpointFamily: 4, endpointIPv4: addr,
-			endpointFamilies: []uint8{4}}
+			endpointID: endpoint, endpointFamily: 4, wantIPv4: true}
 	}
 	first := &Session{LocalSEID: 1}
-	firstPDR := makePDR(1, 1, firstAddr)
+	firstPDR := makePDR(1, 1)
 	first.PDRs.set(1, firstPDR)
-	second := &Session{LocalSEID: 2}
-	secondPDR := makePDR(1, 2, secondAddr)
-	second.PDRs.set(1, secondPDR)
+	secondSession := &Session{LocalSEID: 2}
+	secondPDR := makePDR(1, 2)
+	secondSession.PDRs.set(1, secondPDR)
 
 	c.mu.Lock()
 	if err := c.claimFTEID(first, firstPDR); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.claimFTEID(second, secondPDR); err != nil {
+	if err := c.claimFTEID(secondSession, secondPDR); err != nil {
 		t.Fatal(err)
 	}
-	conflict := makePDR(2, 2, secondAddr)
+	conflict := makePDR(2, 2)
 	conflict.down = true
 	if err := c.claimFTEID(&Session{LocalSEID: 3}, conflict); err == nil {
 		t.Fatal("the same exact endpoint key was claimed for the opposite direction")
@@ -3398,21 +3400,21 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 			firstPDR.fteidContext, secondPDR.fteidContext)
 	}
 
-	if len(fteidKeysOf(firstPDR)) != 1 || len(fteidKeysOf(secondPDR)) != 1 ||
-		fteidKeysOf(firstPDR)[0] == fteidKeysOf(secondPDR)[0] {
+	if len(c.fteidKeysOf(firstPDR)) != 1 || len(c.fteidKeysOf(secondPDR)) != 1 ||
+		c.fteidKeysOf(firstPDR)[0] == c.fteidKeysOf(secondPDR)[0] {
 		t.Fatal("distinct endpoint keys collapsed despite sharing TEID 0x77")
 	}
 	c.mu.Lock()
 	c.releaseSession(first)
 	remaining := c.fteidTEIDKeys[0x77]
-	_, secondStillOwned := c.byFTEID[fteidKeysOf(secondPDR)[0]]
+	_, secondStillOwned := c.byFTEID[c.fteidKeysOf(secondPDR)[0]]
 	pinned := c.teids.taken[0x77]
 	c.mu.Unlock()
 	if remaining != 1 || !secondStillOwned || !pinned {
 		t.Fatalf("releasing one endpoint prematurely freed the shared TEID: refs=%d owner=%v pinned=%v", remaining, secondStillOwned, pinned)
 	}
 	c.mu.Lock()
-	c.releaseSession(second)
+	c.releaseSession(secondSession)
 	remaining, pinned = c.fteidTEIDKeys[0x77], c.teids.taken[0x77]
 	contexts := len(c.fteidContexts)
 	c.mu.Unlock()
@@ -5253,9 +5255,7 @@ func TestAFARThatAsksToDuplicateIsRefused(t *testing.T) {
 func TestDualStackFTEIDIsOneContextNotTwoRuleSets(t *testing.T) {
 	p := &pdr{
 		teid: 0x77, fteidContext: 5,
-		endpointID: 17, endpointIPv4: netip.MustParseAddr("192.0.2.17"),
-		endpointIPv6:     netip.MustParseAddr("2001:4860::17"),
-		endpointFamilies: []uint8{4, 6}, qfis: []uint8{1, 9},
+		endpointID: 17, wantIPv4: true, wantIPv6: true, qfis: []uint8{1, 9},
 		sdfs: []*sdfFilter{{proto: 17, protoOK: true}, {proto: 6, protoOK: true}},
 	}
 	keys, err := p.ruleKeys([]Field{FTEIDContext, Proto, QFI})

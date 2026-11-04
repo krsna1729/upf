@@ -109,7 +109,7 @@ func TestChangeIDSeparatesWhatFmtConflated(t *testing.T) {
 // keys per PDR, and a modification compiles them for every PDR it keeps.
 func TestARuleKeyIdentityAllocatesItsString(t *testing.T) {
 	p := &pdr{teid: 0x77, fteidContext: 5, ueIP: netip.MustParseAddr("10.45.0.2"),
-		endpointFamilies: []uint8{4}, qfis: []uint8{9}, sdfs: []*sdfFilter{{proto: 17, protoOK: true}}}
+		wantIPv4: true, qfis: []uint8{9}, sdfs: []*sdfFilter{{proto: 17, protoOK: true}}}
 	key, err := p.variants()[0].ruleKey([]Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain, FTEIDContext, QFI})
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestARuleKeyIdentityAllocatesItsString(t *testing.T) {
 // 8-field key was 73 allocations.
 func TestARuleKeyIsAFewAllocations(t *testing.T) {
 	p := &pdr{teid: 0x77, fteidContext: 5, ueIP: netip.MustParseAddr("10.45.0.2"),
-		srcIfc: ie.SrcInterfaceAccess, endpointFamilies: []uint8{4}, qfis: []uint8{9},
+		srcIfc: ie.SrcInterfaceAccess, wantIPv4: true, qfis: []uint8{9},
 		sdfs: []*sdfFilter{{proto: 17, protoOK: true}}}
 	v := p.variants()[0]
 	fields := []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain, FTEIDContext, QFI}
@@ -138,7 +138,7 @@ func TestARuleKeyIsAFewAllocations(t *testing.T) {
 // it for every variant of every PDR it keeps, to drop repeated keys.
 func TestARuleIdentityIsOneAllocation(t *testing.T) {
 	p := &pdr{teid: 0x77, fteidContext: 5, ueIP: netip.MustParseAddr("10.45.0.2"),
-		endpointFamilies: []uint8{4}, qfis: []uint8{9}, sdfs: []*sdfFilter{{proto: 17, protoOK: true}}}
+		wantIPv4: true, qfis: []uint8{9}, sdfs: []*sdfFilter{{proto: 17, protoOK: true}}}
 	key, err := p.variants()[0].ruleKey([]Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain, FTEIDContext, QFI})
 	if err != nil {
 		t.Fatal(err)

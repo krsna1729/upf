@@ -1269,13 +1269,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// selects this PDR keeps its action id, so a worker switching
 			// between old and new state never sees a dangling reference.
 			pdr.actionID = old.actionID
-			pdr.writtenTunnels = old.writtenTunnels
+			pdr.writtenTunnel = old.writtenTunnel
 			if !p.hasFTEID || old.down == pdr.down {
 				pdr.teid = old.teid
 				pdr.hasFTEID = old.hasFTEID
 				pdr.endpointID, pdr.endpointFamily = old.endpointID, old.endpointFamily
-				pdr.endpointIPv4, pdr.endpointIPv6 = old.endpointIPv4, old.endpointIPv6
-				pdr.endpointFamilies = slices.Clone(old.endpointFamilies)
 				pdr.wantIPv4, pdr.wantIPv6 = old.wantIPv4, old.wantIPv6
 				pdr.hasChoose, pdr.hasCHID, pdr.chid = old.hasChoose, old.hasCHID, old.chid
 			}
@@ -1328,8 +1326,6 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				return fmt.Errorf("%w: CHOOSE ID %d was reused with a different endpoint address", errNotExpressible, p.chid)
 			}
 			pdr.endpointID = endpoint.ID
-			pdr.endpointIPv4, pdr.endpointIPv6 = endpoint.IPv4, endpoint.IPv6
-			pdr.endpointFamilies = slices.Clone(families)
 			pdr.wantIPv4, pdr.wantIPv6 = slices.Contains(families, 4), slices.Contains(families, 6)
 			pdr.endpointFamily = families[0]
 			if p.teid != 0 {
@@ -1749,7 +1745,7 @@ func (c *Compiler) resolve(s *Session) error {
 				return err
 			}
 			p.nextHop = 0
-			p.drop, p.buffer, p.tunnels = false, false, nil
+			p.drop, p.buffer, p.tunnel = false, false, noTunnel
 		} else {
 			hop, err := c.egressHop(far, ifc, dir)
 			if err != nil {
@@ -1806,7 +1802,7 @@ func (c *Compiler) resolve(s *Session) error {
 				errNotExpressible, p.id, far.barID)
 		}
 		p.meterID = 0
-		p.tunnels = nil
+		p.tunnel = noTunnel
 		p.tunnelLocalAddress = netip.Addr{}
 		p.transportRouteDomain = 0
 		p.encapQFI = 0
@@ -1920,7 +1916,7 @@ func (c *Compiler) resolve(s *Session) error {
 			}
 			p.tunnelLocalAddress = local
 			p.transportRouteDomain = endpoint.TransportRouteDomain
-			p.tunnels = []string{c.res(tunnelTable(p.downlink()))}
+			p.tunnel = tunnelSideOf(p.downlink())
 		}
 		for _, uid := range p.urrIDs {
 			if s.URRs.at(uid) == nil {
@@ -2309,7 +2305,7 @@ func chosenNamed(s *Session, chosen chosenFTEID) bool {
 	for _, p := range s.PDRs.all() {
 		if p.hasCHID && p.teid == chosen.TEID && p.endpointID == chosen.EndpointID &&
 			p.srcIfc == chosen.SourceInterface && p.instance == chosen.Instance &&
-			slices.Equal(p.endpointFamilies, chosen.Families) {
+			slices.Equal(p.fteidFamilies(), chosen.Families) {
 			return true
 		}
 	}
@@ -2318,12 +2314,12 @@ func chosenNamed(s *Session, chosen chosenFTEID) bool {
 
 // fteidKeyNamed reports whether any live PDR in the session still references an
 // exact family/address/endpoint/TEID admission key.
-func fteidKeyNamed(s *Session, key fteidKey) bool {
+func (c *Compiler) fteidKeyNamed(s *Session, key fteidKey) bool {
 	for _, p := range s.PDRs.all() {
 		if p.teid == 0 {
 			continue
 		}
-		if slices.Contains(fteidKeysOf(p), key) {
+		if slices.Contains(c.fteidKeysOf(p), key) {
 			return true
 		}
 	}
@@ -2331,7 +2327,7 @@ func fteidKeyNamed(s *Session, key fteidKey) bool {
 }
 
 func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
-	keys := fteidKeysOf(p)
+	keys := c.fteidKeysOf(p)
 	for _, key := range keys {
 		if owner, ok := c.byFTEID[key]; ok &&
 			(owner.session != s || owner.down != p.down) {
@@ -2380,8 +2376,8 @@ func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
 		return
 	}
 	removed := false
-	for _, key := range fteidKeysOf(p) {
-		if !force && fteidKeyNamed(s, key) {
+	for _, key := range c.fteidKeysOf(p) {
+		if !force && c.fteidKeyNamed(s, key) {
 			continue
 		}
 		owner, ok := c.byFTEID[key]
@@ -2696,15 +2692,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			// resolving an address this UPF no longer carries.
 			erase(e.erasure())
 		}
-		for _, t := range p.tunnels {
-			erase(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
+		if p.tunnel != noTunnel {
+			erase(bess.Change{Resource: c.tunnelRes(p.tunnel), Key: map[string]any{"action_id": p.actionID}})
 		}
-		for _, t := range p.writtenTunnels {
-			erase(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
+		if p.writtenTunnel != noTunnel {
+			erase(bess.Change{Resource: c.tunnelRes(p.writtenTunnel), Key: map[string]any{"action_id": p.actionID}})
 		}
 		if p.teid != 0 {
-			for _, key := range fteidKeysOf(p) {
-				if !fteidKeyNamed(s, key) {
+			for _, key := range c.fteidKeysOf(p) {
+				if !c.fteidKeyNamed(s, key) {
 					erase(bess.Change{Resource: c.teidRes(), Key: key.entry()})
 				}
 			}
@@ -2765,8 +2761,8 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			erase(e.erasure())
 		}
 		if old.teid != 0 {
-			for _, key := range fteidKeysOf(old) {
-				if !fteidKeyNamed(s, key) {
+			for _, key := range c.fteidKeysOf(old) {
+				if !c.fteidKeyNamed(s, key) {
 					erase(bess.Change{Resource: c.teidRes(), Key: key.entry()})
 				}
 			}
@@ -2806,7 +2802,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			if p.down {
 				direction = 1
 			}
-			for _, key := range fteidKeysOf(p) {
+			for _, key := range c.fteidKeysOf(p) {
 				if writtenFTEIDs[key] {
 					continue
 				}
@@ -2941,13 +2937,12 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// route domain; the Router resolves the neighbor and rewrites Ethernet.
 		// A record the action held under its previous FAR and no longer needs
 		// goes, or a later rebind to an encap path would find it stale.
-		for _, resource := range p.writtenTunnels {
-			if !slices.Contains(p.tunnels, resource) {
-				erase(bess.Change{Resource: resource, Key: map[string]any{"action_id": p.actionID}})
-			}
+		if p.writtenTunnel != noTunnel && p.writtenTunnel != p.tunnel {
+			erase(bess.Change{Resource: c.tunnelRes(p.writtenTunnel), Key: map[string]any{"action_id": p.actionID}})
 		}
-		p.writtenTunnels = p.tunnels
-		for _, resource := range p.tunnels {
+		p.writtenTunnel = p.tunnel
+		if p.tunnel != noTunnel {
+			resource := c.tunnelRes(p.tunnel)
 			far := s.FARs.at(p.farID)
 			value := map[string]any{
 				"teid":                   far.teid,
