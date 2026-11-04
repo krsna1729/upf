@@ -957,8 +957,6 @@ type pdr struct {
 	endpointID                   uint32
 	endpointFamily               uint8
 	fteidContext                 uint32 // the admission context the decap writes for this PDR's F-TEID
-	endpointIPv4, endpointIPv6   netip.Addr
-	endpointFamilies             []uint8
 	// reference is the GTP-U reference point the PDI's Source Interface Type
 	// named for the F-TEID ("" for the Source Interface's own: n3 for Access,
 	// n9 for Core); see pdrReferencePoint.
@@ -978,11 +976,12 @@ type pdr struct {
 	// session meter ID second, as the direction's `Meter(levels: 2)` consumes them.
 	ownMeterID    uint32
 	sharedMeterID uint32
-	tunnels       []string // per-session tunnel records to write (downlink)
-	// writtenTunnels are the tunnel resources this PDR's action holds in the
-	// dataplane: a rebind to a FAR without Outer Header Creation erases them.
-	writtenTunnels []string
-	drop           bool // the FAR drops, or the QER's gate is closed this way
+	// tunnel is the per-session tunnel record this PDR's action writes (its
+	// FAR creates an outer header), by the direction's table; writtenTunnel is
+	// the one the dataplane holds now: a rebind to a FAR without Outer Header
+	// Creation erases it, and a change of direction moves it.
+	tunnel, writtenTunnel tunnelSide
+	drop                  bool // the FAR drops, or the QER's gate is closed this way
 	// buffer says the FAR asks for the packets to be held (Apply Action BUFF
 	// without FORW) and the deployment has a store: the rule delivers on the
 	// buffering branch instead, and the flow's key is the ActionId the rule
@@ -1500,18 +1499,82 @@ func meterSlots(p *pdr) (uint32, uint32) {
 	return p.ownMeterID, p.sharedMeterID
 }
 
-func fteidKeysOf(p *pdr) []fteidKey {
-	families := p.endpointFamilies
-	if len(families) == 0 {
-		families = []uint8{p.endpointFamily}
+// tunnelSide names a PDR's per-session tunnel record by its table (resolve
+// writes the direction's): a byte where the resource name list cost a slice
+// header and an allocation per PDR.
+type tunnelSide uint8
+
+const (
+	noTunnel tunnelSide = iota
+	uplinkTunnel
+	downlinkTunnel
+)
+
+func tunnelSideOf(down bool) tunnelSide {
+	if down {
+		return downlinkTunnel
 	}
+	return uplinkTunnel
+}
+
+// tunnelRes is t's resource, "" for noTunnel.
+func (c *Compiler) tunnelRes(t tunnelSide) string {
+	if t == noTunnel {
+		return ""
+	}
+	return c.res(tunnelTable(t == downlinkTunnel))
+}
+
+// The F-TEID family sets a PDR can hold, shared and never written: what
+// fteidFamilies hands out instead of a copy per PDR.
+var (
+	familiesIPv4     = []uint8{4}
+	familiesIPv6     = []uint8{6}
+	familiesIPv4IPv6 = []uint8{4, 6}
+	familiesNone     = []uint8{0}
+)
+
+// fteidFamilies is the address families of this PDR's F-TEID, 4 before 6:
+// what compile (merge) chose them from, wantIPv4 and wantIPv6, which it sets
+// from that set. A PDR with neither has its endpointFamily alone. The slice
+// is shared: a caller must not write it.
+func (p *pdr) fteidFamilies() []uint8 {
+	switch {
+	case p.wantIPv4 && p.wantIPv6:
+		return familiesIPv4IPv6
+	case p.wantIPv4:
+		return familiesIPv4
+	case p.wantIPv6:
+		return familiesIPv6
+	case p.endpointFamily == 4:
+		return familiesIPv4
+	case p.endpointFamily == 6:
+		return familiesIPv6
+	}
+	return familiesNone
+}
+
+// endpointAddrs is the configured endpoint id's addresses: a PDR names its
+// endpoint by id, and the configuration does not change after New.
+func (c *Compiler) endpointAddrs(id uint32) (ipv4, ipv6 netip.Addr) {
+	for i := range c.cfg.FTEIDEndpoints {
+		if e := &c.cfg.FTEIDEndpoints[i]; e.ID == id {
+			return e.IPv4, e.IPv6
+		}
+	}
+	return netip.Addr{}, netip.Addr{}
+}
+
+func (c *Compiler) fteidKeysOf(p *pdr) []fteidKey {
+	families := p.fteidFamilies()
+	ipv4, ipv6 := c.endpointAddrs(p.endpointID)
 	keys := make([]fteidKey, 0, len(families))
 	for _, family := range families {
 		k := fteidKey{endpointID: p.endpointID, family: uint32(family), teid: p.teid}
 		if family == 6 {
-			k.address = p.endpointIPv6.As16()
+			k.address = ipv6.As16()
 		} else {
-			v := p.endpointIPv4.As4()
+			v := ipv4.As4()
 			copy(k.address[:], v[:])
 		}
 		keys = append(keys, k)
@@ -1618,11 +1681,11 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	}
 	for _, p := range all {
 		dir := c.direction(p)
-		for _, t := range p.tunnels {
-			add(bess.Change{Resource: t, Key: map[string]any{"action_id": p.actionID}})
+		if p.tunnel != noTunnel {
+			add(bess.Change{Resource: c.tunnelRes(p.tunnel), Key: map[string]any{"action_id": p.actionID}})
 		}
 		if p.teid != 0 {
-			for _, key := range fteidKeysOf(p) {
+			for _, key := range c.fteidKeysOf(p) {
 				add(bess.Change{Resource: c.teidRes(), Key: key.entry()})
 			}
 		}
