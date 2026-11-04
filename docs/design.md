@@ -982,6 +982,17 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   its path, minus max(32 MiB, 10%); a GOMEMLIMIT in the environment wins. At 1M
   in a 4000 MiB scope (limit 3600 MiB), RSS settles at 3.5 GiB and GC takes
   14-17% of `upfd`'s CPU.
+- **Admission.** `upfd` answers a new establishment cause 75 (no resources
+  available) while the heap its last collection kept live is over
+  `-heap-admission` (default 0.7) of that limit; modifications, deletions, a
+  repeated establishment and the checkpoint replay are never refused for it
+  (`cmd/upfd/admission.go`). 0.7 is where the collector's share turns: 100K
+  sessions, live heap 385 MB, modify spent 12.5%, 40.7% and 78.2% of `upfd`'s
+  CPU in GC at 0.64, 0.78 and 0.93 of the limit. Under a 380 MiB scope (limit
+  342 MiB), 100K establishments admitted 65,315 and refused 34,685 with no OOM
+  event, peak 349 MiB; the live heap read 0.76 of the limit at the end, because
+  the sessions admitted between two collections are not yet in the reading.
+  The pod figures below were measured before admission.
 - **Budget.** Without a limit, RSS ≈ 30 MiB + N × 3.1 KB × (1 + GOGC/100).
   With the limit, the floor is about 30 MiB + N × 3.1 KB, plus ~15% for the
   collector to keep pace.

@@ -907,7 +907,7 @@ func (c *Compiler) Restore(j *Journal) error {
 			c.nextSEID = s.seid
 			c.mu.Unlock()
 		}
-		if got := answerCause(c.establish(req)); got != ie.CauseRequestAccepted {
+		if got := answerCause(c.establish(req, false)); got != ie.CauseRequestAccepted {
 			c.log.Warn("session: a replayed session was refused", "seid", s.seid, "cause", got)
 			continue
 		}
