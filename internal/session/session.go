@@ -667,30 +667,10 @@ type Session struct {
 	// cachedGroups is linkedGroups' answer, which every tick asks for.
 	cachedGroups [][]uint32
 
-	// removed holds the PDRs a modification took out of the model: their
-	// records are still in the dataplane, and the next transaction that
-	// compiles the session erases them (compile), so the SMF is never told a
-	// PDR is gone while its rule still selects packets. settle clears the list
-	// once that transaction is applied, which leaves the retry after a refusal
-	// erasing the same records.
-	removed []*pdr
-
-	// removedMARs holds the MARs a modification took out of the model. Their
-	// policy records are still in the dataplane until compile erases them, so
-	// a refused modification can put the MAR back.
-	removedMARs []*mar
-
-	// retiredTunnels are MAR tunnel records an update replaced (an access
-	// stopped tunnelling, or became "no standby"). compile erases them and
-	// settle returns their ids after the transaction lands.
-	retiredTunnels []uint32
-
-	// stale holds the PDRs a modification replaced: an update keeps a PDR's
-	// action and its tunnel, but a new filter or a new UE address is a new rule
-	// key, and the old one would go on selecting that action. compile erases an
-	// old key unless the same transaction writes it, which is what keeps one
-	// key from being written and erased at once (the engine rejects that).
-	stale []*pdr
+	// pending exists only while a transaction has records to erase or flows
+	// to release. Refused transactions keep it for their retry; settle drops
+	// it only after the dataplane has accepted the change.
+	pending *sessionChanges
 
 	// removedQERs holds the QERs a modification took out of the model. Their
 	// meters were allocated with the QER (one per policed direction) and are
@@ -699,15 +679,6 @@ type Session struct {
 	// returned to the pool would be one another session may police with while
 	// this one still names it.
 	removedQERs []*qer
-
-	// ending holds the flows whose buffering episode this model has ended: the
-	// PDRs a modification took out of buffering, by their ActionId. Their held
-	// packets are released once the transaction that ended the episode has
-	// landed (5.2.4.1), and settle clears the list then -- so a refused
-	// transaction retries the release with the change itself. resolve is what
-	// appends, because a request that carries only the FAR rebuilds no PDR and
-	// this is the one place the transition is visible.
-	ending []uint32
 
 	// ruleKeys are the rule keys this session holds in the compiler's table of
 	// owners, kept here so a release touches only them: a deletion at the
@@ -739,11 +710,8 @@ type modelSnapshot struct {
 	bars map[uint8]*bar
 	mars map[uint16]*mar
 
-	removed, stale []*pdr
-	removedMARs    []*mar
-	retiredTunnels []uint32
-	ending         []uint32
-	removedQERs    []*qer
+	pending     *sessionChanges
+	removedQERs []*qer
 }
 
 // cloneEntries copies m and each entry it points at; an empty m stays nil, as
@@ -766,11 +734,9 @@ func (s *Session) snapshot() modelSnapshot {
 		ueIP: s.UEIP,
 		pdrs: cloneIDMap(s.PDRs), fars: cloneIDMap(s.FARs), qers: cloneIDMap(s.QERs),
 		urrs: cloneIDMap(s.URRs), bars: cloneEntries(s.BARs),
-		mars:    cloneEntries(s.MARs),
-		removed: slices.Clone(s.removed), stale: slices.Clone(s.stale), ending: slices.Clone(s.ending),
-		removedMARs:    slices.Clone(s.removedMARs),
-		retiredTunnels: slices.Clone(s.retiredTunnels),
-		removedQERs:    slices.Clone(s.removedQERs),
+		mars:        cloneEntries(s.MARs),
+		pending:     s.pending.clone(),
+		removedQERs: slices.Clone(s.removedQERs),
 	}
 }
 
@@ -781,18 +747,16 @@ func (s *Session) snapshot() modelSnapshot {
 // and settle drops it once no PDR names it. The caller holds the lock.
 func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 	failedPDRs := pdrsInOrder(s)
-	failedPDRs = append(failedPDRs, s.removed...)
-	failedPDRs = append(failedPDRs, s.stale...)
+	failedPDRs = append(failedPDRs, s.pending.removedPDRs()...)
+	failedPDRs = append(failedPDRs, s.pending.stalePDRs()...)
 	failedQERs := qersInOrder(s)
-	failedMARs := append(marsInOrder(s), s.removedMARs...)
-	failedRetired := slices.Clone(s.retiredTunnels)
+	failedMARs := append(marsInOrder(s), s.pending.removedPolicies()...)
+	failedRetired := slices.Clone(s.pending.retiredIDs())
 
 	s.UEIP = snap.ueIP
 	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs, s.MARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars, snap.mars
 	s.invalidateOrderCache()
-	s.removed, s.stale, s.ending = snap.removed, snap.stale, snap.ending
-	s.removedMARs = snap.removedMARs
-	s.retiredTunnels = snap.retiredTunnels
+	s.pending = snap.pending
 	s.removedQERs = snap.removedQERs
 
 	// MAR policy and tunnel ids allocated by the failed merge are not in the
@@ -800,7 +764,7 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 	// still holds is the same reservation, not a new one.
 	livePolicies := map[uint32]bool{}
 	liveTunnels := map[uint32]bool{}
-	for _, m := range append(marsInOrder(s), s.removedMARs...) {
+	for _, m := range append(marsInOrder(s), s.pending.removedPolicies()...) {
 		if m.policyID != 0 {
 			livePolicies[m.policyID] = true
 		}
@@ -810,7 +774,7 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 			}
 		}
 	}
-	for _, id := range s.retiredTunnels {
+	for _, id := range s.pending.retiredIDs() {
 		if id != 0 {
 			liveTunnels[id] = true
 		}
@@ -878,9 +842,9 @@ func (s *Session) forgetRuleKey(key string) {
 // forgetRemoval marks a PDR id as live again: a request may remove a PDR and
 // create it in the same message, and the removal is folded in first.
 func (s *Session) forgetRemoval(id uint16) {
-	for i, p := range s.removed {
+	for i, p := range s.pending.removedPDRs() {
 		if p.id == id {
-			s.removed = append(s.removed[:i], s.removed[i+1:]...)
+			s.pending.removed = append(s.pending.removed[:i], s.pending.removed[i+1:]...)
 			return
 		}
 	}
@@ -1654,8 +1618,8 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// The dedupe above is what lets both lists name the same records as the
 	// PDRs that stayed.
 	all := pdrsInOrder(s)
-	all = append(all, s.removed...)
-	all = append(all, s.stale...)
+	all = append(all, s.pending.removedPDRs()...)
+	all = append(all, s.pending.stalePDRs()...)
 	for _, p := range all {
 		dir := c.direction(p)
 		keys, err := p.ruleKeys(dir.PDRFields)
@@ -1717,7 +1681,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// the same reason a removed PDR's records are: it is out of the model but
 	// still in the dataplane until this transaction erases it.
 	if c.cfg.Atsss != "" {
-		for _, m := range append(marsInOrder(s), s.removedMARs...) {
+		for _, m := range append(marsInOrder(s), s.pending.removedPolicies()...) {
 			if m.policyID != 0 {
 				add(bess.Change{Resource: c.res(Policies),
 					Key: map[string]any{"policy_id": m.policyID}})
@@ -1729,7 +1693,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 				}
 			}
 		}
-		for _, id := range s.retiredTunnels {
+		for _, id := range s.pending.retiredIDs() {
 			add(bess.Change{Resource: c.res(TunnelsDownlink),
 				Key: map[string]any{"action_id": id}})
 		}
@@ -1771,7 +1735,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 func (c *Compiler) settle(s *Session) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	gones := append(append([]*pdr(nil), s.removed...), s.stale...)
+	gones := append(append([]*pdr(nil), s.pending.removedPDRs()...), s.pending.stalePDRs()...)
 	for _, p := range gones {
 		c.releaseFTEIDClaim(s, p, false)
 	}
@@ -1841,7 +1805,7 @@ func (c *Compiler) settle(s *Session) {
 	// create/remove or tunneled-to-plain updates.
 	policies := map[uint32]bool{}
 	tunnels := map[uint32]bool{}
-	for _, m := range s.removedMARs {
+	for _, m := range s.pending.removedPolicies() {
 		if m.policyID != 0 && !policies[m.policyID] {
 			policies[m.policyID] = true
 			c.policies.release(m.policyID)
@@ -1853,14 +1817,13 @@ func (c *Compiler) settle(s *Session) {
 			}
 		}
 	}
-	for _, id := range s.retiredTunnels {
+	for _, id := range s.pending.retiredIDs() {
 		if id != 0 && !tunnels[id] {
 			tunnels[id] = true
 			c.actions.release(id)
 		}
 	}
-	s.retiredTunnels = nil
-	s.removed, s.stale, s.ending, s.removedMARs = nil, nil, nil, nil
+	s.pending = nil
 }
 
 // releaseSession frees the ids a session's records hold, each exactly once: one
@@ -1892,8 +1855,8 @@ func (c *Compiler) releaseSession(s *Session) {
 	// A PDR a modification removed still holds ids, and a replaced PDR's old
 	// form holds the TEID it used to have: the records are erased by the
 	// deletion above, and the ids are freed here with the rest.
-	all = append(all, s.removed...)
-	all = append(all, s.stale...)
+	all = append(all, s.pending.removedPDRs()...)
+	all = append(all, s.pending.stalePDRs()...)
 	for _, p := range all {
 		c.releaseFTEIDClaim(s, p, true)
 		if p.actionID != 0 && !actions[p.actionID] {
@@ -1915,7 +1878,7 @@ func (c *Compiler) releaseSession(s *Session) {
 	// QER and not with the PDRs that happen to name it. A QER a modification
 	// removed is one of them: the removal took it out of the model, so this is
 	// where its ids come back.
-	for _, m := range append(marsInOrder(s), s.removedMARs...) {
+	for _, m := range append(marsInOrder(s), s.pending.removedPolicies()...) {
 		if m.policyID != 0 && !policies[m.policyID] {
 			policies[m.policyID] = true
 			c.policies.release(m.policyID)
@@ -1927,7 +1890,7 @@ func (c *Compiler) releaseSession(s *Session) {
 			}
 		}
 	}
-	for _, id := range s.retiredTunnels {
+	for _, id := range s.pending.retiredIDs() {
 		if id != 0 && !actions[id] {
 			actions[id] = true
 			c.actions.release(id)

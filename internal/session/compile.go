@@ -1189,7 +1189,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// The records stay in the dataplane until the next compile erases
 			// them: it is the transaction that carries the removal out, so a
 			// refused modification leaves both the PDR and its records.
-			s.removed = append(s.removed, old)
+			s.changes().removed = append(s.changes().removed, old)
 		}
 		s.PDRs.del(id)
 	}
@@ -1371,7 +1371,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// The form being replaced: its rule key, and the TEID it held, are
 			// erased unless the transaction that carries this update writes them
 			// (compile).
-			s.stale = append(s.stale, old)
+			s.changes().stale = append(s.changes().stale, old)
 		}
 		s.PDRs.set(p.id, pdr)
 		if pdr.teid != 0 {
@@ -1392,7 +1392,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			}
 		}
 		if old := s.MARs[id]; old != nil {
-			s.removedMARs = append(s.removedMARs, old)
+			s.changes().removedMARs = append(s.changes().removedMARs, old)
 			delete(s.MARs, id)
 		}
 	}
@@ -1651,12 +1651,12 @@ func (s *Session) retireTunnel(id uint32) {
 	if id == 0 {
 		return
 	}
-	for _, old := range s.retiredTunnels {
+	for _, old := range s.pending.retiredIDs() {
 		if old == id {
 			return
 		}
 	}
-	s.retiredTunnels = append(s.retiredTunnels, id)
+	s.changes().retiredTunnels = append(s.changes().retiredTunnels, id)
 }
 
 // resolve derives what each PDR's FAR and QERs mean for the dataplane: a
@@ -1789,7 +1789,7 @@ func (c *Compiler) resolve(s *Session) error {
 			// instruction is received").
 			p.ddnSent = false
 			if wasBuffering && p.actionID != 0 {
-				s.ending = append(s.ending, p.actionID)
+				s.changes().ending = append(s.changes().ending, p.actionID)
 			}
 		}
 		if p.buffer && far.hasBAR && s.BARs[far.barID] == nil {
@@ -2278,7 +2278,7 @@ func unlinkFromPDRs(s *Session, id uint32, ids func(*pdr) *[]uint32) {
 		}
 		old := *p
 		old.sdfs = slices.Clone(p.sdfs)
-		s.stale = append(s.stale, &old)
+		s.changes().stale = append(s.changes().stale, &old)
 		*list = slices.DeleteFunc(slices.Clone(*list), func(v uint32) bool { return v == id })
 	}
 }
@@ -2675,7 +2675,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		erase(bess.Change{Resource: c.res(Flows),
 			Key: map[string]any{"id": p.actionID}})
 	}
-	for _, p := range s.removed {
+	for _, p := range s.pending.removedPDRs() {
 		dir := c.direction(p)
 		keys, err := p.ruleKeys(dir.PDRFields)
 		if err != nil {
@@ -2731,7 +2731,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// what said "arrivals are news", and a flow that no longer holds anything
 	// must not go on being read. The store's "flows" entry goes with it: the
 	// numbers are the instruction for an episode that is over.
-	for _, id := range s.ending {
+	for _, id := range s.pending.endingFlows() {
 		if liveBuffering[id] {
 			continue
 		}
@@ -2744,7 +2744,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				Key: map[string]any{"id": id}})
 		}
 	}
-	for _, old := range s.stale {
+	for _, old := range s.pending.stalePDRs() {
 		dir := c.direction(old)
 		keys, err := old.ruleKeys(dir.PDRFields)
 		if err != nil {
@@ -3041,7 +3041,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 // every deployment before -atsss; a MAR PDR is refused in resolve when the
 // module is absent.
 func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
-	if c.cfg.Atsss == "" || (len(s.MARs) == 0 && len(s.removedMARs) == 0) {
+	if c.cfg.Atsss == "" || (len(s.MARs) == 0 && len(s.pending.removedPolicies()) == 0) {
 		return nil, nil
 	}
 	changes := make([]bess.Change, 0, 2*len(s.MARs)+1)
@@ -3111,7 +3111,7 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 			},
 		})
 	}
-	for _, m := range s.removedMARs {
+	for _, m := range s.pending.removedPolicies() {
 		if m.policyID != 0 {
 			add(bess.Change{Resource: policyRes, Key: map[string]any{"policy_id": m.policyID}})
 		}
@@ -3121,7 +3121,7 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 			}
 		}
 	}
-	for _, id := range s.retiredTunnels {
+	for _, id := range s.pending.retiredIDs() {
 		add(bess.Change{Resource: c.res(TunnelsDownlink), Key: map[string]any{"action_id": id}})
 	}
 	return changes, nil
@@ -4904,7 +4904,7 @@ func resolveSDFIDs(s *Session) error {
 				// copy writes the same one.
 				old := *p
 				old.sdfs = append([]*sdfFilter(nil), p.sdfs...)
-				s.stale = append(s.stale, &old)
+				s.changes().stale = append(s.changes().stale, &old)
 			}
 			p.sdfs[i] = &c
 		}
