@@ -513,13 +513,26 @@ the arrival signal the Downlink Data Report is decided from on the BUFF branch.
   `restart_window: false` and clears only once the SMF has taken the report
   (`bess.Client.{RuleCounts,PeekRuleCounts}`). An argument that names **no**
   rule is the module's whole table — `get_counts` enumerates every entry it
-  holds — an operator's question. A usage tick names the rules its sessions
-  measure, in chunks of 65,536 ActionIds per call, so no reply nears the
-  daemon's 64 MiB message bound; it is still a few calls per counter module
-  rather than one per session, and the only read that carries counts at all
-  (the `<module>/counters` resource value is empty by design: a resource value
-  is copied on every publish, so a count kept in it would be zeroed by a
-  handover).
+  holds — an operator's question. A usage tick names only the rules of the
+  sessions that have work, in chunks of 65,536 ActionIds per call, so no reply
+  nears the daemon's 64 MiB message bound. `get_counts` is the only read that
+  carries counts (the `<module>/counters` resource value is empty by design: a
+  resource value is copied on every publish, so a count kept in it would be
+  zeroed by a handover).
+* **Activity** is the `get_changes` command
+  (`upf.pb.UrrCountCommandGetChangesArg` → `…Response`; `UrrCount`, and
+  `UpfAppliance`/`UpfSessionAppliance` with `table=counters_ul|counters_dl`).
+  Each counting batch sets one bit per counted rule in its worker's current
+  bitmap bank (`datapath/counter_changes.h`); a command flips the bank, waits
+  for the RCU grace period at the workers' batch boundary, and pages the frozen
+  bank (at most 65,536 ids; `next_after` is opaque, `sequence` names the
+  snapshot). The same snapshot is replayed until a later call sends its
+  `sequence` as `acknowledge`; one consumer (upfd's report loop) acknowledges
+  only after queuing every page. An id may appear once per worker.
+  `UpfSessionAppliance` marks cell slots and answers their active owners, so a
+  slot only the previous version names is never answered as its retired
+  action. Buffer counters are not tracked: the DDN path reads its own set.
+  Memory: two banks per worker plane of 12 B per 64 ids, cache-line padded.
 
 ### `upf_arp_responder` — the interface's addresses, answered while the session lives
 

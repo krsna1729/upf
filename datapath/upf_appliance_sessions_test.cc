@@ -643,6 +643,42 @@ TEST(SessionStore, ReUpdatingManySessionsInOneTransactionWaitsOnce) {
   s.Finish(again);
 }
 
+TEST(SessionStore, DirtyCellsResolveWideActionIdsAndIgnoreRetiredOwners) {
+  Store s;
+  SessionValue image = Image(false);
+  constexpr uint32_t kWideId = 0xfffffff0;
+  image.actions[0].action_id = kWideId;
+  ASSERT_TRUE(Applied(s.Put(image)));
+  const auto config = Classify(s).config;
+  const uint32_t old = s.sessions->CounterSlot(kSession, config.cell & ActionConfig::kCellSlot);
+  s.sessions->Cells(kSession, config.cell & ActionConfig::kCellSlot).urr[0].Add(64, 100);
+  upf::pb::UrrCountCommandGetChangesResponse changed;
+  changed.add_action_ids(old);
+  s.sessions->ChangedActions(false, &changed);
+  ASSERT_EQ(changed.action_ids_size(), 1);
+  EXPECT_EQ(changed.action_ids(0), kWideId);
+  EXPECT_EQ(Packets(*s.sessions, kWideId, false), 1u);
+  changed.Clear();
+  changed.add_action_ids(old);
+  s.sessions->ChangedActions(true, &changed);
+  EXPECT_EQ(changed.action_ids_size(), 0);
+
+  image.actions[0].action_id = kWideId + 1;
+  ASSERT_TRUE(Applied(s.Put(image)));
+  // The freed slot may be reused once its grace period passes: the dirty bit
+  // then names the slot's current owner (one extra evaluation), never the
+  // retired action whose counters are gone.
+  changed.add_action_ids(old);
+  s.sessions->ChangedActions(false, &changed);
+  for (uint32_t id : changed.action_ids()) EXPECT_NE(id, kWideId) << "a retired cell notified its old owner";
+  changed.Clear();
+  const auto replacement = Classify(s).config;
+  changed.add_action_ids(s.sessions->CounterSlot(kSession, replacement.cell & ActionConfig::kCellSlot));
+  s.sessions->ChangedActions(false, &changed);
+  ASSERT_EQ(changed.action_ids_size(), 1);
+  EXPECT_EQ(changed.action_ids(0), kWideId + 1);
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {

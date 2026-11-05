@@ -20,6 +20,7 @@
 #include "stats/worker_local.h"
 #include "utils/dpdk_memory.h"
 #include "upf_datapath.pb.h"
+#include "counter_changes.h"
 
 // Counts the packets and octets of the rules a URR measures: the data half of
 // usage reporting (TS 29.244 7.5.2.4).
@@ -90,6 +91,8 @@ class UrrCount final : public Module {
 
   CommandResponse CommandGetCounts(
       const upf::pb::UrrCountCommandGetCountsArg &arg);
+  CommandResponse CommandGetChanges(
+      const upf::pb::UrrCountCommandGetChangesArg &arg);
 
   static const Commands cmds;
 
@@ -115,6 +118,7 @@ class UrrCount final : public Module {
   // The planes (BESS D-154): one per worker id below worker_planes, each its
   // own cache lines, on the DPDK heap; admitted as "counters" (D-198).
   bess::framework::Sized<bess::stats::KeyedCounters> counts_;
+  bess::framework::Sized<upf::datapath::CounterChanges> changes_;
 
   // One stamp pair per rule, indexed by ActionId - 1: module state like the
   // cells, not part of "<name>/counters" (a reading is a question, not a

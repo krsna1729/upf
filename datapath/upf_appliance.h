@@ -32,6 +32,7 @@
 #include "utils/dpdk_memory.h"
 #include "counter_ids.h"
 #include "upf_appliance_sessions.h"
+#include "counter_changes.h"
 
 namespace upf::appliance {
 using Id = bess::dataplane::ActionId;
@@ -120,6 +121,7 @@ class UpfAppliance : public Module {
   std::string GetDesc() const override;
   CheckConstraintResult CheckModuleConstraints() const override;
   CommandResponse CommandGetCounts(const upf::pb::UrrCountCommandGetCountsArg &);
+  CommandResponse CommandGetChanges(const upf::pb::UrrCountCommandGetChangesArg &);
   CommandResponse CommandDrainErrors(const upf::pb::GtpuResponderCommandDrainErrorsArg &);
   CommandResponse CommandDrainEndMarkers(const upf::pb::GtpuResponderCommandDrainEndMarkersArg &);
   CommandResponse CommandRelease(const bess::pb::PacketStoreCommandReleaseArg &);
@@ -196,6 +198,7 @@ class UpfAppliance : public Module {
   bess::framework::Sized<bess::meter::MeterResource> meters_;
   bess::rcu::RcuPtr<bess::meter::MeterSet> meter_set_{init_context().rcu()};
   upf::appliance::Counters counters_ul_, counters_dl_, buffer_counters_;
+  bess::framework::Sized<upf::datapath::CounterChanges> changes_ul_, changes_dl_;
   bess::framework::Sized<bess::dataplane::SlotTable<Id, upf::appliance::Tunnel>> tunnels_;
   std::unique_ptr<bess::dataplane::SlotResource<Id, upf::appliance::Tunnel>> tunnel_resource_;
   // UpfSessionAppliance: pdr_ul_/pdr_dl_ hold only the tables, meters_ the

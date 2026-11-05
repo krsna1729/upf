@@ -40,6 +40,7 @@ type recorder struct {
 	// RuleCounts answers, and the failure it answers with when readFail is set.
 	counts   map[string][]bess.RuleCount
 	readFail error
+	activity map[string]map[uint32]bess.RuleCount
 	// errors is the fake GTP-U responders' Error Indication logs, by module
 	// name: what DrainErrors answers once and then forgets, as the module does
 	// (finding 15).
@@ -186,6 +187,27 @@ func (r *recorder) AppendRuleCounts(_ context.Context, dst []bess.RuleCount, mod
 		dst = append(dst, count)
 	}
 	return dst, nil
+}
+
+// Changes in the simulated cumulative counters model packet notifications.
+// Reading counts may fail after these notifications have already been queued.
+func (r *recorder) AppendRuleChanges(_ context.Context, dst []uint32, module string,
+	acknowledge, sequence, after uint64) (bess.RuleChangePage, error) {
+	if len(r.counts[module]) != 0 {
+		if r.activity == nil {
+			r.activity = make(map[string]map[uint32]bess.RuleCount)
+		}
+		if r.activity[module] == nil {
+			r.activity[module] = make(map[uint32]bess.RuleCount)
+		}
+		for _, count := range r.counts[module] {
+			if before, seen := r.activity[module][count.ActionID]; !seen || before != count {
+				dst = append(dst, count.ActionID)
+				r.activity[module][count.ActionID] = count
+			}
+		}
+	}
+	return bess.RuleChangePage{Sequence: acknowledge + 1, ActionIDs: dst}, nil
 }
 
 // DrainErrors answers a GtpuResponder's Error Indication log (ErrorReader): the

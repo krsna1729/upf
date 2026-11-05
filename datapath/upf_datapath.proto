@@ -320,6 +320,21 @@ message UrrCountCommandGetCountsResponse {
   uint32 next_after = 4;
 }
 
+// One controller consumes a counter bank's traffic notifications. Replies are
+// replayable until acknowledged; acknowledgements are sent only after every
+// page's ids have been queued for evaluation. Counter reads are independent.
+message UrrCountCommandGetChangesArg {
+  string table = 1;
+  uint64 acknowledge = 2;
+  uint64 sequence = 3; // 0 starts/replays; continuations name their snapshot
+  uint64 after = 4;    // opaque next_after from that snapshot
+}
+message UrrCountCommandGetChangesResponse {
+  uint64 sequence = 1;
+  repeated uint32 action_ids = 2; // at most 65536; workers may name the same id
+  uint64 next_after = 3;          // 0 completes this snapshot
+}
+
 // TunnelKey selects a per-action GtpuEncap tunnel record.
 message TunnelKey {
   uint32 action_id = 1;

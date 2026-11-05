@@ -389,233 +389,185 @@ func usageReportIE(typ ie.IEType, urrID, seqn uint32, trigger Trigger, endMarker
 	return ie.NewUsageReport(typ, usage...)
 }
 
-// EvaluateAll is Evaluate for every session the compiler holds, low SEID first,
-// so one tick of a caller that owns the clock (upfd's reporting loop) is one
-// call.
-//
-// It is not Evaluate in a loop, and that is the point: the counters are read
-// **per counter module** before any session is judged -- every rule of the
-// tick's sessions the module counts, named in chunks of countChunk -- and each
-// session is then decided in memory against what was read. A tick at the
-// 1M-session target is therefore a few dozen calls per counter module rather
-// than one or two million (the per-session read this replaced), which is
-// docs/design.md's control-plane O(total sessions) item 3; what is read is
-// still every counted rule of every session, so the tick's read is O(all
-// sessions) in bytes, not in round trips.
-//
-// A module whose reading fails costs the sessions that measure through it and
-// nothing else, the way a per-session read that failed cost its own session,
-// and a session the SMF deleted while the counters were being read is skipped
-// rather than failed: the usage belongs to a session nobody has.
+// EvaluateAll evaluates traffic-driven work and expired clock deadlines.
+// Selected sessions are read in bounded batches, whole linked groups at a
+// time. Idle volume-only sessions need neither a model walk nor a counter read.
+// Reports retain low-SEID-first order; only the output, not the population, is
+// sorted. Counter failures retain pending work and never become zero usage.
 func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
-	// The sessions with a URR (Compiler.measured), not every session, and
-	// their rules a bounded batch of sessions per hold of the lock: a tick
-	// must not stall every establishment behind a walk of the whole table.
-	c.mu.Lock()
-	seids := make([]uint64, 0, len(c.measured))
-	for seid := range c.measured {
+	c.collectUsageChanges(ctx)
+	work := c.takeUsageWork(now)
+	defer func() {
+		clear(work)
+		c.mu.Lock()
+		c.usage.spare = work
+		c.mu.Unlock()
+	}()
+
+	var indications map[uint32]bool
+	if c.cfg.GTPUErrors != "" {
+		if reader, ok := c.counters.(ErrorReader); ok {
+			read, dropped, err := reader.DrainErrors(ctx, c.target.Errors())
+			if err != nil {
+				c.log.Warn("session: error indications", "module", c.target.Errors(), "error", err)
+			} else {
+				if dropped > c.errorsDropped {
+					c.log.Warn("session: error indications lost to a full ring", "module", c.target.Errors(),
+						"lost", dropped-c.errorsDropped)
+					c.errorsDropped = dropped
+				}
+				if len(read) > 0 {
+					indications = make(map[uint32]bool, len(read))
+					for _, teid := range read {
+						indications[teid] = true
+					}
+				}
+			}
+		} else {
+			c.log.Warn("session: error indications", "error", errNoCounters)
+		}
+	}
+	var markers map[endMarkerKey]bool
+	if c.cfg.GTPUEndMarkers != "" {
+		if reader, ok := c.counters.(EndMarkerReader); ok {
+			read, dropped, err := reader.DrainEndMarkers(ctx, c.target.EndMarkers())
+			if err != nil {
+				c.log.Warn("session: end markers", "module", c.target.EndMarkers(), "error", err)
+			} else {
+				if dropped > c.markersDropped {
+					c.log.Warn("session: end markers lost to a full ring", "module", c.target.EndMarkers(),
+						"lost", dropped-c.markersDropped)
+					c.markersDropped = dropped
+				}
+				if len(read) > 0 {
+					markers = make(map[endMarkerKey]bool, len(read))
+					for _, m := range read {
+						markers[endMarkerKey{endpoint: m.EndpointID, teid: m.TEID}] = true
+					}
+				}
+			}
+		} else {
+			c.log.Warn("session: end markers", "error", errNoCounters)
+		}
+	}
+	if len(indications) > 0 || len(markers) > 0 {
+		if work == nil {
+			work = make(map[uint64]struct{})
+		}
+		c.mu.Lock()
+		// Error Indications can concern an unmeasured session. These rare
+		// event-driven walks are not part of the ordinary idle tick.
+		if len(indications) > 0 {
+			for seid := range c.sessions {
+				work[seid] = struct{}{}
+			}
+		} else {
+			for seid := range c.measured {
+				work[seid] = struct{}{}
+			}
+		}
+		c.mu.Unlock()
+	}
+	if len(work) == 0 {
+		return nil
+	}
+	if c.usage.ids == nil {
+		c.usage.ids = make(map[string][]uint32)
+	}
+	seids := c.usage.seids[:0]
+	for seid := range work {
 		seids = append(seids, seid)
 	}
-	if c.tickIDs == nil {
-		c.tickIDs = map[string][]uint32{}
-	}
-	ids := c.tickIDs
-	for module, rules := range ids {
-		ids[module] = rules[:0]
-	}
-	c.mu.Unlock()
-	slices.Sort(seids)
-	for start := 0; start < len(seids); start += tickHold {
-		c.mu.Lock()
-		for _, seid := range seids[start:min(start+tickHold, len(seids))] {
-			s := c.sessions[seid]
-			if s == nil || s.URRs.len() == 0 {
-				delete(c.measured, seid)
-				continue
+	c.usage.seids = seids
+	ids := c.usage.ids
+	counts := readings(c.usage.reading)
+	var out []Report
+	for start := 0; start < len(seids); {
+		for module, rules := range ids {
+			ids[module] = rules[:0]
+		}
+		c.clearUsageRead()
+		end, rules := start, 0
+		full := false
+		for end < len(seids) && !full {
+			c.mu.Lock()
+			hold := min(end+tickHold, len(seids))
+			for end < hold {
+				s := c.sessions[seids[end]]
+				if s != nil {
+					if rules > 0 && rules+s.PDRs.len() > countChunk {
+						full = true
+						break
+					}
+					c.appendMeasuredRules(s, ids)
+					rules += s.PDRs.len()
+				} else {
+					delete(c.measured, seids[end])
+					delete(c.usage.enforce, seids[end])
+					c.usage.timers.set(seids[end], time.Time{})
+				}
+				end++
 			}
-			c.appendMeasuredRules(s, ids)
-		}
-		c.mu.Unlock()
-	}
-	names := make([]string, 0, len(ids))
-	top := uint32(0)
-	for module, rules := range ids {
-		if len(rules) > 0 {
-			names = append(names, module)
-			top = max(top, slices.Max(rules))
-		}
-	}
-	readsErrors := c.cfg.GTPUErrors != ""
-	// The End Marker log is drained every tick it is configured, whether or
-	// not any session asks: a drain is what frees the ring, and an End Marker
-	// no REEMR URR names is one nobody asked to hear about.
-	readsMarkers := c.cfg.GTPUEndMarkers != ""
-	if len(names) == 0 && !readsErrors && !readsMarkers {
-		// No session measures anything: nothing to read, and nothing owed --
-		// the per-session path returns before its own read on exactly this
-		// fact.
-		return nil
-	}
-	counters, errorReader, markerReader := c.counters, ErrorReader(nil), EndMarkerReader(nil)
-	if r, ok := c.counters.(ErrorReader); ok {
-		errorReader = r
-	}
-	if r, ok := c.counters.(EndMarkerReader); ok {
-		markerReader = r
-	}
-	if counters == nil || (readsErrors && errorReader == nil) || (readsMarkers && markerReader == nil) {
-		// The graph has no counting module this control plane can read, and
-		// every session's URRs would report nothing: the caller's log is where
-		// an operator sees it. The error table is read through the same
-		// dataplane, so a responder this control plane cannot ask is one whose
-		// reports would be owed forever.
-		for _, seid := range seids {
-			c.log.Warn("session: usage evaluation", "seid", seid, "error", errNoCounters)
-		}
-		return nil
-	}
-	// Each module in a fixed order, its rules in chunks: one reply holding
-	// every rule would pass the daemon's 64 MiB bound (countChunk). The
-	// answers land in the one slice indexed by ActionId the report loop keeps.
-	slices.Sort(names)
-	if need := int(top) + 1; len(c.tickCounts) < need {
-		c.tickCounts = make([]reading, need)
-	}
-	cells := c.tickCounts
-	failed := make([]string, 0, len(names))
-	failures := make(map[string]error, len(names))
-	for _, module := range names {
-		for rules := ids[module]; len(rules) > 0; {
-			chunk := rules[:min(len(rules), countChunk)]
-			rules = rules[len(chunk):]
-			read, err := counters.AppendRuleCounts(ctx, c.tickRead[:0], module, chunk...)
-			c.tickRead = read
-			if err != nil {
-				failed = append(failed, module)
-				failures[module] = fmt.Errorf("reading %s: %w", module, err)
+			c.mu.Unlock()
+			if rules >= countChunk {
 				break
 			}
-			for _, rule := range read {
-				if int(rule.ActionID) < len(cells) {
-					cells[rule.ActionID] = readingOf(rule)
+		}
+		failed := make(map[string]error)
+		for module, rules := range ids {
+			for len(rules) > 0 {
+				chunk := rules[:min(len(rules), countChunk)]
+				rules = rules[len(chunk):]
+				before := len(c.usage.read)
+				var err error
+				if c.counters == nil {
+					err = errNoCounters
+				} else {
+					c.usage.read, err = c.counters.AppendRuleCounts(ctx, c.usage.read, module, chunk...)
 				}
-			}
-		}
-	}
-	counts := readings(func(id uint32) reading {
-		if int(id) < len(cells) {
-			return cells[id]
-		}
-		return reading{}
-	})
-
-	// The peer's Error Indications (5.10) since the last tick, each delivered
-	// once by the drain: one responder module logs every indication, and the
-	// sessions below report the ones that name their tunnels. A drain that
-	// fails loses nothing -- the events stay in the ring for the next one.
-	var indications map[uint32]bool
-	if readsErrors {
-		read, dropped, err := errorReader.DrainErrors(ctx, c.target.Errors())
-		if err != nil {
-			c.log.Warn("session: error indications", "module", c.target.Errors(), "error", err)
-		} else {
-			if dropped > c.errorsDropped {
-				c.log.Warn("session: error indications lost to a full ring", "module", c.target.Errors(),
-					"lost", dropped-c.errorsDropped)
-				c.errorsDropped = dropped
-			}
-			if len(read) > 0 {
-				indications = make(map[uint32]bool, len(read))
-				for _, teid := range read {
-					indications[teid] = true
-				}
-			}
-			if len(indications) > 0 {
-				// Error Indications are owed by any session whose tunnel the
-				// peer named, measured or not: this tick judges them all.
-				c.mu.Lock()
-				seids = seids[:0]
-				for seid := range c.sessions {
-					seids = append(seids, seid)
-				}
-				c.mu.Unlock()
-				slices.Sort(seids)
-			}
-		}
-	}
-
-	// The End Markers since the last tick (TS 29.281 7.3.2), each delivered
-	// once by the drain: the keys a REEMR URR's PDRs are judged against. A
-	// drain that fails loses nothing -- the events stay in the ring for the
-	// next one.
-	var markers map[endMarkerKey]bool
-	if readsMarkers {
-		read, dropped, err := markerReader.DrainEndMarkers(ctx, c.target.EndMarkers())
-		if err != nil {
-			c.log.Warn("session: end markers", "module", c.target.EndMarkers(), "error", err)
-		} else {
-			if dropped > c.markersDropped {
-				c.log.Warn("session: end markers lost to a full ring", "module", c.target.EndMarkers(),
-					"lost", dropped-c.markersDropped)
-				c.markersDropped = dropped
-			}
-			markers = make(map[endMarkerKey]bool, len(read))
-			for _, m := range read {
-				markers[endMarkerKey{endpoint: m.EndpointID, teid: m.TEID}] = true
-			}
-		}
-	}
-
-	var out []Report
-	for _, seid := range seids {
-		c.mu.Lock()
-		s := c.sessions[seid]
-		if s == nil {
-			// The SMF deleted it between the list above and this call: the
-			// usage belongs to a session nobody has.
-			c.mu.Unlock()
-			continue
-		}
-		var unread error
-		if len(failed) > 0 {
-			// Only a session whose own rules are counted by a module whose
-			// reading failed is skipped; the rest of the tick is unaffected.
-			measured := map[string]bool{}
-			c.measuredModules(s, measured)
-			for _, module := range failed {
-				if measured[module] {
-					unread = failures[module]
+				if err != nil {
+					failed[module] = fmt.Errorf("reading %s: %w", module, err)
 					break
 				}
+				c.indexUsageRead(before)
 			}
 		}
-		c.mu.Unlock()
-		if unread != nil {
-			c.log.Warn("session: usage evaluation", "seid", seid, "error", unread)
-			continue
+		for _, seid := range seids[start:end] {
+			c.mu.Lock()
+			s := c.sessions[seid]
+			var unread error
+			if s != nil && len(failed) > 0 {
+				for _, p := range s.PDRs.all() {
+					if module, ok := c.countedModule(p); ok && failed[module] != nil {
+						unread = failed[module]
+						break
+					}
+				}
+				if unread != nil {
+					c.queueUsage(s)
+				}
+			}
+			c.mu.Unlock()
+			if s == nil {
+				continue
+			}
+			if unread != nil {
+				c.log.Warn("session: usage evaluation", "seid", seid, "error", unread)
+			} else {
+				reports, err := c.judge(ctx, seid, s, counts, markers, now)
+				if err != nil {
+					c.log.Warn("session: usage evaluation", "seid", seid, "error", err)
+				}
+				out = append(out, reports...)
+			}
+			if len(indications) > 0 {
+				out = append(out, c.errorReports(seid, s, indications)...)
+			}
 		}
-		reports, err := c.judge(ctx, seid, s, counts, markers, now)
-		if err != nil {
-			// The dataplane refused the enforcement: the caller's log is where
-			// an operator sees it, and the reports decided before the failure
-			// are still owed.
-			c.log.Warn("session: usage evaluation", "seid", seid, "error", err)
-		}
-		out = append(out, reports...)
-		if len(indications) > 0 {
-			// The session's own tunnels the peer reported, which is a report
-			// of its own rather than part of the usage (erir.go).
-			out = append(out, c.errorReports(seid, s, indications)...)
-		}
+		start = end
 	}
-	// The cells go back to zero for the next tick: a rule it does not read --
-	// one a modification added after its list was taken -- reads zero, as a
-	// rule no reading answered always has.
-	for _, module := range names {
-		for _, id := range ids[module] {
-			cells[id] = reading{}
-		}
-	}
+	c.clearUsageRead()
+	slices.SortStableFunc(out, func(a, b Report) int { return cmp.Compare(a.SEID, b.SEID) })
 	return out
 }
 
@@ -671,7 +623,7 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 // the same way a modification writes them. The read is the caller's: Evaluate
 // reads one session's rules, EvaluateAll reads each counter module once for
 // every session of the tick.
-func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts readings, markers map[endMarkerKey]bool, now time.Time) ([]Report, error) {
+func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts readings, markers map[endMarkerKey]bool, now time.Time) (out []Report, result error) {
 	c.mu.Lock()
 	if c.sessions[seid] != s {
 		c.mu.Unlock()
@@ -680,11 +632,26 @@ func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts re
 		return nil, nil
 	}
 	reports, stopped := c.decide(s, counts, markers, now)
+	_, retry := c.usage.enforce[seid]
+	c.scheduleUsage(s)
 	c.mu.Unlock()
 
-	if !stopped {
+	if !stopped && !retry {
 		return reports, nil
 	}
+	defer func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if result != nil && c.sessions[seid] == s {
+			if c.usage.enforce == nil {
+				c.usage.enforce = make(map[uint64]struct{})
+			}
+			c.usage.enforce[seid] = struct{}{}
+			c.queueUsage(s)
+		} else {
+			delete(c.usage.enforce, seid)
+		}
+	}()
 	// The enforcement is a dataplane change, and it is compiled the way a
 	// modification compiles one: the PDRs that name the URR come out as drops.
 	changes, _, err := c.compile(s)
@@ -752,20 +719,13 @@ func (c *Compiler) measuredRules(s *Session) map[string][]uint32 {
 // appendMeasuredRules appends the rules s's URRs measure to ids, by the module
 // that counts them. The caller holds the lock.
 func (c *Compiler) appendMeasuredRules(s *Session, ids map[string][]uint32) {
+	// New and modified sessions are already queued. Register before reading,
+	// so later dirty notifications can select them without an eager id-space
+	// allocation during establishment.
+	c.ownUsage(s)
 	for _, p := range pdrsInOrder(s) {
 		if module, ok := c.countedModule(p); ok {
 			ids[module] = append(ids[module], p.actionID)
-		}
-	}
-}
-
-// measuredModules adds the counting modules a session's measured PDRs read
-// from to modules: the modules a tick has to read for it. The caller holds the
-// lock.
-func (c *Compiler) measuredModules(s *Session, modules map[string]bool) {
-	for _, p := range pdrsInOrder(s) {
-		if module, ok := c.countedModule(p); ok {
-			modules[module] = true
 		}
 	}
 }
@@ -1205,6 +1165,7 @@ func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) 
 			lead.seqn++
 		}
 	}
+	c.scheduleUsage(s)
 }
 
 // Unreport takes back the decision of a report that will never be sent -- the
@@ -1235,6 +1196,8 @@ func (c *Compiler) Unreport(r Report) bool {
 	if holder := s.URRs.at(r.bases[0].uid); holder.seqn == r.Seqn+1 {
 		holder.seqn--
 	}
+	c.queueUsage(s)
+	c.scheduleUsage(s)
 	return true
 }
 

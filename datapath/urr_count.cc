@@ -42,6 +42,9 @@ const Commands UrrCount::cmds = {
     {"get_counts", "upf.pb.UrrCountCommandGetCountsArg",
      MODULE_CMD_FUNC(&UrrCount::CommandGetCounts), Command::THREAD_SAFE,
      "upf.pb.UrrCountCommandGetCountsResponse"},
+    {"get_changes", "upf.pb.UrrCountCommandGetChangesArg",
+     MODULE_CMD_FUNC(&UrrCount::CommandGetChanges), Command::THREAD_SAFE,
+     "upf.pb.UrrCountCommandGetChangesResponse"},
 };
 
 namespace {
@@ -85,6 +88,8 @@ CommandResponse UrrCount::Init(const upf::pb::UrrCountArg &arg) {
   // worker_planes (BESS D-154), on the DPDK heap.
   counts_ = memory.Create<bess::stats::KeyedCounters>("counters", capacity_,
                                                       kCellsPerRule, planes);
+  changes_ = memory.Create<upf::datapath::CounterChanges>(
+      "counter_changes", capacity_, planes, init_context().rcu());
   // One stamp pair per rule: 16 bytes x capacity, nothing per worker -- the
   // stamps are the rule's own fact.
   stamps_lease_ = memory.Lease(
@@ -161,6 +166,7 @@ void UrrCount::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   const auto action_offset = attr_offset(action_attr_);
   // This worker's plane, once per batch rather than once per packet.
   const bess::stats::KeyedCounters::Plane plane = counts_->ForWorker(ctx->wid);
+  const auto changed = changes_->ForWorker(ctx->wid.value());
   gate_idx_t ogates[bess::PacketBatch::kMaxBurst];
   const size_t cnt = batch->cnt();
   // The rules this batch counted, in arrival order and each once: what the
@@ -209,6 +215,7 @@ void UrrCount::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
         s.first_ns.store(now_ns, std::memory_order_relaxed);
       }
       s.last_ns.store(now_ns, std::memory_order_relaxed);
+      changed.Mark(counted[j].value());
     }
   }
 
@@ -301,6 +308,15 @@ CommandResponse UrrCount::CommandGetCounts(
   for (uint32_t id : arg.action_ids()) {
     report(ActionId(id));
   }
+  return CommandSuccess(response);
+}
+
+CommandResponse UrrCount::CommandGetChanges(
+    const upf::pb::UrrCountCommandGetChangesArg &arg) {
+  if (!arg.table().empty()) return CommandFailure(EINVAL, "UrrCount has one counter table");
+  upf::pb::UrrCountCommandGetChangesResponse response;
+  if (auto read = changes_->Read(arg, &response); !read)
+    return CommandFailure(EINVAL, "%s", read.error().c_str());
   return CommandSuccess(response);
 }
 

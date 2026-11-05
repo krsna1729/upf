@@ -58,6 +58,7 @@ const ResourceTables UpfSessionAppliance::resource_tables = {
 };
 const Commands UpfAppliance::cmds = {
     {"get_counts", "upf.pb.UrrCountCommandGetCountsArg", MODULE_CMD_FUNC(&UpfAppliance::CommandGetCounts), Command::THREAD_SAFE, "upf.pb.UrrCountCommandGetCountsResponse"},
+    {"get_changes", "upf.pb.UrrCountCommandGetChangesArg", MODULE_CMD_FUNC(&UpfAppliance::CommandGetChanges), Command::THREAD_SAFE, "upf.pb.UrrCountCommandGetChangesResponse"},
     {"drain_errors", "upf.pb.GtpuResponderCommandDrainErrorsArg", MODULE_CMD_FUNC(&UpfAppliance::CommandDrainErrors), Command::THREAD_SAFE, "upf.pb.GtpuResponderCommandDrainErrorsResponse"},
     {"drain_end_markers", "upf.pb.GtpuResponderCommandDrainEndMarkersArg", MODULE_CMD_FUNC(&UpfAppliance::CommandDrainEndMarkers), Command::THREAD_SAFE, "upf.pb.GtpuResponderCommandDrainEndMarkersResponse"},
     {"release", "bess.pb.PacketStoreCommandReleaseArg", MODULE_CMD_FUNC(&UpfAppliance::CommandRelease), Command::THREAD_SAFE},
