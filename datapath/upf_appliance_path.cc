@@ -269,11 +269,15 @@ bool UpfAppliance::RebindSession(State &s) const noexcept {
 void UpfAppliance::CountSessions(Context *ctx, bess::PacketBatch *batch, State *states, size_t n) {
   // The matched action's cells in its session's stride: one writer (the
   // worker), atomic cells that get_counts reads beside it.
+  const auto changed_ul = changes_ul_->ForWorker(0);
+  const auto changed_dl = changes_dl_->ForWorker(0);
   for (size_t i = 0; i < n; ++i) {
     const auto &s = states[i];
     if (!Active(s) || !(s.cell & ActionConfig::kCount)) continue;
     sessions_->Cells(s.session_id, s.cell & ActionConfig::kCellSlot).urr[s.direction].Add(
         UsageOctets(Bytes(batch->packet(i)), batch->packet(i).total_len()), ctx->current_ns);
+    (s.direction == 0 ? changed_ul : changed_dl).Mark(
+        sessions_->CounterSlot(s.session_id, s.cell & ActionConfig::kCellSlot));
   }
 }
 
@@ -328,6 +332,8 @@ void UpfAppliance::CountUsage(Context *ctx, bess::PacketBatch *batch, State *sta
   // One plane (the default): the module's only worker writes it, whatever its id.
   const auto plane = bank.cells->ForWorker(
       bank.cells->workers() == 1 ? bess::dataplane::WorkerId(0) : ctx->wid);
+  const auto changed = (&bank == &counters_dl_ ? changes_dl_ : changes_ul_)->ForWorker(
+      buffer || bank.cells->workers() == 1 ? 0 : ctx->wid.value());
   uint32_t counted[kBurst];
   size_t count = 0;
   for (size_t i = 0; i < n; ++i) {
@@ -347,6 +353,7 @@ void UpfAppliance::CountUsage(Context *ctx, bess::PacketBatch *batch, State *sta
     if (stamp.first.load(std::memory_order_relaxed) == 0)
       stamp.first.store(ctx->current_ns, std::memory_order_relaxed);
     stamp.last.store(ctx->current_ns, std::memory_order_relaxed);
+    if (!buffer) changed.Mark(counted[j]);
   }
 }
 

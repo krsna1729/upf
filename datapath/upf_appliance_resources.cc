@@ -368,6 +368,12 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
     if (auto r = init_counter(*pair.first, pair.second); !r)
       return CommandFailure(EEXIST, "%s", r.error().c_str());
   }
+  const size_t changes_capacity = session_layout_ ?
+      sessions_->limits().capacity * 2 * sessions_->limits().max_actions : capacity_;
+  changes_ul_ = memory.Create<upf::datapath::CounterChanges>(
+      "counter_changes_ul", changes_capacity, session_layout_ ? 1 : planes, init_context().rcu());
+  changes_dl_ = memory.Create<upf::datapath::CounterChanges>(
+      "counter_changes_dl", changes_capacity, session_layout_ ? 1 : planes, init_context().rcu());
   if (!session_layout_) tunnels_ = memory.Create<dataplane::SlotTable<Id, Tunnel>>("tunnels", arg.encap().max_tunnels() ? arg.encap().max_tunnels() : 65536);
   if (!session_layout_) tunnel_resource_ = std::make_unique<dataplane::SlotResource<Id, Tunnel>>(
       name() + "/tunnels", *tunnels_);
@@ -648,6 +654,7 @@ void UpfAppliance::ReleaseResources() {
     bank->stamps = {}; bank->stamps_lease.reset();
     bank->live.reset(); bank->live_lease.reset();
   }
+  changes_ul_.reset(); changes_dl_.reset();
   fteid_resource_.reset(); fteids_.reset(); entries_.reset();
   meters_.reset(); errors_.reset(); end_markers_.reset();
 }
@@ -698,5 +705,17 @@ CommandResponse UpfAppliance::CommandGetCounts(const upf::pb::UrrCountCommandGet
   } else {
     for (uint32_t id : arg.action_ids()) report(id);
   }
+  return CommandSuccess(response);
+}
+
+CommandResponse UpfAppliance::CommandGetChanges(const upf::pb::UrrCountCommandGetChangesArg &arg) {
+  auto *changes = arg.table() == "counters_ul" ? changes_ul_.get() :
+                  arg.table() == "counters_dl" ? changes_dl_.get() : nullptr;
+  if (changes == nullptr)
+    return CommandFailure(EINVAL, "table must be counters_ul or counters_dl");
+  upf::pb::UrrCountCommandGetChangesResponse response;
+  if (auto read = changes->Read(arg, &response); !read)
+    return CommandFailure(EINVAL, "%s", read.error().c_str());
+  if (session_layout_) sessions_->ChangedActions(arg.table() == "counters_dl", &response);
   return CommandSuccess(response);
 }

@@ -39,6 +39,7 @@ type fakeDataplane struct {
 	// rule -- the tick's bulk read -- answers with every one of them
 	// (urr_count.cc's get_counts).
 	rules map[string][]uint32
+	seen  map[string]uint64
 }
 
 func (f *fakeDataplane) Apply(_ context.Context, changes ...bess.Change) error {
@@ -95,6 +96,20 @@ func (f *fakeDataplane) AppendRuleCounts(_ context.Context, dst []bess.RuleCount
 		dst = append(dst, bess.RuleCount{ActionID: id, Packets: f.octets / 37, Octets: f.octets})
 	}
 	return dst, nil
+}
+
+func (f *fakeDataplane) AppendRuleChanges(_ context.Context, dst []uint32, module string,
+	acknowledge, sequence, after uint64) (bess.RuleChangePage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.seen[module] != f.octets {
+		dst = append(dst, f.rules[module]...)
+		if f.seen == nil {
+			f.seen = make(map[string]uint64)
+		}
+		f.seen[module] = f.octets
+	}
+	return bess.RuleChangePage{Sequence: acknowledge + 1, ActionIDs: dst}, nil
 }
 
 // spent is the traffic the counters have counted since the test started.

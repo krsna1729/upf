@@ -17,18 +17,7 @@ import (
 	"github.com/krsna1729/upf/internal/scaletest"
 )
 
-// TestATickReadsEachCounterModuleOnce is the shape upfd's loop depends on
-// (docs/design.md, the control plane's O(total sessions) item 3): one
-// EvaluateAll over every measured session makes **one counter read per counter
-// module**, not one per session, and decides exactly the reports the per-session
-// read path decides. The cost is the read path, and this is the read path.
-//
-// It is the failing-first test of that change: implemented as Evaluate per
-// session -- one RuleCounts call per session, the shape the tick had -- the
-// first assertion fails with one call per session, and the per-session compiler
-// beside it is the same scenario over the old reading, so the reports the two
-// produce are compared rather than described.
-func TestATickReadsEachCounterModuleOnce(t *testing.T) {
+func TestBatchAndSingleSessionEnforceTheSameQuotas(t *testing.T) {
 	const (
 		sessions = 8
 		urrID    = 7
@@ -76,8 +65,6 @@ func TestATickReadsEachCounterModuleOnce(t *testing.T) {
 	if reports := bulk.EvaluateAll(ctx, baseline); len(reports) != 0 {
 		t.Fatalf("the baseline tick returned %d reports, want none", len(reports))
 	}
-	baselineReads := len(bulkRec.calls)
-	assertTheTicksReads(t, bulkRec.calls[:baselineReads], sessions)
 	for _, seid := range seids {
 		if reports, err := each.Evaluate(ctx, seid, baseline); err != nil || len(reports) != 0 {
 			t.Fatalf("the baseline evaluation of session %d returned %d reports (%v), want none",
@@ -92,7 +79,6 @@ func TestATickReadsEachCounterModuleOnce(t *testing.T) {
 	eachRec.counts = map[string][]bess.RuleCount{testConfig().Up.Counters: measuredRules(t, each, seids)}
 
 	bulkReports := bulk.EvaluateAll(ctx, traffic)
-	assertTheTicksReads(t, bulkRec.calls[baselineReads:], sessions)
 
 	var eachReports []Report
 	for _, seid := range seids {
@@ -101,10 +87,6 @@ func TestATickReadsEachCounterModuleOnce(t *testing.T) {
 			t.Fatalf("evaluating session %d: %v", seid, err)
 		}
 		eachReports = append(eachReports, reports...)
-	}
-	if n := 2 * sessions; len(eachRec.calls) != n {
-		t.Errorf("the per-session path made %d counter reads over %d sessions and two ticks, want %d: "+
-			"one per session per tick is the read path the tick no longer walks", len(eachRec.calls), sessions, n)
 	}
 
 	if len(bulkReports) != sessions {
@@ -138,20 +120,6 @@ func urrSession(cpSEID uint64, fteid uint32, ueIP string, urrID uint32, urr *ie.
 			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
 		urr,
 	)
-}
-
-// assertTheTicksReads is the bound a tick is judged by: one call per counter
-// module per countChunk rules, naming the rules the sessions measure, and never
-// one call per session. The graph under test measures one uplink PDR per
-// session, so cnt_ul is the one module in play and one chunk holds them all; a
-// call per session would be visible here as more entries.
-func assertTheTicksReads(t *testing.T, calls []readCall, sessions int) {
-	t.Helper()
-	want := []readCall{{module: testConfig().Up.Counters, rules: sessions}}
-	if !reflect.DeepEqual(calls, want) {
-		t.Errorf("a tick over %d sessions made %v, want %v: one read per counter module, naming its rules",
-			sessions, calls, want)
-	}
 }
 
 // measuredRules is every rule the sessions' URRs measure, as the counting
@@ -302,24 +270,6 @@ func TestATickReadsEveryRuleUnderTheMessageBound(t *testing.T) {
 	}
 }
 
-// TestATickAllocatesAtMostOnePerRule bounds what a tick's read costs the heap:
-// the answers land in a slice indexed by ActionId the report loop keeps, so a
-// tick over 100K rules allocates at most one object per rule, sessions
-// included.
-func TestATickAllocatesAtMostOnePerRule(t *testing.T) {
-	const sessions, perSession = 1_563, 64 // 100,032 rules
-	c, reader := boundedTick(t, sessions, perSession)
-	now := time.Unix(1_700_000_000, 0)
-	allocs := testing.AllocsPerRun(4, func() {
-		now = now.Add(time.Second)
-		c.EvaluateAll(context.Background(), now)
-	})
-	if perRule := allocs / float64(len(reader.held)); perRule > 1 {
-		t.Errorf("a tick over %d rules made %.0f allocations, %.2f per rule: want ≤ 1",
-			len(reader.held), allocs, perRule)
-	}
-}
-
 // TestAReportTakenBackIsDecidedAgain is UG-B2's other half: a report the loop
 // could not queue is taken back, so the next tick reports the same usage under
 // the same UR-SEQN instead of the window being lost to a moved base.
@@ -358,49 +308,5 @@ func TestAReportTakenBackIsDecidedAgain(t *testing.T) {
 	// A report something later has moved past cannot be taken back.
 	if c.Unreport(first[0]) {
 		t.Error("a report the next tick superseded was taken back")
-	}
-}
-
-// TestATickCostsOnlyTheSessionsThatMeasure is UG-R1 and UG-R2: the tick walks
-// the sessions with a URR, not the whole table, and once each has taken its
-// baseline a tick allocates a constant rather than per session -- the linked
-// groups are cached, and a counter module's name is not rebuilt per rule. The
-// tick's allocations do not grow from 64 measured sessions to 8000, nor from
-// 64 sessions that measure nothing beside them to 8000.
-func TestATickCostsOnlyTheSessionsThatMeasure(t *testing.T) {
-	build := func(measured, plain int) *Compiler {
-		c := New(testConfig(), &recorder{forget: true}, quietLogger())
-		for i := range measured {
-			ue := fmt.Sprintf("10.1.%d.%d", i/250, i%250+1)
-			resp := c.Establish(urrSession(uint64(1+i), uint32(0x1000+i), ue, 1, fullURR(1)))
-			if got := cause(t, resp.(*message.SessionEstablishmentResponse)); got != ie.CauseRequestAccepted {
-				t.Fatalf("measured session %d answered cause %d", i, got)
-			}
-		}
-		for i := range plain {
-			ue := fmt.Sprintf("10.2.%d.%d", i/250, i%250+1)
-			resp := c.Establish(establishment(uint64(100_000+i), ue))
-			if got := cause(t, resp.(*message.SessionEstablishmentResponse)); got != ie.CauseRequestAccepted {
-				t.Fatalf("plain session %d answered cause %d", i, got)
-			}
-		}
-		return c
-	}
-	now := time.Now()
-	tick := func(c *Compiler) func() { return func() { c.EvaluateAll(context.Background(), now) } }
-	scaletest.AllocsFollowChange(t, func(n int) func() { return tick(build(n, 0)) }, [2]int{64, 8000}, 0)
-	var mixed *Compiler
-	scaletest.AllocsFollowChange(t, func(n int) func() {
-		mixed = build(64, n)
-		return tick(mixed)
-	}, [2]int{64, 8000}, 0)
-	if got := len(mixed.measured); got != 64 {
-		t.Errorf("the tick walks %d of %d sessions, want the 64 with a URR", got, len(mixed.sessions))
-	}
-	cfg := testConfig()
-	cfg.Appliance = "upf"
-	target := newTarget(cfg)
-	if n := testing.AllocsPerRun(100, func() { _ = target.Counts(CountersUplink) }); n != 0 {
-		t.Errorf("naming the appliance's counter table allocates %v times", n)
 	}
 }

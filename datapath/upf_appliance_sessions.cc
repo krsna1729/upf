@@ -1004,4 +1004,27 @@ uint32_t SessionResource::Counts(bool dl, std::span<const uint32_t> ids, bool re
   return 0;
 }
 
+void SessionResource::ChangedActions(
+    bool dl, upf::pb::UrrCountCommandGetChangesResponse *out) const {
+  auto *ids = out->mutable_action_ids();
+  auto *values = ids->mutable_data();
+  const size_t count = ids->size(), slots = 2 * limits_.max_actions;
+  size_t kept = 0;
+  for (size_t start = 0; start < count; start += kEntriesPerHold) {
+    std::lock_guard lock(mu_);
+    for (size_t i = start; i < std::min(start + kEntriesPerHold, count); ++i) {
+      const uint32_t key = values[i];
+      if (key == 0 || key > limits_.capacity * slots) continue;
+      const size_t session = (key - 1) / slots, slot = (key - 1) % slots;
+      const auto &m = mirrors_[session];
+      // cells_live: the active version's slots. A slot only the previous
+      // version names still lists its retired owner until ReleaseOld.
+      if (m.state != Mirror::State::kLive || !(m.cells_live >> slot & 1) ||
+          !(m.banks[dl] >> slot & 1)) continue;
+      if (const uint32_t owner = m.slots[slot]; owner != 0) values[kept++] = owner;
+    }
+  }
+  ids->Truncate(static_cast<int>(kept));
+}
+
 }  // namespace upf::appliance

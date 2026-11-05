@@ -508,7 +508,7 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 	// quota is spent by the traffic after it.
 	var counted uint64
 	baseline := time.Now()
-	if reports := evaluateAt(t, c, upFSEID(t, resp), baseline); len(reports) != 0 {
+	if reports := c.EvaluateAll(ctx, baseline); len(reports) != 0 {
 		t.Fatalf("the baseline reading returned %+v, want none", reports)
 	}
 	// Wait for the counter to grow past the quota: the reading the baseline
@@ -523,10 +523,7 @@ func TestLiveQuotaEvaluationStopsTheTraffic(t *testing.T) {
 		return fmt.Sprintf("the counter did not grow past the quota: %d octets from %d", counted, start)
 	})
 
-	reports, err := c.Evaluate(ctx, upFSEID(t, resp), time.Now())
-	if err != nil {
-		t.Fatalf("evaluating the session's usage: %v", err)
-	}
+	reports := c.EvaluateAll(ctx, time.Now())
 	if len(reports) != 1 {
 		t.Fatalf("evaluation returned %d reports, want one for the spent quota (%v octets counted)", len(reports), counted)
 	}

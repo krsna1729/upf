@@ -241,6 +241,9 @@ class SessionResource final : public bess::dataplane::Resource {
     return *std::launder(reinterpret_cast<SessionCells *>(
         Stride(session) + cells_at_ + slot * sizeof(SessionCells)));
   }
+  uint32_t CounterSlot(uint32_t session, uint8_t slot) const noexcept {
+    return static_cast<uint32_t>((session - 1) * (2 * limits_.max_actions) + slot + 1);
+  }
   MeterSlot &Meter(uint32_t session, uint16_t slot) const noexcept {
     return *std::launder(reinterpret_cast<MeterSlot *>(
         Stride(session) + meters_at_ + slot * sizeof(MeterSlot)));
@@ -267,6 +270,9 @@ class SessionResource final : public bess::dataplane::Resource {
   // that direction. Returns the id to resume after, 0 when done.
   uint32_t Counts(bool dl, std::span<const uint32_t> ids, bool restart, uint32_t after, size_t limit,
                   upf::pb::UrrCountCommandGetCountsResponse *out) const;
+  // Translate dirty cell slots to their current action ids, in bounded holds.
+  // Old cells of a deleted/replaced action have no current owner to notify.
+  void ChangedActions(bool dl, upf::pb::UrrCountCommandGetChangesResponse *out) const;
   // The most entries ForEachLive and Counts handle per hold of the lock a
   // transaction needs.
   static constexpr size_t kEntriesPerHold = 1024;

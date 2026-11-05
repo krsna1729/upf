@@ -49,7 +49,7 @@ flowchart TB
 | F-TEID the CP function asks the UP function to choose (8.2.3: CH and CHID) | one exact `<decap>/fteids` entry per distinct `{endpoint_id, family, local_address, teid}`; its value selects UL gate 0 or DL gate 1. CHOOSE/CHID reuse is scoped to one PFCP session: PDRs in that session that name one CHID share its F-TEID, while separate N4 sessions keep separate F-SEIDs and ownership |
 | FAR (Apply Action, Forwarding Parameters: Destination Interface, Network Instance, Outer Header Creation) | a *treatment* resource the action references (forward / drop / buffer / notify) plus the next hop and GTP-U encap parameters |
 | QER (Gate Status, MBR, GBR, Averaging Window, QFI) | the PDR result carries the selected flow-meter ID first and the session-shared meter ID second; `Meter(levels: 2)` processes them in order, so a red first level does not charge the second. GBR/MBR map to committed/peak rate, Averaging Window to burst, and QFI goes into tunnel records. Gate status from every named QER is folded; see `ci/meter-compose.sh` and claims status-20/35 |
-| URR (Measurement Method, Reporting Triggers, thresholds, period) | per-rule counters in the `UrrCount` module, one entry per rule a URR's PDRs name, keyed by the rule's ActionId, plus the decision in `session.EvaluateAll` -- one reading per counter module per tick, naming every measured rule in chunks of 65,536 ActionIds, every session judged in memory against it -- and `session.Evaluate`, the single-session reading that names its own rules: it reads the module's counters, reports the period, a threshold or a quota, and stops the traffic of a spent quota. Every limit and the period are measured over the usage since the URR's last report (a report opens the next window), which is the window the report itself carries; the alternative -- accumulate from provisioning and compare the running total -- needs a second base per URR, and the SMF's lever (an Update URR that provisions a new quota, which clears the flag) is the same either way. Time is the dataplane's own fact: the counting module stamps a rule's first packet of a reading and the last one it counted (one stamp pair per rule, shared and stored once per counted batch -- a timestamp is the rule's, not a worker's), the reading carries the wall clock it took them at, and the controller places them on the clock an SMF reads; a reading the reporting side makes closes the window and the next packet opens the next one, while a diagnostic read of the same command leaves it alone. A time threshold and a time quota are then measured against the time the *window's* traffic ran -- the window's own first packet to the reading's last -- which is the base the volume limits use too, with the idle gaps taken out of it. A graph whose counters carry no stamps falls back to the window's length, the same number while the traffic is continuous. Sending the report as a PFCP Session Report Request is `internal/n4`'s `Report` (the one exchange this node initiates, with retries and the Session Report Response routed back to the caller), driven by `upfd -urr-interval`; a report the SMF does not answer is held by the loop (a bounded per-session queue, the oldest report first, so the UR-SEQNs the SMF reads stay in order, retried with a doubling backoff and at most one attempt per tick, since each attempt costs the n4 layer's whole retry budget) rather than dropped, because an unanswered send leaves the outcome unknown while a refusal is an answer. Two facts hold the counters together: a rule's entry exists exactly while a URR measures it (a rule that drops keeps it, so an erase always finds it), and the first reading of a URR is the window's baseline (the cells outlive an erased entry and the id pool reissues ActionIds, so a fresh rule's first reading may hold the previous holder's totals) |
+| URR (Measurement Method, Reporting Triggers, thresholds, period) | per-rule counters in the `UrrCount` module, one entry per rule a URR's PDRs name, keyed by the rule's ActionId, plus the decision in `session.EvaluateAll` -- each tick takes the sessions that counted traffic (`get_changes`, acknowledged worker-local dirty bitmaps) or whose period/time deadline is due, reads only their rules through `get_counts` in chunks of 65,536 ActionIds, and judges each such session whole -- and `session.Evaluate`, the single-session reading that names its own rules: it reads the module's counters, reports the period, a threshold or a quota, and stops the traffic of a spent quota. Every limit and the period are measured over the usage since the URR's last report (a report opens the next window), which is the window the report itself carries; the alternative -- accumulate from provisioning and compare the running total -- needs a second base per URR, and the SMF's lever (an Update URR that provisions a new quota, which clears the flag) is the same either way. Time is the dataplane's own fact: the counting module stamps a rule's first packet of a reading and the last one it counted (one stamp pair per rule, shared and stored once per counted batch -- a timestamp is the rule's, not a worker's), the reading carries the wall clock it took them at, and the controller places them on the clock an SMF reads; a reading the reporting side makes closes the window and the next packet opens the next one, while a diagnostic read of the same command leaves it alone. A time threshold and a time quota are then measured against the time the *window's* traffic ran -- the window's own first packet to the reading's last -- which is the base the volume limits use too, with the idle gaps taken out of it. A graph whose counters carry no stamps falls back to the window's length, the same number while the traffic is continuous. Sending the report as a PFCP Session Report Request is `internal/n4`'s `Report` (the one exchange this node initiates, with retries and the Session Report Response routed back to the caller), driven by `upfd -urr-interval`; a report the SMF does not answer is held by the loop (a bounded per-session queue, the oldest report first, so the UR-SEQNs the SMF reads stay in order, retried with a doubling backoff and at most one attempt per tick, since each attempt costs the n4 layer's whole retry budget) rather than dropped, because an unanswered send leaves the outcome unknown while a refusal is an answer. Two facts hold the counters together: a rule's entry exists exactly while a URR measures it (a rule that drops keeps it, so an erase always finds it), and the first reading of a URR is the window's baseline (the cells outlive an erased entry and the id pool reissues ActionIds, so a fresh rule's first reading may hold the previous holder's totals) |
 | Error Indication Report (ERIR: a tunnel this UPF sends into that the peer's GTP-U reports unreachable, 5.10) | `GtpuDecap` sends unknown G-PDUs and control to gate 2; `GtpuResponder` answers unknown G-PDUs with Error Indications and counts peer Error Indications per TEID for `-gtpu-errors` |
 | End Marker Reception Report (a URR's REEMR, 8.2.19; the Usage Report Trigger's EMRRE, 8.2.41) | `GtpuResponder` records each End Marker that reaches decap gate 2 as an (endpoint_id, local TEID) event in a per-worker ring (`track_end_markers`); the tick drains it once (`-gtpu-end-markers`) and each REEMR URR measuring a PDR on that F-TEID is reported with EMRRE. The relay through every PDR on that F-TEID whose FAR forwards into a GTP-U tunnel is decap's own, in the packet path (gate 3, the relays the compiler writes with the `<decap>/fteids` entry) |
 | Session (CP F-SEID, UP F-SEID) | one transaction's worth of resources, all named `<session-id>/…` |
@@ -852,10 +852,9 @@ same arithmetic. Their routes are all /0, which BESS keeps beside the DPDK
 structure: the tbl24s are never written. Realistic prefix distributions are
 still to measure.
 
-**The control plane has two O(total sessions) operations**, and they fail
-before the dataplane footprint above becomes the limit. They are both ours, and
-the 1M target is a claim about the whole system, so both have to be
-addressed:
+**Two control-plane operations used to walk the total session population.**
+The 1M target concerns the whole system, not only dataplane tables; the
+following paths now select or clear work without that population walk:
 
 1. **`Compiler.Sweep`.** The sweep no longer reads session tables key by key:
    the maps are emptied in the daemon with `ResetResources`, and only the ARP
@@ -866,103 +865,133 @@ addressed:
    subscribers', whose number is the interfaces' pools, not the sessions'. See
    "Restart and failure semantics".
 2. **The URR report loop's read path.** `upfd` calls `Compiler.EvaluateAll` once
-   per `-urr-interval` tick (`cmd/upfd/main.go`), which walks every session, and
-   each session's `Evaluate` makes its **own** `reader.RuleCounts` RPC per
-   counter module (`internal/session/report.go`) -- at 1M sessions that is one to
-   two million gRPC round trips per tick, one after another, so a tick lasts
-   minutes, longer than any sensible interval. The cost was the read path, not
-   the loop, and the fix is **one bulk read per counter module per tick**
-   covering all sessions, evaluated in memory afterwards: one or two round trips
-   instead of one to two million. **This tree does that now** (`EvaluateAll`
-   reads each counter module for every session at once, naming the rules in
-   chunks of 65,536 ActionIds, and judges every session against what was read;
-   `Evaluate` stays as the single-session reading, which names its own rules.
-   `internal/session/report_test.go`'s `TestATickReadsEachCounterModuleOnce`
-   pins the call count: one read per module per chunk, never one per session,
-   and the reports it decides are compared element by element against the
-   per-session path's). The tick walks only the sessions with a URR
-   (`Compiler.measured`), at most 1,024 per hold of the compiler's lock, and
-   `EvaluateDownlinks` does the same over the BUFF+NOCP sessions
-   (`Compiler.buffering`) with one bulk peek per chunk rather than one per
-   session (`TestATickReadsEveryBufferingSessionInOneReading`,
-   `TestATickCostsOnlyTheSessionsThatMeasure`). The reading itself is the
-   module's `get_counts`. **That is not a
-   preference, it is the only read that carries counts:** the counter *resource*
-   (`<module>/counters`) is the existence of an entry, keyed by ActionId, with
-   an **empty value** -- `datapath/upf_datapath.proto` says why ("the counts are
-   not here: they are the module's per-worker planes, because a resource value
-   is copied on every publish and the controller rewrites a session's records on
-   every modification -- a number kept in the value would be zeroed by a
-   handover") -- so an entry is 90 B (two `Any` envelopes, the key and the empty
-   value, each with its own type URL; measured the same way, at the daemon's own
-   encoding) *without* a single count. A tick built on the pipeline's resource
-   readback would therefore read 90 B per counted rule and decide **every
-   report from zeros**; the numbers are the module's per-worker planes, and the
-   module's own command (`datapath/urr_count.cc`) is what enumerates them -- the
-   whole module's, when the argument names no rule. At the interval an operator
-   sets (`-urr-interval` has no default; the flag is what turns reporting on at
-   all) the cost of one tick is **one call per counter module, and 27 B per
-   counted rule** -- measured by marshalling the module's own response with its
-   descriptor (`datapath/upf_datapath.desc`): an ActionId up to 1M, a
-   thousand-odd packets, a megabyte-odd of octets and two ~10^12 ns stamps
-   encode to 27.0 B per rule, 34.0 B with a 4M-wide ActionId space, 4 GiB counts
-   and day-old stamps. So 1M sessions at one counted PDR per module is 1M rules,
-   25.7 MiB in one response (32.4 MiB at the widest encoding), and two of them
-   -- uplink and downlink -- are ~52 MiB per tick,
-   some 1.8 MB/s at a 30 s interval and 0.9 MB/s at 60 s. The daemon refuses
-   any response over 64 MiB (`kMaxMessageBytes`), which at the measured 27 B
-   lands on **~2.5M rules in one module** (1.97M at the widest encoding): 1M
-   sessions at one counted PDR per module fit, and a deployment that measures
-   2-4 PDRs per session crosses it at ~620K-1.2M sessions (earlier with the
-   widest encoding). Past that the read has to be split, and the split is by
-   **ActionId**: the module's `get_counts` takes an explicit id list, so a shard
-   is a slice of the rules, not a resource name (naming fewer *resources* splits
-   between tables and cannot split the one table that holds a rule each way:
-   `Sweep`'s item 1 above) -- names cannot split one table, ids can, so past the
-   ceiling the answer is **fewer rules per read and not a bigger message**.
-   **This tree splits it so:** `EvaluateAll` names at most `countChunk` =
-   65,536 ActionIds per call (≤ 3.3 MiB even at a rule's widest 52 B), decodes
-   each reply off the wire into a slice it reuses (`bess.appendCounts`), and
-   lands the answers in one slice indexed by ActionId that the report loop
-   keeps from tick to tick;
-   `TestATickReadsEveryRuleUnderTheMessageBound` reads 2.1M rules behind a fake
-   that refuses any reply over 64 MiB, where the whole-module read was refused
-   every tick. Nothing about the loop is O(sessions) in round trips. The
-   remaining
-   O(all sessions) is the bytes: every tick still reads every counted rule (the
-   restart wall's sweep has the same read, once). Beside it, as the
-   design-level improvement that removes the per-tick O(all sessions) read
-   entirely -- and that is where this ends up -- the counter module could report
-   threshold crossings itself (a dataplane that flags "this rule crossed X"),
-   and the tick would read only what was flagged. **That mechanism is mostly
-   already built, so the target is an event type and a
-   consumer, not a transport:** `core/stats/event_hub.h` has the shape (a module
-   registers an event type in `Init`, a worker posts with
-   `Post(ctx->wid, WorkerEvent{...})` and never blocks -- a full per-worker ring
-   refuses the event and counts it, and the maintenance loop's `DrainWorkers`
-   moves what was posted into the log the `WatchEvents` stream reads: bounded,
-   per worker, drop-and-count), and `core/stats/event_throttle.h` is the piece
-   for this use case -- at most one event per second per worker, **carrying the
-   count**, called on the failure path only, so what the control plane reads is
-   "this worker crossed this threshold, N times" and never one event per
-   crossing. What is left to design is the **composition**, not the channel:
-   which crossings are worth a report, and how the pushed crossings and the
-   pulled counts compose so that a session is **never double-reported** -- a
-   crossing that already produced a report must not be reported again by the
-   next tick's read of the same window -- with the pull staying the fallback for
-   whatever the channel drops (a full ring, a ring lost across a restart),
-   which is the path the bulk read above already carries to 1M on its own. One
-   constraint follows from the traps above: a pushed crossing and a pulled count
-   have to come from the **same per-worker planes**, or the two disagree -- the
-   empty-value trap seen from the other end, a report whose trigger came from
-   the channel and whose window came from a resource-shaped read. The reason
-   this is the target is *latency*, not volume: a pulled quota or threshold is
-   enforced no sooner than the tick, so a 60 s interval lets a quota overrun for
-   up to 60 s before anything notices, while a pushed crossing is enforced when
-   it happens. "Incremental evaluation" is not
-   that fix and does not fit the code: a session cannot be skipped for a volume
-   threshold or a quota without reading its counters first, so the information
-   that would justify skipping arrives only after the read.
+   per `-urr-interval` tick (`cmd/upfd/main.go`). It once made one counter RPC
+   per session (1-2M round trips per tick at 1M sessions), then one paged read
+   of **every** counted rule per tick. **It now reads only sessions that
+   have work** (`internal/session/usage_work.go`):
+
+   - **Traffic selects a session.** Each counting batch sets one bit per rule
+     in a worker-local bitmap (`datapath/counter_changes.h`: no atomic RMW, no
+     allocation, one bank per worker per generation). `get_changes` flips the
+     generation, waits for the batch-boundary RCU grace period, and pages the
+     frozen bank (65,536 ids per reply). A reply can be replayed until the
+     controller acknowledges its sequence. The controller acknowledges only
+     after every page has entered its pending set. A lost reply, a failed page
+     or a malformed reply cannot lose activity. The session-major appliance
+     marks cell slots and translates them to their active owner. A slot that
+     only the previous version names is never reported as its retired action.
+   - **Clocks select a session.** A typed heap holds one deadline per session:
+     the earliest of its periods and, when the backend gives no packet stamps,
+     its time threshold/quota. Packet-stamped time limits advance only with
+     traffic, so an idle session needs no timer for them.
+   - **Failures remain pending.** A counter read that fails re-queues the
+     session; quota enforcement that the dataplane refuses is retried on later
+     ticks without new packets.
+   - **Linked URRs evaluate as one group.** A selected session is judged
+     whole, so linked groups, LIUSA, period/quota collisions and enforcement
+     keep their previous semantics.
+
+   Selected sessions are read through `get_counts` in batches of at most 1,024
+   sessions per hold of the compiler's lock and `countChunk` (65,536) rules per
+   call. Readings land in the RPC buffer, indexed by a noscan per-ActionId
+   table allocated for issued ids only. An idle volume-only session costs no
+   model walk and no counter read. The tick's cost is the dirty and due
+   sessions plus one `get_changes` round trip per counter table.
+   `get_counts` remains the only read that carries counts: the counter
+   *resource* (`<module>/counters`) has an empty value, because a resource
+   value is copied on every publish and would be zeroed by a handover.
+   Dirty notifications are not threshold crossings. Quota enforcement is still
+   no sooner than the tick, so a 60 s interval can overrun a quota for up to
+   60 s.
+   `TestIdleVolumeClockDoesNotReadInactiveRules`,
+   `TestDirtyCounterReadFailureRetainsQuotaWork`,
+   `TestRefusedQuotaEnforcementRetriesWithoutNewPackets`,
+   `TestInterruptedDirtySnapshotCannotLoseTheUnreceivedSessionsQuota` and
+   `CounterChanges.BatchGracePeriodsNeverLoseTheLastPacketOfARule` pin these
+   properties.
+
+### Final 1M-session churn measurement (2026-11-05)
+
+Frozen URR work-selection code (base `96c69885`, reviewed source delta
+`paired-final-worktree.diff`), BESS `f5d94731` (PRs #146–#148), session-major
+layout: 1,000,000 live sessions, session capacity 1,165,536, two action and two
+QER slots per session, counter capacity 4,194,304, one counter worker plane,
+and 131,072 packet buffers. Eight session workers; upfd on CPU 9, bessd on
+CPUs 9/11, packet worker on 11. Each arm ran separate modification and
+replacement cells at 10K/s and 100K/s for 30 s, first with perf stat, then
+with combined perf record and Go CPU/heap profiles. No concurrent build or
+analysis ran. This is control-plane churn, not packet-throughput evidence.
+
+Goodput below is completed **cycles per measured second including drain**.
+Replacement is delete plus establishment; successful PFCP p99 is per request,
+not the complete replacement cycle. The old normal-page arm is the same
+session-major shape before URR selection, on the earlier BESS revision: this
+is a whole-stack comparison, not an isolated attribution to one patch.
+
+| Churn / offered cycles/s | Old normal completed/s | Final normal completed/s | Final huge completed/s | Normal PFCP p99 ms | Huge PFCP p99 ms |
+|---|---:|---:|---:|---:|---:|
+| modify / 10K | 638.6 | 1,758.8 | 1,786.2 | 547.7 | 504.7 |
+| modify / 100K | 627.4 | 1,718.9 | 1,744.8 | 516.5 | 511.4 |
+| replace / 10K | 41.9 | 159.4 | 157.0 | 520.1 | 523.5 |
+| replace / 100K | 63.0 | 69.3 | 122.9 | 2,153.8 | 522.7 |
+
+Neither offered rate was sustained. At 100K replacement the generator sent
+only about 33.4K cycles/s: the rest were busy skips. UDP receive drops and
+timeouts dominate overload; normal-page modification dropped 238,331 of
+300,000 requests at 10K/s and 2,939,677 of 3,000,000 at 100K/s. Every cell
+was reconciled to exactly 1M sessions before the next cell. Modification
+goodput improved about 2.75× over the old normal arm. The roughly 1.5%
+normal/huge modification difference is not a demonstrated backing advantage:
+there was one arm per backing, not an ABBA distribution. Replacement is
+especially variable (normal 100K profiled repeat: 115 completed/s, p99 531 ms).
+
+During baseline modification, upfd used 35.3–35.5% of one core over the
+measured window and allocated 49.7–51.6 MiB/s; bessd used 49.5–50.0% of a
+core. Each such window had one GC. Profiled modification spent 31.2–33.8%
+of sampled Go CPU in GC. At 100K, `Compiler.modify` was 36.8–37.3%
+cumulative, `bess.Client.Apply` 14.3–14.7%, and `gcBgMarkWorker` 29.3–29.5%;
+these cumulative shares overlap. Go model/GC work and BESS's synchronous
+gRPC thread churn remain candidates, not changes made in this campaign.
+
+| Memory, MiB | Normal | Reserved hugepages |
+|---|---:|---:|
+| upfd loaded heap after GC | 2,560.7 | 2,559.9 |
+| upfd loaded scannable heap | 1,996.9 | 1,997.0 |
+| upfd cgroup peak over the run | 4,659.8 | 4,571.4 |
+| bessd cgroup peak | 2,559.4 | 2,797.5 |
+| measured lane peak, including driver and recorder | 7,464.5 | 7,709.9 |
+
+The final normal loaded heap is 251 MiB smaller, and its scannable heap
+261 MiB smaller, than the old arm. Its old 256 MiB counter-snapshot cache
+is gone. Heap bytes are not RSS; per-process peak values need not coincide.
+
+The normal arm used bessd/upfd/driver limits of 3,000/5,300/512 MiB,
+a 7,872 MiB lane and a 128 MiB controller (8,000 MiB configured aggregate).
+The huge arm reserved 3,072 MiB of hugetlb pages, forbade fallback, and used
+a 3,900 MiB bessd limit and an 8,704 MiB lane: **8,832 MiB configured
+aggregate**, a documented exception, not an 8,000 MiB-budget pass. Whole
+1 GiB-page admission required that extra bessd allowance on this host.
+The recorder's own 192 MiB cap caused reclaim (`memory.events max`
+708/880); neither daemon hit its cap. Both arms had zero OOM events/kills,
+zero lost perf samples, and graceful bessd shutdown. This does not establish
+that 1M sessions fit a combined 2,048 or 3,072 MiB appliance/pod budget.
+
+BESS now disables THP for the whole process: normal means 4 KiB pages,
+huge means reserved hugetlb pages. The fragmented host's normal graph apply
+completed without the former THP-compaction timeout. An initial runner
+configuration subtracted another 200 MiB before BESS's own reserve and
+refused at 965,901 sessions. Removing that duplicate margin did not raise
+the normal cgroup cap or disable BESS's reserve. It also exposed a teardown
+ledger reallocation failure, fixed by BESS #148: a separate 2,800 MiB-policy
+refusal smoke now exits gracefully with no OOM kill.
+
+Evidence in the UPF scratch tree: `evidence/urr-events/million-paired-normal`
+and `million-paired-huge` (campaign metadata, cgroup events/peaks, per-cell
+results, `analysis.json`, perf data, Go profiles and `hotspots/`);
+`paired-final-summary.json`, `paired-final-worktree.diff`,
+`binaries.sha256` and `bessd-paired-final.sha256`. The old comparator is
+`evidence/churn-96c69885/million-major-realchange`.
+
 
 **`upfd`'s own memory and establishment rate**, measured with `n4bench`
 (sessions of 2 PDRs, 2 FARs and 1 QER; 16 requests in flight) against a bessd
@@ -1113,8 +1142,10 @@ The next measurements, in order: publish the engine's retry counter
 (`busy_retried()` is counted and not in `ListMetrics`) so a run reads retries
 instead of inferring them from a histogram; the minimal-graph comparison; and
 `perf` on bessd under the isolate wrapper this box's paranoid setting requires --
-Go's own `-cpuprofile` is killed here, and that does not say anything about
-`perf`.
+Go's own `-cpuprofile` was killed in that earlier harness. The final
+2026-11-05 campaign sets `LimitRTTIME=infinity` and successfully captures
+Go CPU profiles alongside CPU-wide perf; it does not attach perf to the
+short-lived gRPC threads.
 
 The walls, in order:
 

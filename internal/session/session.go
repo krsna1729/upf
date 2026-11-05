@@ -57,6 +57,10 @@ type CounterReader interface {
 	// was on an error), so a reader every tick reuses one slice.
 	AppendRuleCounts(ctx context.Context, dst []bess.RuleCount, counters string,
 		actionIDs ...uint32) ([]bess.RuleCount, error)
+	// AppendRuleChanges returns replayable traffic notifications. The caller
+	// acknowledges only after all pages have entered its pending work set.
+	AppendRuleChanges(ctx context.Context, dst []uint32, counters string,
+		acknowledge, sequence, after uint64) (bess.RuleChangePage, error)
 }
 
 // WindowReader is CounterReader without opening the next window: the same
@@ -466,16 +470,9 @@ type Compiler struct {
 	// answers a running total, and only an increase is news. Only EvaluateAll
 	// touches them, from the one report loop.
 	markersDropped, errorsDropped uint64
-	// tickIDs, tickCounts and tickRead are EvaluateAll's buffers, kept from
-	// tick to tick: the ActionIds a tick names, by the module that counts
-	// them, what the reading answered, indexed by ActionId, and the reading
-	// of one chunk as it arrives: one RuleCount per rule, 7.2 MB a tick at
-	// 100K sessions when it was new every time, and at most a chunk's
-	// (countChunk rules, 4.5 MiB) kept whatever the session count. Only
-	// EvaluateAll touches them, from the one report loop.
-	tickIDs    map[string][]uint32
-	tickCounts []reading
-	tickRead   []bess.RuleCount
+	// usage holds the report loop's dirty work, owner index, bounded read
+	// buffers and clock deadlines. Session-related mutations hold mu.
+	usage usageWork
 	// peek is the same counter reader without the window restart, when the
 	// dataplane offers it (WindowReader): the DDN path's reading.
 	peek WindowReader
@@ -501,10 +498,9 @@ type Compiler struct {
 	mu       sync.Mutex
 	sessions map[uint64]*Session
 	byCP     map[uint64]*Session // sessions by CP F-SEID: an establishment's retransmission, found without a walk
-	// measured and buffering are the sessions a tick walks instead of every
-	// session (track): the ones with a URR (EvaluateAll) and the ones with a
-	// BUFF+NOCP PDR (EvaluateDownlinks). Each is a superset the tick itself
-	// prunes, so a refused change that left a session listed costs one look.
+	// measured tracks URR membership for activity polling and rare End Marker
+	// events, not an ordinary per-tick walk. buffering is the BUFF+NOCP set
+	// EvaluateDownlinks walks and prunes.
 	measured      map[uint64]struct{}
 	buffering     map[uint64]struct{}
 	nextSEID      uint64
@@ -1565,6 +1561,9 @@ func (c *Compiler) forget(s *Session) {
 	delete(c.sessions, s.LocalSEID)
 	delete(c.measured, s.LocalSEID)
 	delete(c.buffering, s.LocalSEID)
+	delete(c.usage.pending, s.LocalSEID)
+	delete(c.usage.enforce, s.LocalSEID)
+	c.usage.timers.set(s.LocalSEID, time.Time{})
 	if c.byCP[s.CPSEID] == s {
 		delete(c.byCP, s.CPSEID)
 	}
@@ -1572,13 +1571,17 @@ func (c *Compiler) forget(s *Session) {
 	c.mu.Unlock()
 }
 
-// track lists s for the ticks its model may owe something to: EvaluateAll if
-// it has a URR, EvaluateDownlinks if a PDR buffers and notifies. Only adds:
-// the ticks drop what no longer qualifies. The caller holds the lock.
+// track registers the session's reporting work and buffering membership.
+// The caller holds the lock. Counter ownership is registered at the first read.
 func (c *Compiler) track(s *Session) {
 	if s.URRs.len() > 0 {
 		c.measured[s.LocalSEID] = struct{}{}
+		c.queueUsage(s)
+	} else {
+		delete(c.measured, s.LocalSEID)
+		delete(c.usage.pending, s.LocalSEID)
 	}
+	c.scheduleUsage(s)
 	for _, p := range s.PDRs.all() {
 		if p.notify {
 			c.buffering[s.LocalSEID] = struct{}{}
@@ -1817,6 +1820,7 @@ func (c *Compiler) settle(s *Session) {
 		}
 	}
 	s.pending = nil
+	c.track(s)
 }
 
 // releaseSession frees the ids a session's records hold, each exactly once: one

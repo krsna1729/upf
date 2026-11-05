@@ -48,8 +48,11 @@ Each miss below passed every unit test and lane, and showed only at
 3. **A tick reads in bulk, and a bulk read is paged.** One RPC per session
    per tick was 1-2M round trips (645488a). One read per module is the fix,
    but one `get_counts` reply passes the 64 MiB message limit at about 2M
-   rules, and then no URR is reported at all (UG-B1). The downlink tick
-   still sends one RPC per idle session (UG-B3).
+   rules, and then no URR is reported at all (UG-B1). Reading every counted
+   rule every tick is still O(N) bytes: the tick now reads only sessions that
+   counted traffic (`get_changes`, acknowledged only after it is queued) or
+   whose clock is due. The downlink tick still sends one RPC per idle session
+   (UG-B3).
 4. **No per-tick O(N) under the session lock.** The usage and downlink
    ticks walk every session under `c.mu`, which stalls every establishment
    (UG-R1); per-session allocations per tick add about 10M per tick (UG-R2).
@@ -319,7 +322,6 @@ test was measured alone, before and after, in `memory.peak` MiB:
 | Test | Plain | `-race` |
 |---|---|---|
 | `TestTheCheckpointHoldsSessionsNotHistory` | 249.3 to 10.6 | 828.5 to 35.2 |
-| `TestATickCostsOnlyTheSessionsThatMeasure` | 203.8 to 65.1 | 644.3 to 164.1 |
 
 **The smallest machine for the suite**, from these rows: CI's phases run one
 after another, so the suite needs its largest phase. That phase is the
@@ -339,9 +341,13 @@ phases:
 
 **Sizing `upfd` and bessd for a deployment** is not what these rows say:
 they bound tests. For `upfd`, the per-session cost and the pod fits are
-measured in design.md, "`upfd`'s own memory and establishment rate" (#36,
-357ca0d): about 3.5 GiB at 1M sessions with the cgroup-derived GOMEMLIMIT,
-and 150K sessions in a 2 GiB pod (upfd 768 + bessd 1280 MiB). For bessd, see
+measured in design.md. The older "`upfd`'s own memory and establishment
+rate" campaign (#36, 357ca0d) found about 3.5 GiB at 1M sessions and 150K
+sessions in a 2 GiB pod (upfd 768 + bessd 1280 MiB). The
+[final session-major churn campaign](design.md#final-1m-session-churn-measurement-2026-11-05)
+instead measured upfd peaks of 4,571–4,660 MiB with modification/replacement
+overload. Do not size from post-GC heap alone or treat that diagnostic 1M
+lane as a 2/3 GiB pod fit. For bessd, see
 the BESS
 [limits, "Sizing a deployment"](https://github.com/krsna1729/bess/blob/develop/docs/limits.md#sizing-a-deployment).
 
