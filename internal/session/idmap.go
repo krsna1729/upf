@@ -159,6 +159,8 @@ func cloneIDMap[K cmp.Ordered, V any](m idMap[K, *V]) idMap[K, *V] {
 	out := idMap[K, *V]{}
 	if m.big != nil {
 		out.big = make(map[K]*V, len(m.big))
+		// A rollback publishes these values as the live model. One survivor
+		// must not retain an arbitrarily large block after later removals.
 		for k, v := range m.big {
 			cp := *v
 			out.big[k] = &cp
@@ -167,9 +169,10 @@ func cloneIDMap[K cmp.Ordered, V any](m idMap[K, *V]) idMap[K, *V] {
 	}
 	if len(m.small) > 0 {
 		out.small = make([]idEntry[K, *V], len(m.small))
+		entries := make([]V, len(m.small))
 		for i, e := range m.small {
-			cp := *e.v
-			out.small[i] = idEntry[K, *V]{e.id, &cp}
+			entries[i] = *e.v
+			out.small[i] = idEntry[K, *V]{e.id, &entries[i]}
 		}
 	}
 	return out

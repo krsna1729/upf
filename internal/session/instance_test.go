@@ -399,14 +399,20 @@ func TestAnUpdateFARKeepsWhatItDoesNotCarry(t *testing.T) {
 		instancedEstablishment(1, "10.45.0.2", 0x11223344, "internet"), "ims"))); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
+	currentHop := nextHop(t, rec.last(), ruleIn(t, rec.last(), "pdr_ul").actionID())
 	hop := func(t *testing.T, req *message.SessionModificationRequest) uint32 {
 		t.Helper()
+		before := len(rec.txns)
 		if got := cause(t, c.Modify(req)); got != ie.CauseRequestAccepted {
 			t.Fatalf("the update answered cause %d", got)
 		}
-		changes := rec.last()
-		ul := ruleIn(t, changes, "pdr_ul")
-		return nextHop(t, changes, ul.actionID())
+		for _, changes := range rec.txns[before:] {
+			if len(changesFor(changes, c.res(PDRUplink))) != 0 {
+				ul := ruleIn(t, changes, "pdr_ul")
+				currentHop = nextHop(t, changes, ul.actionID())
+			}
+		}
+		return currentHop
 	}
 
 	// The Apply Action, with the forwarding parameters a forwarding FAR must
