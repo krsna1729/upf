@@ -259,6 +259,8 @@ The rows below were measured that way on 2026-11-04: branch
 largest of its unit runs and the lanes' runs of it; a range is several runs.
 The lanes ran 12:20-12:33 IST with the 32768-buffer pool; `internal/session`
 ran 12:39-12:44.
+The two `cmd/churnbench` rows were added on 2026-11-07, Go1.27.2 at
+`GOMAXPROCS=2`, using the same scoped/unscoped calibration and rounding.
 
 | Row | Declared MiB | `memory.peak` MiB | `ru_maxrss` / VmHWM MiB |
 |---|---|---|---|
@@ -288,6 +290,8 @@ ran 12:39-12:44.
 | `go-race cmd/n4bench` | 40 | 15.4 | 26.0 |
 | `go-race internal/n4` | 40 | 21.1 | 30.7 |
 | `go-race internal/scaletest` | 40 | 27.1 | 31.0 |
+| `go cmd/churnbench` | 32 | 2.5 | 19.9 |
+| `go-race cmd/churnbench` | 32 | 16.1 | 20.9 |
 | `go internal/n4` | 32 | 5.2 | 20.0 |
 | `go-race internal/n4sim` | 32 | 15.1 | 19.9 |
 | `go-race internal/routing` | 32 | 15.5 | 20.8 |

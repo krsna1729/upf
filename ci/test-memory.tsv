@@ -32,6 +32,8 @@
 # memory.peak / ru_maxrss (or VmHWM), MiB.
 
 # kind   name                 MiB
+# cmd/churnbench measured 2026-11-07, Go 1.27.2, GOMAXPROCS=2; same calibration.
+go       cmd/churnbench       32      # 2.5 / 19.9
 go       cmd/n4bench          24      # 2.7 / 18.4
 go       cmd/upfd             48      # 23.3 / 36.8
 go       internal/bess        40      # 12.3 (session-live) / 27.9
@@ -47,6 +49,7 @@ go       internal/scaletest   24      # 5.8 / 18.4
 # scale). ci/go-test.sh runs it by itself and skips it in the package's run.
 go       internal/session:TestATickReadsEveryRuleUnderTheMessageBound  1736  # 1378.4 / 1387.5
 go       internal/session     168     # 99.8-129.2 / 109.6, without that test
+go-race  cmd/churnbench       32      # 16.1 / 20.9 (2026-11-07)
 go-race  cmd/n4bench          40      # 15.4 / 26.0
 go-race  cmd/upfd             136     # 85.5 / 108.7
 go-race  internal/bess        64      # 34.1 / 49.7
