@@ -805,18 +805,176 @@ For every performance change:
    Keep inconclusive and negative results. Do not repin an old baseline as if
    it measured the new implementation.
 
-### Current candidates, not measured gains
+### Candidate status at this cutover
 
-| Candidate | Measured reason | Evidence needed before accepting |
+| Work | Status | Remaining gate |
 |---|---|---|
-| Incremental FAR-only compilation | Rebuild/fold/key allocations for a tunnel-endpoint change | Lower CPU and allocation per accepted modify; preserve update, counter and rollback semantics |
-| Compact retained model | Many pointer-bearing objects and high scan/GC share | Lower live/scan heap and GC CPU at the same population and semantics, including delete/re-establish |
-| Reuse gRPC server workers / adjust pollers | Thread churn; current BESS uses `MAX_POLLERS=1` | Matched RPC workload, control CPU/thread births, packet interference and tail latency |
-| Local transport, including shared-memory RPC | Client/transport and server machinery are material | Same transaction engine and payload, bounded memory/backpressure, restart correctness, matched end-to-end improvement |
+| Skip unchanged graph/appliance publications | Implemented; known-baseline checks retain full replacement semantics | Preserve rollback, enforcement and unknown-outcome coverage |
+| Reuse RPC workers and avoid SDK catalog copies | Implemented; matched TCP/Unix release results recorded above | Keep complete control/admin/event behavior |
+| Compact retained model and changed-field staging | Duplicate identity state reduced; whole snapshots and pointer-rich retained state remain | Lower allocation and scanning without losing supported N4 state |
+| Native allocator maintenance | Expensive free-list traversal measured; reclamation policy unchanged | Preserve admitted and unadmitted memory bounds |
+| Unix gRPC | Supported; not a universal end-to-end winner | Select on matched complete-workload evidence |
+| Shared-memory RPC | Deferred | Demonstrate a remaining IPC bottleneck after the steps below |
 
-A shared-memory message rate from another system is not a UPF session rate.
-Do not remove validation, receipts, epoch checks, admission or reclamation to
-make a transport benchmark faster.
+### Next optimization design
+
+**Design only, not an implemented store, allocator policy or N4 frontend.**
+Keep the separate Go N4 process and complete gRPC API as the current contract.
+Implement one measured change per branch; do not combine a representation
+change and a transport change into one speedup claim.
+
+#### 0. Establish the post-merge, corrected-driver reference
+
+Pin merged BESS/native SDK revisions and rebuild both products with the recorded
+release options. The corrected producer, its deadline/uncertainty counters and
+its binary hash become the new reference; NT5/NT6 are historical observations,
+not timings of that producer.
+
+- Exercise all seven churn types at the 1K/10K/100K targets, one million
+  resident sessions, the declared rule mix and explicit active/reporting load.
+  Keep finite establishment/deletion bursts separate from steady-state churn.
+- Establish a loss-free accepted-rate curve as well as overload points. Ramp
+  offered rate, bracket the first failure, then refine the bracket. A capacity
+  point requires the producer to achieve its offer without producer/window/
+  busy/uncertain skips, timeouts or unexpected refusals. A skipped offer is
+  producer/state-limited evidence, not UPF capacity.
+- Report latency tiers rather than inventing an equipment SLA: successful
+  response/cycle p50/p99, the failed fraction and timeout censoring separately.
+  Expected packet drops from QER/URR policy are not forwarding failures.
+- Use separate physical UPFD-control, BESS-control and packet cores. Treat
+  Go parallelism and GC policy as explicit independent variables, not assumed
+  wins. Keep laptop power/thermal helpers outside the repository.
+- Use ABBA plain-product pairs; profile separate matching runs with plain
+  corroboration before and after. No concurrent build or heavy analysis.
+  Preserve actual offers, CPU numerators, socket drops, memory events,
+  reconciliation, reporting and restart evidence.
+
+**Exit:** repeatable accepted-rate/latency distributions for every mode, a
+producer that is not the limiting stage at those points, and no unexplained
+population or accounting divergence. Keep failed/inconclusive cells.
+
+#### 1. Stage changed configuration, not whole-session snapshots
+
+Primary files: `internal/session/session.go`, `compile.go`, `idmap.go` and
+`report.go`. Replace whole-record cloning with a per-change before-image of
+touched normalized configuration and an immutable candidate publication.
+This is not safe as a shallow-copy substitution: resolving one FAR/QER/URR
+can change derived PDR fields.
+
+The private write contract must carry session identity, expected local
+model/write-history version, touched rule IDs, before-images and retained
+references. Build derived values in candidate scratch, not by mutating the
+committed baseline. Preserve the current full native entry replacement when
+forwarding changes, and zero native transactions for a proven model-only change.
+
+One session writer owns configuration publication. A known refusal releases the
+candidate and restores only its uncommitted configuration; accepted usage,
+queued/confirmed reports and acknowledgement progress must not roll back.
+An unknown outcome retains/quarantines its candidate and references until
+resolved and invalidates incremental lowering. A late completion cannot
+publish over a newer write.
+
+**Exit:** existing graph/appliance enforcement, handover, overlap, refusal,
+reporting and restart cases pass; add deterministic report-ack-during-refused-
+write and delayed-completion cases where the new ownership boundary requires
+them. Measure allocation per accepted operation, including failed work in the
+separate numerator. A provisional full-path quota-update target is at most
+2 KiB allocated per accepted operation for this fixture, not merely a
+64-byte logical delta. Accept measured improvement beyond paired-run spread,
+not allocation moved into an unmeasured pool.
+
+#### 2. Move canonical session state to pointer-free segmented storage
+
+Keep one model/compiler shared by graph and appliance lowering. The private
+storage boundary is a session/rule handle plus generation and model version,
+not a retained Go IE tree or a pointer into a mutable session object.
+
+- Use segmented pointer-free record arrays and flat handle indexes. The
+  640-byte canonical core and 1–1.25 KiB/session indexed budget above are
+  engineering targets for the stated fixture, not universal feature limits.
+- Retain arbitrary protocol IDs, association identity and explicit presence.
+  Put variable IPv6/SDF/BAR/MAR/linked-rule data in bounded side storage;
+  do not omit less common supported semantics to meet the compact budget.
+- Ownership indexes resolve collisions by comparing complete canonical keys.
+  A fingerprint alone must never establish classifier/F-TEID ownership.
+- Separate configuration versions from measurement/queued/confirmed accounting
+  state. Reporting and native publication consume stable views under the
+  existing synchronization contract.
+- Reuse a slot or release an empty segment only after pending writes, reports
+  and borrowed views release it. Generation/version checks prevent late
+  callbacks from accessing a replacement session. Specify generation-wrap
+  handling rather than assuming it cannot occur.
+- Preserve checkpoint/restart semantics. Migrate compiler, reporting,
+  ownership and checkpoint callers together; remove the obsolete object model
+  rather than retaining parallel canonical copies.
+
+**Exit:** account for core, index capacity/slack, side storage, pending versions
+and runtime memory separately at one million sessions and after mass
+delete/re-establish. Canonical backing must be non-scannable; report descriptor/
+side-object scanning explicitly. Demonstrate the indexed fixture budget or
+explain its measured excess. Paired plain runs must improve GC CPU/service cost
+without lifecycle, accounting, refusal or hard-budget regressions.
+
+#### 3. Reduce native allocation and reclamation cost without hiding memory
+
+Primary files: BESS `core/runtime/malloc_policy.*`,
+`core/control/maintenance_loop.cc`, and UPF native session decoding/reservation.
+This work can be developed independently of the Go store, but measure the
+changes separately.
+
+First prototype budgeted, bounded reusable codec/reservation scratch using
+existing framework allocation/ownership patterns. Cap both per-request capacity
+and aggregate retained idle capacity; an oversized request must not permanently
+inflate every worker. Reduce fragmented transient glibc objects before replacing
+the free-list observation policy.
+
+Admitted-release trimming, fresh measurement/trim before admission refusal and
+the reserve/4 unadmitted-garbage retention contract remain mandatory. Any
+work-triggered reclamation design must identify all covered allocation/release
+lifetimes. Keep a conservative fallback for untracked gRPC/protobuf garbage.
+RSS-growth-only gating misses live-to-free transitions at unchanged RSS;
+simply slowing or deleting `mallinfo2` is not an accepted design.
+
+**Exit:** strict-budget and unadmitted-garbage cases, unchanged-RSS frees,
+fragmented-heap churn, idle retention and packet/control tail latency all pass.
+Show lower allocator-maintenance CPU under the same budget. If the proposed
+policy cannot preserve the bound, retain the old policy and record the result.
+
+#### 4. Isolate lowering, encoding and RPC before changing architecture
+
+After re-profiling the compact paths, compare identical transaction payloads
+from Go and C++ at the same bounded concurrency with individual outcomes.
+Record encode/decode, queue/lock wait, transaction service and acknowledgement
+time separately; sampled user cycles alone cannot partition wall latency.
+
+Compare remote persistent TCP/Unix gRPC against local
+`DataplaneTransactions::Apply` with equivalent codec/receipt semantics, then
+typed owned apply as an engine-side floor. The last comparison also removes
+adapter work and is not a pure transport speedup. Reuse existing framework
+benchmark paths; do not add an unrelated flow-only protocol.
+
+Preserve validation, deduplication/receipts, epochs, ownership, admission,
+backpressure, atomic publication, events, inspection and administration.
+Then repeat through full N4 with packets, reporting and restart.
+
+**Exit:** identify the stage that misses its own per-core service budget:
+100 µs at 10K/s or 10 µs at 100K/s, before utilization margin. Do not turn the
+historical native microbenchmark or VPP routes/s into a session-rate prediction.
+
+#### 5. Architecture decision, only if a measured stage still misses budget
+
+Evaluate the embedded UPF-owned C++ frontend described above before shared
+memory. Require the same PFCP/model/report/restart cases and supported-feature
+matrix as the separate frontend, parser bounds/fuzzing, one writer per session
+and explicit shared failure-domain treatment. Use owned typed transactions,
+never direct mutable-table writes. Do not keep unrelated graph/appliance
+semantics or duplicate Go/native canonical models.
+
+Shared memory remains last: require evidence that residual IPC, rather than
+retained state, allocation, compilation, transaction-engine work or the
+producer, prevents the target after these cuts. Compare with the complete
+existing API and identical acknowledgement/backpressure/restart semantics.
+Without that evidence, keep gRPC and stop the transport work.
 
 ## 2026-11-05: VPP-inspired local transport investigation
 
@@ -1253,8 +1411,15 @@ snapshots, role exits and aggregate-slice cleanup.
 - Compiler/model changes are committed as `32ffaa3`; the measured product
   binaries remain the frozen pre-commit builds recorded by SHA256, not
   relabeled as new bit-identical builds.
-- BESS changes are published in [draft PR #149](https://github.com/krsna1729/bess/pull/149),
-  commit `98fe43d2e8ec06e7ba7c5d3c30e05e4c281447e2`. UPF pin commit `c2541fd`
-  explicitly blocks merging until that framework PR lands and both pins are
-  replaced with the final merged revision.
+- [BESS PR #149](https://github.com/krsna1729/bess/pull/149) merged as
+  `529e53742273036417d9e2d584c6d3c0fb834ccd`. The final native pin and public Go
+  SDK `v0.0.0-20261107173432-529e53742273` replace the provisional branch pins
+  from `c2541fd`; the dependency merge blocker is cleared.
+- Independent merge review found no compiler/model blockers. Harness review
+  identified request-controlled evidence names, overwritten prepare records
+  and incomplete resident selection for populations sharing the old stride.
+  Result paths are now server-owned unique `driver-*.json` files returned as
+  `record_file`; HTTP `Name` is removed. Prepare mode and its returned record
+  stay with the cell. A coprime stride visits every resident. Historical file
+  names and measurements above remain unchanged.
 
