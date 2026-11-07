@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package session compiles PFCP sessions into BESS state (docs/design.md):
-// a session change becomes one control_v2 transaction, all or nothing, and the
+// changed dataplane state becomes one atomic control_v2 transaction, and the
 // packet path never chases a control-plane relation.
 //
 // The compiler resolves a PDR's relations once, at programming time:
@@ -689,6 +689,18 @@ type Session struct {
 	// erases it.
 	sessionID   uint32
 	sessionLive bool
+
+	// A failed or overlapping write can leave the dataplane at another model.
+	// The next isolated write must restate all records before deltas are safe.
+	rewrite bool
+	overlap bool
+	// Successful compiles awaiting apply's result, including zero-change ones.
+	inflight uint32
+
+	// Each compile invalidates snapshots taken before it, including a usage
+	// enforcement interleaved between a modification's snapshot and merge.
+	// Never rolled back: a refused later request cannot unwrite that history.
+	writes uint64
 }
 
 // modelSnapshot is a session's model as it stood before a modification was
@@ -698,13 +710,14 @@ type Session struct {
 // session as the SMF last saw it rather than half-changed -- a half-changed
 // model fails every later message the same way, the SMF's retry included.
 type modelSnapshot struct {
-	ueIP netip.Addr
-	pdrs idMap[uint16, *pdr]
-	fars idMap[uint32, *far]
-	qers idMap[uint32, *qer]
-	urrs idMap[uint32, *urr]
-	bars map[uint8]*bar
-	mars map[uint16]*mar
+	ueIP   netip.Addr
+	writes uint64
+	pdrs   idMap[uint16, *pdr]
+	fars   idMap[uint32, *far]
+	qers   idMap[uint32, *qer]
+	urrs   idMap[uint32, *urr]
+	bars   map[uint8]*bar
+	mars   map[uint16]*mar
 
 	pending     *sessionChanges
 	removedQERs []*qer
@@ -717,9 +730,21 @@ func cloneEntries[K comparable, V any](m map[K]*V) map[K]*V {
 		return nil
 	}
 	out := make(map[K]*V, len(m))
+	if len(m) > idMapSmall {
+		// Snapshots may become the model after rollback. Bound shared backing
+		// so shrinking a large rule set can release the removed values.
+		for k, v := range m {
+			cp := *v
+			out[k] = &cp
+		}
+		return out
+	}
+	entries := make([]V, len(m))
+	i := 0
 	for k, v := range m {
-		cp := *v
-		out[k] = &cp
+		entries[i] = *v
+		out[k] = &entries[i]
+		i++
 	}
 	return out
 }
@@ -727,8 +752,9 @@ func cloneEntries[K comparable, V any](m map[K]*V) map[K]*V {
 // snapshot copies the model. The caller holds the lock.
 func (s *Session) snapshot() modelSnapshot {
 	return modelSnapshot{
-		ueIP: s.UEIP,
-		pdrs: cloneIDMap(s.PDRs), fars: cloneIDMap(s.FARs), qers: cloneIDMap(s.QERs),
+		ueIP:   s.UEIP,
+		writes: s.writes,
+		pdrs:   cloneIDMap(s.PDRs), fars: cloneIDMap(s.FARs), qers: cloneIDMap(s.QERs),
 		urrs: cloneIDMap(s.URRs), bars: cloneEntries(s.BARs),
 		mars:        cloneEntries(s.MARs),
 		pending:     s.pending.clone(),
@@ -848,42 +874,26 @@ func (s *Session) forgetRemoval(id uint16) {
 
 // pdr is one compiled PDR: its rule in the PDR table and what it resolved to.
 type pdr struct {
-	id         uint16
-	precedence uint32
-	srcIfc     uint8
-	// down says the PDR's packets come from the side toward the subscriber:
-	// the Source Interface value is not Access (downSide). It is set where the
-	// value is parsed -- an Update PDR that changes it carries the whole PDI,
-	// and one without a PDI keeps the stored one -- and read wherever a PDR
-	// is put in a chain (the direction), keyed for a look-up (the downlink
-	// selector) or proxied for (the subscriber ARP answer).
-	down bool
-	ueIP netip.Addr
-	// hasUEIP records that this PDI carried the UE IP Address IE; an address
-	// inherited from another PDR must not be mistaken for an explicit S/D bit.
-	hasUEIP bool
-	// ueIPDst is 8.2.62's bit 3 as the PDI carried it: set, the address is the
-	// packet's destination (ueAddr says what that means for the session).
-	ueIPDst bool
-	farID   uint32
-	// hasMAR and marID are the MAR this PDR's packets are steered by (TS
-	// 29.244 8.2.34). A MAR PDR has no FAR of its own: the MAR's two access
-	// actions are its egress.
-	hasMAR   bool
-	marID    uint16
-	policyID uint32 // the shared AtsssSteer policy this PDR's MAR compiled to
-	qerIDs   []uint32
-	urrIDs   []uint32
+	// Keep pointer-bearing data together, then 32/16-bit scalars and flags.
+	// This keeps the cached selector within the 352 B amd64 size class and
+	// leaves the scalar tail outside the GC's pointer-bearing prefix.
+	ueIP   netip.Addr
+	qerIDs []uint32
+	urrIDs []uint32
+
+	// Qualified selector identities, length-prefixed in one immutable string.
+	// Ownership strings are substring views of these same bytes: retained
+	// overhead is a 16 B header/PDR plus varint lengths, not a map or a
+	// pointer-bearing array per PDR. Rebuilt PDIs and changed SDF definitions
+	// discard it; resolve invalidates inherited selector changes. The target's
+	// table layout is immutable.
+	ruleIDs string
 
 	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
 	// empty when the SMF named none: resolve turns it into the deployment's
 	// interface, whose route domain goes into the rule's key and whose next hop
 	// sends the forward out.
 	instance string
-	domain   uint32
-	// resultDomain is the route domain the rule's result writes: domain,
-	// or a 5G VN forward's own instance's (resolve).
-	resultDomain uint32
 
 	// sdfs and qfis are what the PDI named (TS 29.244 8.2.89 and the SDF
 	// Filter IE): the SDF filters and QoS flows this rule selects, any of
@@ -892,41 +902,32 @@ type pdr struct {
 	// then matches every QFI of it.
 	sdfs []*sdfFilter
 	qfis []uint8
-	// sdf, hasQFI and qfi are one combination of the two lists, and are set
-	// only on the copies variants() makes: the matchers read one filter and
-	// one QFI per rule.
-	sdf    *sdfFilter
-	hasQFI bool
-	qfi    uint8
-	// encapQFI is the QFI of the QER this PDR's downlink record carries
-	// (resolve). hasEncapQFI distinguishes an absent QFI from valid QFI 0
-	// (TS 38.415 5.5.3.3).
-	encapQFI    uint8
-	hasEncapQFI bool
+	// sdf, hasQFI and qfi select one combination of those lists, only on the
+	// stack copies ruleKeys makes: each matcher reads one filter and one QFI.
+	sdf *sdfFilter
 
+	fteidIPv4, fteidIPv6 netip.Addr
+	// reference is the GTP-U reference point the PDI's Source Interface Type
+	// named for the F-TEID ("" for the Source Interface's own: n3 for Access,
+	// n9 for Core); see pdrReferencePoint.
+	reference          string
+	tunnelLocalAddress netip.Addr
+
+	precedence uint32
+	farID      uint32
+	policyID   uint32 // the shared AtsssSteer policy this PDR's MAR compiled to
+	domain     uint32
+	// resultDomain is the route domain the rule's result writes: domain,
+	// or a 5G VN forward's own instance's (resolve).
+	resultDomain uint32
 	// nextHop is the Router next hop this PDR's forward leaves by: the
 	// deployment's for the direction, or the network instance's when the FAR
 	// forwards toward the data network (resolve).
 	nextHop uint32
 
-	hasFTEID, hasChoose, hasCHID bool
-	chid                         uint8
-	fteidIPv4, fteidIPv6         netip.Addr
-	wantIPv4, wantIPv6           bool
-	teid                         uint32 // local ingress TEID, in either direction (0 for plain N6)
-	endpointID                   uint32
-	endpointFamily               uint8
-	fteidContext                 uint32 // the admission context the decap writes for this PDR's F-TEID
-	// reference is the GTP-U reference point the PDI's Source Interface Type
-	// named for the F-TEID ("" for the Source Interface's own: n3 for Access,
-	// n9 for Core); see pdrReferencePoint.
-	reference string
-	// relay says the PDR carries another node's packets on through this UP:
-	// it names a local F-TEID and no UE address, and its FAR forwards into
-	// another tunnel or back into classification (resolve). Its F-TEID
-	// alone identifies it, and the IP fields of its key stay open.
-	relay                bool
-	tunnelLocalAddress   netip.Addr
+	teid                 uint32 // local ingress TEID, in either direction (0 for plain N6)
+	endpointID           uint32
+	fteidContext         uint32 // the admission context the decap writes for this PDR's F-TEID
 	transportRouteDomain uint32
 	actionID             uint32 // the ActionId carried in this PDR rule's result
 	meterID              uint32 // the meter record a QER resolved to, in this chain's Meter
@@ -936,6 +937,45 @@ type pdr struct {
 	// session meter ID second, as the direction's `Meter(levels: 2)` consumes them.
 	ownMeterID    uint32
 	sharedMeterID uint32
+
+	id    uint16
+	marID uint16
+
+	srcIfc uint8
+	// down says the PDR's packets come from the side toward the subscriber:
+	// the Source Interface value is not Access (downSide). It is set where the
+	// value is parsed -- an Update PDR that changes it carries the whole PDI,
+	// and one without a PDI keeps the stored one -- and read wherever a PDR
+	// is put in a chain (the direction), keyed for a look-up (the downlink
+	// selector) or proxied for (the subscriber ARP answer).
+	down bool
+	// hasUEIP records that this PDI carried the UE IP Address IE; an address
+	// inherited from another PDR must not be mistaken for an explicit S/D bit.
+	hasUEIP bool
+	// ueIPDst is 8.2.62's bit 3 as the PDI carried it: set, the address is the
+	// packet's destination (ueAddr says what that means for the session).
+	ueIPDst bool
+	// hasMAR and marID are the MAR this PDR's packets are steered by (TS
+	// 29.244 8.2.34). A MAR PDR has no FAR of its own: the MAR's two access
+	// actions are its egress.
+	hasMAR bool
+	hasQFI bool
+	qfi    uint8
+	// encapQFI is the QFI of the QER this PDR's downlink record carries
+	// (resolve). hasEncapQFI distinguishes an absent QFI from valid QFI 0
+	// (TS 38.415 5.5.3.3).
+	encapQFI    uint8
+	hasEncapQFI bool
+
+	hasFTEID, hasChoose, hasCHID bool
+	chid                         uint8
+	wantIPv4, wantIPv6           bool
+	endpointFamily               uint8
+	// relay says the PDR carries another node's packets on through this UP:
+	// it names a local F-TEID and no UE address, and its FAR forwards into
+	// another tunnel or back into classification (resolve). Its F-TEID
+	// alone identifies it, and the IP fields of its key stay open.
+	relay bool
 	// tunnel is the per-session tunnel record this PDR's action writes (its
 	// FAR creates an outer header), by the direction's table; writtenTunnel is
 	// the one the dataplane holds now: a rebind to a FAR without Outer Header
@@ -963,12 +1003,9 @@ type pdr struct {
 
 // far is one compiled FAR.
 type far struct {
-	id       uint32
-	apply    uint8
-	destIfc  uint8
-	teid     uint32
-	peer     netip.Addr
-	hasOuter bool
+	// Pointer-bearing fields precede scalar fields and presence flags, keeping
+	// this record in the 96 B amd64 class rather than 112 B.
+	peer netip.Addr
 	// instance is the Forwarding Parameters' Network Instance (8.2.4), empty
 	// when the SMF named none: the interface a forward out of this FAR leaves
 	// by (resolve).
@@ -982,32 +1019,36 @@ type far struct {
 	// SGi-LAN/N6-LAN, Table 7.5.2.3-2). An Update FAR that names none of them
 	// leaves them as the session has them, which is why the checks read the
 	// record and not the message.
-	hasFwd     bool
-	hasDestIfc bool
-	policy     string
-	hasPolicy  bool
+	policy string
+	// reference is the GTP-U reference point the Destination Interface Type
+	// named for the outer header's local end ("" for the Destination
+	// Interface's own); see tunnelEndpoint.
+	reference string
 
-	// hasBAR and barID are the FAR's BAR ID (8.2.55): the buffering instruction
-	// this FAR's buffered packets live under. resolve refuses a reference to a
-	// BAR the session does not hold, the way it refuses a PDR naming a URR the
-	// session does not have -- compiling a buffer against a rule the SMF never
-	// provisioned would hold packets under numbers nobody sent.
-	hasBAR bool
-	barID  uint8
-
+	id   uint32
+	teid uint32
 	// hasMarking and marking are the FAR's Transport Level Marking
 	// (TS 29.244 8.2.12, inside the Forwarding Parameters): the two octets the
 	// SMF asks this FAR's outer headers to be marked with, the DSCP in the
 	// high octet and the mask in the low one. It reaches the tunnel record a
 	// downlink PDR's FAR writes, where the encap applies it over the inner
 	// packet's own class (the TunnelEntry's "marking" field).
-	hasMarking bool
-	marking    uint16
+	marking uint16
 
-	// reference is the GTP-U reference point the Destination Interface Type
-	// named for the outer header's local end ("" for the Destination
-	// Interface's own); see tunnelEndpoint.
-	reference string
+	apply      uint8
+	destIfc    uint8
+	hasOuter   bool
+	hasFwd     bool
+	hasDestIfc bool
+	hasPolicy  bool
+	// hasBAR and barID are the FAR's BAR ID (8.2.55): the buffering instruction
+	// this FAR's buffered packets live under. resolve refuses a reference to a
+	// BAR the session does not hold, the way it refuses a PDR naming a URR the
+	// session does not have -- compiling a buffer against a rule the SMF never
+	// provisioned would hold packets under numbers nobody sent.
+	hasBAR     bool
+	barID      uint8
+	hasMarking bool
 }
 
 // mar is one compiled Multi-Access Rule (TS 29.244 7.5.2.8): the steering
@@ -1117,12 +1158,10 @@ func (b *bar) timeoutNS() (uint64, bool) {
 }
 
 type qer struct {
-	id      uint32
-	gateUL  uint8
-	gateDL  uint8
-	mbUL    uint64 // bytes per second, as the dataplane's meter wants it
-	mbDL    uint64
-	hasRate bool
+	// Keep 64-bit rates together, then ids and presence flags: 64 B rather
+	// than 80 B on amd64, without changing any policing or window state.
+	mbUL uint64 // bytes per second, as the dataplane's meter wants it
+	mbDL uint64
 
 	// gbUL and gbDL are the QER's GBR (8.2.7), the guaranteed rate, in the same
 	// unit as the MBR. A meter that polices the MBR alone -- which is what this
@@ -1132,14 +1171,23 @@ type qer struct {
 	// guarantee 8.2.7 means rather than policing it flat. A GBR above the MBR
 	// is refused (merge): no two-rate meter holds it.
 	gbUL, gbDL uint64
-	hasGBR     bool
 
 	// window is the QER's Averaging Window (8.2.115): the duration the rates
 	// are measured over, which the meter takes as its burst. Zero means the SMF
 	// named none, and this UP's own tenth of a second applies.
-	window    time.Duration
-	hasWindow bool
+	window time.Duration
 
+	id uint32
+	// One meter record per policed direction, allocated with the session and
+	// released with it. Each lives in that direction's chain.
+	meterUL uint32
+	meterDL uint32
+
+	gateUL    uint8
+	gateDL    uint8
+	hasRate   bool
+	hasGBR    bool
+	hasWindow bool
 	// hasQFI and qfi are the QER's QFI (TS 29.244 8.2.89): the QoS flow this
 	// QER polices, which is also the one the downlink encap must write into the
 	// PDU Session Container of the packets it tunnels (resolve takes it into
@@ -1147,11 +1195,6 @@ type qer struct {
 	// without one polices the session's flows and marks none of them.
 	hasQFI bool
 	qfi    uint8
-
-	// One meter record per policed direction, allocated with the session and
-	// released with it. Each lives in that direction's chain.
-	meterUL uint32
-	meterDL uint32
 }
 
 // volumeLimit is one volume-valued IE of a URR: the Volume Threshold (8.2.13)
@@ -1617,8 +1660,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	all = append(all, s.pending.removedPDRs()...)
 	all = append(all, s.pending.stalePDRs()...)
 	for _, p := range all {
-		dir := c.direction(p)
-		keys, err := p.ruleKeys(dir.PDRFields)
+		keys, err := c.pdrRuleKeys(p)
 		if err != nil {
 			// The session's rules were written with these keys, so this is a
 			// PDI that changed under a live session: fail the deletion rather
@@ -1716,7 +1758,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// removal erases it (foldSession), wherever the changes are applied --
 	// remove, or AssociationEnded's batches.
 	if _, ok := c.target.(sessionTarget); ok {
-		return c.foldSession(s, changes, true)
+		return c.foldSession(s, changes, eraseSessionEntry)
 	}
 	return changes, nil
 }
@@ -1751,14 +1793,13 @@ func (c *Compiler) settle(s *Session) {
 	// programmed (and the retry erases it again), so a claim dropped while the
 	// transaction is in the air would let another session write over that rule
 	// -- and be erased by this session's retry. A key a PDR of the session
-	// still names is one the transaction *wrote* rather than erased (compile
-	// skips the erase for those), and it stays claimed.
+	// still names remains live in the end state (compile skips its erase),
+	// and stays claimed even when its value needed no upsert.
 	live := map[string]bool{}
 	for _, p := range s.PDRs.all() {
-		dir := c.direction(p)
-		if keys, err := p.ruleKeys(dir.PDRFields); err == nil {
-			for _, key := range keys {
-				live[c.res(pdrTable(p.downlink()))+"\x00"+ruleID(key)] = true
+		if ids, _, err := c.pdrRuleIDs(p); err == nil {
+			for id := range ruleIdentities(ids) {
+				live[id] = true
 			}
 		}
 	}
@@ -1770,13 +1811,11 @@ func (c *Compiler) settle(s *Session) {
 		}
 	}
 	for _, p := range gones {
-		dir := c.direction(p)
-		keys, err := p.ruleKeys(dir.PDRFields)
+		ids, _, err := c.pdrRuleIDs(p)
 		if err != nil {
 			continue
 		}
-		for _, key := range keys {
-			rkey := c.res(pdrTable(p.downlink())) + "\x00" + ruleID(key)
+		for rkey := range ruleIdentities(ids) {
 			if !live[rkey] && c.rules[rkey] == s.LocalSEID {
 				delete(c.rules, rkey)
 				s.forgetRuleKey(rkey)

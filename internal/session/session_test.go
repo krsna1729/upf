@@ -685,9 +685,9 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 	if _, ok := teidRule(onlyErases(erases), testConfig().GTPUDecap+"/fteids", 0x22222222); !ok {
 		t.Error("the removed PDR's F-TEID admission entry is still programmed")
 	}
-	// The QER outlives the PDR, and compile writes a meter for every QER the
-	// session still holds: erasing that meter here would name one key twice in
-	// one transaction, which the engine rejects. It goes when the session does.
+	// The QER outlives the PDR, so its meters remain available to other PDRs
+	// even when this transaction need not rewrite their profiles. They go
+	// when the session does.
 	if n := len(metersErased(erases)); n != 0 {
 		t.Errorf("%d meter records erased, want none while the QER is held", n)
 	}
@@ -704,15 +704,15 @@ func TestModifyRemovingAPDRErasesItsRecords(t *testing.T) {
 		t.Errorf("%d meter records erased by the deletion, want the QER's two", n)
 	}
 	assertNoRepeat(t, rec.last())
-	// The downlink PDR stays, so its rule is rewritten in the same transaction.
+	// The surviving downlink PDR is unchanged, so no classifier upsert is needed.
 	written := 0
 	for _, ch := range rules(erases) {
 		if ch.change.Value != nil {
 			written++
 		}
 	}
-	if written != 1 {
-		t.Errorf("%d rules written, want the surviving PDR's one", written)
+	if written != 0 {
+		t.Errorf("%d rules written, want none for the unchanged surviving PDR", written)
 	}
 
 	// Now the shared case: two uplink PDRs on one F-TEID and one QER, one of
@@ -935,7 +935,7 @@ func TestAnUpdateThatKeepsTheKeyWritesItOnce(t *testing.T) {
 	actionID := ruleCarrying(t, rec.last(), fieldDstIP, []byte{10, 10, 0, 0}).actionID()
 
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
-		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(10),
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(20),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
 				ie.NewUEIPAddress(0x06, "10.45.0.6", "", 0, 0),
 				ie.NewSDFFilter("permit out udp from any to 10.10.0.0/16 1000", "", "", "", 0)),
@@ -2017,6 +2017,7 @@ func TestAnUpdatePDRWithoutPrecedenceKeepsTheMatchingOrder(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
+	completed := len(rec.txns)
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewUpdatePDR(ie.NewPDRID(3),
 			ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
@@ -2029,13 +2030,8 @@ func TestAnUpdatePDRWithoutPrecedenceKeepsTheMatchingOrder(t *testing.T) {
 	if got := sessionOf(t, c, upFSEID(t, resp)).PDRs.at(3).precedence; got != 20 {
 		t.Errorf("the updated PDR's precedence is %d, want the stored 20", got)
 	}
-	general, ok := ruleWithQFI(rec.last(), qfiField(t), []byte{0}, []byte{0})
-	if !ok {
-		t.Fatal("the update did not rewrite the general PDR's rule")
-	}
-	if want := int64(math.MaxUint32) - 20; general.priority() != want {
-		t.Errorf("the general rule carries priority %d, want %d: it now outranks the flow's (%d)",
-			general.priority(), want, int64(math.MaxUint32)-10)
+	if len(rec.txns) != completed {
+		t.Error("an unchanged PDI update rewrote the stored matching order")
 	}
 }
 
@@ -3575,7 +3571,7 @@ func TestDataplaneRefusalBecomesACause(t *testing.T) {
 	}
 }
 
-func TestModifyRewritesTheWholeSession(t *testing.T) {
+func TestTunnelModificationDoesNotRewriteUnchangedClassifiers(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(establishment(0x8888, "10.45.0.9")).(*message.SessionEstablishmentResponse)
@@ -3602,8 +3598,58 @@ func TestModifyRewritesTheWholeSession(t *testing.T) {
 	if got := tunnel.Value["teid"]; got != uint32(0x55667788) {
 		t.Errorf("the tunnel's TEID is %v after the modification", got)
 	}
-	if n := len(rules(rec.last())); n != 2 {
-		t.Errorf("%d rules rewritten, want both PDRs", n)
+	if n := len(rules(rec.last())); n != 0 {
+		t.Errorf("%d classifiers rewritten for an unchanged selector and result, want none", n)
+	}
+}
+
+// A handover while quota enforcement drops packets changes the model before
+// it changes the tunnel. Reopening the gate must publish the deferred endpoint,
+// not certify the model's newer endpoint as an already-written tunnel.
+func TestQuotaGrantPublishesTunnelChangedWhileDropping(t *testing.T) {
+	for _, module := range []string{"", "upf"} {
+		t.Run("appliance="+module, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Appliance = module
+			rec := &recorder{}
+			c := New(cfg, rec, quietLogger())
+			req := establishment(0xa106, "10.45.0.3")
+			children, err := req.CreatePDR[1].CreatePDR()
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.CreatePDR[1] = ie.NewCreatePDR(append(children, ie.NewURRID(7))...)
+			req.CreateURR = append(req.CreateURR, quotaURR(7, 100))
+			resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+			if got := cause(t, resp); got != ie.CauseRequestAccepted {
+				t.Fatalf("establishment cause %d", got)
+			}
+			seid := upFSEID(t, resp)
+			p := sessionOf(t, c, seid).PDRs.at(2)
+			counter := c.target.Counts(CountersDownlink)
+			rec.counts = map[string][]bess.RuleCount{counter: {{ActionID: p.actionID, Packets: 10, Octets: 1000}}}
+			evaluate(t, c, seid)
+			rec.counts[counter] = []bess.RuleCount{{ActionID: p.actionID, Packets: 20, Octets: 2000}}
+			evaluate(t, c, seid)
+			if !p.drop {
+				t.Fatal("spent quota did not stop the downlink")
+			}
+			if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+				ie.NewUpdateFAR(ie.NewFARID(2), ie.NewUpdateForwardingParameters(
+					ie.NewOuterHeaderCreation(0x0100, 0x55667788, "10.20.30.9", "", 0, 0, 0)))))); got != ie.CauseRequestAccepted {
+				t.Fatalf("handover while dropping cause %d", got)
+			}
+			if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, 3, 0,
+				ie.NewUpdateURR(ie.NewURRID(7), ie.NewVolumeQuota(0x01, 1<<30, 0, 0))))); got != ie.CauseRequestAccepted {
+				t.Fatalf("quota grant cause %d", got)
+			}
+			for _, ch := range rec.last() {
+				if ch.Resource == c.res(TunnelsDownlink) && ch.Value["teid"] == uint32(0x55667788) {
+					return
+				}
+			}
+			t.Fatal("forwarding resumed without publishing the deferred tunnel endpoint")
+		})
 	}
 }
 
@@ -3714,10 +3760,9 @@ func TestAURRWithoutACountingModuleIsRefused(t *testing.T) {
 	}
 }
 
-func TestAnUpdateThatKeepsTheURRMovesTheCounterOnce(t *testing.T) {
-	// The entry is keyed by the ActionId, which an update keeps: the replaced
-	// form's entry must not be erased while the same transaction writes it, or
-	// the engine rejects the list (the same rule as the PDR's own key).
+func TestAnUpdateThatKeepsTheURRPreservesItsCounter(t *testing.T) {
+	// A replaced PDR keeps its ActionId: changing precedence must not erase
+	// or recreate the counter whose lifetime and totals follow that identity.
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(urrEstablishment(0x3012, 7, fullURR(7))).(*message.SessionEstablishmentResponse)
@@ -3725,14 +3770,16 @@ func TestAnUpdateThatKeepsTheURRMovesTheCounterOnce(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
-		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
-			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewPrecedence(20), ie.NewURRID(7)),
 	)
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
 	}
-	if n := len(counterKeys(rec.last(), countersRes(testConfig().Up))); n != 1 {
-		t.Errorf("the update wrote %d counter entries, want the one it kept", n)
+	if n := len(counterKeys(rec.last(), countersRes(testConfig().Up))); n != 0 {
+		t.Errorf("the update touched %d counter entries, want the existing entry unchanged", n)
+	}
+	if n := len(rec.entries); n != 1 {
+		t.Errorf("the update left %d live counters, want its original one", n)
 	}
 	assertNoRepeat(t, rec.last())
 }

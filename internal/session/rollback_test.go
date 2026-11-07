@@ -3,11 +3,14 @@
 package session
 
 import (
+	"context"
 	"net"
 	"testing"
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
+
+	"github.com/krsna1729/upf/internal/bess"
 )
 
 // A modification the merge refuses must leave the session as the SMF last saw
@@ -82,5 +85,128 @@ func TestARefusedModificationGivesBackTheMetersAndTEIDsItTook(t *testing.T) {
 	}
 	if s := c.sessions[seid]; s.QERs.at(9) != nil || s.PDRs.at(5) != nil {
 		t.Error("the refused request's QER or PDR is in the model")
+	}
+}
+
+// An unanswered delta may or may not have committed. Even a definite refusal
+// of its successor cannot make the uncertain baseline safe for another delta.
+func TestUnansweredModificationRestatesResourcesUntilAWriteCompletes(t *testing.T) {
+	for _, module := range []string{"", "upf"} {
+		t.Run("appliance="+module, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Appliance = module
+			rec := &recorder{}
+			c := New(cfg, rec, quietLogger())
+			resp := c.Establish(establishment(0xa101, "10.45.0.9")).(*message.SessionEstablishmentResponse)
+			if got := cause(t, resp); got != ie.CauseRequestAccepted {
+				t.Fatalf("establishment cause %d", got)
+			}
+			mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
+				ie.NewUpdateFAR(ie.NewFARID(2),
+					ie.NewUpdateForwardingParameters(
+						ie.NewOuterHeaderCreation(0x0100, 0x55667788, "10.20.30.9", "", 0, 0, 0))))
+			rec.fail = context.DeadlineExceeded
+			if got := cause(t, c.Modify(mod)); got == ie.CauseRequestAccepted {
+				t.Fatal("an unanswered modification was accepted")
+			}
+			rec.fail = &bess.RejectedError{}
+			if got := cause(t, c.Modify(mod)); got == ie.CauseRequestAccepted {
+				t.Fatal("a rejected reconciliation was accepted")
+			}
+			rec.fail = nil
+			if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+				t.Fatalf("reconciliation cause %d", got)
+			}
+			for _, table := range []Table{PDRUplink, PDRDownlink} {
+				if got := len(changesFor(rec.last(), c.res(table))); got != 1 {
+					t.Errorf("reconciliation wrote %d %s records, want one", got, table)
+				}
+			}
+			completed := len(rec.txns)
+			if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+				t.Fatalf("subsequent modification cause %d", got)
+			}
+			if len(rec.txns) != completed {
+				t.Error("an identical request after a completed reconciliation sent another transaction")
+			}
+		})
+	}
+}
+
+// Exercise the schedule where usage enforcement commits after the control
+// request took its rollback snapshot, but before it merges a new quota. The
+// forwarding result equals the snapshot, not the now-dropping dataplane.
+func TestQuotaGrantAfterInterleavedEnforcementReopensTheClassifier(t *testing.T) {
+	c, rec, seid, set := measured(t, 0xa104, 0, 0)
+	s := sessionOf(t, c, seid)
+	c.mu.Lock()
+	before := s.snapshot()
+	c.mu.Unlock()
+	set(10000+(1<<30), 200)
+	if reports := evaluate(t, c, seid); len(reports) != 1 {
+		t.Fatalf("quota enforcement produced %d reports, want one", len(reports))
+	}
+	dropped := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	if dropped.gate() != dropGate {
+		t.Fatal("the interleaved quota enforcement did not stop traffic")
+	}
+	_, _, _, _, urrs, _, err := parseCreate([]*ie.IE{
+		ie.NewUpdateURR(ie.NewURRID(7), ie.NewVolumeQuota(0x01, 2<<30, 0, 0)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.merge(s, nil, nil, nil, nil, urrs, nil, removals{}); err != nil {
+		t.Fatal(err)
+	}
+	changes, _, err := c.compileModel(s, &before, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.apply(context.Background(), s, changes); err != nil {
+		t.Fatal(err)
+	}
+	c.settle(s)
+	forwarding := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	if forwarding.change.Value == nil || forwarding.gate() == dropGate {
+		t.Fatal("the granted quota left the dataplane classifier dropping")
+	}
+}
+
+// An older resource-neutral delta completing after an overlapping unanswered
+// full write cannot certify that the dataplane now matches the model.
+func TestAnOlderDeltaCannotClearOverlappingUnknownCompletion(t *testing.T) {
+	c, rec, seid, _ := measured(t, 0xa105, 0, 0)
+	s := sessionOf(t, c, seid)
+	c.mu.Lock()
+	before := s.snapshot()
+	c.mu.Unlock()
+	older, _, err := c.compileModel(s, &before, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(older.resources) != 0 {
+		t.Fatal("the unchanged model did not produce a resource-neutral delta")
+	}
+	newer, _, err := c.compile(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.fail = context.DeadlineExceeded
+	if err := c.apply(context.Background(), s, newer); err == nil {
+		t.Fatal("the newer write unexpectedly completed")
+	}
+	rec.fail = nil
+	if err := c.apply(context.Background(), s, older); err != nil {
+		t.Fatal(err)
+	}
+	// Only a new isolated write can reconcile the unknown result. A quota
+	// update that leaves forwarding unchanged otherwise needs no classifier.
+	if got := cause(t, c.Modify(query(seid, 2,
+		ie.NewUpdateURR(ie.NewURRID(7), ie.NewVolumeQuota(0x01, 2<<30, 0, 0))))); got != ie.CauseRequestAccepted {
+		t.Fatalf("reconciliation cause %d", got)
+	}
+	if got := len(changesFor(rec.last(), c.res(PDRUplink))); got != 1 {
+		t.Fatalf("reconciliation wrote %d classifiers, want the complete model", got)
 	}
 }
