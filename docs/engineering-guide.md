@@ -259,7 +259,7 @@ The rows below were measured that way on 2026-11-04: branch
 largest of its unit runs and the lanes' runs of it; a range is several runs.
 The lanes ran 12:20-12:33 IST with the 32768-buffer pool; `internal/session`
 ran 12:39-12:44.
-The two `cmd/churnbench` rows were added on 2026-11-07, Go1.27.2 at
+The two `cmd/churnbench` rows were added on 2026-11-07, Go 1.27.2 at
 `GOMAXPROCS=2`, using the same scoped/unscoped calibration and rounding.
 
 | Row | Declared MiB | `memory.peak` MiB | `ru_maxrss` / VmHWM MiB |

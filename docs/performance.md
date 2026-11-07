@@ -281,7 +281,7 @@ untimed reconciliation. A later preserved failure snapshot identified the
 product's unchanged 70%-of-Go-limit heap admission boundary: live heap
 3,018,422,936 bytes exceeded the approximately 3,006,477,107-byte threshold,
 with `upf_sessions_unadmitted_total=33738` and zero rejected BESS transactions.
-The original HTTP500 body was not retained; the runner now preserves error bodies
+The original HTTP 500 body was not retained; the runner now preserves error bodies
 and a failure snapshot before cleanup. Do not attribute every earlier kill
 or unobserved HTTP failure to this later diagnosed cause.
 
@@ -306,26 +306,26 @@ Nine arms completed: `nt5-base-tcp-1`, `nt5-cand-tcp-1`,
 Each arm has all seven modes at 1K, 10K and 100K offered cycles/s.
 
 - One million resident sessions; mutation/replacement selects that population.
-  Establish/delete use an extra65,536-session finite cohort. Sixteen resident
+  Establish/delete use an extra 65,536-session finite cohort. Sixteen resident
   sessions are synthetic UL/DL/reporting witnesses. Mutation/replacement offers
-  have a nominal30-second schedule; record actual offer/drain duration because
+  have a nominal 30-second schedule; record actual offer/drain duration because
   driver catch-up can extend an overloaded offer. Finite establishment/deletion
-  is not a30-second high-rate steady-state qualification.
-- Separate physical P-cores: UPFD CPU4, BESS control CPU6, packet worker CPU8;
-  driver CPU10–11. Monitoring avoids these cores and their siblings.
+  is not a 30-second high-rate steady-state qualification.
+- Separate physical P-cores: UPFD CPU 4, BESS control CPU 6, packet worker CPU 8;
+  driver CPU 10–11. Monitoring avoids these cores and their siblings.
 - AC online and turbo disabled in every recorded two-second policy sample.
   The initial thermal gate requires package ≤55°C and fan ≤3,000 RPM for
   60 seconds. CPUs remain shared with ordinary host tasks.
-- Native baseline/candidate use matched GCC16.2.1 `-O3 -DNDEBUG
-  -march=x86-64-v3`, no LTO/sanitizers; ordinary Go1.27.2 product binaries
+- Native baseline/candidate use matched GCC 16.2.1 `-O3 -DNDEBUG
+  -march=x86-64-v3`, no LTO/sanitizers; ordinary Go 1.27.2 product binaries
   use no profiling overlay or local SDK replacement.
 - NT5 explicitly uses `GOMAXPROCS=2` despite UPFD affinity to one logical CPU.
   This is a recorded runtime configuration, not the default-affinity runtime
   floor. The corrected runner uses one Go P; keep its follow-up separate.
-- Hard limits: BESS3,000 MiB, UPFD5,300 MiB, driver512 MiB,
-  aggregate7,872 MiB, no swap. The perf arm reserves 192 MiB extra only
+- Hard limits: BESS 3,000 MiB, UPFD 5,300 MiB, driver 512 MiB,
+  aggregate 7,872 MiB, no swap. The perf arm reserves 192 MiB extra only
   inside the BESS role; its daemon limit and aggregate budget are unchanged.
-- The first three arms ran November6; resumed arms ran November7. Observed
+- The first three arms ran November 6; resumed arms ran November 7. Observed
   PL1/PL2 changed from 58/82 W to 82/82 W between days without a write by this
   campaign. Preserve same-day comparisons and do not infer causation.
 
@@ -333,8 +333,8 @@ All **189 cells** reconcile to one million sessions, zero pending/uncertain
 or busy sessions, with clean BESS/UPFD exits. Every cell has positive UL/DL
 packet and report-acknowledgement deltas. No role/lane hard-limit or OOM event
 was recorded. Aggregate peaks span 6,644.0–7,004.9 MiB; some
-`sock_throttled` counters are nonzero. The perf BESS role peaks at3,008.9 MiB,
-above the plain role cap but within its explicit3,192 MiB recorder reserve.
+`sock_throttled` counters are nonzero. The perf BESS role peaks at 3,008.9 MiB,
+above the plain role cap but within its explicit 3,192 MiB recorder reserve.
 
 This is **not loss-free qualification**: overloaded cells have substantial
 UPFD socket receive drops and PFCP timeouts. Reconciliation repairs uncertain
@@ -372,27 +372,27 @@ cover successful survivors only, excluding timeouts/refusals.
 | Delete | 10,000 | 868–908 | 1,922–2,315 | 1,928–2,097 |
 | Delete | 100,000 | 396–449 | 285–923 | 251–760 |
 
-Quota-only URR emits **zero native applied transactions in all21 candidate
+Quota-only URR emits **zero native applied transactions in all 21 candidate
 URR cells**, versus one per completed cycle in both baseline passes. That
 gain removes unnecessary work; it is not a faster-RPC result.
 
 Do not claim blanket non-regression. In the same-day second TCP pair,
-replacement1K/10K falls52.2%/73.3%; establishment100K falls8.7% and
-deletion100K falls28.2%. The later bare candidate recovers replacement but
-establishment1K/10K falls to775/743 cycles/s, with survivor p99
-1,409/1,268 ms. The second Unix PDR10K cell reaches only750 cycles/s
-with survivor p99 about2,940 ms. Run order, heap state and overload sensitivity
-remain material; neither an all-mode1K SLA nor a universal Unix speedup follows.
+replacement 1K/10K falls 52.2%/73.3%; establishment 100K falls 8.7% and
+deletion 100K falls 28.2%. The later bare candidate recovers replacement but
+establishment 1K/10K falls to 775/743 cycles/s, with survivor p99
+1,409/1,268 ms. The second Unix PDR 10K cell reaches only 750 cycles/s
+with survivor p99 about 2,940 ms. Run order, heap state and overload sensitivity
+remain material; neither an all-mode 1K SLA nor a universal Unix speedup follows.
 
 ### Observer corroboration, not an overhead correction factor
 
 Same candidate release, same placement/payloads/budgets; only the indicated
-observer differs. Perf uses99 Hz user cycles, native DWARF8,192-byte stacks
+observer differs. Perf uses 99 Hz user cycles, native DWARF 8,192-byte stacks
 and Go frame-pointer stacks, active from child startup. The heap/runtime
 overlay uses forced-GC snapshots but **no Go CPU profiler**. Plain before/after
 arms have neither overlay nor sampler. Values are completed cycles/s.
 
-| Mode | Offered/s | Plain TCP2 | Perf | Heap/runtime | Plain TCP3 |
+| Mode | Offered/s | Plain TCP 2 | Perf | Heap/runtime | Plain TCP 3 |
 |---|---:|---:|---:|---:|---:|
 | FAR | 1,000 | 999 | 999 | 999 | 999 |
 | FAR | 10,000 | 2,966 | 3,866 | 4,142 | 4,123 |
@@ -416,9 +416,9 @@ arms have neither overlay nor sampler. Values are completed cycles/s.
 | Delete | 10,000 | 1,922 | 2,195 | 2,354 | 2,159 |
 | Delete | 100,000 | 285 | 367 | 983 | 923 |
 
-For example, perf FAR10K differs+30.4% from the preceding plain but−6.2%
-from the following plain. Perf replacement10K differs+225.2%/−59.6%.
-Overlay PDR10K differs−23.2%/−39.4%; perf URR10K differs−11.3%/−13.9%.
+For example, perf FAR 10K differs +30.4% from the preceding plain but −6.2%
+from the following plain. Perf replacement 10K differs +225.2%/−59.6%.
+Overlay PDR 10K differs −23.2%/−39.4%; perf URR 10K differs −11.3%/−13.9%.
 These quantify **observed differences**, not isolated observer cost.
 Plain-to-plain variability is too large to support one correction factor or
 to interpret an apparent observer speedup as negative sampling overhead.
@@ -429,7 +429,7 @@ Go attribution clips normal-release perf samples to explicit
 `CLOCK_MONOTONIC` measured windows and weights by cycle period.
 Exclusive precedence is GC/scavenging, BESS encoding/SDK/gRPC, compile/fold,
 remaining model/lifecycle, other session/reporting, remaining N4/codec,
-then other runtime. The table shows10K-offer cells, not wall latency,
+then other runtime. The table shows 10K-offer cells, not wall latency,
 all-process CPU or a general PFCP cost distribution.
 
 | Mode | GC/scavenging % | BESS encode/SDK/gRPC % | Compile/fold % | Remaining model % | Remaining N4/codec % |
@@ -461,43 +461,43 @@ denominator is completed cycles, not all received messages or native writes.
 | Establish | 30,194–30,438 | 389–396 |
 | Delete | 22,107–22,397 | 322–333 |
 
-Post-forced-GC live heap is2.403–2.644 GiB and scan heap1.676–1.839 GiB.
+Post-forced-GC live heap is 2.403–2.644 GiB and scan heap 1.676–1.839 GiB.
 Each before→after runtime interval includes exactly one forced GC, while the
 cgroup CPU window excludes those snapshots. Runtime GC CPU-class estimates
 are not physical CPU counters and can exceed cgroup CPU under this two-P,
 one-CPU configuration. Do not divide those mismatched numerators/denominators
 to derive a GC percentage.
 
-Allocation differentials identify concrete remaining work: URR10K repeatedly
-clones ID maps/records and parses PFCP; FAR10K allocates meter changes,
+Allocation differentials identify concrete remaining work: URR 10K repeatedly
+clones ID maps/records and parses PFCP; FAR 10K allocates meter changes,
 compiled values, rule keys, snapshots and protobuf/gRPC objects. Eliminating
 full snapshots requires preserving mutation/resolve/rollback/report ownership;
 reusing mutable records without that proof would corrupt recovery.
 
-For a first-principles scale check, holding FAR10K's measured22,784 B/cycle
-constant at100K accepted cycles/s implies2.278 GB/s of allocation. With
-roughly2.49 GiB live state, `GOGC=25` allows about0.62 GiB of growth before
-the nominal heap goal; repeatedly scanning1.74 GiB then implies roughly
+For a first-principles scale check, holding FAR 10K's measured 22,784 B/cycle
+constant at 100K accepted cycles/s implies 2.278 GB/s of allocation. With
+roughly 2.49 GiB live state, `GOGC=25` allows about 0.62 GiB of growth before
+the nominal heap goal; repeatedly scanning 1.74 GiB then implies roughly
 6 GB/s of scan work. This is idealized arithmetic, excluding roots, pacing
-and changed workload behavior, **not a measured100K run**. Reducing retained
+and changed workload behavior, **not a measured 100K run**. Reducing retained
 pointers and per-change garbage addresses that amplification; shared-memory
 RPC alone does not.
 
-Native perf excludes the packet-worker TID and retains18,015 non-packet
-samples across all21 cells. Complete task metadata shows **one thread birth
-and one exit across1,280,079 applied native transactions**. Additional idle
+Native perf excludes the packet-worker TID and retains 18,015 non-packet
+samples across all 21 cells. Complete task metadata shows **one thread birth
+and one exit across 1,280,079 applied native transactions**. Additional idle
 poller tuning is not the supported next cut.
 
-Independent sampled-IP buckets put25.24% of native non-packet user cycles in
-gRPC/gpr libraries and38.34% in libc. These are instruction locations, not
+Independent sampled-IP buckets put 25.24% of native non-packet user cycles in
+gRPC/gpr libraries and 38.34% in libc. These are instruction locations, not
 complete transport costs. Native DWARF ancestry is incomplete and
 decode-range sensitive; do not subtract observed engine/codec ancestry from
 100% and label the remainder transport.
 
-The periodic `mallinfo2` free-list walk alone has21.57% observed inclusive
-native non-packet cycles,19.55% across the14 high-offer cells. It belongs to
+The periodic `mallinfo2` free-list walk alone has 21.57% observed inclusive
+native non-packet cycles, 19.55% across the 14 high-offer cells. It belongs to
 maintenance, not admission or metrics. Existing admission already uses a
-conservative1 MiB cache and refreshes/trims before refusal.
+conservative 1 MiB cache and refreshes/trims before refusal.
 
 Do **not** remove or merely slow that allocator check: it reclaims unadmitted
 garbage under a reserve/4 retention bound. RSS-growth-only gating misses
@@ -508,7 +508,7 @@ admission checks and strict-budget tests before acceptance.
 ### Evidence and equipment-rating limits
 
 Local root: `.scratch/evidence/nonshm-control/`. Retain each named
-`campaign.json`,21 reconciliation files, `samples.jsonl`, role process/final
+`campaign.json`, 21 reconciliation files, `samples.jsonl`, role process/final
 metadata, saved runner, `release-provenance.json`, compile commands and raw
 perf/heap files. Summaries: `nt5-completion-audit.json` and
 `nt5-go-cycle-attribution.json`; analysis also preserves every cell's latency,
@@ -517,7 +517,7 @@ counts, socket drops, resource peaks and observer comparison.
 One million resident sessions is a demonstrated workload population, **not a
 maximum session rating**. This is session-major appliance control qualification,
 not graph forwarding equivalence, a NIC/Gbit/s rating, all-session charging
-capacity, HA/failover performance, or formal3GPP conformance certification.
+capacity, HA/failover performance, or formal 3GPP conformance certification.
 The existing functional lanes separately cover graph/appliance enforcement,
 quota reporting and restart/replay. Any equipment spec must state those limits,
 rule mix, active-session/report load, memory/core allocation, accepted goodput,
@@ -525,18 +525,18 @@ loss and tail latency instead of presenting offered rate as capacity.
 
 ## 2026-11-07: one Go P is not an oversubscription cure
 
-NT6 changes only UPFD`GOMAXPROCS=2` to1 on the same CPU4, retaining
-binary hashes, payloads,`GOGC=25`, admission and budgets. **Five arms complete
-all21 cells:** two baseline TCP plains, two candidate TCP plains and one
-separate candidate perf arm. The heap/runtime arm remains partial with15 cells.
-Both pair orders and all105 complete plus15 partial rows are retained.
+NT6 changes only UPFD `GOMAXPROCS=2` to 1 on the same CPU 4, retaining
+binary hashes, payloads, `GOGC=25`, admission and budgets. **Five arms complete
+all 21 cells:** two baseline TCP plains, two candidate TCP plains and one
+separate candidate perf arm. The heap/runtime arm remains partial with 15 cells.
+Both pair orders and all 105 complete plus 15 partial rows are retained.
 
 **Do not infer a universal one-P improvement or blanket non-regression.**
-Initial establishment100K goodput falls61.23%, with survivor p99 increasing
-from155.67 to1,146.37 ms. The closing plain recovers to1,218.83 versus
-baseline1,020.72 cycles/s, but p99 still worsens37.20% and UPFD CPU/completion
-18.14%. Closing deletion100K improves goodput5.26% while UPFD
-CPU/completion worsens579.33%. Short cohorts and differing GC/host state limit
+Initial establishment 100K goodput falls 61.23%, with survivor p99 increasing
+from 155.67 to 1,146.37 ms. The closing plain recovers to 1,218.83 versus
+baseline 1,020.72 cycles/s, but p99 still worsens 37.20% and UPFD CPU/completion
+18.14%. Closing deletion 100K improves goodput 5.26% while UPFD
+CPU/completion worsens 579.33%. Short cohorts and differing GC/host state limit
 causal attribution; unfavorable results are not averaged away.
 
 ### Finished one-P plain-product goodput
@@ -579,10 +579,10 @@ identical; neither runtime nor observer differences are isolated causal costs.
 
 ### Actual offers and observer corroboration
 
-The frozen driver catches up nominal attempts: baseline PDR100K offers for
-80.584 seconds rather than30; closing candidate URR100K offers for66.948
-seconds. These are **not sustained100K/s offered or accepted capacities**.
-Across completed arms, the100K-target cells actually send:
+The frozen driver catches up nominal attempts: baseline PDR 100K offers for
+80.584 seconds rather than 30; closing candidate URR 100K offers for 66.948
+seconds. These are **not sustained 100K/s offered or accepted capacities**.
+Across completed arms, the 100K-target cells actually send:
 
 | Mode | Initial logical requests / actual offer second |
 |---|---:|
@@ -594,49 +594,49 @@ Across completed arms, the100K-target cells actually send:
 | Establish, finite cohort | 24,413–54,324 |
 | Delete, finite cohort | 99,838–99,886 |
 
-Use`Sent / offer_seconds`, not replacement`WireSent`, which also includes
-follow-up establishments during drain. Historical`BusySkips` combines busy
+Use `Sent / offer_seconds`, not replacement `WireSent`, which also includes
+follow-up establishments during drain. Historical `BusySkips` combines busy
 and uncertain slots; replacement shortfall is not purely a slow pacer.
 
 Both final plain repeats corroborate the sampled arm. For example, perf
-PDR10K goodput differs−19.9%/−21.0% from the before/after plains; perf URR100K
-differs−47.7%/+22.4%. Full21-cell comparisons retain goodput, latency and CPU
+PDR 10K goodput differs −19.9%/−21.0% from the before/after plains; perf URR 100K
+differs −47.7%/+22.4%. Full 21-cell comparisons retain goodput, latency and CPU
 differences; the partial heap arm has six missing E/D cells, never zeros.
 There is still no defensible scalar instrumentation correction.
 
 ### One-P profiles
 
-The normal-product perf arm retains39,611 UPFD samples in the exact21
-measured windows. Exclusive period-weighted **GC/scavenging is66.88%**,
-largest in19 cells, versus63.64% in the separate NT5 two-P profile.
+The normal-product perf arm retains 39,611 UPFD samples in the exact 21
+measured windows. Exclusive period-weighted **GC/scavenging is 66.88%**,
+largest in 19 cells, versus 63.64% in the separate NT5 two-P profile.
 Those mixed-workload fractions are not matched CPU-cost ratios.
-All nine FAR/PDR/QER cells have1.111–1.316× the prior profile's sampled
+All nine FAR/PDR/QER cells have 1.111–1.316× the prior profile's sampled
 cycles/completion, including failed/background work. No large eliminated
-oversubscription tax is demonstrated. Runtime/other falls1.66%→1.00%,
+oversubscription tax is demonstrated. Runtime/other falls 1.66%→1.00%,
 but that residual is not a complete scheduling-cost counter.
 
-Native profiling independently retains21,959 non-packet samples. It observes
-three births/three exits across1,151,790 applied transactions; worker reuse
-remains effective. `mallinfo2` maintenance has26.07% observed inclusive
-non-packet user cycles,24.84% in high-offer cells. Native DWARF still has
+Native profiling independently retains 21,959 non-packet samples. It observes
+three births/three exits across 1,151,790 applied transactions; worker reuse
+remains effective. `mallinfo2` maintenance has 26.07% observed inclusive
+non-packet user cycles, 24.84% in high-offer cells. Native DWARF still has
 range-sensitive missing ancestors; these fractions cannot establish a
 transport share or predict a speedup from deleting maintenance.
 
-The heap/runtime overlay is **partial and unqualified**:15 timed cells,
-then HTTP500 timeout in the initial untimed resolve/re-establish batch after
-replacement100K. Server population is1M; driver holds999,990 with128 uncertain
+The heap/runtime overlay is **partial and unqualified**: 15 timed cells,
+then HTTP 500 timeout in the initial untimed resolve/re-establish batch after
+replacement 100K. Server population is 1M; driver holds 999,990 with 128 uncertain
 and zero pending. No admission rejection, native rejection, role/lane
 hard-limit or OOM event explains it; daemons later exit cleanly. Significant
 page reclaim/major faults and elevated load are observed, but cause is
 unestablished. Do not treat cleanup as successful reconciliation or retry
 until obtaining a favorable result and discard this failure.
 
-Partial-overlay endpoints confirm one Go P and still scan about1.81–1.88 GB
+Partial-overlay endpoints confirm one Go P and still scan about 1.81–1.88 GB
 after forced GC. Per-cell runtime intervals again include one forced GC;
 their CPU estimates are not divided by physical cgroup CPU.
-Local evidence includes`nt6-final-analysis.{md,json}`,`nt6-final-rows.csv`,
-`nt6-final-pairs.csv`, the preserved initial`nt6-campaign-analysis.{md,json}`,
-`nt6-go-profile.{md,json}`,`nt6-native-profile.{md,json}` and reproducible
+Local evidence includes `nt6-final-analysis.{md,json}`, `nt6-final-rows.csv`,
+`nt6-final-pairs.csv`, the preserved initial `nt6-campaign-analysis.{md,json}`,
+`nt6-go-profile.{md,json}`, `nt6-native-profile.{md,json}` and reproducible
 `nt6-go-profile-analyzer.py`, beside raw campaign/profile files.
 
 ## 2026-11-05: one-million-session control-plane baseline
@@ -1050,8 +1050,8 @@ On this laptop, the corrected layout is UPFD 4 (physical core 2), BESS control
 Monitoring uses 0–3,12–19, avoiding all four workload cores and their siblings.
 This pins the campaign; it does not isolate those CPUs from other host tasks.
 
-The runner defaults UPFD to`GOMAXPROCS=1` for its one-logical-CPU affinity.
-Use`--upfd-gomaxprocs` to record a different runtime policy explicitly; one P
+The runner defaults UPFD to `GOMAXPROCS=1` for its one-logical-CPU affinity.
+Use `--upfd-gomaxprocs` to record a different runtime policy explicitly; one P
 is not a demonstrated universal speedup. N4 worker concurrency remains eight,
 not the number of available CPUs. Keep the one-P and two-P experiments separate.
 
@@ -1079,13 +1079,13 @@ turbo checks remain outside this repository.
 | `qer` | Alternate the UL gate and change its MBR | modifications/s offered |
 | `urr` | Change the UL volume quota | modifications/s offered |
 
-Defaults:1,000,000 resident sessions, an extra65,536-session cohort, targets
-1K/10K/100K cycles/s and nominal30-second modification/replacement schedules.
+Defaults: 1,000,000 resident sessions, an extra 65,536-session cohort, targets
+1K/10K/100K cycles/s and nominal 30-second modification/replacement schedules.
 The current driver stops new attempts at the offer deadline, allowing one
-pacing tick, and records producer shortfall in`PacerSkips` rather than
-extending the offer indefinitely. Frozen NT5/NT6 driver`1d9132e4…` used the
+pacing tick, and records producer shortfall in `PacerSkips` rather than
+extending the offer indefinitely. Frozen NT5/NT6 driver `1d9132e4…` used the
 older catch-up policy; do not apply the new semantics retroactively.
-Each session has two PDRs, two FARs, one UL QER and one UL volume-quota URR. Only16 resident
+Each session has two PDRs, two FARs, one UL QER and one UL volume-quota URR. Only 16 resident
 sessions are active traffic/reporting witnesses: this does **not** qualify
 one million simultaneously active UEs or forwarding capacity. Witnesses have
 one-second periodic reports; the driver acknowledges them, and the server's
@@ -1110,7 +1110,7 @@ with outstanding requests after its bounded drain is invalid.
 
 ### Post-NT6 driver correction and verification
 
-The frozen driver scans every pending request each100 ms. At500K future
+The frozen driver scans every pending request each 100 ms. At 500K future
 outstanding requests, a disposable, plain algorithm fixture measures the old
 idle scan against the new ordered queue:
 
@@ -1120,7 +1120,7 @@ idle scan against the new ordered queue:
 | 500,000 | 23.06–24.50 ms | 20.16 ns |
 
 Three repeats, zero allocation per idle tick, same future records, one physical
-client core/SMT pair,`GOMAXPROCS=4`,`GOGC=25`. This is algorithm cost, **not an
+client core/SMT pair, `GOMAXPROCS=4`, `GOGC=25`. This is algorithm cost, **not an
 end-to-end UPF speedup**. Source/output provenance is retained in
 `driver-expiry-cost-smoke.{go,json}`; the temporary benchmark is removed.
 
@@ -1133,14 +1133,14 @@ uncertainty. No request timeout, payload or reconciliation retry policy changes.
 Reconciliation still fails visibly if uncertainty remains; the earlier failed
 overlay is not erased by new retries.
 
-Actual-program verification completes all21 cells with the final plain driver
-over TCP, then all21 with its race build over Unix gRPC and explicit UPFD
+Actual-program verification completes all 21 cells with the final plain driver
+over TCP, then all 21 with its race build over Unix gRPC and explicit UPFD
 `--upfd-gomaxprocs 2`. The runtime endpoint confirms two Ps in that second run.
-Both use256 resident sessions/cohort128 and nominal two-second schedules,
+Both use 256 resident sessions/cohort 128 and nominal two-second schedules,
 preserve exact scheduling partitions, reconcile populations and exit daemons
 cleanly. Producer skips and overload timeouts are recorded, not hidden.
 These small functional smokes are not new million-session ratings.
-Evidence:`smoke-fifo-final-plain`,`smoke-fifo-final-race-p2` and
+Evidence: `smoke-fifo-final-plain`, `smoke-fifo-final-race-p2` and
 `driver-fifo-final-smoke-audit.json`.
 
 Snapshots include actual driver socket buffer sizes, client/server socket
@@ -1247,10 +1247,10 @@ snapshots, role exits and aggregate-slice cleanup.
   the race detector. The dropping-PDR tunnel-handover regression failed before
   the fix and passed after it for graph and appliance.
 - After the final driver changes, the complete capped Go pass and focused
-  churn-driver race tests pass. The synchronized budget gate has35 rows:
+  churn-driver race tests pass. The synchronized budget gate has 35 rows:
   nine Go packages plain/race, two meson tests and fourteen lanes. The new
-  driver-test rows are calibrated32 MiB each; no existing budget is raised.
-- Compiler/model changes are committed as`32ffaa3`; the measured product
+  driver-test rows are calibrated 32 MiB each; no existing budget is raised.
+- Compiler/model changes are committed as `32ffaa3`; the measured product
   binaries remain the frozen pre-commit builds recorded by SHA256, not
   relabeled as new bit-identical builds.
 - BESS changes are published in [draft PR #149](https://github.com/krsna1729/bess/pull/149),
