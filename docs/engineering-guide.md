@@ -29,7 +29,7 @@ this page does not repeat it.
 | The plugin (`datapath/`) | [datapath.md](datapath.md); the BESS engineering guide |
 | The BESS pin, a transaction shape, a refusal | §4 of this page |
 | A lane or a test | §5 of this page |
-| A number in a doc | §6 of this page |
+| Performance or a number in a doc | §6 of this page; [performance.md](performance.md) (dated CPU attribution, evidence and improvement loop) |
 
 ## 2. Go control plane at scale
 
@@ -120,8 +120,8 @@ The pinned release is Release 16 ([spec/README.md](spec/README.md)).
 
 ## 4. The BESS interface
 
-One PFCP message is one BESS transaction (design.md "The control path in
-one sentence").
+A PFCP message that changes dataplane state uses one atomic BESS transaction;
+model-only changes can need none (design.md "The control path in one sentence").
 
 1. **Follow the engine's rules, not the fake's.** The engine refuses a
    second operation on one (resource, key) in a transaction (0ac7d0c). It
@@ -259,6 +259,8 @@ The rows below were measured that way on 2026-11-04: branch
 largest of its unit runs and the lanes' runs of it; a range is several runs.
 The lanes ran 12:20-12:33 IST with the 32768-buffer pool; `internal/session`
 ran 12:39-12:44.
+The two `cmd/churnbench` rows were added on 2026-11-07, Go 1.27.2 at
+`GOMAXPROCS=2`, using the same scoped/unscoped calibration and rounding.
 
 | Row | Declared MiB | `memory.peak` MiB | `ru_maxrss` / VmHWM MiB |
 |---|---|---|---|
@@ -288,6 +290,8 @@ ran 12:39-12:44.
 | `go-race cmd/n4bench` | 40 | 15.4 | 26.0 |
 | `go-race internal/n4` | 40 | 21.1 | 30.7 |
 | `go-race internal/scaletest` | 40 | 27.1 | 31.0 |
+| `go cmd/churnbench` | 32 | 2.5 | 19.9 |
+| `go-race cmd/churnbench` | 32 | 16.1 | 20.9 |
 | `go internal/n4` | 32 | 5.2 | 20.0 |
 | `go-race internal/n4sim` | 32 | 15.1 | 19.9 |
 | `go-race internal/routing` | 32 | 15.5 | 20.8 |
@@ -366,6 +370,11 @@ the BESS
 4. **Report counts, not only time.** Instructions per packet reproduce to
    0.2 between runs; ns do not (design.md). Scale and garbage claims are
    allocation and byte shares (744837d, 190d996), not latency.
+5. **Corroborate observers with plain product runs.** Always pair
+   instrumentation/sampling with a matching uninstrumented binary and report
+   its overhead. Sampling disabled is not instrumentation removed. Keep source,
+   workload, population and resource policy matched; see
+   [the observer-overhead gate](performance.md#mandatory-observer-overhead-corroboration).
 
 ## 7. Pull requests
 

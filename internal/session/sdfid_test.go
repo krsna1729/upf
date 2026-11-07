@@ -8,6 +8,8 @@ import (
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
+
+	"github.com/krsna1729/upf/internal/bess"
 )
 
 // A bidirectional SDF filter (TS 29.244 5.2.1A.3) is provisioned by ID: one
@@ -144,6 +146,13 @@ func TestADefinitionChangeRewritesTheReferencingPDRsRule(t *testing.T) {
 				ie.NewSDFFilter("permit out udp from any 54 to assigned", "", "", "", 7)),
 			ie.NewFARID(2)),
 	)
+	// A refused definition must also roll its indirect references back. The
+	// retry must erase port 53, not the refused port 54.
+	rec.fail = &bess.RejectedError{}
+	if got := cause(t, c.Modify(mod)); got == ie.CauseRequestAccepted {
+		t.Fatal("a rejected definition change was accepted")
+	}
+	rec.fail = nil
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
 	}

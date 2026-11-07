@@ -48,12 +48,36 @@ func (t sessionTarget) SweepResources() []string {
 	return names
 }
 
-// apply writes one session's changes: as they are, or, under -target
-// session-major, folded into the session's one entry. gone is the session's
-// deletion. A fold refusal is definite (nothing was sent).
-func (c *Compiler) apply(ctx context.Context, s *Session, changes []bess.Change, gone bool) error {
+type sessionEntryWrite uint8
+
+const (
+	replaceSessionEntry sessionEntryWrite = iota
+	keepSessionEntry
+	eraseSessionEntry
+)
+
+// apply writes a compiled model, including its immutable entry decision.
+// A fold refusal is definite (nothing was sent).
+func (c *Compiler) apply(ctx context.Context, s *Session, write modelWrite) (result error) {
+	changes := write.resources
+	// Pair every successful compile with completion, even a local fold
+	// refusal or a resource-neutral modification. Overlap makes the base
+	// uncertain until a later isolated full write completes.
+	defer func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		s.inflight--
+		if result != nil {
+			s.rewrite = true
+		} else if !s.overlap {
+			s.rewrite = false
+		}
+		if s.inflight == 0 {
+			s.overlap = false
+		}
+	}()
 	if _, ok := c.target.(sessionTarget); ok {
-		folded, err := c.foldSession(s, changes, gone)
+		folded, err := c.foldSession(s, changes, write.entry)
 		if err != nil {
 			return err
 		}
@@ -68,17 +92,20 @@ func (c *Compiler) apply(ctx context.Context, s *Session, changes []bess.Change,
 		// committed, so the deletion erases the entry (and a refusal of that
 		// erase for a key that is not there is the leak-safe failure).
 		c.mu.Lock()
-		s.sessionLive = !gone
+		s.sessionLive = true
 		c.mu.Unlock()
 	}
 	return err
 }
 
-// foldSession turns a compile's changes into the session's entry. A compile
-// writes every record the session holds (and erases what it no longer does),
-// so the entry is its upserts of the session tables; their erases have no
-// meaning beyond the entry and are dropped. The deletion erases the entry.
-func (c *Compiler) foldSession(s *Session, changes []bess.Change, gone bool) ([]bess.Change, error) {
+// foldSession folds full records into a replacement entry, drops entry-owned
+// deltas when the resolved entry is unchanged, or erases the entry. The mode
+// belongs to this compile: concurrent enforcement cannot turn an empty,
+// resource-neutral plan into an empty replacement entry.
+func (c *Compiler) foldSession(s *Session, changes []bess.Change, mode sessionEntryWrite) ([]bess.Change, error) {
+	if mode == keepSessionEntry && len(changes) == 0 {
+		return nil, nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	mine := map[string]Table{}
@@ -86,24 +113,22 @@ func (c *Compiler) foldSession(s *Session, changes []bess.Change, gone bool) ([]
 		mine[c.res(t)] = t
 	}
 	sessionsRes := c.cfg.Appliance + "/sessions"
-	out := make([]bess.Change, 0, len(changes)+1)
-	var session []bess.Change
+	// Reserve the first slot for the session entry, ahead of its policies.
+	out := make([]bess.Change, 1, len(changes)+1)
 	for _, ch := range changes {
 		if _, ok := mine[ch.Resource]; ok {
-			if ch.Value != nil {
-				session = append(session, ch)
-			}
 			continue
 		}
 		out = append(out, ch)
 	}
-	if gone {
-		if s.sessionLive {
+	if mode != replaceSessionEntry {
+		out = out[1:]
+		if mode == eraseSessionEntry && s.sessionLive {
 			out = append(out, bess.Change{Resource: sessionsRes, Key: map[string]any{"session_id": s.sessionID}})
 		}
 		return out, nil
 	}
-	value, positions, err := c.sessionValue(s, session, mine)
+	value, positions, err := c.sessionValue(s, changes, mine)
 	if err != nil {
 		return nil, err
 	}
@@ -139,8 +164,9 @@ func (c *Compiler) foldSession(s *Session, changes []bess.Change, gone bool) ([]
 		out[i].Value = v
 	}
 	// The entry first: a policy's tunnels are positions in it.
-	return append([]bess.Change{{Resource: sessionsRes,
-		Key: map[string]any{"session_id": s.sessionID}, Value: value}}, out...), nil
+	out[0] = bess.Change{Resource: sessionsRes,
+		Key: map[string]any{"session_id": s.sessionID}, Value: value}
+	return out, nil
 }
 
 // sessionValue is the UpfSession the session's appliance writes make, and the
@@ -151,7 +177,11 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 	tunnels := map[uint32]map[string]any{}
 	counted := map[uint32]bool{}
 	for _, ch := range writes {
-		switch mine[ch.Resource] {
+		t, ok := mine[ch.Resource]
+		if !ok || ch.Value == nil {
+			continue
+		}
+		switch t {
 		case FTEIDs:
 			fteids = append(fteids, ch)
 		case PDRUplink, PDRDownlink:
@@ -169,12 +199,15 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 	// entry, as the masked layout keeps its counter entry.
 	owners := map[string]*pdr{}
 	for _, p := range s.PDRs.all() {
-		keys, err := p.ruleKeys(c.direction(p).PDRFields)
+		if !p.drop || p.buffer || !counted[p.actionID] {
+			continue
+		}
+		ids, _, err := c.pdrRuleIDs(p)
 		if err != nil {
 			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
 		}
-		for _, key := range keys {
-			owners[changeID(c.res(pdrTable(p.downlink())), key)] = p
+		for id := range ruleIdentities(ids) {
+			owners[id] = p
 		}
 	}
 
@@ -248,7 +281,7 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 				}
 				a[field] = uint32(pos)
 			}
-		} else if p := owners[changeID(ch.Resource, ch.Key)]; p != nil && counted[p.actionID] {
+		} else if p := owners[ch.Resource+"\x00"+ruleID(ch.Key)]; p != nil && counted[p.actionID] {
 			id = p.actionID
 			action(id)
 		}

@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"math"
 	"net"
 	"net/netip"
@@ -583,7 +584,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 		return c.establishResponse(req, cpSEID, local, compileCause(err), nil)
 	}
 
-	changes, created, err := c.compile(s)
+	changes, created, err := c.compileModel(s, nil, true)
 	if err != nil {
 		c.log.Warn("session: cannot compile the establishment request",
 			"cp_seid", cpSEID, "error", err)
@@ -595,7 +596,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 		c.mu.Unlock()
 		return c.establishResponse(req, cpSEID, local, compileCause(err), nil)
 	}
-	if err := c.apply(context.Background(), s, changes, false); err != nil {
+	if err := c.apply(context.Background(), s, changes); err != nil {
 		c.log.Warn("session: the dataplane refused the session",
 			"cp_seid", cpSEID, "seid", local, "error", err)
 		// A definite refusal means nothing of this session is in the dataplane,
@@ -622,17 +623,13 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 	c.checkpoint(kindEstablish, local, req)
 
 	c.log.Info("session: established", "cp_seid", cpSEID, "seid", local,
-		"ue_ip", s.UEIP.String(), "pdrs", s.PDRs.len(), "changes", len(changes))
+		"ue_ip", s.UEIP.String(), "pdrs", s.PDRs.len(), "changes", len(changes.resources))
 	return c.establishResponse(req, cpSEID, local, ie.CauseRequestAccepted, created)
 }
 
-// Modify implements n4.SessionHandler: the request's lists are merged into the
-// session and the whole session is rewritten in one transaction. Rewriting
-// what did not change is idempotent (the daemon applies resource contents, not
-// commands), and it keeps one code path for every modification shape; the
-// per-record optimizations of docs/design.md ("Modification semantics") can
-// narrow it later without changing what the dataplane holds.
-// Modify implements n4.SessionHandler.
+// Modify implements n4.SessionHandler. The merged model is resolved and
+// validated in full; unchanged immutable selectors and resource values do not
+// need to be materialized again for the graph or masked appliance.
 func (c *Compiler) Modify(req *message.SessionModificationRequest) message.Message {
 	resp := c.modify(req)
 	if answerCause(resp) == ie.CauseRequestAccepted {
@@ -668,10 +665,9 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	rm := parseRemovals(ies)
 
 	// Table 7.5.5.1-1: a Created PDR rides on a Modification Response only for
-	// a PDI that asked the UP function to choose its F-TEID. The compile
-	// re-states every PDR's tunnel, which is right for an establishment's
-	// answer and wrong here: a real SMF's modification (free5GC's downlink
-	// Update PDR) asked for none, and was answered with one.
+	// a PDI that asked the UP function to choose its F-TEID. An establishment
+	// restates every PDR's tunnel, but a modification must not answer with a
+	// tunnel the SMF did not ask to create.
 	asked := map[uint16]bool{}
 	for _, p := range pdrs {
 		if p.hasFTEID && p.teid == 0 {
@@ -739,7 +735,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
 
-	changes, _, err := c.compile(s)
+	changes, _, err := c.compileModel(s, &before, false)
 	if err != nil {
 		c.mu.Lock()
 		c.rollback(s, before)
@@ -748,7 +744,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
 	created := s.createdPDRsFor(c.cfg, asked)
-	if err := c.apply(context.Background(), s, changes, false); err != nil {
+	if err := c.apply(context.Background(), s, changes); err != nil {
 		if definiteRefusal(err) {
 			c.mu.Lock()
 			c.rollback(s, before)
@@ -811,10 +807,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		}
 	}
 
-	c.mu.Lock()
-	c.mu.Unlock()
-
-	c.log.Info("session: modified", "seid", seid, "pdrs", s.PDRs.len(), "changes", len(changes))
+	c.log.Info("session: modified", "seid", seid, "pdrs", s.PDRs.len(), "changes", len(changes.resources))
 	c.checkpoint(kindModify, s.LocalSEID, req)
 	// The queried URRs' next window opens now that the SMF has what this one
 	// held; a request that failed above leaves it open, so the usage is
@@ -916,8 +909,21 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	urrs []urrReq, mars []marReq, rm removals) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s.invalidateOrderCache()
-	defer s.invalidateOrderCache()
+	// Only replacing/mutating the corresponding collection can invalidate its
+	// ordered pointer slice. A FAR/BAR update changes resolved values, not
+	// PDR/QER/MAR membership or the URR link graph.
+	if len(pdrs) != 0 || len(rm.pdrs) != 0 {
+		s.cachedPDRs = nil
+	}
+	if len(qers) != 0 || len(rm.qers) != 0 {
+		s.cachedQERs = nil
+	}
+	if len(mars) != 0 || len(rm.mars) != 0 {
+		s.cachedMARs = nil
+	}
+	if len(pdrs) != 0 || len(rm.pdrs) != 0 || len(urrs) != 0 || len(rm.urrs) != 0 {
+		s.cachedGroups = nil
+	}
 
 	for _, q := range qers {
 		entry := s.QERs.at(q.id)
@@ -1256,7 +1262,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			if old.hasUEIP {
 				pdr.ueIP, pdr.hasUEIP = old.ueIP, true
 			}
-			pdr.sdfs, pdr.qfis = slices.Clone(old.sdfs), slices.Clone(old.qfis)
+			pdr.sdfs, pdr.qfis = old.sdfs, old.qfis
 			pdr.fteidIPv4, pdr.fteidIPv6 = old.fteidIPv4, old.fteidIPv6
 		}
 		var err error
@@ -1429,15 +1435,22 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		unlinkFromPDRs(s, id, func(p *pdr) *[]uint32 { return &p.urrIDs })
 		s.URRs.del(id)
 	}
-	if err := resolveSDFIDs(s); err != nil {
-		return err
-	}
-	for _, p := range s.PDRs.all() {
-		down, err := pdrDownlink(p.srcIfc, p.hasUEIP, p.ueIPDst, p.sdfs)
-		if err != nil {
-			return fmt.Errorf("PDR %d: %w", p.id, err)
+	// Only PDR membership/PDIs can change SDF definitions or packet direction.
+	// FAR, QER, URR, BAR and MAR changes still go through resolve below.
+	if len(pdrs) != 0 || len(rm.pdrs) != 0 {
+		if err := resolveSDFIDs(s); err != nil {
+			return err
 		}
-		p.down = down
+		for _, p := range s.PDRs.all() {
+			down, err := pdrDownlink(p.srcIfc, p.hasUEIP, p.ueIPDst, p.sdfs)
+			if err != nil {
+				return fmt.Errorf("PDR %d: %w", p.id, err)
+			}
+			if p.down != down {
+				p.ruleIDs = ""
+			}
+			p.down = down
+		}
 	}
 	tunnelDirections := map[uint32]bool{}
 	for _, p := range s.PDRs.all() {
@@ -1449,12 +1462,8 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 		tunnelDirections[p.teid] = p.down
 	}
-	// What the request's objects mean for each PDR (resolve): a modification
-	// that leaves the model unfaithful to itself is refused before the compile
-	// that would write it.
-	if err := c.resolve(s); err != nil {
-		return err
-	}
+	// Resolution and cross-rule validation run once in compileModel, under
+	// its lock, so intervening usage enforcement is included in the write.
 	return nil
 }
 
@@ -1713,6 +1722,7 @@ func (c *Compiler) resolve(s *Session) error {
 		}
 	}
 	for _, p := range pdrsInOrder(s) {
+		oldDomain, oldUEIP, oldRelay := p.domain, p.ueIP, p.relay
 		far := s.FARs.at(p.farID)
 		dir := c.direction(p)
 		ifc, err := c.interfaceFor(p)
@@ -1976,6 +1986,14 @@ func (c *Compiler) resolve(s *Session) error {
 			// and an address pool").
 			return fmt.Errorf("%w: PDR %d's address %s is outside the pool of the network instance %q",
 				errNotExpressible, p.id, p.ueIP, ifc.Instance)
+		}
+		if len(p.ruleIDs) != 0 && (p.domain != oldDomain || p.ueIP != oldUEIP || p.relay != oldRelay) {
+			// A FAR can change whether a local F-TEID relays other UEs'
+			// packets. Its old selector must be erased just like a new PDI's.
+			old := *p
+			old.domain, old.ueIP, old.relay = oldDomain, oldUEIP, oldRelay
+			s.changes().stale = append(s.changes().stale, &old)
+			p.ruleIDs = ""
 		}
 	}
 	return nil
@@ -2277,7 +2295,6 @@ func unlinkFromPDRs(s *Session, id uint32, ids func(*pdr) *[]uint32) {
 			continue
 		}
 		old := *p
-		old.sdfs = slices.Clone(p.sdfs)
 		s.changes().stale = append(s.changes().stale, &old)
 		*list = slices.DeleteFunc(slices.Clone(*list), func(v uint32) bool { return v == id })
 	}
@@ -2472,10 +2489,98 @@ func (c *Compiler) writeBufferCounter(p *pdr) []bess.Change {
 	}}
 }
 
-// qerHoldsMeter reports whether the meter a removed PDR was policed by still
-// belongs to a QER the session holds. compile writes a meter for every QER with
-// a rate whether or not a PDR names it, so erasing one of those in the same
-// transaction would be a second operation on its key -- the engine rejects it.
+// Compare dataplane dependencies, not PFCP object identity: rate-only QER
+// updates need meters but not classifiers, and FAR endpoint changes need
+// tunnels but not classifiers or usage-counter upserts.
+func samePDRRule(old, p *pdr) bool {
+	return old != nil && old.ruleIDs == p.ruleIDs &&
+		old.down == p.down && old.precedence == p.precedence &&
+		old.drop == p.drop && old.buffer == p.buffer &&
+		old.actionID == p.actionID && old.ownMeterID == p.ownMeterID &&
+		old.sharedMeterID == p.sharedMeterID && old.nextHop == p.nextHop &&
+		old.resultDomain == p.resultDomain && old.hasMAR == p.hasMAR &&
+		old.policyID == p.policyID
+}
+
+func samePDRCounter(old, p *pdr) bool {
+	return old != nil && old.down == p.down && old.actionID == p.actionID &&
+		(len(old.urrIDs) != 0) == (len(p.urrIDs) != 0)
+}
+
+func samePDRTunnel(before *modelSnapshot, s *Session, p *pdr) bool {
+	if before == nil {
+		return false
+	}
+	old := before.pdrs.at(p.id)
+	// Drop/buffer compiles can resolve a FAR without publishing its tunnel.
+	// Their model is not a written baseline when forwarding resumes.
+	if old == nil || old.drop || old.buffer || old.tunnel != p.tunnel || old.writtenTunnel != p.tunnel ||
+		old.actionID != p.actionID || old.tunnelLocalAddress != p.tunnelLocalAddress ||
+		old.transportRouteDomain != p.transportRouteDomain ||
+		old.hasEncapQFI != p.hasEncapQFI || old.encapQFI != p.encapQFI {
+		return false
+	}
+	a, b := before.fars.at(old.farID), s.FARs.at(p.farID)
+	return a != nil && b != nil && a.teid == b.teid && a.peer == b.peer &&
+		a.hasMarking == b.hasMarking && a.marking == b.marking
+}
+
+func sameQERMeter(before *modelSnapshot, q *qer, down bool) bool {
+	if before == nil {
+		return false
+	}
+	old := before.qers.at(q.id)
+	if old == nil || !old.hasRate || old.window != q.window {
+		return false
+	}
+	if down {
+		return old.meterDL == q.meterDL && old.mbDL == q.mbDL && old.gbDL == q.gbDL
+	}
+	return old.meterUL == q.meterUL && old.mbUL == q.mbUL && old.gbUL == q.gbUL
+}
+
+// Admission depends on ingress PDIs and their resolved End Marker relays,
+// not unrelated plain-N6 PDRs or FARs. Comparing those inputs once avoids
+// constructing identical F-TEID keys, maps and relay lists for every update.
+func sameAdmissions(before *modelSnapshot, s *Session) bool {
+	if before == nil {
+		return false
+	}
+	for id, old := range before.pdrs.all() {
+		if old.teid != 0 {
+			if p := s.PDRs.at(id); p == nil || p.teid == 0 {
+				return false
+			}
+		}
+	}
+	for id, p := range s.PDRs.all() {
+		if p.teid == 0 {
+			continue
+		}
+		old := before.pdrs.at(id)
+		if old == nil || old.teid != p.teid || old.endpointID != p.endpointID ||
+			old.wantIPv4 != p.wantIPv4 || old.wantIPv6 != p.wantIPv6 ||
+			old.endpointFamily != p.endpointFamily || old.down != p.down ||
+			old.fteidContext != p.fteidContext || old.hasMAR != p.hasMAR ||
+			old.tunnelLocalAddress != p.tunnelLocalAddress ||
+			old.transportRouteDomain != p.transportRouteDomain {
+			return false
+		}
+		if p.hasMAR || !p.tunnelLocalAddress.IsValid() || p.transportRouteDomain == 0 {
+			continue
+		}
+		a, b := before.fars.at(old.farID), s.FARs.at(p.farID)
+		if a == nil || b == nil {
+			if a != b {
+				return false
+			}
+		} else if a.hasOuter != b.hasOuter || a.teid != b.teid || a.peer != b.peer {
+			return false
+		}
+	}
+	return true
+}
+
 // qerHoldsMeter says a session's QERs still resolve to a meter id: the
 // removal's erase of a PDR's meters is guarded by it, so a meter another PDR's
 // QER still polices stays.
@@ -2488,12 +2593,28 @@ func qerHoldsMeter(s *Session, id uint32) bool {
 	return false
 }
 
+// modelWrite keeps the native entry decision with the compiled resources.
+// An empty delta must never be folded into an empty replacement session.
+type modelWrite struct {
+	resources []bess.Change
+	entry     sessionEntryWrite
+}
+
 // compile turns a session's model into the resource changes that program it,
 // and the Created PDRs the answer carries. Every action and meter id the
 // session needs is allocated here, once.
-func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
+func (c *Compiler) compile(s *Session) (modelWrite, []*ie.IE, error) {
+	return c.compileModel(s, nil, false)
+}
+
+// compileModel accepts a before-model only for a modification whose preceding
+// write completed. A changed session-major entry is always restated whole;
+// an unchanged one is preserved while independent resource changes still apply.
+// wantCreated is only the establishment response's full Created PDR list.
+func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated bool) (modelWrite, []*ie.IE, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	identityBefore := before
 
 	// The rule keys this compile is the first to claim, and whether it got as
 	// far as writing them: a compile that returns an error wrote nothing (its
@@ -2510,6 +2631,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if committed {
 			return
 		}
+		// Report-triggered compiles have no rollback snapshot. A failure can
+		// leave resolved model fields changed without a corresponding write.
+		s.rewrite = true
 		for _, key := range claimed {
 			delete(c.rules, key)
 			s.forgetRuleKey(key)
@@ -2519,11 +2643,28 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// What this transaction writes follows the model as it is now: a URR's
 	// enforcement changes it without a message from the SMF (report.go).
 	if err := c.resolve(s); err != nil {
-		return nil, nil, err
+		return modelWrite{}, nil, err
+	}
+	_, whole := c.target.(sessionTarget)
+	if s.rewrite || s.inflight != 0 || (before != nil && before.writes != s.writes) {
+		before = nil
+	}
+	s.writes++
+	admissionUnchanged := sameAdmissions(before, s)
+	keepSession := whole && before != nil && s.sessionLive && admissionUnchanged &&
+		before.pdrs.len() == s.PDRs.len() && before.qers.len() == s.QERs.len() &&
+		len(before.mars) == 0 && len(s.MARs) == 0
+	oldPDR := func(id uint16) *pdr {
+		if before == nil {
+			return nil
+		}
+		return before.pdrs.at(id)
 	}
 
-	changes := make([]bess.Change, 0, 4*s.PDRs.len()+s.QERs.len())
-	created := make([]*ie.IE, 0, s.PDRs.len())
+	var created []*ie.IE
+	if wantCreated {
+		created = make([]*ie.IE, 0, s.PDRs.len())
+	}
 
 	// Admission is keyed by the complete endpoint/family/local-address/TEID
 	// tuple. PDRs in one session that share that F-TEID write one resource row;
@@ -2543,28 +2684,65 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// being no part of the key -- and the session is refused with a rule
 	// failure rather than half-programmed.
 	writtenRules := map[string]bool{}
-	// The rule keys the session still holds, as the transaction will write them.
-	// Each PDR's keys are built once here and written below: a key is a map per
-	// field, the largest garbage of an establishment.
+	// The rule identities the session retains in the transaction's end state.
+	// Only changed classifiers need their map-based keys materialized; all
+	// identities still participate in collision and ownership validation.
 	type pdrRules struct {
-		keys []map[string]any
-		ids  []string
-		err  error
+		keys  []map[string]any
+		ids   string
+		write bool
+		err   error
 	}
 	rulesOf := make(map[*pdr]pdrRules, s.PDRs.len())
 	live := map[string]bool{}
 	for _, p := range pdrsInOrder(s) {
-		dir := c.direction(p)
-		keys, err := p.ruleKeys(dir.PDRFields)
-		r := pdrRules{keys: keys, err: err}
-		if err == nil {
-			r.ids = make([]string, len(keys))
-			for i, key := range keys {
-				r.ids[i] = c.res(pdrTable(p.downlink())) + "\x00" + ruleID(key)
-				live[r.ids[i]] = true
+		ids, keys, err := c.pdrRuleIDs(p)
+		if identityBefore != nil {
+			if old := identityBefore.pdrs.at(p.id); old != nil && ids == old.ruleIDs {
+				p.ruleIDs, ids = old.ruleIDs, old.ruleIDs
 			}
 		}
+		write := !samePDRRule(oldPDR(p.id), p)
+		if !whole && write && keys == nil && err == nil {
+			keys = c.materializeRuleKeys(p)
+		}
+		r := pdrRules{keys: keys, ids: ids, write: write, err: err}
+		for id := range ruleIdentities(ids) {
+			live[id] = true
+		}
 		rulesOf[p] = r
+		if keepSession {
+			old := oldPDR(p.id)
+			keepSession = !write && !p.buffer && !p.hasMAR && samePDRCounter(old, p) &&
+				old.tunnel == p.tunnel && (p.tunnel == noTunnel || samePDRTunnel(before, s, p))
+		}
+	}
+	if keepSession {
+		for id, q := range s.QERs.all() {
+			old := before.qers.at(id)
+			if old == nil || old.hasRate != q.hasRate ||
+				(q.hasRate && (!sameQERMeter(before, q, false) || !sameQERMeter(before, q, true))) {
+				keepSession = false
+				break
+			}
+		}
+	}
+	if whole && !keepSession {
+		// Folding a delta would discard unchanged PDRs, meters and counters.
+		// Resolve identities once above; materialize the complete entry only
+		// after deciding that its dataplane dependencies actually changed.
+		before, admissionUnchanged = nil, false
+		for p, r := range rulesOf {
+			r.write = true
+			if r.keys == nil && r.err == nil {
+				r.keys = c.materializeRuleKeys(p)
+			}
+			rulesOf[p] = r
+		}
+	}
+	var changes []bess.Change
+	if !keepSession {
+		changes = make([]bess.Change, 0, 4*s.PDRs.len()+s.QERs.len())
 	}
 	// The ARP entries the session still holds: one per subscriber address its
 	// subscriber-side PDRs name, where the interface declares a responder. A
@@ -2576,10 +2754,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			liveARP[e.claim()] = true
 		}
 	}
-	// The counter entries the session still needs, as the transaction will write
-	// them: one per forwarding PDR a URR measures. A removal or a replaced form
-	// whose entry is in this set is not erased -- the write follows, and the
-	// engine rejects both operations on one key.
+	// Counter existence follows a measured PDR, including a dropping one.
+	// A removed/replaced form must not erase an entry the end state retains,
+	// whether it needs an upsert or already has the correct value.
 	liveCounters := map[string]bool{}
 	for _, p := range s.PDRs.all() {
 		dir := c.direction(p)
@@ -2594,16 +2771,15 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			liveCounters[c.res(counterTable(p.downlink()))+"\x00"+strconv.FormatUint(uint64(p.actionID), 10)] = true
 		}
 	}
-	// PDRs a modification removed are erased by the same transaction that
-	// writes the rest of the session: the SMF is told they are gone, so their
-	// rules must stop selecting packets. Three of the records a PDR names can
-	// belong to what stays, and the engine rejects a second operation on one
+	// Removed PDRs are erased atomically with the modification's other
+	// changes: their rules must stop selecting packets. Shared records remain
+	// live, and the engine rejects a second operation on one
 	// (resource, key) -- an erase of a key this transaction also writes, or a
 	// second erase of the same key -- so:
 	//
-	//   - a rule key another PDR compiles to is not erased (the write follows);
+	//   - a rule key another PDR still selects is not erased;
 	//   - a QER's meter is erased only when the QER went with the PDR, because
-	//     compile writes a meter for every QER the session still holds;
+	//     every rate-bearing QER the session retains still holds its meters;
 	//   - an F-TEID admission entry only when no PDR of the session still uses
 	//     its full key;
 	//   - the claim on an erased rule key goes in settle, not here: this is a
@@ -2676,10 +2852,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			Key: map[string]any{"id": p.actionID}})
 	}
 	for _, p := range s.pending.removedPDRs() {
-		dir := c.direction(p)
-		keys, err := p.ruleKeys(dir.PDRFields)
+		// Removed forms keep their immutable selector identities.
+		keys, err := c.pdrRuleKeys(p)
 		if err != nil {
-			return nil, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
+			return modelWrite{}, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
 		}
 		for _, key := range keys {
 			if !live[c.res(pdrTable(p.downlink()))+"\x00"+ruleID(key)] {
@@ -2745,10 +2921,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		}
 	}
 	for _, old := range s.pending.stalePDRs() {
-		dir := c.direction(old)
-		keys, err := old.ruleKeys(dir.PDRFields)
+		keys, err := c.pdrRuleKeys(old)
 		if err != nil {
-			return nil, nil, fmt.Errorf("PDR %d: %w", old.id, err)
+			return modelWrite{}, nil, fmt.Errorf("PDR %d: %w", old.id, err)
 		}
 		for _, key := range keys {
 			if !live[c.res(pdrTable(old.downlink()))+"\x00"+ruleID(key)] {
@@ -2784,10 +2959,10 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// something: a zero rate is not a profile any meter holds (the
 		// module refuses a zero committed rate), and a direction with no cap
 		// is exactly that -- nothing to enforce.
-		if q.meterUL != 0 && q.mbUL != 0 {
+		if q.meterUL != 0 && q.mbUL != 0 && !sameQERMeter(before, q, false) {
 			changes = append(changes, meterChange(c.res(MetersUplink), q.meterUL, q.gbUL, q.mbUL, q.window))
 		}
-		if q.meterDL != 0 && q.mbDL != 0 {
+		if q.meterDL != 0 && q.mbDL != 0 && !sameQERMeter(before, q, true) {
 			changes = append(changes, meterChange(c.res(MetersDownlink), q.meterDL, q.gbDL, q.mbDL, q.window))
 		}
 	}
@@ -2798,31 +2973,34 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// the tunnels a received End Marker on it is relayed through (emrr.go),
 		// so a change to the PDRs or FARs on the F-TEID rewrites it here.
 		if p.teid != 0 {
-			direction := uint32(0)
-			if p.down {
-				direction = 1
-			}
-			for _, key := range c.fteidKeysOf(p) {
-				if writtenFTEIDs[key] {
-					continue
+			if !admissionUnchanged {
+				direction := uint32(0)
+				if p.down {
+					direction = 1
 				}
-				writtenFTEIDs[key] = true
-				value := map[string]any{"direction": direction, "context_id": p.fteidContext}
-				if relays := endMarkerRelays(s, p.endpointID, p.teid); relays != nil {
-					value["end_marker_relays"] = relays
+				for _, key := range c.fteidKeysOf(p) {
+					if writtenFTEIDs[key] {
+						continue
+					}
+					writtenFTEIDs[key] = true
+					value := map[string]any{"direction": direction, "context_id": p.fteidContext}
+					if relays := endMarkerRelays(s, p.endpointID, p.teid); relays != nil {
+						value["end_marker_relays"] = relays
+					}
+					changes = append(changes, bess.Change{Resource: c.teidRes(), Key: key.entry(), Value: value})
 				}
-				changes = append(changes, bess.Change{Resource: c.teidRes(), Key: key.entry(), Value: value})
 			}
-			created = append(created, ie.NewCreatedPDR(
-				ie.NewPDRID(p.id), c.createdFTEID(p)))
+			if wantCreated {
+				created = append(created, ie.NewCreatedPDR(
+					ie.NewPDRID(p.id), c.createdFTEID(p)))
+			}
 		}
 		r := rulesOf[p]
 		if r.err != nil {
-			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, r.err)
+			return modelWrite{}, nil, fmt.Errorf("PDR %d: %w", p.id, r.err)
 		}
 		keys := r.keys
-		for i := range keys {
-			rkey := r.ids[i]
+		for rkey := range ruleIdentities(r.ids) {
 			if writtenRules[rkey] {
 				// The rule table knows PDR ids no better than the SMF's filters do:
 				// one key is one rule, and the engine would reject the second
@@ -2831,7 +3009,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				// names the two shapes that reach it, because the fix differs: an
 				// SMF that sent two identical PDRs, or a deployment whose uplink
 				// table carries no qfi field (see the note above).
-				return nil, nil, fmt.Errorf(
+				return modelWrite{}, nil, fmt.Errorf(
 					"%w: two PDRs compile to one rule key (the same filter and the same QFI, or a graph whose uplink table declares no qfi field)",
 					errNotExpressible)
 			}
@@ -2844,7 +3022,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				// whose key carries the tunnel or the domain does not collide here
 				// for sessions that share a UE address; one that classifies by the
 				// tuple alone does, and this is where it says so.
-				return nil, nil, fmt.Errorf("%w: the rule is session %d's", errNotExpressible, owner)
+				return modelWrite{}, nil, fmt.Errorf("%w: the rule is session %d's", errNotExpressible, owner)
 			}
 			if _, held := c.rules[rkey]; !held {
 				// This compile is the first to claim the key for the session. A key
@@ -2885,33 +3063,40 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 				if p.actionID == 0 {
 					id, err := c.actions.alloc()
 					if err != nil {
-						return nil, nil, fmt.Errorf("allocating an action for PDR %d: %w", p.id, err)
+						return modelWrite{}, nil, fmt.Errorf("allocating an action for PDR %d: %w", p.id, err)
 					}
 					p.actionID = id
 				}
 				action = p.actionID
 			}
-			result := make([]byte, p.resultSize())
-			if action != 0 {
-				result = pdrResult(p)
+			var result []byte
+			if r.write {
+				result = make([]byte, p.resultSize())
+				if action != 0 {
+					result = pdrResult(p)
+				}
 			}
-			for _, key := range keys {
-				changes = append(changes, bess.Change{
-					Resource: c.res(pdrTable(p.downlink())),
-					Key:      key,
-					Value: map[string]any{
-						"priority": rulePriority(p.precedence),
-						"gate":     gate,
-						"result":   result,
-					},
-				})
+			if r.write {
+				for _, key := range keys {
+					changes = append(changes, bess.Change{
+						Resource: c.res(pdrTable(p.downlink())),
+						Key:      key,
+						Value: map[string]any{
+							"priority": rulePriority(p.precedence),
+							"gate":     gate,
+							"result":   result,
+						},
+					})
+				}
 			}
 			// A URR that measures this PDR still holds its counter entry: the
 			// entry says the rule is measured (the reporting side reads it), and
 			// its existence must follow the PDR rather than the rule's effect,
 			// so that a later erase has something to erase. The counter counts
 			// nothing while the rule drops: no packet reaches the action.
-			changes = append(changes, c.writeCounter(p)...)
+			if !samePDRCounter(oldPDR(p.id), p) {
+				changes = append(changes, c.writeCounter(p)...)
+			}
 			if p.buffer {
 				changes = append(changes, c.writeBufferCounter(p)...)
 				changes = append(changes, c.writeFlowEntry(barOf(s, s.FARs.at(p.farID)), p)...)
@@ -2921,7 +3106,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		if p.actionID == 0 {
 			id, err := c.actions.alloc()
 			if err != nil {
-				return nil, nil, fmt.Errorf("allocating an action for PDR %d: %w", p.id, err)
+				return modelWrite{}, nil, fmt.Errorf("allocating an action for PDR %d: %w", p.id, err)
 			}
 			p.actionID = id
 		}
@@ -2930,7 +3115,9 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// ActionId: the module counts what the chain forwards for that rule,
 		// and the reporting side sums the entries of the URR's PDRs. The entry
 		// is what keeps a session without a URR off the counting module's cost.
-		changes = append(changes, c.writeCounter(p)...)
+		if !samePDRCounter(oldPDR(p.id), p) {
+			changes = append(changes, c.writeCounter(p)...)
+		}
 
 		// An outer GTP-U tunnel is routed by the post-encap Router. The
 		// record carries only the local/peer IP endpoints and the transport
@@ -2941,7 +3128,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 			erase(bess.Change{Resource: c.tunnelRes(p.writtenTunnel), Key: map[string]any{"action_id": p.actionID}})
 		}
 		p.writtenTunnel = p.tunnel
-		if p.tunnel != noTunnel {
+		if p.tunnel != noTunnel && !samePDRTunnel(before, s, p) {
 			resource := c.tunnelRes(p.tunnel)
 			far := s.FARs.at(p.farID)
 			value := map[string]any{
@@ -2976,25 +3163,20 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		// One rule per (SDF filter, QFI) the PDI names -- TS 29.244 7.5.2.2
 		// NOTE 4: several of either match any -- all with this PDR's
 		// Precedence and its one action.
-		for _, key := range keys {
-			changes = append(changes, bess.Change{
-				Resource: c.res(pdrTable(p.downlink())),
-				Key:      key,
-				Value: map[string]any{
-					// The table's own output gate: one chain per direction.
-					//
-					// The priority is the PDR's Precedence (8.2.11) inverted into
-					// the classifier's own ordering (rulePriority), QFI or not: a
-					// session's general rule (the QFI field masked out) and its
-					// flow's rule (the field required) both match a packet of that
-					// flow, and which PDR serves it stays the SMF's decision --
-					// the more specific rule is not raised above the one the SMF
-					// gave the higher Precedence.
-					"priority": rulePriority(p.precedence),
-					"gate":     uint64(0),
-					"result":   pdrResult(p),
-				},
-			})
+		if r.write {
+			result := pdrResult(p)
+			for _, key := range keys {
+				changes = append(changes, bess.Change{
+					Resource: c.res(pdrTable(p.downlink())),
+					Key:      key,
+					Value: map[string]any{
+						// Preserve the SMF's precedence, not filter specificity.
+						"priority": rulePriority(p.precedence),
+						"gate":     uint64(0),
+						"result":   result,
+					},
+				})
+			}
 		}
 
 	}
@@ -3004,7 +3186,7 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// selects a packet.
 	marWrites, err := c.marChanges(s)
 	if err != nil {
-		return nil, nil, err
+		return modelWrite{}, nil, err
 	}
 	changes = append(changes, marWrites...)
 	// The subscriber's ARP entries, claimed the same way: one per address the
@@ -3015,12 +3197,12 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 	// sessions stand.
 	entries, err := c.arpEntries(s)
 	if err != nil {
-		return nil, nil, err
+		return modelWrite{}, nil, err
 	}
 	for _, e := range entries {
 		claim := e.claim()
 		if owner, taken := c.rules[claim]; taken && owner != s.LocalSEID {
-			return nil, nil, fmt.Errorf(
+			return modelWrite{}, nil, fmt.Errorf(
 				"%w: the subscriber address %s on %s is session %d's", errNotExpressible, e.addr, e.resource, owner)
 		}
 		if _, held := c.rules[claim]; !held {
@@ -3032,8 +3214,16 @@ func (c *Compiler) compile(s *Session) ([]bess.Change, []*ie.IE, error) {
 		c.rules[claim] = s.LocalSEID
 		changes = append(changes, e.change())
 	}
+	if s.inflight != 0 {
+		s.overlap, s.rewrite = true, true
+	}
+	s.inflight++
 	committed = true
-	return changes, created, nil
+	entry := replaceSessionEntry
+	if keepSession {
+		entry = keepSessionEntry
+	}
+	return modelWrite{resources: changes, entry: entry}, created, nil
 }
 
 // marChanges writes the session's MAR policies and the tunnel records their
@@ -3192,55 +3382,143 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 	return key, nil
 }
 
-// variants is the PDR as one match per (SDF filter, QFI) its PDI names. A PDI
-// may carry several SDF Filter IEs and several QFI IEs, and "match any" is the
-// rule for each (TS 29.244 7.5.2.2-2, NOTE 4): the PDR matches a packet that
-// any filter and any QFI of it matches. A matcher holds one filter and one QFI
-// per rule, so the PDR is a set of rules that share its Precedence and its one
-// action. Each variant is a copy whose sdf, hasQFI and qfi are the one it
-// stands for; a PDI that names neither is the single variant that constrains
-// nothing, which is what a PDR always was.
-func (p *pdr) variants() []*pdr {
+// ruleKeys expands "match any" SDF/QFI combinations without allocating a
+// whole PDR per variant. Repeated filters still make only one dataplane key.
+func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 	sdfs := p.sdfs
 	if len(sdfs) == 0 {
 		sdfs = []*sdfFilter{nil}
 	}
 	qfis := max(len(p.qfis), 1)
-	out := make([]*pdr, 0, len(sdfs)*qfis)
+	combinations := len(sdfs) * qfis
+	keys := make([]map[string]any, 0, combinations)
+	var seen map[string]bool
+	if combinations > 1 {
+		seen = make(map[string]bool, combinations)
+	}
 	for _, sd := range sdfs {
 		for i := range qfis {
 			v := *p
-			v.sdf = sd
-			v.hasQFI = len(p.qfis) > 0
-			v.qfi = 0
+			v.sdf, v.hasQFI, v.qfi = sd, len(p.qfis) > 0, 0
 			if v.hasQFI {
 				v.qfi = p.qfis[i]
 			}
-			out = append(out, &v)
+			key, err := v.ruleKey(fields)
+			if err != nil {
+				return nil, err
+			}
+			if combinations > 1 {
+				id := ruleID(key)
+				if seen[id] {
+					continue
+				}
+				seen[id] = true
+			}
+			keys = append(keys, key)
 		}
-	}
-	return out
-}
-
-// ruleKeys is the WildcardMatch rule key of each variant, without the repeats:
-// two identical filters in one PDI are one rule, not a key written twice.
-func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
-	variants := p.variants()
-	keys := make([]map[string]any, 0, len(variants))
-	seen := make(map[string]bool, len(variants))
-	for _, v := range variants {
-		key, err := v.ruleKey(fields)
-		if err != nil {
-			return nil, err
-		}
-		id := ruleID(key)
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		keys = append(keys, key)
 	}
 	return keys, nil
+}
+
+// pdrRuleIDs keeps only the canonical ownership strings, not map-based
+// resource changes. On the first derivation return the keys too, so the
+// caller can write them without decoding the identity it just constructed.
+func (c *Compiler) pdrRuleIDs(p *pdr) (string, []map[string]any, error) {
+	if p.ruleIDs != "" {
+		return p.ruleIDs, nil, nil
+	}
+	keys, err := p.ruleKeys(c.direction(p).PDRFields)
+	if err != nil {
+		return "", nil, err
+	}
+	resource := c.res(pdrTable(p.downlink()))
+	total := 0
+	var length [binary.MaxVarintLen64]byte
+	for _, key := range keys {
+		n := len(resource) + 1 + ruleIDSize(key)
+		total += binary.PutUvarint(length[:], uint64(n)) + n
+	}
+	var ids strings.Builder
+	ids.Grow(total)
+	for _, key := range keys {
+		n := len(resource) + 1 + ruleIDSize(key)
+		ids.Write(length[:binary.PutUvarint(length[:], uint64(n))])
+		ids.WriteString(resource)
+		ids.WriteByte(0)
+		writeRuleID(&ids, key)
+	}
+	p.ruleIDs = ids.String()
+	return p.ruleIDs, keys, nil
+}
+
+// Identities are substring views into one immutable, noscan byte allocation.
+// Lengths distinguish variants without retaining a slice of string headers.
+func ruleIdentities(encoded string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for rest := encoded; len(rest) != 0; {
+			n, at := 0, 0
+			for shift := uint(0); ; shift += 7 {
+				b := rest[at]
+				at++
+				n |= int(b&0x7f) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if !yield(rest[at : at+n]) {
+				return
+			}
+			rest = rest[at+n:]
+		}
+	}
+}
+
+// materializeRuleKeys decodes our own canonical identity. Field widths and
+// resource are fixed by the compiler's immutable target, and each trailing
+// range is (field:uint32, low:uint64, high:uint64), as in ruleID.
+func (c *Compiler) materializeRuleKeys(p *pdr) []map[string]any {
+	fields := c.direction(p).PDRFields
+	width := 0
+	for _, f := range fields {
+		width += f.width()
+	}
+	prefix := len(c.res(pdrTable(p.downlink()))) + 1
+	keys := make([]map[string]any, 0, max(len(p.sdfs), 1)*max(len(p.qfis), 1))
+	for id := range ruleIdentities(p.ruleIDs) {
+		mem := []byte(id[prefix:])
+		lists := make([][]byte, 2*len(fields))
+		values, masks := lists[:len(fields):len(fields)], lists[len(fields):]
+		at := 0
+		for j, f := range fields {
+			n := f.width()
+			masks[j] = mem[at : at+n : at+n]
+			values[j] = mem[width+at : width+at+n : width+at+n]
+			at += n
+		}
+		key := map[string]any{"values": values, "masks": masks}
+		if tail := mem[2*width:]; len(tail) != 0 {
+			ranges := make([]map[string]any, len(tail)/20)
+			for j := range ranges {
+				r := tail[20*j:]
+				ranges[j] = map[string]any{
+					"field": binary.BigEndian.Uint32(r),
+					"low":   binary.BigEndian.Uint64(r[4:]),
+					"high":  binary.BigEndian.Uint64(r[12:]),
+				}
+			}
+			key["ranges"] = ranges
+		}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func (c *Compiler) pdrRuleKeys(p *pdr) ([]map[string]any, error) {
+	_, keys, err := c.pdrRuleIDs(p)
+	if err == nil && keys == nil {
+		keys = c.materializeRuleKeys(p)
+	}
+	return keys, err
 }
 
 // ruleID is a rule key's identity, compact enough to be held per rule for the
@@ -3248,6 +3526,13 @@ func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 // field of a table has the table's fixed width, so within one table (the caller
 // prefixes the resource) two keys have one identity only if they are one key.
 func ruleID(key map[string]any) string {
+	var b strings.Builder
+	b.Grow(ruleIDSize(key)) // the one allocation: the identity's own bytes
+	writeRuleID(&b, key)
+	return b.String()
+}
+
+func ruleIDSize(key map[string]any) int {
 	n := 0
 	for _, list := range [...]string{"masks", "values"} {
 		for _, f := range key[list].([][]byte) {
@@ -3255,21 +3540,22 @@ func ruleID(key map[string]any) string {
 		}
 	}
 	ranges, _ := key["ranges"].([]map[string]any)
-	n += 20 * len(ranges)
-	var b strings.Builder
-	b.Grow(n) // the one allocation: the identity's own bytes
+	return n + 20*len(ranges)
+}
+
+func writeRuleID(b *strings.Builder, key map[string]any) {
 	for _, list := range [...]string{"masks", "values"} {
 		for _, f := range key[list].([][]byte) {
 			b.Write(f)
 		}
 	}
 	var num [8]byte
+	ranges, _ := key["ranges"].([]map[string]any)
 	for _, r := range ranges {
 		b.Write(binary.BigEndian.AppendUint32(num[:0], r["field"].(uint32)))
 		b.Write(binary.BigEndian.AppendUint64(num[:0], r["low"].(uint64)))
 		b.Write(binary.BigEndian.AppendUint64(num[:0], r["high"].(uint64)))
 	}
-	return b.String()
 }
 
 // match is one field's constraint: the bits a PDI fixes, and the mask that says
@@ -4881,6 +5167,7 @@ func resolveSDFIDs(s *Session) error {
 		}
 	}
 	for _, p := range pdrsInOrder(s) {
+		copied := false
 		for i, f := range p.sdfs {
 			// A reference is a bare filter or the copy a previous compile
 			// resolved it to (via): the copy is re-resolved every compile, so
@@ -4896,15 +5183,19 @@ func resolveSDFIDs(s *Session) error {
 			}
 			c := *d
 			c.via = true
-			if f.via && *f != c {
-				// The definition changed under a PDR this message does not
-				// touch. Its rule was written from the copy it carried, so
-				// that rule is stale: the previous form joins the removed and
-				// replaced ones, and compile erases its key unless the new
-				// copy writes the same one.
-				old := *p
-				old.sdfs = append([]*sdfFilter(nil), p.sdfs...)
-				s.changes().stale = append(s.changes().stale, &old)
+			if f.via && *f == c {
+				continue
+			}
+			if !copied {
+				// Resolved filters are immutable. Copy the slice before
+				// replacing a reference: snapshots and stale forms may share it.
+				if len(p.ruleIDs) != 0 {
+					old := *p
+					s.changes().stale = append(s.changes().stale, &old)
+				}
+				p.sdfs = slices.Clone(p.sdfs)
+				p.ruleIDs = ""
+				copied = true
 			}
 			p.sdfs[i] = &c
 		}

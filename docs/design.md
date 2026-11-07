@@ -28,16 +28,18 @@ placement and state locality -- is `docs/datapath.md`.
 
 ## The control path in one sentence
 
-A PFCP session change becomes **one control_v2 transaction**: the session's
-PDR rules, its action, its meters, its next hop and its route go in together or
-not at all, with a request id that survives retries, and no other writer exists
-to race.
+A PFCP session change that needs a dataplane write becomes **one atomic
+control_v2 transaction**: the changed PDR rules, actions, meters, next hops
+and routes go in together or not at all, with a request id that survives
+retries, and no other writer exists to race. A model-only modification can
+need no dataplane write; it must not split a dataplane change across
+transactions.
 
 ```mermaid
 flowchart TB
     smf["SMF"] -->|PFCP session message| n4["internal/n4<br/>association, sequence numbers,<br/>restart detection"]
     n4 --> sess["internal/session<br/>parse, validate,<br/>resolve PDR → FAR/QER/URR"]
-    sess -->|"one control_v2 transaction<br/>(request id survives retries)"| bess["bessd<br/>rules, actions, meters,<br/>next hops, tunnels"]
+    sess -->|"at most one atomic control_v2 transaction<br/>(request id survives retries)"| bess["bessd<br/>rules, actions, meters,<br/>next hops, tunnels"]
     bess -->|"publish a generation"| workers["workers"]
 ```
 

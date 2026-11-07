@@ -3,6 +3,7 @@
 package session
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -199,4 +200,86 @@ func TestSessionMajorAssociationEndErasesOneEntryPerSession(t *testing.T) {
 	if len(ids) != n {
 		t.Errorf("the end erased %d session entries, want %d", len(ids), n)
 	}
+}
+
+// A quota lives in the controller. Updating it without changing the resolved
+// forwarding state must not require a native write or replace the live entry
+// with a partial one when the next FAR update does change forwarding.
+func TestSessionMajorQuotaOnlyUpdatePreservesForwarding(t *testing.T) {
+	rec := &recorder{}
+	c := New(sessionMajorConfig(SessionLayout{MaxSessions: 8, Actions: 4, QERs: 4}), rec, quietLogger())
+	req := establishment(0x9310, "10.45.0.3")
+	children, err := req.CreatePDR[0].CreatePDR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.CreatePDR[0] = ie.NewCreatePDR(append(children, ie.NewURRID(7))...)
+	req.CreateURR = append(req.CreateURR, quotaURR(7, 1<<30))
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("establishment cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	before := len(rec.txns)
+	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+		ie.NewUpdateURR(ie.NewURRID(7), ie.NewVolumeQuota(0x01, 2<<30, 0, 0))))); got != ie.CauseRequestAccepted {
+		t.Fatalf("quota update cause %d", got)
+	}
+	if len(rec.txns) != before {
+		t.Fatalf("a controller-only quota update wrote the dataplane")
+	}
+	if got := sessionOf(t, c, seid).URRs.at(7).volQuota.total; got != 2<<30 {
+		t.Fatalf("quota is %d, want %d", got, uint64(2<<30))
+	}
+	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, 3, 0,
+		ie.NewUpdateFAR(ie.NewFARID(2), ie.NewUpdateForwardingParameters(
+			ie.NewOuterHeaderCreation(0x0100, 0x55667788, "10.20.30.9", "", 0, 0, 0)))))); got != ie.CauseRequestAccepted {
+		t.Fatalf("FAR update cause %d", got)
+	}
+	entry := sessionEntry(t, rec.last())
+	pdrs, _ := entry.Value["pdrs"].([]map[string]any)
+	if len(pdrs) != 2 {
+		t.Fatalf("FAR update replaced the session with %d PDRs, want both directions", len(pdrs))
+	}
+	ul, dl := entryAction(t, entry.Value, false), entryAction(t, entry.Value, true)
+	tunnel, _ := dl["tunnel"].(map[string]any)
+	if tunnel["teid"] != uint32(0x55667788) || ul["count"] != true {
+		t.Fatalf("full forwarding/counting state was not preserved: ul=%v dl=%v", ul, dl)
+	}
+}
+
+// The decision to preserve the entry belongs to the compiled plan. Rechecking
+// mutable session state during apply can turn an older no-op into a blank or
+// stale replacement after another modification has changed forwarding.
+func TestSessionMajorEarlierNoopDoesNotOverwriteLaterForwarding(t *testing.T) {
+	rec := &recorder{}
+	c := New(sessionMajorConfig(SessionLayout{MaxSessions: 8, Actions: 4, QERs: 4}), rec, quietLogger())
+	resp := c.Establish(establishment(0x9311, "10.45.0.4")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("establishment cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	s := sessionOf(t, c, seid)
+	c.mu.Lock()
+	before := s.snapshot()
+	c.mu.Unlock()
+	older, _, err := c.compileModel(s, &before, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+		ie.NewUpdateFAR(ie.NewFARID(2), ie.NewUpdateForwardingParameters(
+			ie.NewOuterHeaderCreation(0x0100, 0x66778899, "10.20.30.9", "", 0, 0, 0)))))); got != ie.CauseRequestAccepted {
+		t.Fatalf("later FAR update cause %d", got)
+	}
+	if err := c.apply(context.Background(), s, older); err != nil {
+		t.Fatal(err)
+	}
+	entry := sessionEntry(t, rec.last())
+	dl := entryAction(t, entry.Value, true)
+	tunnel, _ := dl["tunnel"].(map[string]any)
+	if tunnel["teid"] != uint32(0x66778899) {
+		t.Fatalf("the earlier no-op overwrote the later tunnel: %v", dl)
+	}
+	entryAction(t, entry.Value, false)
 }

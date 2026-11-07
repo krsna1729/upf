@@ -134,7 +134,11 @@ type Target interface {
 // otherwise.
 func newTarget(cfg Config) Target {
 	if cfg.Appliance == "" {
-		return graphTarget{cfg: cfg}
+		g := graphTarget{cfg: cfg, names: new([tableCount]string)}
+		for t := range tableCount {
+			g.names[t] = g.resourceName(t)
+		}
+		return g
 	}
 	a := applianceTarget{module: cfg.Appliance, cfg: cfg, names: new([tableCount]string)}
 	for t := range tableCount {
@@ -162,6 +166,9 @@ func endMarkerPath(base string, domain uint32) string {
 // have.
 type graphTarget struct {
 	cfg Config
+	// Like the appliance, resolve immutable resource names once, rather
+	// than concatenating module/table for every rule and ownership lookup.
+	names *[tableCount]string
 }
 
 func graphResource(module, table string) string {
@@ -172,6 +179,13 @@ func graphResource(module, table string) string {
 }
 
 func (g graphTarget) Resource(t Table) string {
+	if t >= tableCount {
+		return ""
+	}
+	return g.names[t]
+}
+
+func (g graphTarget) resourceName(t Table) string {
 	c := g.cfg
 	switch t {
 	case FTEIDs:

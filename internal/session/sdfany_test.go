@@ -132,3 +132,40 @@ func TestFiltersAndQFIsMultiplyAndModificationErasesWhatItDrops(t *testing.T) {
 		t.Errorf("the deletion erased %d uplink rules, want 1", len(erased))
 	}
 }
+
+func TestDeletionAfterAFARUpdateErasesEveryRangedVariant(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	req := uplinkPDI(0xa103,
+		[]string{"permit out udp from any 53-54 to assigned", tcp443},
+		[]uint8{5, 9})
+	resp := c.Establish(req).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("establishment cause %d", got)
+	}
+	keys := map[string]bool{}
+	for _, ch := range changesFor(rec.last(), c.res(PDRUplink)) {
+		keys[changeID(ch.Resource, ch.Key)] = true
+	}
+	if len(keys) != 4 {
+		t.Fatalf("the PDI wrote %d distinct variants, want four", len(keys))
+	}
+	seid := upFSEID(t, resp)
+	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+		ie.NewUpdateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw))))); got != ie.CauseRequestAccepted {
+		t.Fatalf("FAR update cause %d", got)
+	}
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 3, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("deletion cause %d", got)
+	}
+	for _, ch := range changesFor(rec.last(), c.res(PDRUplink)) {
+		id := changeID(ch.Resource, ch.Key)
+		if !keys[id] || ch.Value != nil {
+			t.Errorf("deletion did not erase an original ranged/QFI selector: %v", ch)
+		}
+		delete(keys, id)
+	}
+	if len(keys) != 0 {
+		t.Errorf("deletion left %d ranged/QFI selectors behind", len(keys))
+	}
+}

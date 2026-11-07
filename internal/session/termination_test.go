@@ -291,8 +291,11 @@ func TestRemovingAURRAPDRStillNamesReportsAndUnlinksIt(t *testing.T) {
 	if len(trig) < 2 || trig[0] != 0 || trig[1] != 0x08 {
 		t.Errorf("the trigger is %#v, want only TERMR", trig)
 	}
-	if r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2}); r.gate() == dropGate {
-		t.Error("the PDR drops after its URR was removed")
+	if n := len(rules(rec.last())); n != 0 {
+		t.Errorf("removing usage measurement changed %d classifier records", n)
+	}
+	if p := sessionOf(t, c, seid).PDRs.at(1); p.drop || len(p.urrIDs) != 0 {
+		t.Errorf("PDR drop=%v URRs=%v, want forwarding without measurement", p.drop, p.urrIDs)
 	}
 	if n := len(rec.entries); n != 0 {
 		t.Errorf("%d counter entries outlived the removed URR", n)
@@ -334,5 +337,58 @@ func TestTheEstablishmentResponseNamesTheNodeAndTheUPFSEIDAddress(t *testing.T) 
 	f, err := resp.UPFSEID.FSEID()
 	if err != nil || f.IPv4Address == nil || f.IPv4Address.String() != "10.77.88.1" {
 		t.Errorf("UP F-SEID %+v (%v), want it to carry 10.77.88.1", f, err)
+	}
+}
+
+// Changing policing and provisioned quota must not restart an unrelated usage
+// window, reassign its action/counter identity or re-create unchanged buckets.
+func TestRateAndQuotaModificationsPreserveTheUsageWindow(t *testing.T) {
+	c, rec, seid, set := measured(t, 0xa102, 1500, 10)
+	attach := query(seid, 2,
+		ie.NewCreateQER(ie.NewQERID(9), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			ie.NewMBR(1000, 2000)),
+		ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewQERID(9)))
+	if got := cause(t, c.Modify(attach)); got != ie.CauseRequestAccepted {
+		t.Fatalf("attaching QER cause %d", got)
+	}
+	q := sessionOf(t, c, seid).QERs.at(9)
+	ul, dl := q.meterUL, q.meterDL
+	if got := cause(t, c.Modify(query(seid, 3,
+		ie.NewUpdateQER(ie.NewQERID(9), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			ie.NewMBR(2000, 4000))))); got != ie.CauseRequestAccepted {
+		t.Fatalf("updating rate cause %d", got)
+	}
+	for _, table := range []Table{PDRUplink, CountersUplink} {
+		if got := len(changesFor(rec.last(), c.res(table))); got != 0 {
+			t.Errorf("rate-only update rewrote %d %s records", got, table)
+		}
+	}
+	for _, meter := range []struct {
+		table Table
+		id    uint32
+		peak  uint64
+	}{{MetersUplink, ul, 2000 * 1000 / 8}, {MetersDownlink, dl, 4000 * 1000 / 8}} {
+		ch := find(t, rec.last(), c.res(meter.table), "id", meter.id)
+		profile, _ := ch.Value["tr_tcm"].(map[string]any)
+		if profile["peak_rate"] != meter.peak {
+			t.Errorf("meter %d peak %v, want %d", meter.id, profile["peak_rate"], meter.peak)
+		}
+	}
+	completed := len(rec.txns)
+	if got := cause(t, c.Modify(query(seid, 4,
+		ie.NewUpdateURR(ie.NewURRID(7), ie.NewVolumeQuota(0x01, 1<<31, 0, 0))))); got != ie.CauseRequestAccepted {
+		t.Fatalf("updating quota cause %d", got)
+	}
+	if len(rec.txns) != completed {
+		t.Error("a quota update without an enforcement transition rewrote dataplane resources")
+	}
+	_, seq, _, octets := reportOf(t, c.Modify(query(seid, 5, ie.NewQueryURR(ie.NewURRID(7)))))
+	if seq != 0 || octets != 1500 {
+		t.Errorf("report after updates: sequence %d, %d octets; want 0, 1500", seq, octets)
+	}
+	set(10000+1500+400, 100+10+3)
+	_, seq, _, octets = reportOf(t, c.Modify(query(seid, 6, ie.NewQueryURR(ie.NewURRID(7)))))
+	if seq != 1 || octets != 400 {
+		t.Errorf("next report: sequence %d, %d octets; want 1, 400", seq, octets)
 	}
 }
