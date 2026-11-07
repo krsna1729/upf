@@ -435,7 +435,7 @@ func (d *driver) fill(workers int) error {
 	close(jobs)
 	wg.Wait()
 	r.End = time.Now()
-	d.save("fill", r)
+	d.save(r)
 	if first != nil {
 		return first
 	}
@@ -464,7 +464,7 @@ func (d *driver) state() map[string]any {
 		"report_acknowledgements_sent": d.reportAcknowledged,
 		"report_wire_bytes":            d.reportBytes, "report_wire_packets": d.reportPackets}
 }
-func (d *driver) save(name string, r *result) map[string]any {
+func (d *driver) save(r *result) map[string]any {
 	d.mu.Lock()
 	copyR := *r
 	lat := append([]time.Duration(nil), r.Latency...)
@@ -491,20 +491,40 @@ func (d *driver) save(name string, r *result) map[string]any {
 	if copyR.Duration > 0 {
 		out["sent_cycles_per_offer_second"] = float64(copyR.Sent) / copyR.Duration
 	}
-	data, err := json.MarshalIndent(out, "", "  ")
+	file, err := os.CreateTemp(d.out, "driver-*.json")
 	if err != nil {
 		panic(err)
 	}
-	if err = os.WriteFile(filepath.Join(d.out, name+".json"), data, 0644); err != nil {
+	out["record_file"] = filepath.Base(file.Name())
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err == nil {
+		_, err = file.Write(data)
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		panic(err)
 	}
 	return out
+}
+
+func sessionStride(population int) int {
+	for stride := 104729; ; stride++ {
+		a, b := stride, population
+		for b != 0 {
+			a, b = b, a%b
+		}
+		if a == 1 {
+			return stride
+		}
+	}
 }
 func (d *driver) run(w http.ResponseWriter, req *http.Request) {
 	d.runMu.Lock()
 	defer d.runMu.Unlock()
 	var spec struct {
-		Name, Mode    string
+		Mode          string
 		Rate, Seconds int
 	}
 	if err := json.NewDecoder(req.Body).Decode(&spec); err != nil {
@@ -536,6 +556,10 @@ func (d *driver) run(w http.ResponseWriter, req *http.Request) {
 		count = d.cohort
 	}
 	r.Scheduled = count
+	stride := 0
+	if !finite {
+		stride = sessionStride(d.base)
+	}
 	start := time.Now()
 	// Allow the final pacing tick, but never extend the offer to clear a backlog.
 	deadline := start.Add(time.Duration(count)*time.Second/time.Duration(spec.Rate) + time.Millisecond)
@@ -549,9 +573,11 @@ offer:
 			if !time.Now().Before(deadline) {
 				break offer
 			}
-			i := (next * 104729) % d.base
+			i := next
 			if finite {
-				i = d.base + next
+				i += d.base
+			} else {
+				i = (next * stride) % d.base
 			}
 			next++
 			d.mu.Lock()
@@ -613,7 +639,7 @@ offer:
 	r.ReportBytes = d.reportBytes - bytesStart
 	r.ReportPackets = d.reportPackets - packetsStart
 	d.mu.Unlock()
-	json.NewEncoder(w).Encode(d.save(filepath.Base(spec.Name), r))
+	json.NewEncoder(w).Encode(d.save(r))
 }
 func (d *driver) drain() bool {
 	// A replacement chains two requests; include both expiry ticks and slack.
@@ -718,7 +744,7 @@ func (d *driver) reconcile(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	json.NewEncoder(w).Encode(d.save("reconcile-"+fmt.Sprint(time.Now().UnixNano()), r))
+	json.NewEncoder(w).Encode(d.save(r))
 }
 func (d *driver) prepare(w http.ResponseWriter, req *http.Request) {
 	d.runMu.Lock()
@@ -736,14 +762,14 @@ func (d *driver) prepare(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "not ready or requests still draining", 409)
 		return
 	}
-	r := newResult("prepare", 0)
+	r := newResult("prepare-"+mode, 0)
 	err := d.reconcileState(mode == "delete", r)
 	r.End = time.Now()
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	json.NewEncoder(w).Encode(d.save("prepare-"+mode, r))
+	json.NewEncoder(w).Encode(d.save(r))
 }
 func main() {
 	target := flag.String("upf", "127.0.0.1:8805", "UPF N4 UDP endpoint")

@@ -436,14 +436,15 @@ def main():
             for rate in rates:
                 profiled = args.perf
                 healthy()
+                prepared = None
                 if mode in ('establish', 'delete'):
-                    request(f'http://127.0.0.1:{dp}/prepare?mode={mode}', {}, timeout=1800)
+                    prepared = request(f'http://127.0.0.1:{dp}/prepare?mode={mode}', {}, timeout=1800)
                 label = f'{mode}-{rate}-' + ('profile' if profiled else 'baseline')
                 phase = label
                 before = snapshot(label + '-before')
                 start = time.monotonic()
                 result = request(f'http://127.0.0.1:{dp}/run',
-                    {'Name': label, 'Mode': mode, 'Rate': rate, 'Seconds': args.seconds},
+                    {'Mode': mode, 'Rate': rate, 'Seconds': args.seconds},
                     timeout=args.seconds + 90)
                 end = time.monotonic()
                 if result['state']['pending']:
@@ -452,7 +453,7 @@ def main():
                 if profiled:
                     summary.setdefault('perf_windows', {})[label] = [start, end]
                 row = {'phase': label, 'profiled': profiled, 'start': start, 'end': end,
-                       'result': result, 'before': before, 'after': after}
+                       'result': result, 'before': before, 'after': after, 'prepare': prepared}
                 summary['rows'].append(row)
                 save(out / 'campaign.json', summary)
                 print(label, json.dumps(result), flush=True)
