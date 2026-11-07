@@ -1423,3 +1423,33 @@ snapshots, role exits and aggregate-slice cleanup.
   stay with the cell. A coprime stride visits every resident. Historical file
   names and measurements above remain unchanged.
 
+### Final merged-pin verification — 2026-11-07 UTC
+
+These are functional checks, not a new capacity or timing qualification.
+Release BESS was rebuilt from clean merged `529e5374` into a separate installed
+stage; the frozen NT5/NT6 stage was not overwritten. Ordinary UPFD and plain/
+race churn drivers were built from clean `486748d` with the public merged SDK,
+without a local module replacement or profiling overlay.
+
+- All nine capped ordinary Go packages, the isolated message-bound case,
+  churn-driver race tests and targeted session compiler/enforcement race cases
+  passed. Both native UPF tests and the 35-row budget declaration gate passed.
+- The merged BESS non-benchmark run passed 249 of 250 selected Meson cases.
+  Its remaining Go conformance case first lacked the Go executable, then
+  inherited the outer UPF workspace. It passed with explicit `BESS_GO` and
+  `GOWORK=off`; no product fix or `BESS_SKIP_GO` was used. The earlier native
+  benchmark memory overruns remain recorded above, not waived or relabeled.
+- All nine `session-path`, `session-report` and `n4-path` lanes passed across
+  graph, masked appliance and session-major, including packet bytes, usage
+  acknowledgement, quota enforcement and checkpoint/restart.
+- `final-pin-tcp-smoke` and `final-pin-uds-race-smoke` each completed 21 cells
+  with 256 residents, cohort 128 and two-second nominal offers. Each retained
+  49 distinct driver records; all 27 run/prepare response records matched their
+  own files. All six prepare records retained the correct mode and cell link.
+  Both original `loaded.json` snapshots remained intact.
+- TCP's URR 100K-offer cell recorded 35 request timeouts; the Unix/race arm
+  recorded none. Neither arm recorded refusals. Both reconciled after every
+  cell and shut down cleanly. The timeout cause was not attributed in this
+  smoke. These small-population offers, run during functional verification,
+  are not loss-free capacity points or a TCP-versus-Unix performance comparison.
+
