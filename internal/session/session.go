@@ -505,7 +505,7 @@ type Compiler struct {
 	buffering     map[uint64]struct{}
 	nextSEID      uint64
 	byFTEID       map[fteidKey]fteidOwner
-	fteidTEIDKeys map[uint32]int // byFTEID keys per TEID: the TEID is released when none is left
+	fteidTEIDKeys map[uint32]int32 // byFTEID keys per TEID: the TEID is released when none is left
 	actions       *idPool
 	policies      *idPool
 	meters        *idPool
@@ -517,7 +517,7 @@ type Compiler struct {
 	// admission entries leave in the same transaction as its rules. A pinned
 	// TEID outside MaxTEIDs still takes a context, so the pool is not bounded
 	// by it: the decap's max_fteids is what bounds live contexts.
-	fteidContexts map[fteidContextKey]*fteidContext
+	fteidContexts map[fteidContextKey]fteidContext
 	contexts      *idPool
 	// sessionIDs are the "<module>/sessions" keys (cfg.Sessions), aged like
 	// the action ids: an erased session's id retires for a grace period.
@@ -552,9 +552,11 @@ type fteidContextKey struct {
 	teid     uint32
 }
 
+// fteidContext is held by value: an entry per session, so a pointer to a
+// separate 16 B object would cost every session one more allocation.
 type fteidContext struct {
 	id   uint32
-	keys int // claimed exact admission keys that write this id
+	keys int32 // claimed exact admission keys that write this id
 }
 
 // teidReuseDelay is how long a released F-TEID waits before the pool may hand
@@ -581,8 +583,8 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		measured:      map[uint64]struct{}{},
 		rules:         map[string]uint64{},
 		byFTEID:       map[fteidKey]fteidOwner{},
-		fteidTEIDKeys: map[uint32]int{},
-		fteidContexts: map[fteidContextKey]*fteidContext{},
+		fteidTEIDKeys: map[uint32]int32{},
+		fteidContexts: map[fteidContextKey]fteidContext{},
 		nextSEID:      1,
 		actions:       newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		policies:      newIDPool(cfg.MaxActions, cfg.IDReuseDelay),

@@ -2327,14 +2327,13 @@ func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
 		}
 	}
 	ctxKey := fteidContextKey{session: s, down: p.down, endpoint: p.endpointID, teid: p.teid}
-	ctx := c.fteidContexts[ctxKey]
-	if ctx == nil {
+	ctx, held := c.fteidContexts[ctxKey]
+	if !held {
 		id, err := c.contexts.alloc()
 		if err != nil {
 			return fmt.Errorf("%w: F-TEID context: %v", errNoResources, err)
 		}
-		ctx = &fteidContext{id: id}
-		c.fteidContexts[ctxKey] = ctx
+		ctx = fteidContext{id: id}
 	}
 	for _, key := range keys {
 		if _, exists := c.byFTEID[key]; exists {
@@ -2344,6 +2343,7 @@ func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
 		ctx.keys++
 		c.fteidTEIDKeys[p.teid]++
 	}
+	c.fteidContexts[ctxKey] = ctx
 	p.fteidContext = ctx.id
 	c.teids.reserve(p.teid)
 	return nil
@@ -2380,10 +2380,12 @@ func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
 		c.fteidTEIDKeys[p.teid]--
 		removed = true
 		ctxKey := fteidContextKey{session: s, down: owner.down, endpoint: p.endpointID, teid: p.teid}
-		if ctx := c.fteidContexts[ctxKey]; ctx != nil {
+		if ctx, held := c.fteidContexts[ctxKey]; held {
 			if ctx.keys--; ctx.keys <= 0 {
 				delete(c.fteidContexts, ctxKey)
 				c.contexts.release(ctx.id)
+			} else {
+				c.fteidContexts[ctxKey] = ctx
 			}
 		}
 	}
