@@ -1901,7 +1901,8 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// left the model holding the new key while the old one is still programmed.
 	// The dedupe above is what lets both lists name the same records as the
 	// PDRs that stayed.
-	all := pdrList(s)
+	var buf [8]*pdr // the usual session's PDRs, on the stack
+	all := s.PDRs.appendTo(buf[:0])
 	all = append(all, s.pending.removedPDRs()...)
 	all = append(all, s.pending.stalePDRs()...)
 	for _, p := range all {
@@ -1988,7 +1989,8 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// once per PDR. A QER a modification removed is on the list too: its record
 	// is in the daemon, and a record nobody names goes on holding the rate it
 	// was written with until another session reuses the id.
-	for _, q := range append(qerList(s), s.rare().removedQERs...) {
+	var qbuf [4]*qer // the usual session's QERs, on the stack
+	for _, q := range append(s.QERs.appendTo(qbuf[:0]), s.rare().removedQERs...) {
 		if !q.hasRate {
 			continue
 		}
@@ -2132,7 +2134,8 @@ func (c *Compiler) releaseSession(s *Session) {
 	actions := map[uint32]bool{}
 	policies := map[uint32]bool{}
 	meters := map[uint32]bool{}
-	all := pdrList(s)
+	var buf [8]*pdr // the usual session's PDRs, on the stack
+	all := s.PDRs.appendTo(buf[:0])
 	// A PDR a modification removed still holds ids, and a replaced PDR's old
 	// form holds the TEID it used to have: the records are erased by the
 	// deletion above, and the ids are freed here with the rest.
@@ -2177,7 +2180,8 @@ func (c *Compiler) releaseSession(s *Session) {
 			c.actions.release(id)
 		}
 	}
-	for _, q := range append(qerList(s), s.rare().removedQERs...) {
+	var qbuf [4]*qer // the usual session's QERs, on the stack
+	for _, q := range append(s.QERs.appendTo(qbuf[:0]), s.rare().removedQERs...) {
 		if q.meterUL != 0 && !meters[q.meterUL] {
 			meters[q.meterUL] = true
 			c.meters.release(q.meterUL)

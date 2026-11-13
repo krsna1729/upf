@@ -911,32 +911,35 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 //
 // This runs for every measured session every tick, so it holds nothing on the
 // session: with no links at all -- the usual session -- each URR is yielded
-// alone, and only a session with links has its groups built.
+// alone, and only a session with links has its groups built. It is one call
+// so that it inlines and a range over it keeps its body on the stack.
 func linkedGroups(s *Session) iter.Seq2[int, []uint32] {
-	return func(yield func(int, []uint32) bool) {
-		linked := false
-		for _, u := range s.URRs.all() {
-			if len(u.linked) != 0 {
-				linked = true
-				break
-			}
+	return func(yield func(int, []uint32) bool) { walkLinkedGroups(s, yield) }
+}
+
+func walkLinkedGroups(s *Session, yield func(int, []uint32) bool) {
+	linked := false
+	for _, u := range s.URRs.all() {
+		if len(u.linked) != 0 {
+			linked = true
+			break
 		}
-		if !linked {
-			var one [1]uint32
-			i := 0
-			for id := range s.URRs.ordered() {
-				one[0] = id
-				if !yield(i, one[:]) {
-					return
-				}
-				i++
-			}
-			return
-		}
-		for i, g := range buildLinkedGroups(s) {
-			if !yield(i, g) {
+	}
+	if !linked {
+		var one [1]uint32
+		i := 0
+		for id := range s.URRs.ordered() {
+			one[0] = id
+			if !yield(i, one[:]) {
 				return
 			}
+			i++
+		}
+		return
+	}
+	for i, g := range buildLinkedGroups(s) {
+		if !yield(i, g) {
+			return
 		}
 	}
 }

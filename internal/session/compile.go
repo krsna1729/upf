@@ -106,15 +106,19 @@ func heldFlows(s *Session) []uint32 {
 // from its idMaps, allocating nothing for the handful a session names;
 // pdrList and qerList are the same as new slices, for the callers that extend
 // them. marsInOrder builds its slice: MARs are rare, and none costs nothing.
+// Each returns one closure that makes one call: a range over it then inlines
+// and keeps its body on the stack. Returning one of two closures (a nil
+// guard's empty one) would not, and every loop would allocate its body.
 func pdrsInOrder(s *Session) iter.Seq2[uint16, *pdr] {
-	if s == nil {
-		return func(func(uint16, *pdr) bool) {}
+	return func(yield func(uint16, *pdr) bool) {
+		if s != nil {
+			s.PDRs.walkOrdered(yield)
+		}
 	}
-	return s.PDRs.ordered()
 }
 
 func qersInOrder(s *Session) iter.Seq2[uint32, *qer] {
-	return s.QERs.ordered()
+	return func(yield func(uint32, *qer) bool) { s.QERs.walkOrdered(yield) }
 }
 
 func pdrList(s *Session) []*pdr { return s.PDRs.list() }

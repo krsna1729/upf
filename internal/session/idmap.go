@@ -155,24 +155,33 @@ func (m *idMap[K, V]) ids() []K {
 
 // ordered yields every entry in id order. The slice form is already sorted
 // and walks as all does, allocating nothing; past idMapSmall the ids are
-// sorted first, and an entry deleted during the walk is skipped.
+// sorted first, and an entry deleted during the walk is skipped. Like all, it
+// is one call so that it inlines and a range over it keeps its body on the
+// stack.
 func (m *idMap[K, V]) ordered() iter.Seq2[K, V] {
-	return func(yield func(K, V) bool) {
-		if m.big == nil {
-			m.walk(yield)
+	return func(yield func(K, V) bool) { m.walkOrdered(yield) }
+}
+
+func (m *idMap[K, V]) walkOrdered(yield func(K, V) bool) {
+	if m.big == nil {
+		m.walk(yield)
+		return
+	}
+	for _, k := range slices.Sorted(maps.Keys(m.big)) {
+		if v, ok := m.big[k]; ok && !yield(k, v) {
 			return
-		}
-		for _, k := range slices.Sorted(maps.Keys(m.big)) {
-			if v, ok := m.big[k]; ok && !yield(k, v) {
-				return
-			}
 		}
 	}
 }
 
 // list returns the entries in id order, in a new slice the caller may extend.
 func (m *idMap[K, V]) list() []V {
-	out := make([]V, 0, m.len())
+	return m.appendTo(make([]V, 0, m.len()))
+}
+
+// appendTo appends the entries in id order to out: a caller with a stack
+// buffer for the usual handful allocates nothing.
+func (m *idMap[K, V]) appendTo(out []V) []V {
 	for _, v := range m.ordered() {
 		out = append(out, v)
 	}
