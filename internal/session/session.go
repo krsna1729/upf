@@ -637,37 +637,14 @@ type Session struct {
 	FARs idMap[uint32, *far]
 	QERs idMap[uint32, *qer]
 	URRs idMap[uint32, *urr]
-	// BARs are what the SMF asks a buffering FAR to hold (TS 29.244 7.5.2.6):
-	// the DL Buffering Duration and the DL Buffering Suggested Packet Count,
-	// referenced by the FARs' BAR ID (8.2.55). They are a map rather than a
-	// field of the FAR because an Update BAR arrives on its own -- including in
-	// a Session Report Response, which is how the SMF answers a Downlink Data
-	// Report -- and the flows that reference it must be reprogrammed without a
-	// FAR in the message.
-	BARs map[uint8]*bar
-
-	// MARs are the session's Multi-Access Rules (TS 29.244 7.5.2.8), by MAR
-	// ID. A PDR names one instead of a FAR; the two access actions it holds
-	// are what AtsssSteer applies.
-	MARs map[uint16]*mar
-
-	// chids stores the allocated endpoint, complete address-family set and TEID
-	// per CHOOSE ID (TS 29.244 8.2.3). All PDIs sharing an ID reuse precisely
-	// that selection, which remains reserved for a retry until no PDR names it.
-	chids map[uint8]chosenFTEID
+	// ext holds the parts of a session a usual one leaves empty; nil until
+	// one is set. Read them through rare, write them through rareMut.
+	ext *sessionExt
 
 	// pending exists only while a transaction has records to erase or flows
 	// to release. Refused transactions keep it for their retry; settle drops
 	// it only after the dataplane has accepted the change.
 	pending *sessionChanges
-
-	// removedQERs holds the QERs a modification took out of the model. Their
-	// meters were allocated with the QER (one per policed direction) and are
-	// released with the session's other ids (releaseSession) rather than at the
-	// removal: a refused modification puts the QER back, and a meter already
-	// returned to the pool would be one another session may police with while
-	// this one still names it.
-	removedQERs []*qer
 
 	// ruleKeys are the rule keys this session holds in the compiler's table of
 	// owners, kept here so a release touches only them: a deletion at the
@@ -694,6 +671,59 @@ type Session struct {
 	// enforcement interleaved between a modification's snapshot and merge.
 	// Never rolled back: a refused later request cannot unwrite that history.
 	writes uint64
+}
+
+// sessionExt is what a session holds only once the SMF uses buffering, ATSSS
+// or CHOOSE IDs, or removes a QER: four fields a usual session would carry
+// empty in every one of a million records.
+type sessionExt struct {
+	// BARs are what the SMF asks a buffering FAR to hold (TS 29.244 7.5.2.6):
+	// the DL Buffering Duration and the DL Buffering Suggested Packet Count,
+	// referenced by the FARs' BAR ID (8.2.55). They are a map rather than a
+	// field of the FAR because an Update BAR arrives on its own -- including in
+	// a Session Report Response, which is how the SMF answers a Downlink Data
+	// Report -- and the flows that reference it must be reprogrammed without a
+	// FAR in the message.
+	BARs map[uint8]*bar
+
+	// MARs are the session's Multi-Access Rules (TS 29.244 7.5.2.8), by MAR
+	// ID. A PDR names one instead of a FAR; the two access actions it holds
+	// are what AtsssSteer applies.
+	MARs map[uint16]*mar
+
+	// chids stores the allocated endpoint, complete address-family set and TEID
+	// per CHOOSE ID (TS 29.244 8.2.3). All PDIs sharing an ID reuse precisely
+	// that selection, which remains reserved for a retry until no PDR names it.
+	chids map[uint8]chosenFTEID
+
+	// removedQERs holds the QERs a modification took out of the model. Their
+	// meters were allocated with the QER (one per policed direction) and are
+	// released with the session's other ids (releaseSession) rather than at the
+	// removal: a refused modification puts the QER back, and a meter already
+	// returned to the pool would be one another session may police with while
+	// this one still names it.
+	removedQERs []*qer
+}
+
+// noSessionExt is what rare reads for a session without an extension. Its maps
+// are nil, so reading, ranging, deleting and clearing are no-ops and a write
+// panics rather than reaching another session.
+var noSessionExt = &sessionExt{}
+
+// rare returns the session's extension for reading.
+func (s *Session) rare() *sessionExt {
+	if s.ext == nil {
+		return noSessionExt
+	}
+	return s.ext
+}
+
+// rareMut returns the session's extension for writing, making it first.
+func (s *Session) rareMut() *sessionExt {
+	if s.ext == nil {
+		s.ext = &sessionExt{}
+	}
+	return s.ext
 }
 
 // modelSnapshot is a session's model as it stood before a modification was
@@ -748,10 +778,10 @@ func (s *Session) snapshot() modelSnapshot {
 		ueIP:   s.UEIP,
 		writes: s.writes,
 		pdrs:   cloneIDMap(s.PDRs), fars: cloneIDMap(s.FARs), qers: cloneIDMap(s.QERs),
-		urrs: cloneIDMap(s.URRs), bars: cloneEntries(s.BARs),
-		mars:        cloneEntries(s.MARs),
+		urrs: cloneIDMap(s.URRs), bars: cloneEntries(s.rare().BARs),
+		mars:        cloneEntries(s.rare().MARs),
 		pending:     s.pending.clone(),
-		removedQERs: slices.Clone(s.removedQERs),
+		removedQERs: slices.Clone(s.rare().removedQERs),
 	}
 }
 
@@ -769,9 +799,12 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 	failedRetired := slices.Clone(s.pending.retiredIDs())
 
 	s.UEIP = snap.ueIP
-	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs, s.MARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars, snap.mars
+	s.PDRs, s.FARs, s.QERs, s.URRs = snap.pdrs, snap.fars, snap.qers, snap.urrs
 	s.pending = snap.pending
-	s.removedQERs = snap.removedQERs
+	if s.ext != nil || snap.bars != nil || snap.mars != nil || snap.removedQERs != nil {
+		r := s.rareMut()
+		r.BARs, r.MARs, r.removedQERs = snap.bars, snap.mars, snap.removedQERs
+	}
 
 	// MAR policy and tunnel ids allocated by the failed merge are not in the
 	// restored model (or its removal list); return them. An id the snapshot
@@ -1785,7 +1818,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// once per PDR. A QER a modification removed is on the list too: its record
 	// is in the daemon, and a record nobody names goes on holding the rate it
 	// was written with until another session reuses the id.
-	for _, q := range append(qerList(s), s.removedQERs...) {
+	for _, q := range append(qerList(s), s.rare().removedQERs...) {
 		if !q.hasRate {
 			continue
 		}
@@ -1822,9 +1855,9 @@ func (c *Compiler) settle(s *Session) {
 	// A CHID's F-TEID remains owned while a PDR names it. Keeping a released
 	// CHID would hand a recycled TEID to a later PDR and let sessions claim the
 	// same complete admission key.
-	for chid, chosen := range s.chids {
+	for chid, chosen := range s.rare().chids {
 		if !chosenNamed(s, chosen) {
-			delete(s.chids, chid)
+			delete(s.rare().chids, chid)
 			if c.fteidTEIDKeys[chosen.TEID] == 0 {
 				c.teids.release(chosen.TEID)
 			}
@@ -1942,12 +1975,12 @@ func (c *Compiler) releaseSession(s *Session) {
 			c.actions.release(p.actionID)
 		}
 	}
-	for _, chosen := range s.chids {
+	for _, chosen := range s.rare().chids {
 		if c.fteidTEIDKeys[chosen.TEID] == 0 {
 			c.teids.release(chosen.TEID)
 		}
 	}
-	clear(s.chids)
+	clear(s.rare().chids)
 	if s.sessionID != 0 && c.sessionIDs != nil {
 		c.sessionIDs.release(s.sessionID)
 		s.sessionID, s.sessionLive = 0, false
@@ -1974,7 +2007,7 @@ func (c *Compiler) releaseSession(s *Session) {
 			c.actions.release(id)
 		}
 	}
-	for _, q := range append(qerList(s), s.removedQERs...) {
+	for _, q := range append(qerList(s), s.rare().removedQERs...) {
 		if q.meterUL != 0 && !meters[q.meterUL] {
 			meters[q.meterUL] = true
 			c.meters.release(q.meterUL)

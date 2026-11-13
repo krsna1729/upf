@@ -122,12 +122,13 @@ func pdrList(s *Session) []*pdr { return s.PDRs.list() }
 func qerList(s *Session) []*qer { return s.QERs.list() }
 
 func marsInOrder(s *Session) []*mar {
-	if s == nil || len(s.MARs) == 0 {
+	if s == nil || len(s.rare().MARs) == 0 {
 		return nil
 	}
-	out := make([]*mar, 0, len(s.MARs))
-	for _, id := range idsOf(s.MARs) {
-		out = append(out, s.MARs[id])
+	mars := s.rare().MARs
+	out := make([]*mar, 0, len(mars))
+	for _, id := range idsOf(mars) {
+		out = append(out, mars[id])
 	}
 	return out
 }
@@ -866,13 +867,14 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 // does the same, since "hold no packets" is not an instruction anyone sends.
 func mergeBars(s *Session, bars []barReq) {
 	for _, b := range bars {
-		entry := s.BARs[b.id]
+		entry := s.rare().BARs[b.id]
 		if entry == nil {
 			entry = &bar{id: b.id}
-			if s.BARs == nil {
-				s.BARs = map[uint8]*bar{}
+			r := s.rareMut()
+			if r.BARs == nil {
+				r.BARs = map[uint8]*bar{}
 			}
-			s.BARs[b.id] = entry
+			r.BARs[b.id] = entry
 		}
 		if b.hasDuration {
 			if b.deactivated {
@@ -1044,16 +1046,17 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 	}
 	for _, m := range mars {
-		entry := s.MARs[m.id]
+		entry := s.rare().MARs[m.id]
 		if entry == nil {
 			if !m.create {
 				return fmt.Errorf("%w: the MAR %d is not in the session", errNotExpressible, m.id)
 			}
 			entry = &mar{id: m.id}
-			if s.MARs == nil {
-				s.MARs = map[uint16]*mar{}
+			r := s.rareMut()
+			if r.MARs == nil {
+				r.MARs = map[uint16]*mar{}
 			}
-			s.MARs[m.id] = entry
+			r.MARs[m.id] = entry
 		}
 		if m.hasFunctionality {
 			if m.functionality != ie.SteeringFunctionalityATSSSLL {
@@ -1187,7 +1190,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				f.hasBAR, f.barID = false, 0
 			}
 		}
-		delete(s.BARs, id)
+		delete(s.rare().BARs, id)
 	}
 	for _, p := range pdrs {
 		old := s.PDRs.at(p.id)
@@ -1266,7 +1269,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			families := requestedFTEIDFamilies(pdr)
 			var endpoint FTEIDEndpoint
 			if p.hasCHID && p.teid == 0 {
-				if chosen, ok := s.chids[p.chid]; ok {
+				if chosen, ok := s.rare().chids[p.chid]; ok {
 					if chosen.SourceInterface != pdr.srcIfc || chosen.Instance != pdr.instance ||
 						!slices.Equal(chosen.Families, families) {
 						return fmt.Errorf("%w: CHOOSE ID %d was reused with a different endpoint or family set", errNotExpressible, p.chid)
@@ -1309,7 +1312,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				c.teids.reserve(p.teid)
 			} else if p.hasChoose {
 				if p.hasCHID {
-					chosen, ok := s.chids[p.chid]
+					chosen, ok := s.rare().chids[p.chid]
 					if !ok {
 						teid, err := c.teids.alloc()
 						if err != nil {
@@ -1320,10 +1323,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 							Families: slices.Clone(families), SourceInterface: pdr.srcIfc,
 							Instance: pdr.instance,
 						}
-						if s.chids == nil {
-							s.chids = map[uint8]chosenFTEID{}
+						r := s.rareMut()
+						if r.chids == nil {
+							r.chids = map[uint8]chosenFTEID{}
 						}
-						s.chids[p.chid] = chosen
+						r.chids[p.chid] = chosen
 					}
 					pdr.teid = chosen.TEID
 				} else {
@@ -1367,9 +1371,9 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 					"%w: MAR %d is still named by PDR %d", errNotExpressible, id, p.id)
 			}
 		}
-		if old := s.MARs[id]; old != nil {
+		if old := s.rare().MARs[id]; old != nil {
 			s.changes().removedMARs = append(s.changes().removedMARs, old)
-			delete(s.MARs, id)
+			delete(s.rare().MARs, id)
 		}
 	}
 	createdQERs := make(map[uint32]bool, len(qers))
@@ -1390,7 +1394,8 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// back to the pool that a refused modification restores the QER
 			// to -- and that another session would then police with while this
 			// one still names it.
-			s.removedQERs = append(s.removedQERs, entry)
+			r := s.rareMut()
+			r.removedQERs = append(r.removedQERs, entry)
 			s.QERs.del(id)
 		}
 	}
@@ -1668,8 +1673,8 @@ func (c *Compiler) resolve(s *Session) error {
 			linkedTo[lid] = true
 		}
 	}
-	for _, id := range idsOf(s.MARs) {
-		if err := c.resolveMAR(s, s.MARs[id]); err != nil {
+	for _, id := range idsOf(s.rare().MARs) {
+		if err := c.resolveMAR(s, s.rare().MARs[id]); err != nil {
 			return err
 		}
 	}
@@ -1716,7 +1721,7 @@ func (c *Compiler) resolve(s *Session) error {
 					"%w: PDR %d names MAR %d, and this deployment has no AtsssSteer module (-atsss)",
 					errNotExpressible, p.id, p.marID)
 			}
-			m := s.MARs[p.marID]
+			m := s.rare().MARs[p.marID]
 			if m == nil {
 				return fmt.Errorf("%w: PDR %d names MAR %d, which the session does not hold",
 					errNotExpressible, p.id, p.marID)
@@ -1772,7 +1777,7 @@ func (c *Compiler) resolve(s *Session) error {
 				s.changes().ending = append(s.changes().ending, p.actionID)
 			}
 		}
-		if p.buffer && far.hasBAR && s.BARs[far.barID] == nil {
+		if p.buffer && far.hasBAR && s.rare().BARs[far.barID] == nil {
 			// The FAR names a BAR the session does not hold. 5.2.4.1 makes the
 			// BAR the CP function's instruction ("the CP function needs to
 			// provision a (possibly empty) BAR and associate it to the FARs"),
@@ -2390,7 +2395,7 @@ func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
 	}
 }
 func sessionHasCHIDTEID(s *Session, teid uint32) bool {
-	for _, chosen := range s.chids {
+	for _, chosen := range s.rare().chids {
 		if chosen.TEID == teid {
 			return true
 		}
@@ -2406,7 +2411,7 @@ func barOf(s *Session, far *far) *bar {
 	if far == nil || !far.hasBAR {
 		return nil
 	}
-	return s.BARs[far.barID]
+	return s.rare().BARs[far.barID]
 }
 
 // writeFlowEntry writes the store's per-flow "flows" entry for a PDR that
@@ -2623,7 +2628,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	admissionUnchanged := sameAdmissions(before, s)
 	keepSession := whole && before != nil && s.sessionLive && admissionUnchanged &&
 		before.pdrs.len() == s.PDRs.len() && before.qers.len() == s.QERs.len() &&
-		len(before.mars) == 0 && len(s.MARs) == 0
+		len(before.mars) == 0 && len(s.rare().MARs) == 0
 	oldPDR := func(id uint16) *pdr {
 		if before == nil {
 			return nil
@@ -3201,10 +3206,10 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 // every deployment before -atsss; a MAR PDR is refused in resolve when the
 // module is absent.
 func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
-	if c.cfg.Atsss == "" || (len(s.MARs) == 0 && len(s.pending.removedPolicies()) == 0) {
+	if c.cfg.Atsss == "" || (len(s.rare().MARs) == 0 && len(s.pending.removedPolicies()) == 0) {
 		return nil, nil
 	}
-	changes := make([]bess.Change, 0, 2*len(s.MARs)+1)
+	changes := make([]bess.Change, 0, 2*len(s.rare().MARs)+1)
 	seen := map[string]bool{}
 	add := func(ch bess.Change) {
 		key := changeID(ch.Resource, ch.Key)
@@ -3215,8 +3220,8 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 		changes = append(changes, ch)
 	}
 	policyRes := c.res(Policies)
-	for _, id := range idsOf(s.MARs) {
-		m := s.MARs[id]
+	for _, id := range idsOf(s.rare().MARs) {
+		m := s.rare().MARs[id]
 		accesses := make([]map[string]any, 0, 2)
 		for which := 0; which < 2; which++ {
 			access := m.accesses[which]

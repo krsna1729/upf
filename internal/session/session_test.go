@@ -1157,7 +1157,7 @@ func TestARefusedModificationKeepsTheCHIDItAllocated(t *testing.T) {
 		t.Fatalf("the dataplane refused the modification and the SMF was told cause %d", got)
 	}
 	c.mu.Lock()
-	chosen, has := c.sessions[upFSEID(t, resp)].chids[9]
+	chosen, has := c.sessions[upFSEID(t, resp)].rare().chids[9]
 	held := chosen.TEID
 	queued := len(c.teids.freed)
 	c.mu.Unlock()

@@ -527,14 +527,14 @@ func TestLeavingTunnelsCapturesSharedPDRAndMARRoutedEndpoints(t *testing.T) {
 			1: {id: 1, farID: 2, tunnelLocalAddress: localN3, transportRouteDomain: 1},
 			2: {id: 2, farID: 2, tunnelLocalAddress: localN3, transportRouteDomain: 1},
 		}),
-		MARs: map[uint16]*mar{
+		ext: &sessionExt{MARs: map[uint16]*mar{
 			1: {
 				accesses:              [2]marAccess{{hasFarID: true, farID: 2}},
 				tunnelIDs:             [2]uint32{7},
 				tunnelLocalAddresses:  [2]netip.Addr{localN9},
 				transportRouteDomains: [2]uint32{2},
 			},
-		},
+		}},
 	}
 	markers := c.leavingTunnels(s, []farReq{{id: 2, hasOuter: true, teid: 0xaabbccdd, peer: old.peer}})
 	if len(markers) != 2 {

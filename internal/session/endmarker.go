@@ -319,7 +319,7 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 				add(p.tunnelLocalAddress, p.transportRouteDomain, ifc)
 			}
 		}
-		for _, m := range s.MARs {
+		for _, m := range s.rare().MARs {
 			ifc, err := c.marInterface(s, m.id)
 			if err != nil {
 				continue

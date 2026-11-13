@@ -215,7 +215,7 @@ func TestTheBARsParametersAreReadWhereverTheySit(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	seid := upFSEID(t, resp)
-	entry := c.sessions[seid].BARs[1]
+	entry := c.sessions[seid].rare().BARs[1]
 	if entry == nil {
 		t.Fatal("the session holds no BAR 1 after establishing one")
 	}
@@ -241,7 +241,7 @@ func TestTheBARsParametersAreReadWhereverTheySit(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
 	}
-	entry = c.sessions[seid].BARs[1]
+	entry = c.sessions[seid].rare().BARs[1]
 	if entry.hasDuration || entry.hasCount {
 		t.Errorf("an all-zero Update BAR left %+v, want no instruction at all", entry)
 	}
@@ -260,7 +260,7 @@ func TestTheBARsParametersAreReadWhereverTheySit(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
 	}
-	entry = c.sessions[seid].BARs[1]
+	entry = c.sessions[seid].rare().BARs[1]
 	if !entry.infinite {
 		t.Fatalf("the infinite timer was read as %+v", entry)
 	}
@@ -409,7 +409,7 @@ func TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession(t *testing.T) 
 	}
 	seid := upFSEID(t, resp)
 	// The numbers a Session Modification set, which the response replaces.
-	if entry := c.sessions[seid].BARs[1]; entry == nil || entry.duration != 30*time.Second || entry.count != 16 {
+	if entry := c.sessions[seid].rare().BARs[1]; entry == nil || entry.duration != 30*time.Second || entry.count != 16 {
 		t.Fatalf("the establishment's BAR is %+v, want 30s/16", entry)
 	}
 
@@ -418,7 +418,7 @@ func TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession(t *testing.T) 
 		ie.NewDLBufferingDuration(10*time.Second),
 		ie.NewDLBufferingSuggestedPacketCount(64),
 	))
-	entry := c.sessions[seid].BARs[1]
+	entry := c.sessions[seid].rare().BARs[1]
 	if !entry.hasDuration || entry.duration != 10*time.Second || entry.infinite {
 		t.Errorf("the response's duration left %+v, want 10s", entry)
 	}
@@ -434,7 +434,7 @@ func TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession(t *testing.T) 
 		ie.NewBARID(1),
 		ie.NewDLBufferingDuration(time.Duration(math.MaxInt64)),
 	))
-	entry = c.sessions[seid].BARs[1]
+	entry = c.sessions[seid].rare().BARs[1]
 	if !entry.infinite {
 		t.Fatalf("the infinite timer in a response was read as %+v", entry)
 	}
@@ -448,7 +448,7 @@ func TestAnUpdateBARInASessionReportResponseIsAppliedToTheSession(t *testing.T) 
 		ie.NewDLBufferingDuration(0),
 		ie.NewDLBufferingSuggestedPacketCount(0),
 	))
-	entry = c.sessions[seid].BARs[1]
+	entry = c.sessions[seid].rare().BARs[1]
 	if entry.hasDuration || entry.hasCount {
 		t.Errorf("an all-zero Update BAR in a response left %+v, want no instruction at all", entry)
 	}
@@ -509,11 +509,11 @@ func TestAnUpdateBARForABARTheSessionDoesNotHoldIsIgnored(t *testing.T) {
 		ie.NewDLBufferingSuggestedPacketCount(64),
 	))
 
-	if len(c.sessions[seid].BARs) != 1 {
+	if len(c.sessions[seid].rare().BARs) != 1 {
 		t.Errorf("the session holds %d BARs after an Update BAR for BAR 2, want the one it had",
-			len(c.sessions[seid].BARs))
+			len(c.sessions[seid].rare().BARs))
 	}
-	if entry := c.sessions[seid].BARs[1]; entry.duration != 30*time.Second || entry.count != 16 {
+	if entry := c.sessions[seid].rare().BARs[1]; entry.duration != 30*time.Second || entry.count != 16 {
 		t.Errorf("the BAR the session holds is now %+v, want the establishment's 30s/16", entry)
 	}
 	if len(rec.txns) != txns {
@@ -538,7 +538,7 @@ func TestASessionReportResponseWithNoUpdateBARChangesNothing(t *testing.T) {
 
 	c.ApplyUpdateBAR(context.Background(), seid, nil)
 
-	if entry := c.sessions[seid].BARs[1]; entry == nil ||
+	if entry := c.sessions[seid].rare().BARs[1]; entry == nil ||
 		entry.duration != 30*time.Second || entry.count != 16 {
 		t.Errorf("the BAR is %+v after a response with no Update BAR, want the establishment's 30s/16", entry)
 	}
@@ -584,7 +584,7 @@ func TestAnUpdateBARAfterTheEpisodeEndedIsIgnored(t *testing.T) {
 		ie.NewDLBufferingDuration(10*time.Second),
 		ie.NewDLBufferingSuggestedPacketCount(64),
 	))
-	if entry := c.sessions[seid].BARs[1]; entry == nil || entry.duration != 30*time.Second || entry.count != 16 {
+	if entry := c.sessions[seid].rare().BARs[1]; entry == nil || entry.duration != 30*time.Second || entry.count != 16 {
 		t.Errorf("the BAR is %+v after an Update BAR for an ended episode, want the establishment's 30s/16", entry)
 	}
 	if len(rec.txns) != txns {
