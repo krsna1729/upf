@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 
+	sdk "github.com/krsna1729/bess/sdk/go/bess"
 	"github.com/krsna1729/upf/internal/bess"
 )
 
@@ -273,4 +275,81 @@ func TestLiveSessionSharesOneFTEIDPerCHOOSEID(t *testing.T) {
 		t.Errorf("two PDIs with CHOOSE ID 3 got TEIDs %#x and %#x: they asked for one tunnel", one, two)
 	}
 	t.Logf("established SEID %d: two PDIs, one F-TEID %#x", upFSEID(t, resp), one)
+}
+
+// The native engine rejects erasing a key that never existed. Exercise the
+// complete lifecycle, including rates becoming zero after a meter was installed,
+// rather than accepting an establishment in a recorder that cannot reject it.
+func TestLiveQERDirectionalMetersRemainDeletable(t *testing.T) {
+	for i, tc := range []struct {
+		name        string
+		ul, dl      uint64
+		transitions bool
+	}{
+		{"uplink-only", 1000, 0, false},
+		{"downlink-only", 0, 2000, false},
+		{"unpoliced", 0, 0, false},
+		{"rate-transitions-and-compiler-refusal", 1000, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			target := os.Getenv("UPF_BESS_TARGET")
+			if target == "" {
+				t.Skip("set UPF_BESS_TARGET to exercise native meter lifecycle")
+			}
+			client, err := bess.Dial(ctx, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			c := New(liveConfig(), client, quietLogger())
+			req := establishment(uint64(0x209000+i), fmt.Sprintf("10.252.0.%d", i+1))
+			req.CreateQER = []*ie.IE{ie.NewCreateQER(ie.NewQERID(1),
+				ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen), ie.NewMBR(tc.ul, tc.dl))}
+			resp := c.Establish(req)
+			if got := cause(t, resp); got != ie.CauseRequestAccepted {
+				t.Fatalf("establishment cause %d", got)
+			}
+			seid := upFSEID(t, resp.(*message.SessionEstablishmentResponse))
+			deleted := false
+			defer func() {
+				if !deleted {
+					if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 11, 0))); got != ie.CauseRequestAccepted {
+						t.Errorf("cleanup deletion cause %d", got)
+					}
+				}
+			}()
+			if tc.transitions {
+				// Allocation precedes compiler model validation. This refusal
+				// happens before any native transaction, and must restore the
+				// old model and release only the new ids.
+				bad := message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+					ie.NewUpdateQER(ie.NewQERID(1), ie.NewMBR(1000, 2000)),
+					ie.NewUpdatePDR(ie.NewPDRID(1), ie.NewURRID(0xffff)))
+				if got := cause(t, c.Modify(bad)); got != ie.CauseRuleCreationModificationFailure {
+					t.Fatalf("invalid rule reference cause %d", got)
+				}
+				for n, rates := range [][2]uint64{{0, 2000}, {1000, 2000}, {0, 0}, {1000, 2000}, {0, 0}} {
+					mod := message.NewSessionModificationRequest(0, 0, seid, uint32(3+n), 0,
+						ie.NewUpdateQER(ie.NewQERID(1), ie.NewMBR(rates[0], rates[1])))
+					if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+						t.Fatalf("rate transition %v cause %d", rates, got)
+					}
+				}
+			}
+			if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 10, 0))); got != ie.CauseRequestAccepted {
+				t.Fatalf("native deletion cause %d", got)
+			}
+			deleted = true
+			snapshot, err := client.SDK().Pipeline(ctx, sdk.WithResources(c.target.SweepResources()...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, resource := range snapshot.Pipeline.GetResources() {
+				if len(resource.GetEntries()) != 0 {
+					t.Errorf("deletion left session-owned entries in %s", resource.GetName())
+				}
+			}
+		})
+	}
 }

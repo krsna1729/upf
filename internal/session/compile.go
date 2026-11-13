@@ -968,14 +968,19 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 		if q.hasRate {
 			entry.mbUL, entry.mbDL, entry.hasRate = q.mbUL, q.mbDL, true
-			if entry.meterUL == 0 {
+			// Reserve a direction only once it can create a native record.
+			// A zero-rate direction is never written; allocating its id would
+			// make deletion erase a key that never existed. Keep an already
+			// allocated id across later zero rates: its native record remains
+			// owned until removal, and an unknown write must not free it.
+			if entry.meterUL == 0 && entry.mbUL != 0 {
 				if id, err := c.meters.alloc(); err != nil {
 					c.log.Warn("session: no meter id left for a QER", "qer", q.id)
 				} else {
 					entry.meterUL = id
 				}
 			}
-			if entry.meterDL == 0 {
+			if entry.meterDL == 0 && entry.mbDL != 0 {
 				if id, err := c.meters.alloc(); err != nil {
 					c.log.Warn("session: no meter id left for a QER", "qer", q.id)
 				} else {
