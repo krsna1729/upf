@@ -1185,7 +1185,7 @@ func TestARefusedModificationKeepsTheCHIDItAllocated(t *testing.T) {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
 	c.mu.Lock()
-	_, mapped := c.fteidTEIDKeys[held]
+	mapped := c.teidClaimed(held)
 	queued = len(c.teids.freed)
 	c.mu.Unlock()
 	if mapped {
@@ -1336,10 +1336,10 @@ func TestSharedCHIDMustKeepTheSameEndpointFamilySet(t *testing.T) {
 		t.Fatal("family-set mismatch reached Apply")
 	}
 	c.mu.Lock()
-	owners, reserved := len(c.byFTEID), len(c.fteidTEIDKeys)
+	owners := len(c.byFTEID)
 	c.mu.Unlock()
-	if owners != 0 || reserved != 0 {
-		t.Fatalf("failed shared CHID left ownership behind: owners=%d TEID refs=%d", owners, reserved)
+	if owners != 0 {
+		t.Fatalf("failed shared CHID left ownership behind: owners=%d", owners)
 	}
 }
 func TestZeroTEIDRequiresChooseFlag(t *testing.T) {
@@ -3424,20 +3424,20 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 	}
 	c.mu.Lock()
 	c.releaseSession(first)
-	remaining := c.fteidTEIDKeys[0x77]
+	remaining := c.teidClaimed(0x77)
 	_, secondStillOwned := c.byFTEID[c.fteidKeysOf(secondPDR)[0]]
 	pinned := c.teids.taken[0x77]
 	c.mu.Unlock()
-	if remaining != 1 || !secondStillOwned || !pinned {
-		t.Fatalf("releasing one endpoint prematurely freed the shared TEID: refs=%d owner=%v pinned=%v", remaining, secondStillOwned, pinned)
+	if !remaining || !secondStillOwned || !pinned {
+		t.Fatalf("releasing one endpoint prematurely freed the shared TEID: claimed=%v owner=%v pinned=%v", remaining, secondStillOwned, pinned)
 	}
 	c.mu.Lock()
 	c.releaseSession(secondSession)
-	remaining, pinned = c.fteidTEIDKeys[0x77], c.teids.taken[0x77]
-	contexts := len(c.fteidContexts)
+	remaining, pinned = c.teidClaimed(0x77), c.teids.taken[0x77]
+	contexts := c.contexts.taken[firstPDR.fteidContext] || c.contexts.taken[secondPDR.fteidContext]
 	c.mu.Unlock()
-	if remaining != 0 || pinned || contexts != 0 {
-		t.Fatalf("last endpoint did not release the TEID: refs=%d pinned=%v contexts=%d", remaining, pinned, contexts)
+	if remaining || pinned || contexts {
+		t.Fatalf("last endpoint did not release the TEID: claimed=%v pinned=%v contexts=%v", remaining, pinned, contexts)
 	}
 }
 

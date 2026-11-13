@@ -501,24 +501,22 @@ type Compiler struct {
 	// measured tracks URR membership for activity polling and rare End Marker
 	// events, not an ordinary per-tick walk. buffering is the BUFF+NOCP set
 	// EvaluateDownlinks walks and prunes.
-	measured      map[uint64]struct{}
-	buffering     map[uint64]struct{}
-	nextSEID      uint64
-	byFTEID       map[fteidKey]fteidOwner
-	fteidTEIDKeys map[uint32]int32 // byFTEID keys per TEID: the TEID is released when none is left
-	actions       *idPool
-	policies      *idPool
-	meters        *idPool
-	teids         *idPool
-	// fteidContexts is the admission context each (session, direction,
-	// endpoint, TEID) holds while one of its exact F-TEID keys is claimed: the
-	// id GtpuDecap writes as `fteid_context` and the PDR key matches. Like the
-	// TEID it replaced in that key, a context is reusable once released: its
-	// admission entries leave in the same transaction as its rules. A pinned
-	// TEID outside MaxTEIDs still takes a context, so the pool is not bounded
-	// by it: the decap's max_fteids is what bounds live contexts.
-	fteidContexts map[fteidContextKey]fteidContext
-	contexts      *idPool
+	measured  map[uint64]struct{}
+	buffering map[uint64]struct{}
+	nextSEID  uint64
+	// byFTEID is the owner of every claimed exact F-TEID admission key, and
+	// the admission context the key writes. It is also the TEIDs' and the
+	// contexts' reference count: a TEID is released when no key of any
+	// endpoint names it, a context when no key of its (session, direction,
+	// endpoint, TEID) is left (teidClaimed, contextOf). The keys a TEID can
+	// have are few -- an endpoint's address per family -- so those are probes
+	// rather than two more maps with an entry per session.
+	byFTEID  map[fteidKey]fteidOwner
+	actions  *idPool
+	policies *idPool
+	meters   *idPool
+	teids    *idPool
+	contexts *idPool
 	// sessionIDs are the "<module>/sessions" keys (cfg.Sessions), aged like
 	// the action ids: an erased session's id retires for a grace period.
 	sessionIDs *idPool
@@ -542,21 +540,15 @@ type Compiler struct {
 
 type fteidOwner struct {
 	session *Session
-	down    bool
-}
-
-type fteidContextKey struct {
-	session  *Session
-	down     bool
-	endpoint uint32
-	teid     uint32
-}
-
-// fteidContext is held by value: an entry per session, so a pointer to a
-// separate 16 B object would cost every session one more allocation.
-type fteidContext struct {
-	id   uint32
-	keys int32 // claimed exact admission keys that write this id
+	// ctx is the admission context each (session, direction, endpoint, TEID)
+	// holds while one of its exact F-TEID keys is claimed: the id GtpuDecap
+	// writes as `fteid_context` and the PDR key matches. Like the TEID it
+	// replaced in that key, a context is reusable once released: its
+	// admission entries leave in the same transaction as its rules. A pinned
+	// TEID outside MaxTEIDs still takes a context, so the pool is not bounded
+	// by it: the decap's max_fteids is what bounds live contexts.
+	ctx  uint32
+	down bool
 }
 
 // teidReuseDelay is how long a released F-TEID waits before the pool may hand
@@ -573,23 +565,21 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	}
 	cfg = cfg.withDefaults()
 	c := &Compiler{
-		cfg:           cfg,
-		target:        newTarget(cfg),
-		ap:            ap,
-		log:           log,
-		sessions:      map[uint64]*Session{},
-		byCP:          map[uint64]*Session{},
-		buffering:     map[uint64]struct{}{},
-		measured:      map[uint64]struct{}{},
-		rules:         map[string]uint64{},
-		byFTEID:       map[fteidKey]fteidOwner{},
-		fteidTEIDKeys: map[uint32]int32{},
-		fteidContexts: map[fteidContextKey]fteidContext{},
-		nextSEID:      1,
-		actions:       newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
-		policies:      newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
-		meters:        newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
-		teids:         newIDPool(cfg.MaxTEIDs, teidReuseDelay),
+		cfg:       cfg,
+		target:    newTarget(cfg),
+		ap:        ap,
+		log:       log,
+		sessions:  map[uint64]*Session{},
+		byCP:      map[uint64]*Session{},
+		buffering: map[uint64]struct{}{},
+		measured:  map[uint64]struct{}{},
+		rules:     map[string]uint64{},
+		byFTEID:   map[fteidKey]fteidOwner{},
+		nextSEID:  1,
+		actions:   newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		policies:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		meters:    newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
+		teids:     newIDPool(cfg.MaxTEIDs, teidReuseDelay),
 		// A context never reaches the wire (GtpuDecap writes it, the PDR key
 		// matches it), so it may be reused at once -- and over a 2^31 space a
 		// grace would hold every release until a walk that never ends.
@@ -1651,16 +1641,63 @@ func (c *Compiler) fteidKeysOf(p *pdr) []fteidKey {
 	ipv4, ipv6 := c.endpointAddrs(p.endpointID)
 	keys := make([]fteidKey, 0, len(families))
 	for _, family := range families {
-		k := fteidKey{endpointID: p.endpointID, family: uint32(family), teid: p.teid}
-		if family == 6 {
-			k.address = ipv6.As16()
-		} else {
-			v := ipv4.As4()
-			copy(k.address[:], v[:])
-		}
-		keys = append(keys, k)
+		keys = append(keys, fteidKeyOf(p.endpointID, family, p.teid, ipv4, ipv6))
 	}
 	return keys
+}
+
+// fteidKeyOf is the admission key of one family of an endpoint's F-TEID.
+func fteidKeyOf(endpointID uint32, family uint8, teid uint32, ipv4, ipv6 netip.Addr) fteidKey {
+	k := fteidKey{endpointID: endpointID, family: uint32(family), teid: teid}
+	if family == 6 {
+		k.address = ipv6.As16()
+	} else {
+		v := ipv4.As4()
+		copy(k.address[:], v[:])
+	}
+	return k
+}
+
+// endpointFTEIDKeys calls yield, until it returns false, with every key a TEID
+// can have at one endpoint: one per family a PDR's keys are made in
+// (fteidFamilies: 0, 4 or 6). Families 0 and 4 take the endpoint's IPv4
+// address, without which no key of theirs was ever made.
+func endpointFTEIDKeys(endpointID, teid uint32, ipv4, ipv6 netip.Addr, yield func(fteidKey) bool) {
+	if ipv4.Is4() || ipv4.Is4In6() {
+		if !yield(fteidKeyOf(endpointID, 0, teid, ipv4, ipv6)) || !yield(fteidKeyOf(endpointID, 4, teid, ipv4, ipv6)) {
+			return
+		}
+	}
+	yield(fteidKeyOf(endpointID, 6, teid, ipv4, ipv6))
+}
+
+// teidClaimed reports whether a claimed key of any endpoint names teid.
+func (c *Compiler) teidClaimed(teid uint32) bool {
+	claimed := false
+	for i := range c.cfg.FTEIDEndpoints {
+		e := &c.cfg.FTEIDEndpoints[i]
+		endpointFTEIDKeys(e.ID, teid, e.IPv4, e.IPv6, func(k fteidKey) bool {
+			_, claimed = c.byFTEID[k]
+			return !claimed
+		})
+		if claimed {
+			return true
+		}
+	}
+	return false
+}
+
+// contextOf is the admission context a claimed key of this session, direction,
+// endpoint and TEID writes, if one is claimed.
+func (c *Compiler) contextOf(s *Session, down bool, endpointID, teid uint32) (ctx uint32, held bool) {
+	ipv4, ipv6 := c.endpointAddrs(endpointID)
+	endpointFTEIDKeys(endpointID, teid, ipv4, ipv6, func(k fteidKey) bool {
+		if o, ok := c.byFTEID[k]; ok && o.session == s && o.down == down {
+			ctx, held = o.ctx, true
+		}
+		return !held
+	})
+	return ctx, held
 }
 
 // remove takes a session's state out of the dataplane and frees its ids. The
@@ -1868,7 +1905,7 @@ func (c *Compiler) settle(s *Session) {
 	for chid, chosen := range s.rare().chids {
 		if !chosenNamed(s, chosen) {
 			delete(s.rare().chids, chid)
-			if c.fteidTEIDKeys[chosen.TEID] == 0 {
+			if !c.teidClaimed(chosen.TEID) {
 				c.teids.release(chosen.TEID)
 			}
 		}
@@ -1986,7 +2023,7 @@ func (c *Compiler) releaseSession(s *Session) {
 		}
 	}
 	for _, chosen := range s.rare().chids {
-		if c.fteidTEIDKeys[chosen.TEID] == 0 {
+		if !c.teidClaimed(chosen.TEID) {
 			c.teids.release(chosen.TEID)
 		}
 	}

@@ -2326,25 +2326,23 @@ func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
 			return fmt.Errorf("%w: F-TEID endpoint key is already owned", errNoResources)
 		}
 	}
-	ctxKey := fteidContextKey{session: s, down: p.down, endpoint: p.endpointID, teid: p.teid}
-	ctx, held := c.fteidContexts[ctxKey]
+	ctx, held := c.contextOf(s, p.down, p.endpointID, p.teid)
 	if !held {
+		// No key of this context is claimed, so none of keys is: a key that
+		// is was refused above unless this session and direction own it.
 		id, err := c.contexts.alloc()
 		if err != nil {
 			return fmt.Errorf("%w: F-TEID context: %v", errNoResources, err)
 		}
-		ctx = fteidContext{id: id}
+		ctx = id
 	}
 	for _, key := range keys {
 		if _, exists := c.byFTEID[key]; exists {
 			continue
 		}
-		c.byFTEID[key] = fteidOwner{session: s, down: p.down}
-		ctx.keys++
-		c.fteidTEIDKeys[p.teid]++
+		c.byFTEID[key] = fteidOwner{session: s, ctx: ctx, down: p.down}
 	}
-	c.fteidContexts[ctxKey] = ctx
-	p.fteidContext = ctx.id
+	p.fteidContext = ctx
 	c.teids.reserve(p.teid)
 	return nil
 }
@@ -2377,23 +2375,13 @@ func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
 			continue
 		}
 		delete(c.byFTEID, key)
-		c.fteidTEIDKeys[p.teid]--
 		removed = true
-		ctxKey := fteidContextKey{session: s, down: owner.down, endpoint: p.endpointID, teid: p.teid}
-		if ctx, held := c.fteidContexts[ctxKey]; held {
-			if ctx.keys--; ctx.keys <= 0 {
-				delete(c.fteidContexts, ctxKey)
-				c.contexts.release(ctx.id)
-			} else {
-				c.fteidContexts[ctxKey] = ctx
-			}
+		if _, still := c.contextOf(s, owner.down, p.endpointID, p.teid); !still {
+			c.contexts.release(owner.ctx)
 		}
 	}
-	if removed && c.fteidTEIDKeys[p.teid] == 0 {
-		delete(c.fteidTEIDKeys, p.teid)
-		if !sessionHasCHIDTEID(s, p.teid) {
-			c.teids.release(p.teid)
-		}
+	if removed && !c.teidClaimed(p.teid) && !sessionHasCHIDTEID(s, p.teid) {
+		c.teids.release(p.teid)
 	}
 }
 func sessionHasCHIDTEID(s *Session, teid uint32) bool {
