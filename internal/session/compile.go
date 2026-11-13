@@ -1220,22 +1220,19 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			ueIP: p.ueIP, hasUEIP: p.hasUEIP, ueIPDst: p.ueIPDst,
 			sdfs: p.sdfs, farID: p.farID,
 			hasMAR: p.hasMAR, marID: p.marID, qerIDs: p.qerIDs, urrIDs: p.urrIDs,
-			instance: p.instance, qfis: p.qfis,
+			pdrExt:   newPDRExt(p.fteidIPv4, p.fteidIPv6, p.instance, p.reference, p.qfis),
 			hasFTEID: p.hasFTEID, hasChoose: p.hasChoose, hasCHID: p.hasCHID, chid: p.chid,
-			fteidIPv4: p.fteidIPv4, fteidIPv6: p.fteidIPv6,
-			wantIPv4: p.wantIPv4, wantIPv6: p.wantIPv6, reference: p.reference,
+			wantIPv4: p.wantIPv4, wantIPv6: p.wantIPv6,
 		}
 		if old != nil && !p.hasPDI {
 			// An Update PDR with no PDI keeps the one the UP function stored
 			// (Table 7.5.4.2-1): only a PDI it carries replaces it. The
 			// F-TEID is carried over below, as for an update that names none.
-			pdr.srcIfc, pdr.ueIPDst, pdr.instance, pdr.reference =
-				old.srcIfc, old.ueIPDst, old.instance, old.reference
+			pdr.srcIfc, pdr.ueIPDst, pdr.pdrExt = old.srcIfc, old.ueIPDst, old.pdrExt
 			if old.hasUEIP {
 				pdr.ueIP, pdr.hasUEIP = old.ueIP, true
 			}
-			pdr.sdfs, pdr.qfis = old.sdfs, old.qfis
-			pdr.fteidIPv4, pdr.fteidIPv6 = old.fteidIPv4, old.fteidIPv6
+			pdr.sdfs = old.sdfs
 		}
 		var err error
 		pdr.down, err = pdrDownlink(pdr.srcIfc, pdr.hasUEIP, pdr.ueIPDst, pdr.sdfs)

@@ -5324,7 +5324,7 @@ func TestAFARThatAsksToDuplicateIsRefused(t *testing.T) {
 func TestDualStackFTEIDIsOneContextNotTwoRuleSets(t *testing.T) {
 	p := &pdr{
 		teid: 0x77, fteidContext: 5,
-		endpointID: 17, wantIPv4: true, wantIPv6: true, qfis: []uint8{1, 9},
+		endpointID: 17, wantIPv4: true, wantIPv6: true, pdrExt: &pdrExt{qfis: []uint8{1, 9}},
 		sdfs: []*sdfFilter{{proto: 17, protoOK: true}, {proto: 6, protoOK: true}},
 	}
 	keys, err := p.ruleKeys([]Field{FTEIDContext, Proto, QFI})

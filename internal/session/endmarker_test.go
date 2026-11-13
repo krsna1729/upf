@@ -343,37 +343,37 @@ func TestFTEIDEndpointSelectionUsesSourceAndInstance(t *testing.T) {
 		{ID: 8, ReferencePoint: "n9", SourceInterface: ie.SrcInterfaceCore, Instance: "internet", IPv4: netip.MustParseAddr("10.91.0.1")},
 	}
 	c := New(cfg, &recorder{}, quietLogger())
-	core, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceCore, instance: "internet", wantIPv4: true})
+	internet := &pdrExt{instance: "internet"}
+	core, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceCore, pdrExt: internet, wantIPv4: true})
 	if err != nil || core.ID != 8 {
 		t.Fatalf("Core PDI selected endpoint %+v, error %v", core, err)
 	}
-	first, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, instance: "internet", wantIPv4: true})
+	first, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, wantIPv4: true})
 	if err != nil || first.ID != 7 {
 		t.Fatalf("IPv4 CHOOSE selected endpoint %+v, error %v", first, err)
 	}
 	for _, p := range []*pdr{
-		{srcIfc: ie.SrcInterfaceAccess, instance: "internet", wantIPv6: true},
-		{srcIfc: ie.SrcInterfaceAccess, instance: "internet", wantIPv4: true, wantIPv6: true},
+		{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, wantIPv6: true},
+		{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, wantIPv4: true, wantIPv6: true},
 	} {
 		ep, err := c.fteidEndpoint(p)
 		if err != nil || ep.ID != 9 {
 			t.Fatalf("family-exact CHOOSE selected endpoint %+v, error %v", ep, err)
 		}
 	}
-	pinned := &pdr{srcIfc: ie.SrcInterfaceAccess, instance: "internet", teid: 0x77,
-		wantIPv4: true, fteidIPv4: netip.MustParseAddr("10.92.0.1")}
+	pinned := &pdr{srcIfc: ie.SrcInterfaceAccess, teid: 0x77, wantIPv4: true,
+		pdrExt: &pdrExt{instance: "internet", fteidIPv4: netip.MustParseAddr("10.92.0.1")}}
 	if ep, err := c.fteidEndpoint(pinned); err != nil || ep.ID != 9 {
 		t.Fatalf("pinned F-TEID selected endpoint %+v, error %v", ep, err)
 	}
-	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess,
-		instance: "internet", teid: 0x79, wantIPv4: true,
-		fteidIPv4: netip.MustParseAddr("198.51.100.77")}); err == nil {
+	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, teid: 0x79, wantIPv4: true,
+		pdrExt: &pdrExt{instance: "internet", fteidIPv4: netip.MustParseAddr("198.51.100.77")}}); err == nil {
 		t.Fatal("pinned address absent from endpoint configuration was accepted")
 	}
-	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, instance: "internet", teid: 0x78, wantIPv4: true}); err == nil {
+	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, teid: 0x78, wantIPv4: true}); err == nil {
 		t.Fatal("addressless pinned F-TEID was accepted despite multiple matching endpoints")
 	}
-	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, instance: "vn", wantIPv4: true}); err == nil {
+	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, pdrExt: &pdrExt{instance: "vn"}, wantIPv4: true}); err == nil {
 		t.Fatal("an unmatched instance selected an endpoint")
 	}
 	onlyV4 := cfg
@@ -383,7 +383,7 @@ func TestFTEIDEndpointSelectionUsesSourceAndInstance(t *testing.T) {
 			Instance: "internet", IPv4: netip.MustParseAddr("10.93.0.1")},
 	}
 	if _, err := New(onlyV4, &recorder{}, quietLogger()).fteidEndpoint(
-		&pdr{srcIfc: ie.SrcInterfaceAccess, instance: "internet", wantIPv4: true, wantIPv6: true}); err == nil {
+		&pdr{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, wantIPv4: true, wantIPv6: true}); err == nil {
 		t.Fatal("no-partial-fallback family request selected an IPv4-only endpoint")
 	}
 }
@@ -567,7 +567,7 @@ func TestLeavingTunnelsDoesNotEndAnUnchangedRoutedEndpoint(t *testing.T) {
 	s := &Session{
 		FARs: idMapOf(map[uint32]*far{2: old}),
 		PDRs: idMapOf(map[uint16]*pdr{
-			1: {id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, instance: "internet",
+			1: {id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, pdrExt: &pdrExt{instance: "internet"},
 				tunnelLocalAddress: local, transportRouteDomain: 2},
 		}),
 	}

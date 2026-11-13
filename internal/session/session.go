@@ -867,8 +867,8 @@ func (s *Session) forgetRemoval(id uint16) {
 // pdr is one compiled PDR: its rule in the PDR table and what it resolved to.
 type pdr struct {
 	// Keep pointer-bearing data together, then 32/16-bit scalars and flags.
-	// This keeps the cached selector within the 352 B amd64 size class and
-	// leaves the scalar tail outside the GC's pointer-bearing prefix.
+	// This keeps a PDR within the 240 B amd64 size class and leaves the
+	// scalar tail outside the GC's pointer-bearing prefix.
 	ueIP   netip.Addr
 	qerIDs []uint32
 	urrIDs []uint32
@@ -881,28 +881,17 @@ type pdr struct {
 	// table layout is immutable.
 	ruleIDs string
 
-	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
-	// empty when the SMF named none: resolve turns it into the deployment's
-	// interface, whose route domain goes into the rule's key and whose next hop
-	// sends the forward out.
-	instance string
+	// pdrExt holds the PDI fields a PDR usually lacks; its fields read as the
+	// PDR's own. It is never nil and never written: see pdrExt.
+	*pdrExt
 
-	// sdfs and qfis are what the PDI named (TS 29.244 8.2.89 and the SDF
-	// Filter IE): the SDF filters and QoS flows this rule selects, any of
-	// which matches. A PDI that names no QFI leaves the uplink table's qfi
-	// field open -- the session's general rule for the flow -- and the rule
-	// then matches every QFI of it.
+	// sdfs is the SDF filters the PDI named (the SDF Filter IE), any of which
+	// matches.
 	sdfs []*sdfFilter
-	qfis []uint8
-	// sdf, hasQFI and qfi select one combination of those lists, only on the
+	// sdf, hasQFI and qfi select one combination of sdfs and qfis, only on the
 	// stack copies ruleKeys makes: each matcher reads one filter and one QFI.
 	sdf *sdfFilter
 
-	fteidIPv4, fteidIPv6 netip.Addr
-	// reference is the GTP-U reference point the PDI's Source Interface Type
-	// named for the F-TEID ("" for the Source Interface's own: n3 for Access,
-	// n9 for Core); see pdrReferencePoint.
-	reference          string
 	tunnelLocalAddress netip.Addr
 
 	precedence uint32
@@ -991,6 +980,41 @@ type pdr struct {
 	// nothing, and a Downlink Data Report sent anyway is a message the SMF did
 	// not ask for (its own NOCP field says so).
 	notify bool
+}
+
+// pdrExt is the part of a PDI that a usual session's PDRs do not name. A PDR
+// points at noPDRExt until its PDI names one of them, which keeps 104 B out of
+// every PDR of a million sessions. An extension is immutable once built, so
+// PDRs (and the stack copies ruleKeys makes) share it: merge builds a new one
+// rather than writing a field.
+type pdrExt struct {
+	// fteidIPv4 and fteidIPv6 are the F-TEID addresses the SMF named; none
+	// when it asked this UP to choose (CHOOSE), as a 5G SMF usually does.
+	fteidIPv4, fteidIPv6 netip.Addr
+	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
+	// empty when the SMF named none: resolve turns it into the deployment's
+	// interface, whose route domain goes into the rule's key and whose next hop
+	// sends the forward out.
+	instance string
+	// reference is the GTP-U reference point the PDI's Source Interface Type
+	// named for the F-TEID ("" for the Source Interface's own: n3 for Access,
+	// n9 for Core); see pdrReferencePoint.
+	reference string
+	// qfis are the QoS flows the PDI named (TS 29.244 8.2.89), any of which
+	// matches. A PDI that names no QFI leaves the uplink table's qfi field
+	// open -- the session's general rule for the flow -- and the rule then
+	// matches every QFI of it.
+	qfis []uint8
+}
+
+// noPDRExt is the extension of every PDR whose PDI names none of its fields.
+var noPDRExt = &pdrExt{}
+
+func newPDRExt(v4, v6 netip.Addr, instance, reference string, qfis []uint8) *pdrExt {
+	if !v4.IsValid() && !v6.IsValid() && instance == "" && reference == "" && len(qfis) == 0 {
+		return noPDRExt
+	}
+	return &pdrExt{fteidIPv4: v4, fteidIPv6: v6, instance: instance, reference: reference, qfis: qfis}
 }
 
 // far is one compiled FAR.
