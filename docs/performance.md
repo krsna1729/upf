@@ -1174,7 +1174,9 @@ An earlier ungated four-run ABBA (`abba-{A1-unary,B1-stream,B2-stream,A2-unary}`
 turbo state uncertain) reported +22% for FAR 10K; the gated campaign does not
 reproduce that, and replaces it. Streams raise capacity but do not reach 10K:
 loss-free operation above capacity still needs the overload-refusal design.
-Adopting streams in UPF needs the SDK from BESS PR #151, which is not merged.
+BESS #151 merged (develop 733ddb19, tree-identical to the measured SDK), and
+upfd now dials `DialTransactionStreams(target, kMaxInFlight)`, the measured
+arm.
 
 Quota-only URR changes issue **zero native transactions**, yet target 10K has
 147 timeouts and target 100K completes 965,751 of 3,000,000 scheduled cycles.

@@ -60,9 +60,12 @@ type Client struct {
 	version string
 }
 
-// Dial connects to bessd's gRPC endpoint and reads its schema.
+// Dial connects to bessd's gRPC endpoint and reads its schema. Transactions
+// go over persistent streams, one per transaction the client lets in flight:
+// each stream carries one outstanding attempt with its own receipt, so the
+// bound and the stream count are the same number.
 func Dial(ctx context.Context, target string) (*Client, error) {
-	conn, err := sdk.Dial(target)
+	conn, err := sdk.DialTransactionStreams(target, kMaxInFlight)
 	if err != nil {
 		return nil, fmt.Errorf("bess: dial %s: %w", target, err)
 	}

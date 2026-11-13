@@ -1305,6 +1305,14 @@ own SEID bug ruled out), while one worker doing the same 16 sessions never
 missed a reply. And the run that measures this must fail when answers are
 missing, or a starved box and a slow UPF look alike.
 
+The bound is `kMaxInFlight` (32), and each transaction it admits rides one of as
+many persistent transaction streams (`sdk.DialTransactionStreams`): one
+outstanding attempt per stream, with its own receipt, the unary error and
+deadline semantics, and no merging of independent transactions. Against unary
+calls at 1M loaded sessions (gated ABBA, 4 pairs), streams raise replacement
+capacity 22.7% and FAR capacity 5.7%, and cut the 1K replacement p99 36%
+(`docs/performance.md`, "Loaded UPFD at 1M").
+
 ## What proves it
 
 - `ci/smoke-gtpu.sh` — the datapath, byte for byte: it builds the plugin against
