@@ -384,6 +384,11 @@ func (s *Server) Close() error {
 	var err error
 	s.once.Do(func() {
 		close(s.done)
+		// Workers may leave queued work behind on shutdown. Wake an
+		// association drain so it does not wait for answers that cannot be sent.
+		s.queuedMu.Lock()
+		s.drained.Broadcast()
+		s.queuedMu.Unlock()
 		if s.conn != nil {
 			err = s.conn.Close()
 		}
@@ -506,6 +511,8 @@ func (s *Server) Report(ctx context.Context, seid uint64, ies ...*ie.IE) (Report
 			return answer, nil
 		case <-ctx.Done():
 			return ReportAnswer{}, fmt.Errorf("n4: session report for SEID %d: %w", seid, ctx.Err())
+		case <-s.done:
+			return ReportAnswer{}, errors.New("n4: server closed")
 		case <-time.After(s.cfg.ReportTimeout):
 			if try >= s.cfg.ReportRetries {
 				return ReportAnswer{}, fmt.Errorf("n4: no answer to the session report for SEID %d after %d requests",
@@ -645,7 +652,15 @@ func (s *Server) onSession(msg message.Message, from net.Addr) {
 		s.queuedMu.Lock()
 		s.queued++
 		s.queuedMu.Unlock()
-		s.work[sessionKey(msg)%uint64(len(s.work))] <- sessionWork{msg: msg, from: from}
+		select {
+		case s.work[sessionKey(msg)%uint64(len(s.work))] <- sessionWork{msg: msg, from: from}:
+		case <-s.done:
+			s.queuedMu.Lock()
+			if s.queued--; s.queued == 0 {
+				s.drained.Broadcast()
+			}
+			s.queuedMu.Unlock()
+		}
 	default:
 		s.answerSession(msg, from)
 	}
@@ -771,6 +786,12 @@ func (s *Server) ended(reason string) {
 	// peer being gone.
 	s.queuedMu.Lock()
 	for s.queued > 0 {
+		select {
+		case <-s.done:
+			s.queuedMu.Unlock()
+			return
+		default:
+		}
 		s.drained.Wait()
 	}
 	s.queuedMu.Unlock()

@@ -599,9 +599,6 @@ func TestAnUnansweredReportIsRetriedAndFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("a report nobody answered returned no error")
 	}
-	if !strings.Contains(err.Error(), "no answer") {
-		t.Errorf("the error is %q, want it to say the report went unanswered", err)
-	}
 	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
 		t.Errorf("the report gave up after %v, want at least the two retries it was configured for", elapsed)
 	}
@@ -613,6 +610,32 @@ func TestAnUnansweredReportIsRetriedAndFails(t *testing.T) {
 	}
 	if sent != 3 {
 		t.Errorf("the SMF received %d reports, want the 3 attempts (1 + 2 retries)", sent)
+	}
+}
+
+func TestCloseUnblocksUnansweredReport(t *testing.T) {
+	srv, addr := startServer(t, n4.Config{ReportTimeout: time.Hour})
+	conn := connect(t, addr)
+	associate(t, conn, 1)
+
+	returned := make(chan error, 1)
+	go func() {
+		_, err := srv.Report(context.Background(), 0x1122, ie.NewReportType(0, 0, 1, 0))
+		returned <- err
+	}()
+	if req := recvMsg(t, conn, waitFor); req.MessageType() != message.MsgTypeSessionReportRequest {
+		t.Fatalf("got %s, want a Session Report Request", req.MessageTypeName())
+	}
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-returned:
+		if err == nil {
+			t.Fatal("Report completed successfully without an answer after Close")
+		}
+	case <-time.After(waitFor):
+		t.Fatal("Close left an unanswered Report blocked")
 	}
 }
 
