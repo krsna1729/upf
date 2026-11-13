@@ -43,7 +43,7 @@ bessd_apply "$ROOT/deploy/session-live.yaml"
 # the module and its workspace resolve.
 cd "$ROOT"
 MISE_GO_VERSION=${MISE_GO_VERSION:-1.27.1} UPF_BESS_TARGET=$SERVER \
-  $GO test "${GO_TEST_EXEC[@]}" ./internal/session/ -run 'TestLiveSessionProgramsTheDaemon|TestLiveStartupSweepErasesStaleSessions|TestLiveSessionSharedRecords|TestLiveSessionSharesOneFTEIDPerCHOOSEID' -count=1 -v -cover || {
+  $GO test "${GO_TEST_EXEC[@]}" ./internal/session/ -run 'TestLiveSessionProgramsTheDaemon|TestLiveStartupSweepErasesStaleSessions|TestLiveSessionSharedRecords|TestLiveSessionSharesOneFTEIDPerCHOOSEID|TestLiveQERDirectionalMetersRemainDeletable' -count=1 -v -cover || {
   echo "session-live: failed; the daemon's log is $LOG" >&2
   exit 1
 }
