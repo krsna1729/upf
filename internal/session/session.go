@@ -1010,8 +1010,6 @@ type localEnd struct {
 	domain  uint32
 }
 
-var localEnds interner[localEnd, localEnd]
-
 // newLocalEnd is the shared local end for address and domain, nil for
 // neither.
 func newLocalEnd(address netip.Addr, domain uint32) *localEnd {
