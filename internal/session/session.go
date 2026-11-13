@@ -1045,11 +1045,16 @@ type pdrExt struct {
 // noPDRExt is the extension of every PDR whose PDI names none of its fields.
 var noPDRExt = &pdrExt{}
 
+// newPDRExt returns the extension for these fields: noPDRExt when there are
+// none, else the one shared by every PDR naming the same ones (pdrExts).
 func newPDRExt(v4, v6 netip.Addr, instance, reference string, qfis []uint8) *pdrExt {
 	if !v4.IsValid() && !v6.IsValid() && instance == "" && reference == "" && len(qfis) == 0 {
 		return noPDRExt
 	}
-	return &pdrExt{fteidIPv4: v4, fteidIPv6: v6, instance: instance, reference: reference, qfis: qfis}
+	key := pdrExtKey{v4: v4, v6: v6, instance: instance, reference: reference, qfis: string(qfis)}
+	return pdrExts.get(key, func() *pdrExt {
+		return &pdrExt{fteidIPv4: v4, fteidIPv6: v6, instance: instance, reference: reference, qfis: qfis}
+	})
 }
 
 // far is one compiled FAR.
@@ -1117,11 +1122,14 @@ type farExt struct {
 // noFARExt is the extension of every FAR that names none of its strings.
 var noFARExt = &farExt{}
 
+// newFARExt returns the extension for these strings: noFARExt when there are
+// none, else the one shared by every FAR naming the same ones (farExts).
 func newFARExt(instance, policy, reference string) *farExt {
 	if instance == "" && policy == "" && reference == "" {
 		return noFARExt
 	}
-	return &farExt{instance: instance, policy: policy, reference: reference}
+	key := farExt{instance: instance, policy: policy, reference: reference}
+	return farExts.get(key, func() *farExt { ext := key; return &ext })
 }
 
 func (f *far) setInstance(v string)  { f.farExt = newFARExt(v, f.policy, f.reference) }
