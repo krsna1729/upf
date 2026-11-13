@@ -916,27 +916,32 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				errNotExpressible, q.id)
 		}
 		if entry == nil {
-			entry = &qer{id: q.id}
+			entry = &qer{id: q.id, qerPolicy: noQERPolicy}
 			s.QERs.set(q.id, entry)
 		}
 		// An Update QER carries what changed; every field it names replaces
-		// the one before it.
-		entry.gateUL, entry.gateDL = q.gateUL, q.gateDL
+		// the one before it. The provisioning is shared, so the change is made
+		// on a copy.
+		p := *entry.qerPolicy
+		p.gateUL, p.gateDL = q.gateUL, q.gateDL
 		if q.hasQFI {
 			// The QFI is optional in a QER (Gate Status is its one mandatory
 			// IE), so an Update that leaves it out keeps the flow the session
 			// holds: a QER that stopped naming its flow would quietly stop
 			// marking the packets of it.
-			entry.hasQFI, entry.qfi = true, q.qfi
+			p.hasQFI, p.qfi = true, q.qfi
 		}
 		if q.hasGBR {
-			entry.gbUL, entry.gbDL, entry.hasGBR = q.gbUL, q.gbDL, true
+			p.gbUL, p.gbDL, p.hasGBR = q.gbUL, q.gbDL, true
 		}
 		if q.hasWindow {
-			entry.window, entry.hasWindow = q.window, true
+			p.window, p.hasWindow = q.window, true
 		}
 		if q.hasRate {
-			entry.mbUL, entry.mbDL, entry.hasRate = q.mbUL, q.mbDL, true
+			p.mbUL, p.mbDL, p.hasRate = q.mbUL, q.mbDL, true
+		}
+		entry.qerPolicy = qerPolicyOf(p)
+		if q.hasRate {
 			// Reserve a direction only once it can create a native record.
 			// A zero-rate direction is never written; allocating its id would
 			// make deletion erase a key that never existed. Keep an already

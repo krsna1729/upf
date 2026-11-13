@@ -1262,8 +1262,21 @@ func (b *bar) timeoutNS() (uint64, bool) {
 }
 
 type qer struct {
-	// Keep 64-bit rates together, then ids and presence flags: 64 B rather
-	// than 80 B on amd64, without changing any policing or window state.
+	// qerPolicy is what the SMF provisioned, read as the QER's own fields.
+	// QERs provisioned alike share one (qerPolicyOf); merge changes it by
+	// building another, never by writing it.
+	*qerPolicy
+
+	id uint32
+	// One meter record per policed direction, allocated with the session and
+	// released with it. Each lives in that direction's chain.
+	meterUL uint32
+	meterDL uint32
+}
+
+// qerPolicy is a QER's provisioning. A plan provisions the same rates to every
+// subscriber, so QERs share it (qerPolicyOf); it is never written once shared.
+type qerPolicy struct {
 	mbUL uint64 // bytes per second, as the dataplane's meter wants it
 	mbDL uint64
 
@@ -1281,12 +1294,6 @@ type qer struct {
 	// named none, and this UP's own tenth of a second applies.
 	window time.Duration
 
-	id uint32
-	// One meter record per policed direction, allocated with the session and
-	// released with it. Each lives in that direction's chain.
-	meterUL uint32
-	meterDL uint32
-
 	gateUL    uint8
 	gateDL    uint8
 	hasRate   bool
@@ -1299,6 +1306,16 @@ type qer struct {
 	// without one polices the session's flows and marks none of them.
 	hasQFI bool
 	qfi    uint8
+}
+
+// noQERPolicy is a QER's provisioning before merge reads any.
+var noQERPolicy = &qerPolicy{}
+
+var qerPolicies = interner[qerPolicy, qerPolicy]{keyOf: func(p *qerPolicy) qerPolicy { return *p }}
+
+// qerPolicyOf returns a shared provisioning equal to p, or a copy of p.
+func qerPolicyOf(p qerPolicy) *qerPolicy {
+	return qerPolicies.get(p, func() *qerPolicy { v := p; return &v })
 }
 
 // volumeLimit is one volume-valued IE of a URR: the Volume Threshold (8.2.13)
