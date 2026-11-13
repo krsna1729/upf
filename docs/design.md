@@ -1000,11 +1000,19 @@ results, `analysis.json`, perf data, Go profiles and `hotspots/`);
 with the meter set as a transactional resource (BESS D-199). Each PDR table
 holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
 
-- **Live heap: 3.0-3.1 KB per session**, 2.97 GiB at 1M. Most of it is the
-  model itself: the `pdr` structs (~500 B each), the `Session` with its maps,
-  and the FAR and QER entries.
-- **Garbage: 70 KB per establishment.** Building the dataplane messages
-  (dynamicpb) and parsing PFCP account for most of it.
+- **Live heap: 1.5-1.6 KB per session.** The controller model holds 1,511 B
+  per session (`TestASessionHoldsAtMostItsBytes`), down from 3.0-3.1 KB:
+  rare PDR/FAR/Session fields sit behind pointers, provisioning that sessions
+  share (SDF filters, PDR/FAR extensions, URR limits, QER policy, tunnel local
+  ends) is interned through a fixed 256-slot table per kind, and per-session
+  caches are walked rather than kept. At 1M in the lane run
+  (`evidence/upfd-mem-20261113/1m-lane5000-u2700`) HeapAlloc after the fill
+  was 1,501 MiB, 1.57 KB per session with the compiler's own maps.
+- **Garbage: ~28 KB per establishment** end to end. The 1M lane run
+  allocated 30.6 GB over ~1M establishments; reading grouped IEs' children
+  once instead of through go-pfcp's re-parsing accessors removed 2.7 KB of it
+  (20.2 → 17.5 KB in-process). The largest remaining share is the
+  `map[string]any` keys and values of each dataplane change.
 - **Rate with one worker: 1,450/s at 100K and 1,220/s at 1M.** bessd's Apply
   takes 0.63-0.75 ms and is 91% of the load wall time.
   `-session-workers 8` overlaps those transactions: 2,140/s at 100K and 1,425/s
@@ -1028,11 +1036,13 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   slices, promoting to maps after 16 entries; unused BAR/MAR/CHOOSE-ID maps
   stay nil. PDRs derive endpoint addresses and tunnel resources rather than
   retaining copies; transaction-removal lists exist only while pending.
-  Removed QER ownership still lasts until deletion. URR fields are packed
-  without replacing `time.Time` or changing monotonic duration behavior.
+  Removed QER ownership still lasts until deletion. A URR's four times are
+  8-byte stamps on a monotonic base: durations stay monotonic, and after a
+  wall-clock step a stamp's wall time does not follow the step.
   `TestASessionHoldsAtMostItsBytes` bounds the whole retained model at
-  2,550 B of live objects and 3,500 B of heap spans per session for 20K
-  sessions with 2 PDRs, 2 FARs, 1 QER and 1 URR.
+  1,600 B of live objects and 2,300 B of heap spans per session for 20K
+  sessions with 2 PDRs, 2 FARs, 1 QER and 1 URR (measured 1,511 B and
+  2,022-2,109 B).
   A disposable runtime-metrics probe at that count measured live bytes
   74,097,904 → 50,097,568 and scannable heap 59,354,496 → 39,994,496
   (`.scratch/evidence/go-garbage/dsa-layout/{before,after}.json`).
@@ -1041,16 +1051,21 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   `150000-establish-cap380-dsa` admitted 102,729 sessions and answered
   47,271 with PFCP cause 75. Its upfd scope was 380 MiB, memory peak
   369,504,256 B (352.4 MiB), with `memory.events` max/oom/oom_kill all zero.
-- **Budget.** Without a limit, RSS ≈ 30 MiB + N × 3.1 KB × (1 + GOGC/100).
-  With the limit, the floor is about 30 MiB + N × 3.1 KB, plus ~15% for the
-  collector to keep pace.
+- **Budget.** Without a limit, RSS ≈ 30 MiB + N × 1.6 KB × (1 + GOGC/100).
+  With the limit, the floor is about 30 MiB + N × 1.6 KB, plus ~15% for the
+  collector to keep pace. Admission reads `/gc/heap/live:bytes`, which counts
+  everything allocated while a collection marks: during a fast fill it read
+  1,685 MiB at 1M while HeapAlloc was 1,501 MiB, so size the limit for
+  ~1.1 × the settled live heap / `-heap-admission`.
 - **Pod fits (measured).** bessd's default 1 GiB packet pool is the largest
   fixed term.
   - In 2 GiB (upfd 768 + bessd 1280 MiB), 150K sessions fit. bessd's limit
     refuses establishments from 167,678.
   - In 3 GiB (upfd 1472 + bessd 1600 MiB), 300K fit. bessd refuses from
     373,556.
-  - At 1M, `upfd` alone needs ~3.5 GiB and bessd 2.1 GiB.
+  - At 1M, `upfd` peaks at 2,265 MiB in a 2,700 MiB scope and bessd at
+    2,158 MiB (16,384 packet buffers, exact counters); the lane's three
+    processes total 4,537 MiB with no OOM event.
 - **Association end.** It erases in transactions of up to 1,000 changes. 1M
   sessions leave in 488 s once BESS's RecordArena grows its retirement queue
   geometrically (krsna1729/bess#116); before that fix, it took 4,246 s.
