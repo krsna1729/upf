@@ -67,14 +67,14 @@ func endMarkerRelays(s *Session, endpoint, teid uint32) []map[string]any {
 		// The tunnel's local end is resolved only for a PDR whose FAR
 		// forwards with an Outer Header Creation (resolve).
 		if p.endpointID != endpoint || p.teid != teid || p.hasMAR ||
-			!p.tunnelLocalAddress.IsValid() || p.transportRouteDomain == 0 {
+			!p.tunnelLocalAddress().IsValid() || p.transportRouteDomain() == 0 {
 			continue
 		}
 		f := s.FARs.at(p.farID)
 		if f == nil || !f.hasOuter || f.teid == 0 {
 			continue
 		}
-		t := tunnel{teid: f.teid, local: p.tunnelLocalAddress, peer: f.peer, domain: p.transportRouteDomain}
+		t := tunnel{teid: f.teid, local: p.tunnelLocalAddress(), peer: f.peer(), domain: p.transportRouteDomain()}
 		if slices.Contains(seen, t) {
 			continue
 		}

@@ -49,13 +49,17 @@ func TestASessionHoldsAtMostItsBytes(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	live := float64(int64(after.HeapAlloc)-int64(before.HeapAlloc)) / n
 	t.Logf("%.1f B of live objects per session", live)
-	if live > 2550 {
-		t.Errorf("a session retains %.0f B of live objects, want at most 2550", live)
+	// 2,550 B before the session-memory series (perf/upfd-session-memory):
+	// rare fields behind pointers, interned shared provisioning, walked
+	// caches. 1,511 B after it.
+	if live > 1600 {
+		t.Errorf("a session retains %.0f B of live objects, want at most 1600", live)
 	}
 	// Before the layout changes: 4,543-4,665 B. After rule maps, PDR
-	// derived fields, pending state and URR padding: 3,050-3,224 B.
-	if per > 3500 {
-		t.Errorf("a session holds %.0f B of heap, want at most 3500", per)
+	// derived fields, pending state and URR padding: 3,050-3,224 B. After
+	// the session-memory series: 2,022-2,109 B.
+	if per > 2300 {
+		t.Errorf("a session holds %.0f B of heap, want at most 2300", per)
 	}
 	runtime.KeepAlive(c)
 }

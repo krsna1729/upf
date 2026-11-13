@@ -36,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"slices"
 	"time"
 
@@ -213,9 +214,9 @@ type Report struct {
 // measured from, and that window's stamps.
 type urrBase struct {
 	uid                     uint32
-	reported                time.Time
+	reported                stamp
 	lastUp, lastDown        Usage
-	windowFirst, windowLast time.Time
+	windowFirst, windowLast stamp
 }
 
 // Absorb adds another undelivered report of the same session to r, URR by
@@ -781,15 +782,15 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 				// group it belongs to may still be reported, and then it is
 				// carried with a zero window.
 				u.baselined = true
-				u.reported, u.lastUp, u.lastDown = now, up, down
-				u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, now
+				u.reported, u.lastUp, u.lastDown = stampOf(now), up, down
+				u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, stampOf(now)
 				if st.endMarker && !u.linkedReporting {
 					st.trigger, st.due, anyDue = TriggerEndMarker, true, true
 				}
 				states = append(states, st)
 				continue
 			}
-			window := now.Sub(u.reported)
+			window := now.Sub(u.reported.time())
 			if window < 0 {
 				window = 0
 			}
@@ -799,9 +800,9 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 				// activity when the window has none yet, and it is its last one.
 				u.stamped = true
 				if u.windowFirst.IsZero() {
-					u.windowFirst = first
+					u.windowFirst = stampOf(first)
 				}
-				u.windowLast = last
+				u.windowLast = stampOf(last)
 			}
 			// The time a window's traffic ran is what a time limit is measured
 			// against -- the window's own first counted packet to its own last
@@ -813,12 +814,12 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 			if u.stamped {
 				windowActive = 0
 				if !u.windowFirst.IsZero() {
-					windowActive = u.windowLast.Sub(u.windowFirst)
+					windowActive = time.Duration(u.windowLast - u.windowFirst)
 				}
 			}
 			st.up, st.down = upWindow, downWindow
 			st.window = window
-			st.first, st.last = windowTimes(u.windowFirst, u.windowLast, upWindow, downWindow)
+			st.first, st.last = windowTimes(u.windowFirst.time(), u.windowLast.time(), upWindow, downWindow)
 			// A limit that is reached stops the traffic whether or not it is
 			// the reason this report is going: a period that ends in the same
 			// window as a quota must not swallow the enforcement.
@@ -890,8 +891,8 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 			u := s.URRs.at(st.uid)
 			r.bases = append(r.bases, urrBase{uid: st.uid, reported: u.reported, lastUp: u.lastUp,
 				lastDown: u.lastDown, windowFirst: u.windowFirst, windowLast: u.windowLast})
-			u.reported, u.lastUp, u.lastDown = now, st.rawUp, st.rawDown
-			u.windowFirst, u.windowLast = time.Time{}, time.Time{}
+			u.reported, u.lastUp, u.lastDown = stampOf(now), st.rawUp, st.rawDown
+			u.windowFirst, u.windowLast = 0, 0
 		}
 		reports = append(reports, r)
 		s.URRs.at(members[0]).seqn++
@@ -899,18 +900,51 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 	return reports, stopped
 }
 
-// linkedGroups partitions a session's URRs into linked groups: the connected
+// linkedGroups yields a session's URRs as linked groups: the connected
 // components of the Linked URR ID edges (8.2.55), each group's members sorted
-// low to high, and the groups sorted by their first member, so a session
+// low to high, and the groups in order of their first member, so a session
 // reports them in one order whatever the map's is. The link is undirected for
 // grouping -- a URR "Y" may itself link to more URRs, and 5.2.2.4 makes the
 // group everything reachable from any of them. A URR with no link is a group of
-// one. The answer is cached until the model changes (invalidateOrderCache).
-// The caller holds the lock.
-func linkedGroups(s *Session) [][]uint32 {
-	if s.cachedGroups != nil {
-		return s.cachedGroups
+// one. A yielded group is valid only until the next one. The caller holds the
+// lock.
+//
+// This runs for every measured session every tick, so it holds nothing on the
+// session: with no links at all -- the usual session -- each URR is yielded
+// alone, and only a session with links has its groups built. It is one call
+// so that it inlines and a range over it keeps its body on the stack.
+func linkedGroups(s *Session) iter.Seq2[int, []uint32] {
+	return func(yield func(int, []uint32) bool) { walkLinkedGroups(s, yield) }
+}
+
+func walkLinkedGroups(s *Session, yield func(int, []uint32) bool) {
+	linked := false
+	for _, u := range s.URRs.all() {
+		if len(u.linked) != 0 {
+			linked = true
+			break
+		}
 	}
+	if !linked {
+		var one [1]uint32
+		i := 0
+		for id := range s.URRs.ordered() {
+			one[0] = id
+			if !yield(i, one[:]) {
+				return
+			}
+			i++
+		}
+		return
+	}
+	for i, g := range buildLinkedGroups(s) {
+		if !yield(i, g) {
+			return
+		}
+	}
+}
+
+func buildLinkedGroups(s *Session) [][]uint32 {
 	ids := urrIDsInOrder(s)
 	parent := make(map[uint32]uint32, len(ids))
 	for _, id := range ids {
@@ -944,7 +978,6 @@ func linkedGroups(s *Session) [][]uint32 {
 		groups = append(groups, g)
 	}
 	slices.SortFunc(groups, func(a, b []uint32) int { return cmp.Compare(a[0], b[0]) })
-	s.cachedGroups = groups
 	return groups
 }
 
@@ -1056,7 +1089,7 @@ type urrWindow struct {
 	duration    time.Duration
 	first, last time.Time
 	groupLeader uint32
-	reportedAt  time.Time // the URR's base time when read: a tick that reported since has moved it
+	reportedAt  stamp // the URR's base time when read: a tick that reported since has moved it
 }
 
 // windowsOf reads the counters of the URRs a session holds and returns the
@@ -1109,11 +1142,11 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 			}
 			w := urrWindow{
 				uid: uid, seqn: seqn, rawUp: nowUp, rawDown: nowDown,
-				duration: max(now.Sub(fromAt), 0), groupLeader: members[0], reportedAt: u.reported,
+				duration: max(now.Sub(fromAt.time()), 0), groupLeader: members[0], reportedAt: u.reported,
 			}
 			if u.baselined {
 				w.up, w.down = nowUp.since(fromUp), nowDown.since(fromDown)
-				first, last := u.windowFirst, u.windowLast
+				first, last := u.windowFirst.time(), u.windowLast.time()
 				if !f.IsZero() && !l.Before(f) {
 					if first.IsZero() {
 						first = f
@@ -1151,15 +1184,15 @@ func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) 
 	bumped := map[uint32]bool{}
 	for _, w := range windows {
 		u := s.URRs.at(w.uid)
-		if u == nil || !u.reported.Equal(w.reportedAt) {
+		if u == nil || u.reported != w.reportedAt {
 			// Gone, or a reporting tick reported it since this reading: moving
 			// the base back would report the same usage twice.
 			continue
 		}
 		u.baselined = true
-		u.reported, u.lastUp, u.lastDown = now, w.rawUp, w.rawDown
-		u.deliveredUp, u.deliveredDown, u.deliveredAt = w.rawUp, w.rawDown, now
-		u.windowFirst, u.windowLast = time.Time{}, time.Time{}
+		u.reported, u.lastUp, u.lastDown = stampOf(now), w.rawUp, w.rawDown
+		u.deliveredUp, u.deliveredDown, u.deliveredAt = w.rawUp, w.rawDown, stampOf(now)
+		u.windowFirst, u.windowLast = 0, 0
 		if lead := s.URRs.at(w.groupLeader); lead != nil && !bumped[w.groupLeader] {
 			bumped[w.groupLeader] = true
 			lead.seqn++
@@ -1184,7 +1217,7 @@ func (c *Compiler) Unreport(r Report) bool {
 		return false
 	}
 	for _, b := range r.bases {
-		if u := s.URRs.at(b.uid); u == nil || !u.reported.Equal(r.DecidedAt) {
+		if u := s.URRs.at(b.uid); u == nil || u.reported != stampOf(r.DecidedAt) {
 			return false
 		}
 	}
@@ -1225,7 +1258,7 @@ func (c *Compiler) ConfirmReport(ctx context.Context, r Report) {
 		if u == nil {
 			return
 		}
-		u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, r.DecidedAt
+		u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, stampOf(r.DecidedAt)
 	}
 	delivered(r.URRID, r.RawUp, r.RawDown)
 	for _, l := range r.Linked {

@@ -227,20 +227,13 @@ func smReqFlagsDepth(ies []*ie.IE, depth int, has func(*ie.IE) bool) bool {
 		if i.Type == ie.PFCPSMReqFlags && has(i) {
 			return true
 		}
-		var children []*ie.IE
-		var err error
 		switch i.Type {
-		case ie.CreateFAR:
-			children, err = i.CreateFAR()
-		case ie.UpdateFAR:
-			children, err = i.UpdateFAR()
-		case ie.ForwardingParameters:
-			children, err = i.ForwardingParameters()
-		case ie.UpdateForwardingParameters:
-			children, err = i.UpdateForwardingParameters()
+		case ie.CreateFAR, ie.UpdateFAR, ie.ForwardingParameters, ie.UpdateForwardingParameters:
 		default:
 			continue
 		}
+		// The message parse already split the children (ChildIEs).
+		children, err := i.ValueAsGrouped()
 		if err == nil && smReqFlagsDepth(children, depth+1, has) {
 			return true
 		}
@@ -260,7 +253,7 @@ func (c *Compiler) sendTunnelEndMarker(tunnel tunnelEndMarker) error {
 	if tunnel.transportRouteDomain == 0 {
 		return fmt.Errorf("the old tunnel has no transport route domain")
 	}
-	frame, err := endMarkerFrame(tunnel.teid, tunnel.peer, tunnel.localAddress)
+	frame, err := endMarkerFrame(tunnel.teid, tunnel.peer(), tunnel.localAddress)
 	if err != nil {
 		return err
 	}
@@ -277,7 +270,7 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 		if old == nil || !old.hasOuter || old.teid == 0 {
 			continue
 		}
-		tunnelChanged := f.hasOuter && (f.teid != old.teid || f.peer != old.peer)
+		tunnelChanged := f.hasOuter && (f.teid != old.teid || f.peer != old.peer())
 		egressChanged := (f.hasDestIfc && f.destIfc != old.destIfc) ||
 			(f.hasInstance && f.instance != old.instance)
 		if !tunnelChanged && !egressChanged {
@@ -288,7 +281,7 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 			updated.destIfc = f.destIfc
 		}
 		if f.hasInstance {
-			updated.instance = f.instance
+			updated.setInstance(f.instance)
 		}
 		start := len(out)
 		add := func(local netip.Addr, domain uint32, ifc routing.Interface) {
@@ -311,15 +304,15 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 			})
 		}
 		for _, p := range pdrsInOrder(s) {
-			if p.hasMAR || p.farID != old.id || !p.tunnelLocalAddress.IsValid() {
+			if p.hasMAR || p.farID != old.id || !p.tunnelLocalAddress().IsValid() {
 				continue
 			}
 			ifc, err := c.interfaceFor(p)
 			if err == nil {
-				add(p.tunnelLocalAddress, p.transportRouteDomain, ifc)
+				add(p.tunnelLocalAddress(), p.transportRouteDomain(), ifc)
 			}
 		}
-		for _, m := range s.MARs {
+		for _, m := range s.rare().MARs {
 			ifc, err := c.marInterface(s, m.id)
 			if err != nil {
 				continue

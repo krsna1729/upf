@@ -501,24 +501,22 @@ type Compiler struct {
 	// measured tracks URR membership for activity polling and rare End Marker
 	// events, not an ordinary per-tick walk. buffering is the BUFF+NOCP set
 	// EvaluateDownlinks walks and prunes.
-	measured      map[uint64]struct{}
-	buffering     map[uint64]struct{}
-	nextSEID      uint64
-	byFTEID       map[fteidKey]fteidOwner
-	fteidTEIDKeys map[uint32]int // byFTEID keys per TEID: the TEID is released when none is left
-	actions       *idPool
-	policies      *idPool
-	meters        *idPool
-	teids         *idPool
-	// fteidContexts is the admission context each (session, direction,
-	// endpoint, TEID) holds while one of its exact F-TEID keys is claimed: the
-	// id GtpuDecap writes as `fteid_context` and the PDR key matches. Like the
-	// TEID it replaced in that key, a context is reusable once released: its
-	// admission entries leave in the same transaction as its rules. A pinned
-	// TEID outside MaxTEIDs still takes a context, so the pool is not bounded
-	// by it: the decap's max_fteids is what bounds live contexts.
-	fteidContexts map[fteidContextKey]*fteidContext
-	contexts      *idPool
+	measured  map[uint64]struct{}
+	buffering map[uint64]struct{}
+	nextSEID  uint64
+	// byFTEID is the owner of every claimed exact F-TEID admission key, and
+	// the admission context the key writes. It is also the TEIDs' and the
+	// contexts' reference count: a TEID is released when no key of any
+	// endpoint names it, a context when no key of its (session, direction,
+	// endpoint, TEID) is left (teidClaimed, contextOf). The keys a TEID can
+	// have are few -- an endpoint's address per family -- so those are probes
+	// rather than two more maps with an entry per session.
+	byFTEID  map[fteidKey]fteidOwner
+	actions  *idPool
+	policies *idPool
+	meters   *idPool
+	teids    *idPool
+	contexts *idPool
 	// sessionIDs are the "<module>/sessions" keys (cfg.Sessions), aged like
 	// the action ids: an erased session's id retires for a grace period.
 	sessionIDs *idPool
@@ -542,19 +540,15 @@ type Compiler struct {
 
 type fteidOwner struct {
 	session *Session
-	down    bool
-}
-
-type fteidContextKey struct {
-	session  *Session
-	down     bool
-	endpoint uint32
-	teid     uint32
-}
-
-type fteidContext struct {
-	id   uint32
-	keys int // claimed exact admission keys that write this id
+	// ctx is the admission context each (session, direction, endpoint, TEID)
+	// holds while one of its exact F-TEID keys is claimed: the id GtpuDecap
+	// writes as `fteid_context` and the PDR key matches. Like the TEID it
+	// replaced in that key, a context is reusable once released: its
+	// admission entries leave in the same transaction as its rules. A pinned
+	// TEID outside MaxTEIDs still takes a context, so the pool is not bounded
+	// by it: the decap's max_fteids is what bounds live contexts.
+	ctx  uint32
+	down bool
 }
 
 // teidReuseDelay is how long a released F-TEID waits before the pool may hand
@@ -571,23 +565,21 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	}
 	cfg = cfg.withDefaults()
 	c := &Compiler{
-		cfg:           cfg,
-		target:        newTarget(cfg),
-		ap:            ap,
-		log:           log,
-		sessions:      map[uint64]*Session{},
-		byCP:          map[uint64]*Session{},
-		buffering:     map[uint64]struct{}{},
-		measured:      map[uint64]struct{}{},
-		rules:         map[string]uint64{},
-		byFTEID:       map[fteidKey]fteidOwner{},
-		fteidTEIDKeys: map[uint32]int{},
-		fteidContexts: map[fteidContextKey]*fteidContext{},
-		nextSEID:      1,
-		actions:       newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
-		policies:      newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
-		meters:        newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
-		teids:         newIDPool(cfg.MaxTEIDs, teidReuseDelay),
+		cfg:       cfg,
+		target:    newTarget(cfg),
+		ap:        ap,
+		log:       log,
+		sessions:  map[uint64]*Session{},
+		byCP:      map[uint64]*Session{},
+		buffering: map[uint64]struct{}{},
+		measured:  map[uint64]struct{}{},
+		rules:     map[string]uint64{},
+		byFTEID:   map[fteidKey]fteidOwner{},
+		nextSEID:  1,
+		actions:   newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		policies:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		meters:    newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
+		teids:     newIDPool(cfg.MaxTEIDs, teidReuseDelay),
 		// A context never reaches the wire (GtpuDecap writes it, the PDR key
 		// matches it), so it may be reused at once -- and over a 2^31 space a
 		// grace would hold every release until a walk that never ends.
@@ -637,44 +629,14 @@ type Session struct {
 	FARs idMap[uint32, *far]
 	QERs idMap[uint32, *qer]
 	URRs idMap[uint32, *urr]
-	// BARs are what the SMF asks a buffering FAR to hold (TS 29.244 7.5.2.6):
-	// the DL Buffering Duration and the DL Buffering Suggested Packet Count,
-	// referenced by the FARs' BAR ID (8.2.55). They are a map rather than a
-	// field of the FAR because an Update BAR arrives on its own -- including in
-	// a Session Report Response, which is how the SMF answers a Downlink Data
-	// Report -- and the flows that reference it must be reprogrammed without a
-	// FAR in the message.
-	BARs map[uint8]*bar
-
-	// MARs are the session's Multi-Access Rules (TS 29.244 7.5.2.8), by MAR
-	// ID. A PDR names one instead of a FAR; the two access actions it holds
-	// are what AtsssSteer applies.
-	MARs map[uint16]*mar
-
-	// chids stores the allocated endpoint, complete address-family set and TEID
-	// per CHOOSE ID (TS 29.244 8.2.3). All PDIs sharing an ID reuse precisely
-	// that selection, which remains reserved for a retry until no PDR names it.
-	chids map[uint8]chosenFTEID
-
-	// Cached sorted slices for hot compile paths; invalidated on mutation.
-	cachedPDRs []*pdr
-	cachedQERs []*qer
-	cachedMARs []*mar
-	// cachedGroups is linkedGroups' answer, which every tick asks for.
-	cachedGroups [][]uint32
+	// ext holds the parts of a session a usual one leaves empty; nil until
+	// one is set. Read them through rare, write them through rareMut.
+	ext *sessionExt
 
 	// pending exists only while a transaction has records to erase or flows
 	// to release. Refused transactions keep it for their retry; settle drops
 	// it only after the dataplane has accepted the change.
 	pending *sessionChanges
-
-	// removedQERs holds the QERs a modification took out of the model. Their
-	// meters were allocated with the QER (one per policed direction) and are
-	// released with the session's other ids (releaseSession) rather than at the
-	// removal: a refused modification puts the QER back, and a meter already
-	// returned to the pool would be one another session may police with while
-	// this one still names it.
-	removedQERs []*qer
 
 	// ruleKeys are the rule keys this session holds in the compiler's table of
 	// owners, kept here so a release touches only them: a deletion at the
@@ -701,6 +663,59 @@ type Session struct {
 	// enforcement interleaved between a modification's snapshot and merge.
 	// Never rolled back: a refused later request cannot unwrite that history.
 	writes uint64
+}
+
+// sessionExt is what a session holds only once the SMF uses buffering, ATSSS
+// or CHOOSE IDs, or removes a QER: four fields a usual session would carry
+// empty in every one of a million records.
+type sessionExt struct {
+	// BARs are what the SMF asks a buffering FAR to hold (TS 29.244 7.5.2.6):
+	// the DL Buffering Duration and the DL Buffering Suggested Packet Count,
+	// referenced by the FARs' BAR ID (8.2.55). They are a map rather than a
+	// field of the FAR because an Update BAR arrives on its own -- including in
+	// a Session Report Response, which is how the SMF answers a Downlink Data
+	// Report -- and the flows that reference it must be reprogrammed without a
+	// FAR in the message.
+	BARs map[uint8]*bar
+
+	// MARs are the session's Multi-Access Rules (TS 29.244 7.5.2.8), by MAR
+	// ID. A PDR names one instead of a FAR; the two access actions it holds
+	// are what AtsssSteer applies.
+	MARs map[uint16]*mar
+
+	// chids stores the allocated endpoint, complete address-family set and TEID
+	// per CHOOSE ID (TS 29.244 8.2.3). All PDIs sharing an ID reuse precisely
+	// that selection, which remains reserved for a retry until no PDR names it.
+	chids map[uint8]chosenFTEID
+
+	// removedQERs holds the QERs a modification took out of the model. Their
+	// meters were allocated with the QER (one per policed direction) and are
+	// released with the session's other ids (releaseSession) rather than at the
+	// removal: a refused modification puts the QER back, and a meter already
+	// returned to the pool would be one another session may police with while
+	// this one still names it.
+	removedQERs []*qer
+}
+
+// noSessionExt is what rare reads for a session without an extension. Its maps
+// are nil, so reading, ranging, deleting and clearing are no-ops and a write
+// panics rather than reaching another session.
+var noSessionExt = &sessionExt{}
+
+// rare returns the session's extension for reading.
+func (s *Session) rare() *sessionExt {
+	if s.ext == nil {
+		return noSessionExt
+	}
+	return s.ext
+}
+
+// rareMut returns the session's extension for writing, making it first.
+func (s *Session) rareMut() *sessionExt {
+	if s.ext == nil {
+		s.ext = &sessionExt{}
+	}
+	return s.ext
 }
 
 // modelSnapshot is a session's model as it stood before a modification was
@@ -755,10 +770,10 @@ func (s *Session) snapshot() modelSnapshot {
 		ueIP:   s.UEIP,
 		writes: s.writes,
 		pdrs:   cloneIDMap(s.PDRs), fars: cloneIDMap(s.FARs), qers: cloneIDMap(s.QERs),
-		urrs: cloneIDMap(s.URRs), bars: cloneEntries(s.BARs),
-		mars:        cloneEntries(s.MARs),
+		urrs: cloneIDMap(s.URRs), bars: cloneEntries(s.rare().BARs),
+		mars:        cloneEntries(s.rare().MARs),
 		pending:     s.pending.clone(),
-		removedQERs: slices.Clone(s.removedQERs),
+		removedQERs: slices.Clone(s.rare().removedQERs),
 	}
 }
 
@@ -768,18 +783,20 @@ func (s *Session) snapshot() modelSnapshot {
 // is not restored): it is what a retry of the same request is handed again,
 // and settle drops it once no PDR names it. The caller holds the lock.
 func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
-	failedPDRs := pdrsInOrder(s)
+	failedPDRs := pdrList(s)
 	failedPDRs = append(failedPDRs, s.pending.removedPDRs()...)
 	failedPDRs = append(failedPDRs, s.pending.stalePDRs()...)
-	failedQERs := qersInOrder(s)
+	failedQERs := qerList(s)
 	failedMARs := append(marsInOrder(s), s.pending.removedPolicies()...)
 	failedRetired := slices.Clone(s.pending.retiredIDs())
 
 	s.UEIP = snap.ueIP
-	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs, s.MARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars, snap.mars
-	s.invalidateOrderCache()
+	s.PDRs, s.FARs, s.QERs, s.URRs = snap.pdrs, snap.fars, snap.qers, snap.urrs
 	s.pending = snap.pending
-	s.removedQERs = snap.removedQERs
+	if s.ext != nil || snap.bars != nil || snap.mars != nil || snap.removedQERs != nil {
+		r := s.rareMut()
+		r.BARs, r.MARs, r.removedQERs = snap.bars, snap.mars, snap.removedQERs
+	}
 
 	// MAR policy and tunnel ids allocated by the failed merge are not in the
 	// restored model (or its removal list); return them. An id the snapshot
@@ -875,8 +892,8 @@ func (s *Session) forgetRemoval(id uint16) {
 // pdr is one compiled PDR: its rule in the PDR table and what it resolved to.
 type pdr struct {
 	// Keep pointer-bearing data together, then 32/16-bit scalars and flags.
-	// This keeps the cached selector within the 352 B amd64 size class and
-	// leaves the scalar tail outside the GC's pointer-bearing prefix.
+	// This keeps a PDR within the 240 B amd64 size class and leaves the
+	// scalar tail outside the GC's pointer-bearing prefix.
 	ueIP   netip.Addr
 	qerIDs []uint32
 	urrIDs []uint32
@@ -889,29 +906,17 @@ type pdr struct {
 	// table layout is immutable.
 	ruleIDs string
 
-	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
-	// empty when the SMF named none: resolve turns it into the deployment's
-	// interface, whose route domain goes into the rule's key and whose next hop
-	// sends the forward out.
-	instance string
+	// pdrExt holds the PDI fields a PDR usually lacks; its fields read as the
+	// PDR's own. It is never nil and never written: see pdrExt.
+	*pdrExt
 
-	// sdfs and qfis are what the PDI named (TS 29.244 8.2.89 and the SDF
-	// Filter IE): the SDF filters and QoS flows this rule selects, any of
-	// which matches. A PDI that names no QFI leaves the uplink table's qfi
-	// field open -- the session's general rule for the flow -- and the rule
-	// then matches every QFI of it.
+	// sdfs is the SDF filters the PDI named (the SDF Filter IE), any of which
+	// matches.
 	sdfs []*sdfFilter
-	qfis []uint8
-	// sdf, hasQFI and qfi select one combination of those lists, only on the
-	// stack copies ruleKeys makes: each matcher reads one filter and one QFI.
-	sdf *sdfFilter
-
-	fteidIPv4, fteidIPv6 netip.Addr
-	// reference is the GTP-U reference point the PDI's Source Interface Type
-	// named for the F-TEID ("" for the Source Interface's own: n3 for Access,
-	// n9 for Core); see pdrReferencePoint.
-	reference          string
-	tunnelLocalAddress netip.Addr
+	// tunnelEnd is the local end of the tunnel record a downlink PDR's FAR
+	// writes, nil for none; usually shared with every PDR naming the same one
+	// (localEnds). Compare two with sameLocalEnd, not ==.
+	tunnelEnd *localEnd
 
 	precedence uint32
 	farID      uint32
@@ -925,12 +930,11 @@ type pdr struct {
 	// forwards toward the data network (resolve).
 	nextHop uint32
 
-	teid                 uint32 // local ingress TEID, in either direction (0 for plain N6)
-	endpointID           uint32
-	fteidContext         uint32 // the admission context the decap writes for this PDR's F-TEID
-	transportRouteDomain uint32
-	actionID             uint32 // the ActionId carried in this PDR rule's result
-	meterID              uint32 // the meter record a QER resolved to, in this chain's Meter
+	teid         uint32 // local ingress TEID, in either direction (0 for plain N6)
+	endpointID   uint32
+	fteidContext uint32 // the admission context the decap writes for this PDR's F-TEID
+	actionID     uint32 // the ActionId carried in this PDR rule's result
+	meterID      uint32 // the meter record a QER resolved to, in this chain's Meter
 	// ownMeterID and sharedMeterID are that choice's halves: the PDR's own
 	// last rate-bearing QER, and the session's shared QER (0 when the PDR
 	// names none). The PDR result writes the own meter ID first and the shared
@@ -959,8 +963,6 @@ type pdr struct {
 	// 29.244 8.2.34). A MAR PDR has no FAR of its own: the MAR's two access
 	// actions are its egress.
 	hasMAR bool
-	hasQFI bool
-	qfi    uint8
 	// encapQFI is the QFI of the QER this PDR's downlink record carries
 	// (resolve). hasEncapQFI distinguishes an absent QFI from valid QFI 0
 	// (TS 38.415 5.5.3.3).
@@ -1001,29 +1003,95 @@ type pdr struct {
 	notify bool
 }
 
+// localEnd is the local end of a downlink tunnel record: the endpoint address
+// and its transport route domain, one of a handful a deployment has.
+type localEnd struct {
+	address netip.Addr
+	domain  uint32
+}
+
+// newLocalEnd is the shared local end for address and domain, nil for
+// neither.
+func newLocalEnd(address netip.Addr, domain uint32) *localEnd {
+	if !address.IsValid() && domain == 0 {
+		return nil
+	}
+	key := localEnd{address: address, domain: domain}
+	return localEnds.get(key, func() *localEnd { e := key; return &e })
+}
+
+// sameLocalEnd reports whether two PDRs name the same local end. Interning is
+// lossy (a table slot goes to the latest end), so equal ends may be different
+// copies: compare what they hold.
+func sameLocalEnd(a, b *localEnd) bool {
+	return a == b || (a != nil && b != nil && *a == *b)
+}
+
+// tunnelLocalAddress is the local end's address, none without one.
+func (p *pdr) tunnelLocalAddress() netip.Addr {
+	if p.tunnelEnd == nil {
+		return netip.Addr{}
+	}
+	return p.tunnelEnd.address
+}
+
+// transportRouteDomain is the local end's transport route domain, 0 without
+// one.
+func (p *pdr) transportRouteDomain() uint32 {
+	if p.tunnelEnd == nil {
+		return 0
+	}
+	return p.tunnelEnd.domain
+}
+
+// pdrExt is the part of a PDI that a usual session's PDRs do not name. A PDR
+// points at noPDRExt until its PDI names one of them, which keeps 104 B out of
+// every PDR of a million sessions. An extension is immutable once built, so
+// PDRs share it: merge builds a new one rather than writing a field.
+type pdrExt struct {
+	// fteidIPv4 and fteidIPv6 are the F-TEID addresses the SMF named; none
+	// when it asked this UP to choose (CHOOSE), as a 5G SMF usually does.
+	fteidIPv4, fteidIPv6 netip.Addr
+	// instance is the Network Instance IE the PDI carried (TS 29.244 8.2.4),
+	// empty when the SMF named none: resolve turns it into the deployment's
+	// interface, whose route domain goes into the rule's key and whose next hop
+	// sends the forward out.
+	instance string
+	// reference is the GTP-U reference point the PDI's Source Interface Type
+	// named for the F-TEID ("" for the Source Interface's own: n3 for Access,
+	// n9 for Core); see pdrReferencePoint.
+	reference string
+	// qfis are the QoS flows the PDI named (TS 29.244 8.2.89), any of which
+	// matches. A PDI that names no QFI leaves the uplink table's qfi field
+	// open -- the session's general rule for the flow -- and the rule then
+	// matches every QFI of it.
+	qfis []uint8
+}
+
+// noPDRExt is the extension of every PDR whose PDI names none of its fields.
+var noPDRExt = &pdrExt{}
+
+// newPDRExt returns the extension for these fields: noPDRExt when there are
+// none, else the one shared by every PDR naming the same ones (pdrExts).
+func newPDRExt(v4, v6 netip.Addr, instance, reference string, qfis []uint8) *pdrExt {
+	if !v4.IsValid() && !v6.IsValid() && instance == "" && reference == "" && len(qfis) == 0 {
+		return noPDRExt
+	}
+	key := pdrExtKey{v4: v4, v6: v6, instance: instance, reference: reference, qfis: string(qfis)}
+	return pdrExts.get(key, func() *pdrExt {
+		return &pdrExt{fteidIPv4: v4, fteidIPv6: v6, instance: instance, reference: reference, qfis: qfis}
+	})
+}
+
 // far is one compiled FAR.
 type far struct {
-	// Pointer-bearing fields precede scalar fields and presence flags, keeping
-	// this record in the 96 B amd64 class rather than 112 B.
-	peer netip.Addr
-	// instance is the Forwarding Parameters' Network Instance (8.2.4), empty
-	// when the SMF named none: the interface a forward out of this FAR leaves
-	// by (resolve).
-	instance string
-
-	// hasFwd, hasDestIfc, hasPolicy and policy are what the FAR's forwarding
-	// parameters named, as they stand after every message that touched this
-	// FAR: the IE itself (mandatory for a FAR that forwards, Table
-	// 7.5.2.3-1), the Destination Interface inside it (mandatory, Table
-	// 7.5.2.3-2), and the Forwarding Policy (mandatory for a forward toward
-	// SGi-LAN/N6-LAN, Table 7.5.2.3-2). An Update FAR that names none of them
-	// leaves them as the session has them, which is why the checks read the
-	// record and not the message.
-	policy string
-	// reference is the GTP-U reference point the Destination Interface Type
-	// named for the outer header's local end ("" for the Destination
-	// Interface's own); see tunnelEndpoint.
-	reference string
+	// The peer's address bytes and family, read through peer: a netip.Addr's
+	// zone pointer would keep this record out of the 48 B class.
+	peerAddr [16]byte
+	// farExt holds the forwarding parameters' strings, which a usual FAR does
+	// not name; they read as the FAR's own. Never nil, never written in place:
+	// change one through setInstance, setPolicy or setReference.
+	*farExt
 
 	id   uint32
 	teid uint32
@@ -1035,9 +1103,17 @@ type far struct {
 	// packet's own class (the TunnelEntry's "marking" field).
 	marking uint16
 
-	apply      uint8
-	destIfc    uint8
-	hasOuter   bool
+	apply    uint8
+	destIfc  uint8
+	hasOuter bool
+	// hasFwd, hasDestIfc, hasPolicy and policy are what the FAR's forwarding
+	// parameters named, as they stand after every message that touched this
+	// FAR: the IE itself (mandatory for a FAR that forwards, Table
+	// 7.5.2.3-1), the Destination Interface inside it (mandatory, Table
+	// 7.5.2.3-2), and the Forwarding Policy (mandatory for a forward toward
+	// SGi-LAN/N6-LAN, Table 7.5.2.3-2). An Update FAR that names none of them
+	// leaves them as the session has them, which is why the checks read the
+	// record and not the message.
 	hasFwd     bool
 	hasDestIfc bool
 	hasPolicy  bool
@@ -1049,7 +1125,68 @@ type far struct {
 	hasBAR     bool
 	barID      uint8
 	hasMarking bool
+	peerFamily uint8 // 4, 6, or 0 for no peer
 }
+
+// peer is the Outer Header Creation's peer address, none without one.
+func (f *far) peer() netip.Addr {
+	switch f.peerFamily {
+	case 4:
+		return netip.AddrFrom4([4]byte(f.peerAddr[:4]))
+	case 6:
+		return netip.AddrFrom16(f.peerAddr)
+	}
+	return netip.Addr{}
+}
+
+// setPeer stores the peer address; one with a zone, which an Outer Header
+// Creation cannot carry, keeps only its bytes.
+func (f *far) setPeer(a netip.Addr) {
+	f.peerAddr, f.peerFamily = [16]byte{}, 0
+	switch {
+	case a.Is4():
+		v := a.As4()
+		copy(f.peerAddr[:], v[:])
+		f.peerFamily = 4
+	case a.Is6():
+		f.peerAddr, f.peerFamily = a.As16(), 6
+	}
+}
+
+// farExt is the part of a FAR's forwarding parameters a usual session does not
+// name. A FAR points at noFARExt until one is named; an extension is never
+// written once built, so a FAR, its snapshot copy and endmarker's copies may
+// share one.
+type farExt struct {
+	// instance is the Forwarding Parameters' Network Instance (8.2.4), empty
+	// when the SMF named none: the interface a forward out of this FAR leaves
+	// by (resolve).
+	instance string
+	// policy is the Forwarding Policy (hasPolicy says it was named; it is
+	// mandatory for a forward toward SGi-LAN/N6-LAN, Table 7.5.2.3-2).
+	policy string
+	// reference is the GTP-U reference point the Destination Interface Type
+	// named for the outer header's local end ("" for the Destination
+	// Interface's own); see tunnelEndpoint.
+	reference string
+}
+
+// noFARExt is the extension of every FAR that names none of its strings.
+var noFARExt = &farExt{}
+
+// newFARExt returns the extension for these strings: noFARExt when there are
+// none, else the one shared by every FAR naming the same ones (farExts).
+func newFARExt(instance, policy, reference string) *farExt {
+	if instance == "" && policy == "" && reference == "" {
+		return noFARExt
+	}
+	key := farExt{instance: instance, policy: policy, reference: reference}
+	return farExts.get(key, func() *farExt { ext := key; return &ext })
+}
+
+func (f *far) setInstance(v string)  { f.farExt = newFARExt(v, f.policy, f.reference) }
+func (f *far) setPolicy(v string)    { f.farExt = newFARExt(f.instance, v, f.reference) }
+func (f *far) setReference(v string) { f.farExt = newFARExt(f.instance, f.policy, v) }
 
 // mar is one compiled Multi-Access Rule (TS 29.244 7.5.2.8): the steering
 // mode and the two access actions an ATSSS PDR's packets choose between.
@@ -1158,8 +1295,21 @@ func (b *bar) timeoutNS() (uint64, bool) {
 }
 
 type qer struct {
-	// Keep 64-bit rates together, then ids and presence flags: 64 B rather
-	// than 80 B on amd64, without changing any policing or window state.
+	// qerPolicy is what the SMF provisioned, read as the QER's own fields.
+	// QERs provisioned alike share one (qerPolicyOf); merge changes it by
+	// building another, never by writing it.
+	*qerPolicy
+
+	id uint32
+	// One meter record per policed direction, allocated with the session and
+	// released with it. Each lives in that direction's chain.
+	meterUL uint32
+	meterDL uint32
+}
+
+// qerPolicy is a QER's provisioning. A plan provisions the same rates to every
+// subscriber, so QERs share it (qerPolicyOf); it is never written once shared.
+type qerPolicy struct {
 	mbUL uint64 // bytes per second, as the dataplane's meter wants it
 	mbDL uint64
 
@@ -1177,12 +1327,6 @@ type qer struct {
 	// named none, and this UP's own tenth of a second applies.
 	window time.Duration
 
-	id uint32
-	// One meter record per policed direction, allocated with the session and
-	// released with it. Each lives in that direction's chain.
-	meterUL uint32
-	meterDL uint32
-
 	gateUL    uint8
 	gateDL    uint8
 	hasRate   bool
@@ -1195,6 +1339,16 @@ type qer struct {
 	// without one polices the session's flows and marks none of them.
 	hasQFI bool
 	qfi    uint8
+}
+
+// noQERPolicy is a QER's provisioning before merge reads any.
+var noQERPolicy = &qerPolicy{}
+
+var qerPolicies = interner[qerPolicy, qerPolicy]{keyOf: func(p *qerPolicy) qerPolicy { return *p }}
+
+// qerPolicyOf returns a shared provisioning equal to p, or a copy of p.
+func qerPolicyOf(p qerPolicy) *qerPolicy {
+	return qerPolicies.get(p, func() *qerPolicy { v := p; return &v })
 }
 
 // volumeLimit is one volume-valued IE of a URR: the Volume Threshold (8.2.13)
@@ -1233,6 +1387,66 @@ type urr struct {
 	id   uint32
 	seqn uint32 // UR-SEQN of the next report (5.2.2.3), initially 0
 
+	// The window-state flags.
+	enforcing bool // a reached quota compiles its PDRs to drop
+	stamped   bool // the current window has packet timestamps
+	baselined bool // the first counter reading has set its base
+
+	// urrLimits is what the SMF provisioned: method, triggers, period,
+	// thresholds, quotas and links, read as the URR's own fields. Every URR
+	// provisioned alike shares one (urrLimitsOf); merge changes it by building
+	// another, never by writing it.
+	*urrLimits
+
+	// reported is where the last report ended, so the next periodic report
+	// has a period to measure. A stamp keeps the monotonic reading:
+	// wall-clock changes must not change the duration of a quota.
+	reported stamp
+
+	// windowFirst and windowLast are the *current* reporting window's own first
+	// and last counted packet. The dataplane stamps a tick's own first packet (a
+	// reading clears it) and a window spans however many ticks its period is, so
+	// which packets opened and closed the window are remembered here; a report
+	// opens the next one. stamped says whether any reading carried a stamp at
+	// all: a graph whose counters carry none falls back to the window's length.
+	windowFirst stamp
+	windowLast  stamp
+
+	// lastUp and lastDown are the counters these PDRs had counted when the last
+	// report was made, so that report's successor covers the usage after it
+	// rather than the session's lifetime (report.go, "the window"), and
+	// baselined says whether that base has been taken from a reading yet: the
+	// first reading is the baseline, because the cells of a reused ActionId are
+	// another rule's totals.
+	lastUp, lastDown Usage
+
+	// deliveredUp, deliveredDown and deliveredAt are the reading the SMF was
+	// last *told* up to, and when that window opened. lastUp/lastDown move as
+	// soon as a report is decided, because the queue holds that report and the
+	// next tick must not report the same usage twice; this trio moves only when
+	// the message carrying it is accepted (Compiler.ConfirmReport,
+	// Compiler.advanceAfter). A session that ends while a report is still in
+	// the queue is reported from this trio, so the usage that report held
+	// reaches the SMF in the termination report instead of going with it
+	// (docs/claims.md, finding 20).
+	deliveredUp, deliveredDown Usage
+	deliveredAt                stamp
+}
+
+// urrLimits is a URR's provisioning: what reports it and what stops its
+// traffic. A plan provisions the same to every subscriber, so URRs share it
+// (urrLimitsOf); it is never written once shared.
+type urrLimits struct {
+	urrConfig
+
+	// linked are the URR's Linked URR IDs (TS 29.244 8.2.55): the URRs this one
+	// reports with. A session's URRs joined by these edges are one linked group
+	// and share one UR-SEQN (report.go, "the group").
+	linked []uint32
+}
+
+// urrConfig is the comparable part of a URR's provisioning.
+type urrConfig struct {
 	// The Measurement Method (8.2.40): VOLUM, DURAT or both. EVENT is refused
 	// when the URR is read (this UP detects no events), so at least one of
 	// these is set.
@@ -1261,12 +1475,7 @@ type urr struct {
 	// the session is resolved (compile.go, `resolve`).
 	linkedReporting bool
 
-	// Keep presence and window-state flags together: spreading them between
-	// 8-byte counters and times adds padding to every session's URRs.
 	hasTimeTh, hasTimeQuota bool
-	enforcing               bool // a reached quota compiles its PDRs to drop
-	stamped                 bool // the current window has packet timestamps
-	baselined               bool // the first counter reading has set its base
 
 	// period is the Measurement Period (8.2.42) in seconds, with periodic set.
 	period time.Duration
@@ -1278,45 +1487,34 @@ type urr struct {
 	timeThreshold time.Duration
 	volQuota      volumeLimit
 	timeQuota     time.Duration
+}
 
-	// linked are the URR's Linked URR IDs (TS 29.244 8.2.55): the URRs this one
-	// reports with. A session's URRs joined by these edges are one linked group
-	// and share one UR-SEQN (report.go, "the group").
-	linked []uint32
+// noURRLimits is a URR's provisioning before merge reads any.
+var noURRLimits = &urrLimits{}
 
-	// reported is where the last report ended, so the next periodic report
-	// has a period to measure. Keep time.Time's monotonic clock component:
-	// wall-clock changes must not change the duration of a quota.
-	reported time.Time
+// urrLimitsKey is a urrLimits as a key: the links as a string.
+type urrLimitsKey struct {
+	urrConfig
+	linked string
+}
 
-	// windowFirst and windowLast are the *current* reporting window's own first
-	// and last counted packet. The dataplane stamps a tick's own first packet (a
-	// reading clears it) and a window spans however many ticks its period is, so
-	// which packets opened and closed the window are remembered here; a report
-	// opens the next one. stamped says whether any reading carried a stamp at
-	// all: a graph whose counters carry none falls back to the window's length.
-	windowFirst time.Time
-	windowLast  time.Time
+func (l *urrLimits) key() urrLimitsKey {
+	key := urrLimitsKey{urrConfig: l.urrConfig}
+	if len(l.linked) != 0 {
+		b := make([]byte, 0, 4*len(l.linked))
+		for _, id := range l.linked {
+			b = binary.BigEndian.AppendUint32(b, id)
+		}
+		key.linked = string(b)
+	}
+	return key
+}
 
-	// lastUp and lastDown are the counters these PDRs had counted when the last
-	// report was made, so that report's successor covers the usage after it
-	// rather than the session's lifetime (report.go, "the window"), and
-	// baselined says whether that base has been taken from a reading yet: the
-	// first reading is the baseline, because the cells of a reused ActionId are
-	// another rule's totals.
-	lastUp, lastDown Usage
+var urrLimitSets = interner[urrLimitsKey, urrLimits]{keyOf: (*urrLimits).key}
 
-	// deliveredUp, deliveredDown and deliveredAt are the reading the SMF was
-	// last *told* up to, and when that window opened. lastUp/lastDown move as
-	// soon as a report is decided, because the queue holds that report and the
-	// next tick must not report the same usage twice; this trio moves only when
-	// the message carrying it is accepted (Compiler.ConfirmReport,
-	// Compiler.advanceAfter). A session that ends while a report is still in
-	// the queue is reported from this trio, so the usage that report held
-	// reaches the SMF in the termination report instead of going with it
-	// (docs/claims.md, finding 20).
-	deliveredUp, deliveredDown Usage
-	deliveredAt                time.Time
+// urrLimitsOf returns a shared provisioning equal to l, or a copy of l.
+func urrLimitsOf(l urrLimits) *urrLimits {
+	return urrLimitSets.get(l.key(), func() *urrLimits { v := l; return &v })
 }
 
 // AssociationEnded implements n4.SessionHandler: no session of the association
@@ -1566,16 +1764,63 @@ func (c *Compiler) fteidKeysOf(p *pdr) []fteidKey {
 	ipv4, ipv6 := c.endpointAddrs(p.endpointID)
 	keys := make([]fteidKey, 0, len(families))
 	for _, family := range families {
-		k := fteidKey{endpointID: p.endpointID, family: uint32(family), teid: p.teid}
-		if family == 6 {
-			k.address = ipv6.As16()
-		} else {
-			v := ipv4.As4()
-			copy(k.address[:], v[:])
-		}
-		keys = append(keys, k)
+		keys = append(keys, fteidKeyOf(p.endpointID, family, p.teid, ipv4, ipv6))
 	}
 	return keys
+}
+
+// fteidKeyOf is the admission key of one family of an endpoint's F-TEID.
+func fteidKeyOf(endpointID uint32, family uint8, teid uint32, ipv4, ipv6 netip.Addr) fteidKey {
+	k := fteidKey{endpointID: endpointID, family: uint32(family), teid: teid}
+	if family == 6 {
+		k.address = ipv6.As16()
+	} else {
+		v := ipv4.As4()
+		copy(k.address[:], v[:])
+	}
+	return k
+}
+
+// endpointFTEIDKeys calls yield, until it returns false, with every key a TEID
+// can have at one endpoint: one per family a PDR's keys are made in
+// (fteidFamilies: 0, 4 or 6). Families 0 and 4 take the endpoint's IPv4
+// address, without which no key of theirs was ever made.
+func endpointFTEIDKeys(endpointID, teid uint32, ipv4, ipv6 netip.Addr, yield func(fteidKey) bool) {
+	if ipv4.Is4() || ipv4.Is4In6() {
+		if !yield(fteidKeyOf(endpointID, 0, teid, ipv4, ipv6)) || !yield(fteidKeyOf(endpointID, 4, teid, ipv4, ipv6)) {
+			return
+		}
+	}
+	yield(fteidKeyOf(endpointID, 6, teid, ipv4, ipv6))
+}
+
+// teidClaimed reports whether a claimed key of any endpoint names teid.
+func (c *Compiler) teidClaimed(teid uint32) bool {
+	claimed := false
+	for i := range c.cfg.FTEIDEndpoints {
+		e := &c.cfg.FTEIDEndpoints[i]
+		endpointFTEIDKeys(e.ID, teid, e.IPv4, e.IPv6, func(k fteidKey) bool {
+			_, claimed = c.byFTEID[k]
+			return !claimed
+		})
+		if claimed {
+			return true
+		}
+	}
+	return false
+}
+
+// contextOf is the admission context a claimed key of this session, direction,
+// endpoint and TEID writes, if one is claimed.
+func (c *Compiler) contextOf(s *Session, down bool, endpointID, teid uint32) (ctx uint32, held bool) {
+	ipv4, ipv6 := c.endpointAddrs(endpointID)
+	endpointFTEIDKeys(endpointID, teid, ipv4, ipv6, func(k fteidKey) bool {
+		if o, ok := c.byFTEID[k]; ok && o.session == s && o.down == down {
+			ctx, held = o.ctx, true
+		}
+		return !held
+	})
+	return ctx, held
 }
 
 // remove takes a session's state out of the dataplane and frees its ids. The
@@ -1656,7 +1901,8 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// left the model holding the new key while the old one is still programmed.
 	// The dedupe above is what lets both lists name the same records as the
 	// PDRs that stayed.
-	all := pdrsInOrder(s)
+	var buf [8]*pdr // the usual session's PDRs, on the stack
+	all := s.PDRs.appendTo(buf[:0])
 	all = append(all, s.pending.removedPDRs()...)
 	all = append(all, s.pending.stalePDRs()...)
 	for _, p := range all {
@@ -1743,7 +1989,8 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// once per PDR. A QER a modification removed is on the list too: its record
 	// is in the daemon, and a record nobody names goes on holding the rate it
 	// was written with until another session reuses the id.
-	for _, q := range append(qersInOrder(s), s.removedQERs...) {
+	var qbuf [4]*qer // the usual session's QERs, on the stack
+	for _, q := range append(s.QERs.appendTo(qbuf[:0]), s.rare().removedQERs...) {
 		if !q.hasRate {
 			continue
 		}
@@ -1780,10 +2027,10 @@ func (c *Compiler) settle(s *Session) {
 	// A CHID's F-TEID remains owned while a PDR names it. Keeping a released
 	// CHID would hand a recycled TEID to a later PDR and let sessions claim the
 	// same complete admission key.
-	for chid, chosen := range s.chids {
+	for chid, chosen := range s.rare().chids {
 		if !chosenNamed(s, chosen) {
-			delete(s.chids, chid)
-			if c.fteidTEIDKeys[chosen.TEID] == 0 {
+			delete(s.rare().chids, chid)
+			if !c.teidClaimed(chosen.TEID) {
 				c.teids.release(chosen.TEID)
 			}
 		}
@@ -1887,7 +2134,8 @@ func (c *Compiler) releaseSession(s *Session) {
 	actions := map[uint32]bool{}
 	policies := map[uint32]bool{}
 	meters := map[uint32]bool{}
-	all := pdrsInOrder(s)
+	var buf [8]*pdr // the usual session's PDRs, on the stack
+	all := s.PDRs.appendTo(buf[:0])
 	// A PDR a modification removed still holds ids, and a replaced PDR's old
 	// form holds the TEID it used to have: the records are erased by the
 	// deletion above, and the ids are freed here with the rest.
@@ -1900,12 +2148,12 @@ func (c *Compiler) releaseSession(s *Session) {
 			c.actions.release(p.actionID)
 		}
 	}
-	for _, chosen := range s.chids {
-		if c.fteidTEIDKeys[chosen.TEID] == 0 {
+	for _, chosen := range s.rare().chids {
+		if !c.teidClaimed(chosen.TEID) {
 			c.teids.release(chosen.TEID)
 		}
 	}
-	clear(s.chids)
+	clear(s.rare().chids)
 	if s.sessionID != 0 && c.sessionIDs != nil {
 		c.sessionIDs.release(s.sessionID)
 		s.sessionID, s.sessionLive = 0, false
@@ -1932,7 +2180,8 @@ func (c *Compiler) releaseSession(s *Session) {
 			c.actions.release(id)
 		}
 	}
-	for _, q := range append(qersInOrder(s), s.removedQERs...) {
+	var qbuf [4]*qer // the usual session's QERs, on the stack
+	for _, q := range append(s.QERs.appendTo(qbuf[:0]), s.rare().removedQERs...) {
 		if q.meterUL != 0 && !meters[q.meterUL] {
 			meters[q.meterUL] = true
 			c.meters.release(q.meterUL)
@@ -1941,15 +2190,5 @@ func (c *Compiler) releaseSession(s *Session) {
 			meters[q.meterDL] = true
 			c.meters.release(q.meterDL)
 		}
-	}
-}
-
-// invalidateOrderCache clears the sorted slices cached during compilation.
-func (s *Session) invalidateOrderCache() {
-	if s != nil {
-		s.cachedPDRs = nil
-		s.cachedQERs = nil
-		s.cachedMARs = nil
-		s.cachedGroups = nil
 	}
 }

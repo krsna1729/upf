@@ -157,7 +157,7 @@ func (c *Compiler) tunnelEndpoint(far *far, ifc routing.Interface) (FTEIDEndpoin
 			"%w: Destination Interface %d has no configured GTP-U reference point",
 			errNotExpressible, far.destIfc)
 	}
-	if !far.peer.IsValid() || (!far.peer.Is4() && !far.peer.Is6()) {
+	if peer := far.peer(); !peer.IsValid() || (!peer.Is4() && !peer.Is6()) {
 		return FTEIDEndpoint{}, netip.Addr{}, fmt.Errorf("%w: the outer GTP-U peer address is invalid",
 			errNotExpressible)
 	}
@@ -175,7 +175,7 @@ func (c *Compiler) tunnelEndpoint(far *far, ifc routing.Interface) (FTEIDEndpoin
 			continue
 		}
 		var address netip.Addr
-		if far.peer.Is4() {
+		if far.peer().Is4() {
 			address = endpoint.IPv4
 		} else {
 			address = endpoint.IPv6

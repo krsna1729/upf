@@ -102,50 +102,38 @@ func heldFlows(s *Session) []uint32 {
 	return append(out, removedFlows(s)...)
 }
 
-// pdrsInOrder, marsInOrder and qersInOrder are the session's objects in id order,
-// cached on the session for repeated accesses within a compilation.
-func pdrsInOrder(s *Session) []*pdr {
-	if s == nil {
-		return nil
+// pdrsInOrder and qersInOrder yield the session's objects in id order straight
+// from its idMaps, allocating nothing for the handful a session names;
+// pdrList and qerList are the same as new slices, for the callers that extend
+// them. marsInOrder builds its slice: MARs are rare, and none costs nothing.
+// Each returns one closure that makes one call: a range over it then inlines
+// and keeps its body on the stack. Returning one of two closures (a nil
+// guard's empty one) would not, and every loop would allocate its body.
+func pdrsInOrder(s *Session) iter.Seq2[uint16, *pdr] {
+	return func(yield func(uint16, *pdr) bool) {
+		if s != nil {
+			s.PDRs.walkOrdered(yield)
+		}
 	}
-	if s.cachedPDRs != nil {
-		return s.cachedPDRs
-	}
-	out := make([]*pdr, 0, s.PDRs.len())
-	for _, id := range s.PDRs.ids() {
-		out = append(out, s.PDRs.at(id))
-	}
-	s.cachedPDRs = out
-	return out
 }
+
+func qersInOrder(s *Session) iter.Seq2[uint32, *qer] {
+	return func(yield func(uint32, *qer) bool) { s.QERs.walkOrdered(yield) }
+}
+
+func pdrList(s *Session) []*pdr { return s.PDRs.list() }
+
+func qerList(s *Session) []*qer { return s.QERs.list() }
 
 func marsInOrder(s *Session) []*mar {
-	if s == nil {
+	if s == nil || len(s.rare().MARs) == 0 {
 		return nil
 	}
-	if s.cachedMARs != nil {
-		return s.cachedMARs
+	mars := s.rare().MARs
+	out := make([]*mar, 0, len(mars))
+	for _, id := range idsOf(mars) {
+		out = append(out, mars[id])
 	}
-	out := make([]*mar, 0, len(s.MARs))
-	for _, id := range idsOf(s.MARs) {
-		out = append(out, s.MARs[id])
-	}
-	s.cachedMARs = out
-	return out
-}
-
-func qersInOrder(s *Session) []*qer {
-	if s == nil {
-		return nil
-	}
-	if s.cachedQERs != nil {
-		return s.cachedQERs
-	}
-	out := make([]*qer, 0, s.QERs.len())
-	for _, id := range s.QERs.ids() {
-		out = append(out, s.QERs.at(id))
-	}
-	s.cachedQERs = out
 	return out
 }
 
@@ -883,13 +871,14 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 // does the same, since "hold no packets" is not an instruction anyone sends.
 func mergeBars(s *Session, bars []barReq) {
 	for _, b := range bars {
-		entry := s.BARs[b.id]
+		entry := s.rare().BARs[b.id]
 		if entry == nil {
 			entry = &bar{id: b.id}
-			if s.BARs == nil {
-				s.BARs = map[uint8]*bar{}
+			r := s.rareMut()
+			if r.BARs == nil {
+				r.BARs = map[uint8]*bar{}
 			}
-			s.BARs[b.id] = entry
+			r.BARs[b.id] = entry
 		}
 		if b.hasDuration {
 			if b.deactivated {
@@ -909,22 +898,6 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	urrs []urrReq, mars []marReq, rm removals) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Only replacing/mutating the corresponding collection can invalidate its
-	// ordered pointer slice. A FAR/BAR update changes resolved values, not
-	// PDR/QER/MAR membership or the URR link graph.
-	if len(pdrs) != 0 || len(rm.pdrs) != 0 {
-		s.cachedPDRs = nil
-	}
-	if len(qers) != 0 || len(rm.qers) != 0 {
-		s.cachedQERs = nil
-	}
-	if len(mars) != 0 || len(rm.mars) != 0 {
-		s.cachedMARs = nil
-	}
-	if len(pdrs) != 0 || len(rm.pdrs) != 0 || len(urrs) != 0 || len(rm.urrs) != 0 {
-		s.cachedGroups = nil
-	}
-
 	for _, q := range qers {
 		entry := s.QERs.at(q.id)
 		// A GBR above the MBR is not a policy this side can hold: the committed
@@ -947,27 +920,32 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				errNotExpressible, q.id)
 		}
 		if entry == nil {
-			entry = &qer{id: q.id}
+			entry = &qer{id: q.id, qerPolicy: noQERPolicy}
 			s.QERs.set(q.id, entry)
 		}
 		// An Update QER carries what changed; every field it names replaces
-		// the one before it.
-		entry.gateUL, entry.gateDL = q.gateUL, q.gateDL
+		// the one before it. The provisioning is shared, so the change is made
+		// on a copy.
+		p := *entry.qerPolicy
+		p.gateUL, p.gateDL = q.gateUL, q.gateDL
 		if q.hasQFI {
 			// The QFI is optional in a QER (Gate Status is its one mandatory
 			// IE), so an Update that leaves it out keeps the flow the session
 			// holds: a QER that stopped naming its flow would quietly stop
 			// marking the packets of it.
-			entry.hasQFI, entry.qfi = true, q.qfi
+			p.hasQFI, p.qfi = true, q.qfi
 		}
 		if q.hasGBR {
-			entry.gbUL, entry.gbDL, entry.hasGBR = q.gbUL, q.gbDL, true
+			p.gbUL, p.gbDL, p.hasGBR = q.gbUL, q.gbDL, true
 		}
 		if q.hasWindow {
-			entry.window, entry.hasWindow = q.window, true
+			p.window, p.hasWindow = q.window, true
 		}
 		if q.hasRate {
-			entry.mbUL, entry.mbDL, entry.hasRate = q.mbUL, q.mbDL, true
+			p.mbUL, p.mbDL, p.hasRate = q.mbUL, q.mbDL, true
+		}
+		entry.qerPolicy = qerPolicyOf(p)
+		if q.hasRate {
 			// Reserve a direction only once it can create a native record.
 			// A zero-rate direction is never written; allocating its id would
 			// make deletion erase a key that never existed. Keep an already
@@ -993,7 +971,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		entry := s.FARs.at(f.id)
 		if entry == nil {
 			// A Create FAR: every field the message carries is the record's.
-			entry = &far{id: f.id, apply: f.apply, destIfc: f.destIfc, instance: f.instance}
+			entry = &far{id: f.id, apply: f.apply, destIfc: f.destIfc, farExt: newFARExt(f.instance, "", "")}
 			s.FARs.set(f.id, entry)
 		} else {
 			// An Update FAR carries what changes (7.5.4.3): a field the message
@@ -1010,7 +988,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				entry.destIfc = f.destIfc
 			}
 			if f.hasInstance {
-				entry.instance = f.instance
+				entry.setInstance(f.instance)
 			}
 		}
 		// What the forwarding parameters named, whether this message carried
@@ -1023,10 +1001,12 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			entry.hasDestIfc = true
 		}
 		if f.hasPolicy {
-			entry.hasPolicy, entry.policy = true, f.policy
+			entry.hasPolicy = true
+			entry.setPolicy(f.policy)
 		}
 		if f.hasOuter {
-			entry.teid, entry.peer, entry.hasOuter = f.teid, f.peer, true
+			entry.teid, entry.hasOuter = f.teid, true
+			entry.setPeer(f.peer)
 		}
 		if f.hasBAR {
 			entry.hasBAR, entry.barID = true, f.barID
@@ -1038,7 +1018,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 		if f.reference != "" {
 			// The Destination Interface Type merges like the marking.
-			entry.reference = f.reference
+			entry.setReference(f.reference)
 		}
 	}
 	// What a FAR that forwards must carry (Tables 7.5.2.3-1 and 7.5.2.3-2),
@@ -1076,16 +1056,17 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 	}
 	for _, m := range mars {
-		entry := s.MARs[m.id]
+		entry := s.rare().MARs[m.id]
 		if entry == nil {
 			if !m.create {
 				return fmt.Errorf("%w: the MAR %d is not in the session", errNotExpressible, m.id)
 			}
 			entry = &mar{id: m.id}
-			if s.MARs == nil {
-				s.MARs = map[uint16]*mar{}
+			r := s.rareMut()
+			if r.MARs == nil {
+				r.MARs = map[uint16]*mar{}
 			}
-			s.MARs[m.id] = entry
+			r.MARs[m.id] = entry
 		}
 		if m.hasFunctionality {
 			if m.functionality != ie.SteeringFunctionalityATSSSLL {
@@ -1151,40 +1132,43 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				// make a URR out of half a request.
 				return fmt.Errorf("%w: the URR %d is not in the session", errNotExpressible, u.id)
 			}
-			entry = &urr{id: u.id, reported: time.Now()}
+			entry = &urr{id: u.id, reported: stampOf(time.Now()), urrLimits: noURRLimits}
 			s.URRs.set(u.id, entry)
 		}
 		// An Update URR carries what changed (7.5.4.4); the fields it names
-		// replace the ones before, and the ones it leaves out stay.
+		// replace the ones before, and the ones it leaves out stay. The
+		// provisioning is shared, so the change is made on a copy.
+		l := *entry.urrLimits
 		if u.hasMethod {
-			entry.volume, entry.duration = u.volume, u.duration
+			l.volume, l.duration = u.volume, u.duration
 		}
 		if u.hasTriggers {
-			entry.periodic, entry.onVolumeTh, entry.onTimeTh = u.periodic, u.onVolumeTh, u.onTimeTh
-			entry.onVolQuota, entry.onTimeQuota = u.onVolQuota, u.onTimeQuota
-			entry.onEndMarker = u.onEndMarker
-			entry.linkedReporting = u.linkedReporting
+			l.periodic, l.onVolumeTh, l.onTimeTh = u.periodic, u.onVolumeTh, u.onTimeTh
+			l.onVolQuota, l.onTimeQuota = u.onVolQuota, u.onTimeQuota
+			l.onEndMarker = u.onEndMarker
+			l.linkedReporting = u.linkedReporting
 		}
 		if u.hasPeriod {
-			entry.period = u.period
+			l.period = u.period
 		}
 		if u.hasVolThreshold {
-			entry.volThreshold = u.volThreshold
+			l.volThreshold = u.volThreshold
 		}
 		if u.hasTimeTh {
-			entry.timeThreshold, entry.hasTimeTh = u.timeThreshold, true
+			l.timeThreshold, l.hasTimeTh = u.timeThreshold, true
 		}
 		if u.hasVolQuota {
-			entry.volQuota = u.volQuota
+			l.volQuota = u.volQuota
 		}
 		if u.hasTimeQuota {
-			entry.timeQuota, entry.hasTimeQuota = u.timeQuota, true
+			l.timeQuota, l.hasTimeQuota = u.timeQuota, true
 		}
 		if u.hasLinked {
 			// The Linked URR IDs the update named replace the set; the links
 			// themselves are checked once the whole message is folded in.
-			entry.linked = u.linked
+			l.linked = u.linked
 		}
+		entry.urrLimits = urrLimitsOf(l)
 		if u.hasVolQuota || u.hasTimeQuota || u.hasVolThreshold || u.hasTimeTh {
 			// A new quota (or threshold) is the SMF granting more usage: the
 			// drop a quota exhaustion put on this URR's PDRs is lifted, and the
@@ -1219,7 +1203,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				f.hasBAR, f.barID = false, 0
 			}
 		}
-		delete(s.BARs, id)
+		delete(s.rare().BARs, id)
 	}
 	for _, p := range pdrs {
 		old := s.PDRs.at(p.id)
@@ -1253,22 +1237,19 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			ueIP: p.ueIP, hasUEIP: p.hasUEIP, ueIPDst: p.ueIPDst,
 			sdfs: p.sdfs, farID: p.farID,
 			hasMAR: p.hasMAR, marID: p.marID, qerIDs: p.qerIDs, urrIDs: p.urrIDs,
-			instance: p.instance, qfis: p.qfis,
+			pdrExt:   newPDRExt(p.fteidIPv4, p.fteidIPv6, p.instance, p.reference, p.qfis),
 			hasFTEID: p.hasFTEID, hasChoose: p.hasChoose, hasCHID: p.hasCHID, chid: p.chid,
-			fteidIPv4: p.fteidIPv4, fteidIPv6: p.fteidIPv6,
-			wantIPv4: p.wantIPv4, wantIPv6: p.wantIPv6, reference: p.reference,
+			wantIPv4: p.wantIPv4, wantIPv6: p.wantIPv6,
 		}
 		if old != nil && !p.hasPDI {
 			// An Update PDR with no PDI keeps the one the UP function stored
 			// (Table 7.5.4.2-1): only a PDI it carries replaces it. The
 			// F-TEID is carried over below, as for an update that names none.
-			pdr.srcIfc, pdr.ueIPDst, pdr.instance, pdr.reference =
-				old.srcIfc, old.ueIPDst, old.instance, old.reference
+			pdr.srcIfc, pdr.ueIPDst, pdr.pdrExt = old.srcIfc, old.ueIPDst, old.pdrExt
 			if old.hasUEIP {
 				pdr.ueIP, pdr.hasUEIP = old.ueIP, true
 			}
-			pdr.sdfs, pdr.qfis = old.sdfs, old.qfis
-			pdr.fteidIPv4, pdr.fteidIPv6 = old.fteidIPv4, old.fteidIPv6
+			pdr.sdfs = old.sdfs
 		}
 		var err error
 		pdr.down, err = pdrDownlink(pdr.srcIfc, pdr.hasUEIP, pdr.ueIPDst, pdr.sdfs)
@@ -1301,7 +1282,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			families := requestedFTEIDFamilies(pdr)
 			var endpoint FTEIDEndpoint
 			if p.hasCHID && p.teid == 0 {
-				if chosen, ok := s.chids[p.chid]; ok {
+				if chosen, ok := s.rare().chids[p.chid]; ok {
 					if chosen.SourceInterface != pdr.srcIfc || chosen.Instance != pdr.instance ||
 						!slices.Equal(chosen.Families, families) {
 						return fmt.Errorf("%w: CHOOSE ID %d was reused with a different endpoint or family set", errNotExpressible, p.chid)
@@ -1344,7 +1325,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				c.teids.reserve(p.teid)
 			} else if p.hasChoose {
 				if p.hasCHID {
-					chosen, ok := s.chids[p.chid]
+					chosen, ok := s.rare().chids[p.chid]
 					if !ok {
 						teid, err := c.teids.alloc()
 						if err != nil {
@@ -1355,10 +1336,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 							Families: slices.Clone(families), SourceInterface: pdr.srcIfc,
 							Instance: pdr.instance,
 						}
-						if s.chids == nil {
-							s.chids = map[uint8]chosenFTEID{}
+						r := s.rareMut()
+						if r.chids == nil {
+							r.chids = map[uint8]chosenFTEID{}
 						}
-						s.chids[p.chid] = chosen
+						r.chids[p.chid] = chosen
 					}
 					pdr.teid = chosen.TEID
 				} else {
@@ -1402,9 +1384,9 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 					"%w: MAR %d is still named by PDR %d", errNotExpressible, id, p.id)
 			}
 		}
-		if old := s.MARs[id]; old != nil {
+		if old := s.rare().MARs[id]; old != nil {
 			s.changes().removedMARs = append(s.changes().removedMARs, old)
-			delete(s.MARs, id)
+			delete(s.rare().MARs, id)
 		}
 	}
 	createdQERs := make(map[uint32]bool, len(qers))
@@ -1425,7 +1407,8 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// back to the pool that a refused modification restores the QER
 			// to -- and that another session would then police with while this
 			// one still names it.
-			s.removedQERs = append(s.removedQERs, entry)
+			r := s.rareMut()
+			r.removedQERs = append(r.removedQERs, entry)
 			s.QERs.del(id)
 		}
 	}
@@ -1703,8 +1686,8 @@ func (c *Compiler) resolve(s *Session) error {
 			linkedTo[lid] = true
 		}
 	}
-	for _, id := range idsOf(s.MARs) {
-		if err := c.resolveMAR(s, s.MARs[id]); err != nil {
+	for _, id := range idsOf(s.rare().MARs) {
+		if err := c.resolveMAR(s, s.rare().MARs[id]); err != nil {
 			return err
 		}
 	}
@@ -1751,7 +1734,7 @@ func (c *Compiler) resolve(s *Session) error {
 					"%w: PDR %d names MAR %d, and this deployment has no AtsssSteer module (-atsss)",
 					errNotExpressible, p.id, p.marID)
 			}
-			m := s.MARs[p.marID]
+			m := s.rare().MARs[p.marID]
 			if m == nil {
 				return fmt.Errorf("%w: PDR %d names MAR %d, which the session does not hold",
 					errNotExpressible, p.id, p.marID)
@@ -1807,7 +1790,7 @@ func (c *Compiler) resolve(s *Session) error {
 				s.changes().ending = append(s.changes().ending, p.actionID)
 			}
 		}
-		if p.buffer && far.hasBAR && s.BARs[far.barID] == nil {
+		if p.buffer && far.hasBAR && s.rare().BARs[far.barID] == nil {
 			// The FAR names a BAR the session does not hold. 5.2.4.1 makes the
 			// BAR the CP function's instruction ("the CP function needs to
 			// provision a (possibly empty) BAR and associate it to the FARs"),
@@ -1818,8 +1801,7 @@ func (c *Compiler) resolve(s *Session) error {
 		}
 		p.meterID = 0
 		p.tunnel = noTunnel
-		p.tunnelLocalAddress = netip.Addr{}
-		p.transportRouteDomain = 0
+		p.tunnelEnd = nil
 		p.encapQFI = 0
 		p.hasEncapQFI = false
 		var sharedUL, ownUL, sharedDL, ownDL uint32
@@ -1929,8 +1911,7 @@ func (c *Compiler) resolve(s *Session) error {
 			if err != nil {
 				return fmt.Errorf("PDR %d's outer GTP-U tunnel: %w", p.id, err)
 			}
-			p.tunnelLocalAddress = local
-			p.transportRouteDomain = endpoint.TransportRouteDomain
+			p.tunnelEnd = newLocalEnd(local, endpoint.TransportRouteDomain)
 			p.tunnel = tunnelSideOf(p.downlink())
 		}
 		for _, uid := range p.urrIDs {
@@ -2356,25 +2337,23 @@ func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
 			return fmt.Errorf("%w: F-TEID endpoint key is already owned", errNoResources)
 		}
 	}
-	ctxKey := fteidContextKey{session: s, down: p.down, endpoint: p.endpointID, teid: p.teid}
-	ctx := c.fteidContexts[ctxKey]
-	if ctx == nil {
+	ctx, held := c.contextOf(s, p.down, p.endpointID, p.teid)
+	if !held {
+		// No key of this context is claimed, so none of keys is: a key that
+		// is was refused above unless this session and direction own it.
 		id, err := c.contexts.alloc()
 		if err != nil {
 			return fmt.Errorf("%w: F-TEID context: %v", errNoResources, err)
 		}
-		ctx = &fteidContext{id: id}
-		c.fteidContexts[ctxKey] = ctx
+		ctx = id
 	}
 	for _, key := range keys {
 		if _, exists := c.byFTEID[key]; exists {
 			continue
 		}
-		c.byFTEID[key] = fteidOwner{session: s, down: p.down}
-		ctx.keys++
-		c.fteidTEIDKeys[p.teid]++
+		c.byFTEID[key] = fteidOwner{session: s, ctx: ctx, down: p.down}
 	}
-	p.fteidContext = ctx.id
+	p.fteidContext = ctx
 	c.teids.reserve(p.teid)
 	return nil
 }
@@ -2407,25 +2386,17 @@ func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
 			continue
 		}
 		delete(c.byFTEID, key)
-		c.fteidTEIDKeys[p.teid]--
 		removed = true
-		ctxKey := fteidContextKey{session: s, down: owner.down, endpoint: p.endpointID, teid: p.teid}
-		if ctx := c.fteidContexts[ctxKey]; ctx != nil {
-			if ctx.keys--; ctx.keys <= 0 {
-				delete(c.fteidContexts, ctxKey)
-				c.contexts.release(ctx.id)
-			}
+		if _, still := c.contextOf(s, owner.down, p.endpointID, p.teid); !still {
+			c.contexts.release(owner.ctx)
 		}
 	}
-	if removed && c.fteidTEIDKeys[p.teid] == 0 {
-		delete(c.fteidTEIDKeys, p.teid)
-		if !sessionHasCHIDTEID(s, p.teid) {
-			c.teids.release(p.teid)
-		}
+	if removed && !c.teidClaimed(p.teid) && !sessionHasCHIDTEID(s, p.teid) {
+		c.teids.release(p.teid)
 	}
 }
 func sessionHasCHIDTEID(s *Session, teid uint32) bool {
-	for _, chosen := range s.chids {
+	for _, chosen := range s.rare().chids {
 		if chosen.TEID == teid {
 			return true
 		}
@@ -2441,7 +2412,7 @@ func barOf(s *Session, far *far) *bar {
 	if far == nil || !far.hasBAR {
 		return nil
 	}
-	return s.BARs[far.barID]
+	return s.rare().BARs[far.barID]
 }
 
 // writeFlowEntry writes the store's per-flow "flows" entry for a PDR that
@@ -2520,13 +2491,12 @@ func samePDRTunnel(before *modelSnapshot, s *Session, p *pdr) bool {
 	// Drop/buffer compiles can resolve a FAR without publishing its tunnel.
 	// Their model is not a written baseline when forwarding resumes.
 	if old == nil || old.drop || old.buffer || old.tunnel != p.tunnel || old.writtenTunnel != p.tunnel ||
-		old.actionID != p.actionID || old.tunnelLocalAddress != p.tunnelLocalAddress ||
-		old.transportRouteDomain != p.transportRouteDomain ||
+		old.actionID != p.actionID || !sameLocalEnd(old.tunnelEnd, p.tunnelEnd) ||
 		old.hasEncapQFI != p.hasEncapQFI || old.encapQFI != p.encapQFI {
 		return false
 	}
 	a, b := before.fars.at(old.farID), s.FARs.at(p.farID)
-	return a != nil && b != nil && a.teid == b.teid && a.peer == b.peer &&
+	return a != nil && b != nil && a.teid == b.teid && a.peer() == b.peer() &&
 		a.hasMarking == b.hasMarking && a.marking == b.marking
 }
 
@@ -2567,11 +2537,10 @@ func sameAdmissions(before *modelSnapshot, s *Session) bool {
 			old.wantIPv4 != p.wantIPv4 || old.wantIPv6 != p.wantIPv6 ||
 			old.endpointFamily != p.endpointFamily || old.down != p.down ||
 			old.fteidContext != p.fteidContext || old.hasMAR != p.hasMAR ||
-			old.tunnelLocalAddress != p.tunnelLocalAddress ||
-			old.transportRouteDomain != p.transportRouteDomain {
+			!sameLocalEnd(old.tunnelEnd, p.tunnelEnd) {
 			return false
 		}
-		if p.hasMAR || !p.tunnelLocalAddress.IsValid() || p.transportRouteDomain == 0 {
+		if p.hasMAR || !p.tunnelLocalAddress().IsValid() || p.transportRouteDomain() == 0 {
 			continue
 		}
 		a, b := before.fars.at(old.farID), s.FARs.at(p.farID)
@@ -2579,7 +2548,7 @@ func sameAdmissions(before *modelSnapshot, s *Session) bool {
 			if a != b {
 				return false
 			}
-		} else if a.hasOuter != b.hasOuter || a.teid != b.teid || a.peer != b.peer {
+		} else if a.hasOuter != b.hasOuter || a.teid != b.teid || a.peer() != b.peer() {
 			return false
 		}
 	}
@@ -2658,7 +2627,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	admissionUnchanged := sameAdmissions(before, s)
 	keepSession := whole && before != nil && s.sessionLive && admissionUnchanged &&
 		before.pdrs.len() == s.PDRs.len() && before.qers.len() == s.QERs.len() &&
-		len(before.mars) == 0 && len(s.MARs) == 0
+		len(before.mars) == 0 && len(s.rare().MARs) == 0
 	oldPDR := func(id uint16) *pdr {
 		if before == nil {
 			return nil
@@ -3138,9 +3107,9 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 			far := s.FARs.at(p.farID)
 			value := map[string]any{
 				"teid":                   far.teid,
-				"local_address":          p.tunnelLocalAddress.AsSlice(),
-				"peer_address":           far.peer.AsSlice(),
-				"transport_route_domain": p.transportRouteDomain,
+				"local_address":          p.tunnelLocalAddress().AsSlice(),
+				"peer_address":           far.peer().AsSlice(),
+				"transport_route_domain": p.transportRouteDomain(),
 			}
 			if p.hasEncapQFI {
 				// QFI 0 is valid; qfi_present distinguishes it from no QFI.
@@ -3236,10 +3205,10 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 // every deployment before -atsss; a MAR PDR is refused in resolve when the
 // module is absent.
 func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
-	if c.cfg.Atsss == "" || (len(s.MARs) == 0 && len(s.pending.removedPolicies()) == 0) {
+	if c.cfg.Atsss == "" || (len(s.rare().MARs) == 0 && len(s.pending.removedPolicies()) == 0) {
 		return nil, nil
 	}
-	changes := make([]bess.Change, 0, 2*len(s.MARs)+1)
+	changes := make([]bess.Change, 0, 2*len(s.rare().MARs)+1)
 	seen := map[string]bool{}
 	add := func(ch bess.Change) {
 		key := changeID(ch.Resource, ch.Key)
@@ -3250,8 +3219,8 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 		changes = append(changes, ch)
 	}
 	policyRes := c.res(Policies)
-	for _, id := range idsOf(s.MARs) {
-		m := s.MARs[id]
+	for _, id := range idsOf(s.rare().MARs) {
+		m := s.rare().MARs[id]
 		accesses := make([]map[string]any, 0, 2)
 		for which := 0; which < 2; which++ {
 			access := m.accesses[which]
@@ -3284,7 +3253,7 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 			value := map[string]any{
 				"teid":                   far.teid,
 				"local_address":          m.tunnelLocalAddresses[which].AsSlice(),
-				"peer_address":           far.peer.AsSlice(),
+				"peer_address":           far.peer().AsSlice(),
 				"transport_route_domain": m.transportRouteDomains[which],
 			}
 			if far.hasMarking {
@@ -3345,7 +3314,7 @@ func rulePriority(precedence uint32) int64 {
 //
 // The value must be canonical (value & ^mask == 0), and the key is the
 // concatenation of mask then value per field, then the ranges.
-func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
+func (p *pdr) ruleKey(fields []Field, v ruleVariant) (map[string]any, error) {
 	// The table's key message is WildcardMatchRuleKey: one FieldData per
 	// field, values and masks in two parallel lists, and the ranges by field
 	// index. A FieldData here is its bytes field, value_bin, alone, so each
@@ -3362,12 +3331,12 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 		total += f.width()
 	}
 	mem := make([]byte, 2*total)
-	sd := p.oriented()
+	sd := p.oriented(v.sdf)
 	for i, f := range fields {
 		width := f.width()
 		mask, value := mem[:width:width], mem[width:2*width:2*width]
 		mem = mem[2*width:]
-		m, ok, err := p.matchValue(f, sd)
+		m, ok, err := p.matchValue(f, v, sd)
 		if err != nil {
 			return nil, fmt.Errorf("the PDI's %s: %w", f, err)
 		}
@@ -3387,6 +3356,14 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 	return key, nil
 }
 
+// ruleVariant is the one SDF filter and QFI a rule key of a PDR matches: a PDI
+// that names several of either is one rule per combination (ruleKeys).
+type ruleVariant struct {
+	sdf    *sdfFilter // nil for a PDI that names no SDF filter
+	hasQFI bool
+	qfi    uint8
+}
+
 // ruleKeys expands "match any" SDF/QFI combinations without allocating a
 // whole PDR per variant. Repeated filters still make only one dataplane key.
 func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
@@ -3403,12 +3380,11 @@ func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 	}
 	for _, sd := range sdfs {
 		for i := range qfis {
-			v := *p
-			v.sdf, v.hasQFI, v.qfi = sd, len(p.qfis) > 0, 0
+			v := ruleVariant{sdf: sd, hasQFI: len(p.qfis) > 0}
 			if v.hasQFI {
 				v.qfi = p.qfis[i]
 			}
-			key, err := v.ruleKey(fields)
+			key, err := p.ruleKey(fields, v)
 			if err != nil {
 				return nil, err
 			}
@@ -3690,12 +3666,13 @@ func pref(p netip.Prefix) (match, error) {
 // form a 4-byte mask cannot carry is a session the SMF is told to fix, not one
 // whose rule quietly matches everything.
 //
-// sd is p.oriented(), the filter as the packets this PDR selects carry it (the
-// SMF provisions the downlink form on both PDRs, and an ACCESS PDR's is
-// swapped, 5.2.1A.2A): a key orients it once, not once per field.
-func (p *pdr) matchValue(f Field, sd *sdfFilter) (match, bool, error) {
-	if p.sdf != nil && p.sdf.bare {
-		return match{}, false, fmt.Errorf("%w: SDF Filter ID %d was never resolved to a flow description", errNotExpressible, p.sdf.id)
+// v is the SDF filter and QFI this key is for; sd is p.oriented(v.sdf), the
+// filter as the packets this PDR selects carry it (the SMF provisions the
+// downlink form on both PDRs, and an ACCESS PDR's is swapped, 5.2.1A.2A): a key
+// orients it once, not once per field.
+func (p *pdr) matchValue(f Field, v ruleVariant, sd *sdfFilter) (match, bool, error) {
+	if v.sdf != nil && v.sdf.bare {
+		return match{}, false, fmt.Errorf("%w: SDF Filter ID %d was never resolved to a flow description", errNotExpressible, v.sdf.id)
 	}
 	switch f {
 	case SrcIP:
@@ -3801,8 +3778,8 @@ func (p *pdr) matchValue(f Field, sd *sdfFilter) (match, bool, error) {
 		// matching where a later PDR of the session names a QFI -- which is
 		// what the masked-out byte says (its value is 0, the canonical form
 		// under a zero mask).
-		if p.hasQFI {
-			return match{value: []byte{p.qfi}, mask: ones(1)}, true, nil
+		if v.hasQFI {
+			return match{value: []byte{v.qfi}, mask: ones(1)}, true, nil
 		}
 		return match{}, false, nil
 	case RouteDomain:
@@ -4134,11 +4111,20 @@ func parseRemovals(ies []*ie.IE) removals {
 	return rm
 }
 
+// grouped returns the children of a grouped IE of type create or update. The
+// message parse already split them (ChildIEs); go-pfcp's per-type accessors
+// (i.CreatePDR() and so on) parse the payload again on every call.
+func grouped(i *ie.IE, create, update ie.IEType) ([]*ie.IE, error) {
+	if i.Type != create && i.Type != update {
+		return nil, &ie.InvalidTypeError{Type: i.Type}
+	}
+	return i.ValueAsGrouped()
+}
+
 func parsePDR(i *ie.IE) (pdrReq, error) {
-	children, err := i.CreatePDR()
+	children, err := grouped(i, ie.CreatePDR, ie.UpdatePDR)
 	what := "Create PDR"
 	if i.Type == ie.UpdatePDR {
-		children, err = i.UpdatePDR()
 		what = "Update PDR"
 	}
 	if err != nil {
@@ -4178,7 +4164,7 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 			}
 		case ie.PDI:
 			p.hasPDI = true
-			pdiChildren, err := c.PDI()
+			pdiChildren, err := grouped(c, ie.PDI, ie.PDI)
 			if err != nil {
 				return pdrReq{}, fmt.Errorf("PDI: %w", err)
 			}
@@ -4527,7 +4513,7 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if fields.HasBID() {
 				filter.id, filter.hasID = fields.SDFFilterID, true
 			}
-			p.sdfs = append(p.sdfs, filter)
+			p.sdfs = append(p.sdfs, internSDF(filter))
 		case ie.ApplicationID, ie.TrafficEndpointID, ie.EthernetPacketFilter,
 			ie.EthernetPDUSessionInformation, ie.FramedRoute, ie.FramedRouting,
 			ie.FramedIPv6Route, ie.IPMulticastAddressingInfo:
@@ -4639,10 +4625,9 @@ func parseBAR(i *ie.IE) (barReq, error) {
 }
 
 func parseFAR(i *ie.IE) (farReq, error) {
-	children, err := i.CreateFAR()
+	children, err := grouped(i, ie.CreateFAR, ie.UpdateFAR)
 	what := "Create FAR"
 	if i.Type == ie.UpdateFAR {
-		children, err = i.UpdateFAR()
 		what = "Update FAR"
 	}
 	if err != nil {
@@ -4670,7 +4655,7 @@ func parseFAR(i *ie.IE) (farReq, error) {
 					errNotExpressible)
 			}
 		case ie.ForwardingParameters:
-			fwd, err := c.ForwardingParameters()
+			fwd, err := grouped(c, ie.ForwardingParameters, ie.ForwardingParameters)
 			if err != nil {
 				return farReq{}, fmt.Errorf("Forwarding Parameters: %w", err)
 			}
@@ -4691,7 +4676,7 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			// interface and network instance would be read as absent, and a
 			// merge that overwrote them with the zero values would move the
 			// forward -- 0 is the access side.
-			fwd, err := c.UpdateForwardingParameters()
+			fwd, err := grouped(c, ie.UpdateForwardingParameters, ie.UpdateForwardingParameters)
 			if err != nil {
 				return farReq{}, fmt.Errorf("Update Forwarding Parameters: %w", err)
 			}
@@ -4815,11 +4800,10 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 // does not implement is refused here -- see urrUnsupported for why a silently
 // ignored URR field is not an option.
 func parseURR(i *ie.IE) (urrReq, error) {
-	children, err := i.CreateURR()
+	children, err := grouped(i, ie.CreateURR, ie.UpdateURR)
 	what := "Create URR"
 	u := urrReq{create: true}
 	if i.Type == ie.UpdateURR {
-		children, err = i.UpdateURR()
 		what, u.create = "Update URR", false
 	}
 	if err != nil {
@@ -4989,10 +4973,9 @@ func parseURR(i *ie.IE) (urrReq, error) {
 }
 
 func parseQER(i *ie.IE) (qerReq, error) {
-	children, err := i.CreateQER()
+	children, err := grouped(i, ie.CreateQER, ie.UpdateQER)
 	what := "Create QER"
 	if i.Type == ie.UpdateQER {
-		children, err = i.UpdateQER()
 		what = "Update QER"
 	}
 	if err != nil {
@@ -5208,23 +5191,24 @@ func resolveSDFIDs(s *Session) error {
 	return nil
 }
 
-// oriented is the PDR's SDF filter as the packets it selects carry it. The CP
-// function provisions the PCF's Flow Description -- always the downlink form,
-// "from the remote side to the UE" -- in the PDI of the uplink and the downlink
-// PDR alike, and the UP function applies it as is for a CORE PDR and with the
-// source and destination, address and port, swapped for an ACCESS one (TS
-// 29.244 5.2.1A.2A: "shall swap the source and destination address/port in the
-// Flow Description"). Open5GS's UPF does the same (lib/pfcp/handler.c,
-// ogs_ipfw_rule_swap, for a PDR whose source interface is ACCESS).
-func (p *pdr) oriented() *sdfFilter {
-	if p.sdf == nil || p.srcIfc != ie.SrcInterfaceAccess {
-		return p.sdf
+// oriented is one of the PDR's SDF filters, sdf, as the packets it selects
+// carry it. The CP function provisions the PCF's Flow Description -- always
+// the downlink form, "from the remote side to the UE" -- in the PDI of the
+// uplink and the downlink PDR alike, and the UP function applies it as is for
+// a CORE PDR and with the source and destination, address and port, swapped
+// for an ACCESS one (TS 29.244 5.2.1A.2A: "shall swap the source and
+// destination address/port in the Flow Description"). Open5GS's UPF does the
+// same (lib/pfcp/handler.c, ogs_ipfw_rule_swap, for a PDR whose source
+// interface is ACCESS).
+func (p *pdr) oriented(sdf *sdfFilter) *sdfFilter {
+	if sdf == nil || p.srcIfc != ie.SrcInterfaceAccess {
+		return sdf
 	}
-	f := *p.sdf
-	f.src, f.srcOK, f.srcAssigned = p.sdf.dst, p.sdf.dstOK, p.sdf.dstAssigned
-	f.dst, f.dstOK, f.dstAssigned = p.sdf.src, p.sdf.srcOK, p.sdf.srcAssigned
-	f.sportLo, f.sportHi, f.sportOK = p.sdf.dportLo, p.sdf.dportHi, p.sdf.dportOK
-	f.dportLo, f.dportHi, f.dportOK = p.sdf.sportLo, p.sdf.sportHi, p.sdf.sportOK
+	f := *sdf
+	f.src, f.srcOK, f.srcAssigned = sdf.dst, sdf.dstOK, sdf.dstAssigned
+	f.dst, f.dstOK, f.dstAssigned = sdf.src, sdf.srcOK, sdf.srcAssigned
+	f.sportLo, f.sportHi, f.sportOK = sdf.dportLo, sdf.dportHi, sdf.dportOK
+	f.dportLo, f.dportHi, f.dportOK = sdf.sportLo, sdf.sportHi, sdf.sportOK
 	return &f
 }
 

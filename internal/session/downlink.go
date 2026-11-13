@@ -300,7 +300,7 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 			"seid", seid, "bar", b.id)
 		return
 	}
-	if s.BARs[b.id] == nil {
+	if s.rare().BARs[b.id] == nil {
 		// The SMF named a BAR this session does not hold. Applying it would
 		// create one under numbers nobody provisioned -- the guess a FAR naming
 		// an unknown BAR is refused for -- so it is dropped.
@@ -330,7 +330,7 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 			if f := s.FARs.at(p.farID); f == nil || !f.hasBAR || f.barID != b.id {
 				continue
 			}
-			changes = append(changes, c.writeFlowEntry(s.BARs[b.id], p)...)
+			changes = append(changes, c.writeFlowEntry(s.rare().BARs[b.id], p)...)
 		}
 	}
 	c.mu.Unlock()
