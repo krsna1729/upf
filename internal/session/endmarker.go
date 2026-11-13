@@ -227,20 +227,13 @@ func smReqFlagsDepth(ies []*ie.IE, depth int, has func(*ie.IE) bool) bool {
 		if i.Type == ie.PFCPSMReqFlags && has(i) {
 			return true
 		}
-		var children []*ie.IE
-		var err error
 		switch i.Type {
-		case ie.CreateFAR:
-			children, err = i.CreateFAR()
-		case ie.UpdateFAR:
-			children, err = i.UpdateFAR()
-		case ie.ForwardingParameters:
-			children, err = i.ForwardingParameters()
-		case ie.UpdateForwardingParameters:
-			children, err = i.UpdateForwardingParameters()
+		case ie.CreateFAR, ie.UpdateFAR, ie.ForwardingParameters, ie.UpdateForwardingParameters:
 		default:
 			continue
 		}
+		// The message parse already split the children (ChildIEs).
+		children, err := i.ValueAsGrouped()
 		if err == nil && smReqFlagsDepth(children, depth+1, has) {
 			return true
 		}

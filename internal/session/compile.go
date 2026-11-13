@@ -4107,11 +4107,20 @@ func parseRemovals(ies []*ie.IE) removals {
 	return rm
 }
 
+// grouped returns the children of a grouped IE of type create or update. The
+// message parse already split them (ChildIEs); go-pfcp's per-type accessors
+// (i.CreatePDR() and so on) parse the payload again on every call.
+func grouped(i *ie.IE, create, update ie.IEType) ([]*ie.IE, error) {
+	if i.Type != create && i.Type != update {
+		return nil, &ie.InvalidTypeError{Type: i.Type}
+	}
+	return i.ValueAsGrouped()
+}
+
 func parsePDR(i *ie.IE) (pdrReq, error) {
-	children, err := i.CreatePDR()
+	children, err := grouped(i, ie.CreatePDR, ie.UpdatePDR)
 	what := "Create PDR"
 	if i.Type == ie.UpdatePDR {
-		children, err = i.UpdatePDR()
 		what = "Update PDR"
 	}
 	if err != nil {
@@ -4151,7 +4160,7 @@ func parsePDR(i *ie.IE) (pdrReq, error) {
 			}
 		case ie.PDI:
 			p.hasPDI = true
-			pdiChildren, err := c.PDI()
+			pdiChildren, err := grouped(c, ie.PDI, ie.PDI)
 			if err != nil {
 				return pdrReq{}, fmt.Errorf("PDI: %w", err)
 			}
@@ -4612,10 +4621,9 @@ func parseBAR(i *ie.IE) (barReq, error) {
 }
 
 func parseFAR(i *ie.IE) (farReq, error) {
-	children, err := i.CreateFAR()
+	children, err := grouped(i, ie.CreateFAR, ie.UpdateFAR)
 	what := "Create FAR"
 	if i.Type == ie.UpdateFAR {
-		children, err = i.UpdateFAR()
 		what = "Update FAR"
 	}
 	if err != nil {
@@ -4643,7 +4651,7 @@ func parseFAR(i *ie.IE) (farReq, error) {
 					errNotExpressible)
 			}
 		case ie.ForwardingParameters:
-			fwd, err := c.ForwardingParameters()
+			fwd, err := grouped(c, ie.ForwardingParameters, ie.ForwardingParameters)
 			if err != nil {
 				return farReq{}, fmt.Errorf("Forwarding Parameters: %w", err)
 			}
@@ -4664,7 +4672,7 @@ func parseFAR(i *ie.IE) (farReq, error) {
 			// interface and network instance would be read as absent, and a
 			// merge that overwrote them with the zero values would move the
 			// forward -- 0 is the access side.
-			fwd, err := c.UpdateForwardingParameters()
+			fwd, err := grouped(c, ie.UpdateForwardingParameters, ie.UpdateForwardingParameters)
 			if err != nil {
 				return farReq{}, fmt.Errorf("Update Forwarding Parameters: %w", err)
 			}
@@ -4788,11 +4796,10 @@ func parseForwardingParameters(f *farReq, fwd []*ie.IE) error {
 // does not implement is refused here -- see urrUnsupported for why a silently
 // ignored URR field is not an option.
 func parseURR(i *ie.IE) (urrReq, error) {
-	children, err := i.CreateURR()
+	children, err := grouped(i, ie.CreateURR, ie.UpdateURR)
 	what := "Create URR"
 	u := urrReq{create: true}
 	if i.Type == ie.UpdateURR {
-		children, err = i.UpdateURR()
 		what, u.create = "Update URR", false
 	}
 	if err != nil {
@@ -4962,10 +4969,9 @@ func parseURR(i *ie.IE) (urrReq, error) {
 }
 
 func parseQER(i *ie.IE) (qerReq, error) {
-	children, err := i.CreateQER()
+	children, err := grouped(i, ie.CreateQER, ie.UpdateQER)
 	what := "Create QER"
 	if i.Type == ie.UpdateQER {
-		children, err = i.UpdateQER()
 		what = "Update QER"
 	}
 	if err != nil {
