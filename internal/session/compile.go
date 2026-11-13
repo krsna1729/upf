@@ -960,7 +960,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		entry := s.FARs.at(f.id)
 		if entry == nil {
 			// A Create FAR: every field the message carries is the record's.
-			entry = &far{id: f.id, apply: f.apply, destIfc: f.destIfc, instance: f.instance}
+			entry = &far{id: f.id, apply: f.apply, destIfc: f.destIfc, farExt: newFARExt(f.instance, "", "")}
 			s.FARs.set(f.id, entry)
 		} else {
 			// An Update FAR carries what changes (7.5.4.3): a field the message
@@ -977,7 +977,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				entry.destIfc = f.destIfc
 			}
 			if f.hasInstance {
-				entry.instance = f.instance
+				entry.setInstance(f.instance)
 			}
 		}
 		// What the forwarding parameters named, whether this message carried
@@ -990,7 +990,8 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			entry.hasDestIfc = true
 		}
 		if f.hasPolicy {
-			entry.hasPolicy, entry.policy = true, f.policy
+			entry.hasPolicy = true
+			entry.setPolicy(f.policy)
 		}
 		if f.hasOuter {
 			entry.teid, entry.peer, entry.hasOuter = f.teid, f.peer, true
@@ -1005,7 +1006,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 		if f.reference != "" {
 			// The Destination Interface Type merges like the marking.
-			entry.reference = f.reference
+			entry.setReference(f.reference)
 		}
 	}
 	// What a FAR that forwards must carry (Tables 7.5.2.3-1 and 7.5.2.3-2),

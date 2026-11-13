@@ -288,7 +288,7 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 			updated.destIfc = f.destIfc
 		}
 		if f.hasInstance {
-			updated.instance = f.instance
+			updated.setInstance(f.instance)
 		}
 		start := len(out)
 		add := func(local netip.Addr, domain uint32, ifc routing.Interface) {

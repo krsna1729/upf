@@ -1020,26 +1020,12 @@ func newPDRExt(v4, v6 netip.Addr, instance, reference string, qfis []uint8) *pdr
 // far is one compiled FAR.
 type far struct {
 	// Pointer-bearing fields precede scalar fields and presence flags, keeping
-	// this record in the 96 B amd64 class rather than 112 B.
+	// this record in the 64 B amd64 class.
 	peer netip.Addr
-	// instance is the Forwarding Parameters' Network Instance (8.2.4), empty
-	// when the SMF named none: the interface a forward out of this FAR leaves
-	// by (resolve).
-	instance string
-
-	// hasFwd, hasDestIfc, hasPolicy and policy are what the FAR's forwarding
-	// parameters named, as they stand after every message that touched this
-	// FAR: the IE itself (mandatory for a FAR that forwards, Table
-	// 7.5.2.3-1), the Destination Interface inside it (mandatory, Table
-	// 7.5.2.3-2), and the Forwarding Policy (mandatory for a forward toward
-	// SGi-LAN/N6-LAN, Table 7.5.2.3-2). An Update FAR that names none of them
-	// leaves them as the session has them, which is why the checks read the
-	// record and not the message.
-	policy string
-	// reference is the GTP-U reference point the Destination Interface Type
-	// named for the outer header's local end ("" for the Destination
-	// Interface's own); see tunnelEndpoint.
-	reference string
+	// farExt holds the forwarding parameters' strings, which a usual FAR does
+	// not name; they read as the FAR's own. Never nil, never written in place:
+	// change one through setInstance, setPolicy or setReference.
+	*farExt
 
 	id   uint32
 	teid uint32
@@ -1051,9 +1037,17 @@ type far struct {
 	// packet's own class (the TunnelEntry's "marking" field).
 	marking uint16
 
-	apply      uint8
-	destIfc    uint8
-	hasOuter   bool
+	apply    uint8
+	destIfc  uint8
+	hasOuter bool
+	// hasFwd, hasDestIfc, hasPolicy and policy are what the FAR's forwarding
+	// parameters named, as they stand after every message that touched this
+	// FAR: the IE itself (mandatory for a FAR that forwards, Table
+	// 7.5.2.3-1), the Destination Interface inside it (mandatory, Table
+	// 7.5.2.3-2), and the Forwarding Policy (mandatory for a forward toward
+	// SGi-LAN/N6-LAN, Table 7.5.2.3-2). An Update FAR that names none of them
+	// leaves them as the session has them, which is why the checks read the
+	// record and not the message.
 	hasFwd     bool
 	hasDestIfc bool
 	hasPolicy  bool
@@ -1066,6 +1060,38 @@ type far struct {
 	barID      uint8
 	hasMarking bool
 }
+
+// farExt is the part of a FAR's forwarding parameters a usual session does not
+// name. A FAR points at noFARExt until one is named; an extension is never
+// written once built, so a FAR, its snapshot copy and endmarker's copies may
+// share one.
+type farExt struct {
+	// instance is the Forwarding Parameters' Network Instance (8.2.4), empty
+	// when the SMF named none: the interface a forward out of this FAR leaves
+	// by (resolve).
+	instance string
+	// policy is the Forwarding Policy (hasPolicy says it was named; it is
+	// mandatory for a forward toward SGi-LAN/N6-LAN, Table 7.5.2.3-2).
+	policy string
+	// reference is the GTP-U reference point the Destination Interface Type
+	// named for the outer header's local end ("" for the Destination
+	// Interface's own); see tunnelEndpoint.
+	reference string
+}
+
+// noFARExt is the extension of every FAR that names none of its strings.
+var noFARExt = &farExt{}
+
+func newFARExt(instance, policy, reference string) *farExt {
+	if instance == "" && policy == "" && reference == "" {
+		return noFARExt
+	}
+	return &farExt{instance: instance, policy: policy, reference: reference}
+}
+
+func (f *far) setInstance(v string)  { f.farExt = newFARExt(v, f.policy, f.reference) }
+func (f *far) setPolicy(v string)    { f.farExt = newFARExt(f.instance, v, f.reference) }
+func (f *far) setReference(v string) { f.farExt = newFARExt(f.instance, f.policy, v) }
 
 // mar is one compiled Multi-Access Rule (TS 29.244 7.5.2.8): the steering
 // mode and the two access actions an ATSSS PDR's packets choose between.

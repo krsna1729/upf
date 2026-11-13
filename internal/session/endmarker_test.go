@@ -310,11 +310,11 @@ func TestTunnelEndpointUsesReferencePointFamilyAndInstance(t *testing.T) {
 		local      netip.Addr
 		domain     uint32
 	}{
-		{"N3 IPv4 scoped endpoint", &far{destIfc: ie.DstInterfaceAccess, peer: netip.MustParseAddr("10.20.30.2")},
+		{"N3 IPv4 scoped endpoint", &far{farExt: noFARExt, destIfc: ie.DstInterfaceAccess, peer: netip.MustParseAddr("10.20.30.2")},
 			internet, 1, netip.MustParseAddr("10.90.0.1"), 1},
-		{"N9 IPv6 scoped endpoint", &far{destIfc: ie.DstInterfaceCore, peer: netip.MustParseAddr("2001:db8:9::2")},
+		{"N9 IPv6 scoped endpoint", &far{farExt: noFARExt, destIfc: ie.DstInterfaceCore, peer: netip.MustParseAddr("2001:db8:9::2")},
 			internet, 3, netip.MustParseAddr("2001:db8:9::1"), 2},
-		{"unscoped endpoint fallback", &far{destIfc: ie.DstInterfaceAccess, peer: netip.MustParseAddr("10.20.30.2")},
+		{"unscoped endpoint fallback", &far{farExt: noFARExt, destIfc: ie.DstInterfaceAccess, peer: netip.MustParseAddr("10.20.30.2")},
 			vn, 2, netip.MustParseAddr("10.93.0.1"), 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -329,7 +329,7 @@ func TestTunnelEndpointUsesReferencePointFamilyAndInstance(t *testing.T) {
 			}
 		})
 	}
-	missing := &far{destIfc: ie.DstInterfaceCore, instance: "vn",
+	missing := &far{destIfc: ie.DstInterfaceCore, farExt: &farExt{instance: "vn"},
 		peer: netip.MustParseAddr("2001:db8:9::2")}
 	if _, _, err := c.tunnelEndpoint(missing, vn); err == nil {
 		t.Fatal("a scoped N9 IPv6 endpoint was selected for a different instance")
@@ -520,7 +520,7 @@ func TestLeavingTunnelsCapturesSharedPDRAndMARRoutedEndpoints(t *testing.T) {
 	c := New(testConfig(), &recorder{}, quietLogger())
 	localN3 := netip.MustParseAddr("192.0.2.1")
 	localN9 := netip.MustParseAddr("192.0.2.9")
-	old := &far{id: 2, hasOuter: true, teid: 0x11223344, peer: netip.MustParseAddr("10.20.30.2")}
+	old := &far{id: 2, farExt: noFARExt, hasOuter: true, teid: 0x11223344, peer: netip.MustParseAddr("10.20.30.2")}
 	s := &Session{
 		FARs: idMapOf(map[uint32]*far{2: old}),
 		PDRs: idMapOf(map[uint16]*pdr{
@@ -561,7 +561,7 @@ func TestLeavingTunnelsDoesNotEndAnUnchangedRoutedEndpoint(t *testing.T) {
 	}
 	c := New(cfg, &recorder{}, quietLogger())
 	old := &far{
-		id: 2, apply: applyForw, destIfc: ie.DstInterfaceCore, instance: "internet",
+		id: 2, apply: applyForw, destIfc: ie.DstInterfaceCore, farExt: &farExt{instance: "internet"},
 		hasOuter: true, teid: 0x11223344, peer: netip.MustParseAddr("10.20.30.2"),
 	}
 	s := &Session{
