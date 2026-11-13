@@ -1017,6 +1017,14 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   takes 0.63-0.75 ms and is 91% of the load wall time.
   `-session-workers 8` overlaps those transactions: 2,140/s at 100K and 1,425/s
   at 1M.
+- **N4 receive buffer.** The read loop stops reading while a session worker's
+  64-entry queue is full, so requests arriving meanwhile wait in the socket's
+  receive buffer or the kernel drops them. With the 208 KiB system default,
+  1K/s delete+establish churn over 1M residents lost 239 and 307 of 10,000
+  cycles, each loss one UDP receive drop at `upfd`, with p99 350-370 ms; a
+  flight-recorder trace showed no single stall above 53 ms, but 433 read-loop
+  waits totalling 1.8 s in 20 s. `-n4-receive-buffer` (default 4 MiB, capped by
+  `net.core.rmem_max`, which `upfd` warns about) removed every drop.
 - **GOMEMLIMIT.** `upfd` sets it from the smallest cgroup v2 `memory.max` on
   its path, minus max(32 MiB, 10%); a GOMEMLIMIT in the environment wins. At 1M
   in a 4000 MiB scope (limit 3600 MiB), RSS settles at 3.5 GiB and GC takes
