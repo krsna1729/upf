@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -122,6 +123,15 @@ type Config struct {
 	// mostly the wait for its transaction, and the read loop's heartbeats and
 	// association messages no longer wait behind it.
 	SessionWorkers int
+
+	// ReceiveBuffer is the socket receive buffer, in bytes, Listen asks the
+	// kernel for; zero keeps the system default (net.core.rmem_default, often
+	// 208 KiB). The read loop stops reading while a session worker's queue is
+	// full, and every datagram that arrives meanwhile waits in this buffer or
+	// is dropped by the kernel: the buffer is what turns a short stall into a
+	// delay rather than a retransmission. Linux grants at most
+	// net.core.rmem_max; Listen logs what it got.
+	ReceiveBuffer int
 
 	// HeartbeatEvery is the silence after which the UP function asks the CP
 	// function to prove it is there; HeartbeatTimeout is how long it waits for
@@ -312,7 +322,36 @@ func (s *Server) Listen() error {
 		return fmt.Errorf("n4: listen %s: %w", s.cfg.Listen, err)
 	}
 	s.conn = conn
+	if s.cfg.ReceiveBuffer > 0 {
+		s.setReceiveBuffer(conn.(*net.UDPConn), s.cfg.ReceiveBuffer)
+	}
 	return nil
+}
+
+// setReceiveBuffer asks for want bytes of receive buffer and logs what the
+// kernel granted, which net.core.rmem_max caps without an error.
+func (s *Server) setReceiveBuffer(conn *net.UDPConn, want int) {
+	if err := conn.SetReadBuffer(want); err != nil {
+		s.log.Warn("n4: socket receive buffer not set", "want", want, "error", err)
+		return
+	}
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return
+	}
+	got := 0
+	_ = raw.Control(func(fd uintptr) {
+		// Linux reports twice the size asked for: half is its bookkeeping.
+		if v, err := syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF); err == nil {
+			got = v / 2
+		}
+	})
+	if got < want {
+		s.log.Warn("n4: socket receive buffer smaller than asked: raise net.core.rmem_max",
+			"want", want, "got", got)
+		return
+	}
+	s.log.Info("n4: socket receive buffer", "bytes", got)
 }
 
 // Addr returns the bound address, or nil before Listen.

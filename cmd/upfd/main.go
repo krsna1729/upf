@@ -142,6 +142,10 @@ func run() error {
 		"how many PFCP session messages are handled at once, each session's in the order "+
 			"they arrived (1: one at a time, in the socket's read loop). More lets the "+
 			"dataplane transactions of different sessions overlap")
+	n4ReceiveBuffer := flag.Int("n4-receive-buffer", 4<<20,
+		"bytes of socket receive buffer for the N4 socket: what holds the PFCP requests "+
+			"that arrive while every session worker is busy (Linux caps it at "+
+			"net.core.rmem_max; upfd logs what it got). 0: the system default")
 	heapAdmission := flag.Float64("heap-admission", defaultHeapAdmission,
 		"refuse new sessions (cause 75, no resources available) while the heap the last "+
 			"collection kept live is over this share of the Go memory limit (the cgroup's, "+
@@ -255,7 +259,8 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg := n4.Config{NodeID: id, Listen: *n4Addr, Logger: log, SessionWorkers: *sessionWorkers}
+	cfg := n4.Config{NodeID: id, Listen: *n4Addr, Logger: log, SessionWorkers: *sessionWorkers,
+		ReceiveBuffer: *n4ReceiveBuffer}
 	// The checkpoint (docs/design.md's restart wall). It is opened first: the
 	// Recovery Time Stamp it carries decides what the association answer tells
 	// the SMF, and that answer is built before the socket opens.
