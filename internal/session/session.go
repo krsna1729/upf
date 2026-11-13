@@ -656,13 +656,6 @@ type Session struct {
 	// that selection, which remains reserved for a retry until no PDR names it.
 	chids map[uint8]chosenFTEID
 
-	// Cached sorted slices for hot compile paths; invalidated on mutation.
-	cachedPDRs []*pdr
-	cachedQERs []*qer
-	cachedMARs []*mar
-	// cachedGroups is linkedGroups' answer, which every tick asks for.
-	cachedGroups [][]uint32
-
 	// pending exists only while a transaction has records to erase or flows
 	// to release. Refused transactions keep it for their retry; settle drops
 	// it only after the dataplane has accepted the change.
@@ -768,16 +761,15 @@ func (s *Session) snapshot() modelSnapshot {
 // is not restored): it is what a retry of the same request is handed again,
 // and settle drops it once no PDR names it. The caller holds the lock.
 func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
-	failedPDRs := pdrsInOrder(s)
+	failedPDRs := pdrList(s)
 	failedPDRs = append(failedPDRs, s.pending.removedPDRs()...)
 	failedPDRs = append(failedPDRs, s.pending.stalePDRs()...)
-	failedQERs := qersInOrder(s)
+	failedQERs := qerList(s)
 	failedMARs := append(marsInOrder(s), s.pending.removedPolicies()...)
 	failedRetired := slices.Clone(s.pending.retiredIDs())
 
 	s.UEIP = snap.ueIP
 	s.PDRs, s.FARs, s.QERs, s.URRs, s.BARs, s.MARs = snap.pdrs, snap.fars, snap.qers, snap.urrs, snap.bars, snap.mars
-	s.invalidateOrderCache()
 	s.pending = snap.pending
 	s.removedQERs = snap.removedQERs
 
@@ -1656,7 +1648,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// left the model holding the new key while the old one is still programmed.
 	// The dedupe above is what lets both lists name the same records as the
 	// PDRs that stayed.
-	all := pdrsInOrder(s)
+	all := pdrList(s)
 	all = append(all, s.pending.removedPDRs()...)
 	all = append(all, s.pending.stalePDRs()...)
 	for _, p := range all {
@@ -1743,7 +1735,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// once per PDR. A QER a modification removed is on the list too: its record
 	// is in the daemon, and a record nobody names goes on holding the rate it
 	// was written with until another session reuses the id.
-	for _, q := range append(qersInOrder(s), s.removedQERs...) {
+	for _, q := range append(qerList(s), s.removedQERs...) {
 		if !q.hasRate {
 			continue
 		}
@@ -1887,7 +1879,7 @@ func (c *Compiler) releaseSession(s *Session) {
 	actions := map[uint32]bool{}
 	policies := map[uint32]bool{}
 	meters := map[uint32]bool{}
-	all := pdrsInOrder(s)
+	all := pdrList(s)
 	// A PDR a modification removed still holds ids, and a replaced PDR's old
 	// form holds the TEID it used to have: the records are erased by the
 	// deletion above, and the ids are freed here with the rest.
@@ -1932,7 +1924,7 @@ func (c *Compiler) releaseSession(s *Session) {
 			c.actions.release(id)
 		}
 	}
-	for _, q := range append(qersInOrder(s), s.removedQERs...) {
+	for _, q := range append(qerList(s), s.removedQERs...) {
 		if q.meterUL != 0 && !meters[q.meterUL] {
 			meters[q.meterUL] = true
 			c.meters.release(q.meterUL)
@@ -1941,15 +1933,5 @@ func (c *Compiler) releaseSession(s *Session) {
 			meters[q.meterDL] = true
 			c.meters.release(q.meterDL)
 		}
-	}
-}
-
-// invalidateOrderCache clears the sorted slices cached during compilation.
-func (s *Session) invalidateOrderCache() {
-	if s != nil {
-		s.cachedPDRs = nil
-		s.cachedQERs = nil
-		s.cachedMARs = nil
-		s.cachedGroups = nil
 	}
 }

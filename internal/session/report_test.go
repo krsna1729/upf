@@ -200,14 +200,13 @@ func boundedTick(t *testing.T, sessions, perSession int) (*Compiler, *boundedRea
 	seid := upFSEID(t, resp)
 	model := c.sessions[seid]
 	delete(c.sessions, seid)
-	measured := pdrsInOrder(model)[0]
+	measured := pdrList(model)[0]
 	rules := sessions * perSession
 	reader.held = make([]uint32, 0, rules)
 	reader.named = make([]uint8, rules+1)
 	for i := range sessions {
 		s := *model
 		s.LocalSEID = seid + 1 + uint64(i)
-		s.cachedPDRs = nil
 		s.PDRs = idMap[uint16, *pdr]{}
 		pdrs := make([]pdr, perSession)
 		for j := range pdrs {

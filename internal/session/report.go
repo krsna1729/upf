@@ -36,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"slices"
 	"time"
 
@@ -899,18 +900,48 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 	return reports, stopped
 }
 
-// linkedGroups partitions a session's URRs into linked groups: the connected
+// linkedGroups yields a session's URRs as linked groups: the connected
 // components of the Linked URR ID edges (8.2.55), each group's members sorted
-// low to high, and the groups sorted by their first member, so a session
+// low to high, and the groups in order of their first member, so a session
 // reports them in one order whatever the map's is. The link is undirected for
 // grouping -- a URR "Y" may itself link to more URRs, and 5.2.2.4 makes the
 // group everything reachable from any of them. A URR with no link is a group of
-// one. The answer is cached until the model changes (invalidateOrderCache).
-// The caller holds the lock.
-func linkedGroups(s *Session) [][]uint32 {
-	if s.cachedGroups != nil {
-		return s.cachedGroups
+// one. A yielded group is valid only until the next one. The caller holds the
+// lock.
+//
+// This runs for every measured session every tick, so it holds nothing on the
+// session: with no links at all -- the usual session -- each URR is yielded
+// alone, and only a session with links has its groups built.
+func linkedGroups(s *Session) iter.Seq2[int, []uint32] {
+	return func(yield func(int, []uint32) bool) {
+		linked := false
+		for _, u := range s.URRs.all() {
+			if len(u.linked) != 0 {
+				linked = true
+				break
+			}
+		}
+		if !linked {
+			var one [1]uint32
+			i := 0
+			for id := range s.URRs.ordered() {
+				one[0] = id
+				if !yield(i, one[:]) {
+					return
+				}
+				i++
+			}
+			return
+		}
+		for i, g := range buildLinkedGroups(s) {
+			if !yield(i, g) {
+				return
+			}
+		}
 	}
+}
+
+func buildLinkedGroups(s *Session) [][]uint32 {
 	ids := urrIDsInOrder(s)
 	parent := make(map[uint32]uint32, len(ids))
 	for _, id := range ids {
@@ -944,7 +975,6 @@ func linkedGroups(s *Session) [][]uint32 {
 		groups = append(groups, g)
 	}
 	slices.SortFunc(groups, func(a, b []uint32) int { return cmp.Compare(a[0], b[0]) })
-	s.cachedGroups = groups
 	return groups
 }
 

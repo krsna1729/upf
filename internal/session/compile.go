@@ -102,50 +102,33 @@ func heldFlows(s *Session) []uint32 {
 	return append(out, removedFlows(s)...)
 }
 
-// pdrsInOrder, marsInOrder and qersInOrder are the session's objects in id order,
-// cached on the session for repeated accesses within a compilation.
-func pdrsInOrder(s *Session) []*pdr {
+// pdrsInOrder and qersInOrder yield the session's objects in id order straight
+// from its idMaps, allocating nothing for the handful a session names;
+// pdrList and qerList are the same as new slices, for the callers that extend
+// them. marsInOrder builds its slice: MARs are rare, and none costs nothing.
+func pdrsInOrder(s *Session) iter.Seq2[uint16, *pdr] {
 	if s == nil {
-		return nil
+		return func(func(uint16, *pdr) bool) {}
 	}
-	if s.cachedPDRs != nil {
-		return s.cachedPDRs
-	}
-	out := make([]*pdr, 0, s.PDRs.len())
-	for _, id := range s.PDRs.ids() {
-		out = append(out, s.PDRs.at(id))
-	}
-	s.cachedPDRs = out
-	return out
+	return s.PDRs.ordered()
 }
 
+func qersInOrder(s *Session) iter.Seq2[uint32, *qer] {
+	return s.QERs.ordered()
+}
+
+func pdrList(s *Session) []*pdr { return s.PDRs.list() }
+
+func qerList(s *Session) []*qer { return s.QERs.list() }
+
 func marsInOrder(s *Session) []*mar {
-	if s == nil {
+	if s == nil || len(s.MARs) == 0 {
 		return nil
-	}
-	if s.cachedMARs != nil {
-		return s.cachedMARs
 	}
 	out := make([]*mar, 0, len(s.MARs))
 	for _, id := range idsOf(s.MARs) {
 		out = append(out, s.MARs[id])
 	}
-	s.cachedMARs = out
-	return out
-}
-
-func qersInOrder(s *Session) []*qer {
-	if s == nil {
-		return nil
-	}
-	if s.cachedQERs != nil {
-		return s.cachedQERs
-	}
-	out := make([]*qer, 0, s.QERs.len())
-	for _, id := range s.QERs.ids() {
-		out = append(out, s.QERs.at(id))
-	}
-	s.cachedQERs = out
 	return out
 }
 
@@ -909,22 +892,6 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	urrs []urrReq, mars []marReq, rm removals) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Only replacing/mutating the corresponding collection can invalidate its
-	// ordered pointer slice. A FAR/BAR update changes resolved values, not
-	// PDR/QER/MAR membership or the URR link graph.
-	if len(pdrs) != 0 || len(rm.pdrs) != 0 {
-		s.cachedPDRs = nil
-	}
-	if len(qers) != 0 || len(rm.qers) != 0 {
-		s.cachedQERs = nil
-	}
-	if len(mars) != 0 || len(rm.mars) != 0 {
-		s.cachedMARs = nil
-	}
-	if len(pdrs) != 0 || len(rm.pdrs) != 0 || len(urrs) != 0 || len(rm.urrs) != 0 {
-		s.cachedGroups = nil
-	}
-
 	for _, q := range qers {
 		entry := s.QERs.at(q.id)
 		// A GBR above the MBR is not a policy this side can hold: the committed
