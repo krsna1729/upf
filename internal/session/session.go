@@ -1327,9 +1327,9 @@ type urr struct {
 	linked []uint32
 
 	// reported is where the last report ended, so the next periodic report
-	// has a period to measure. Keep time.Time's monotonic clock component:
+	// has a period to measure. A stamp keeps the monotonic reading:
 	// wall-clock changes must not change the duration of a quota.
-	reported time.Time
+	reported stamp
 
 	// windowFirst and windowLast are the *current* reporting window's own first
 	// and last counted packet. The dataplane stamps a tick's own first packet (a
@@ -1337,8 +1337,8 @@ type urr struct {
 	// which packets opened and closed the window are remembered here; a report
 	// opens the next one. stamped says whether any reading carried a stamp at
 	// all: a graph whose counters carry none falls back to the window's length.
-	windowFirst time.Time
-	windowLast  time.Time
+	windowFirst stamp
+	windowLast  stamp
 
 	// lastUp and lastDown are the counters these PDRs had counted when the last
 	// report was made, so that report's successor covers the usage after it
@@ -1358,7 +1358,7 @@ type urr struct {
 	// reaches the SMF in the termination report instead of going with it
 	// (docs/claims.md, finding 20).
 	deliveredUp, deliveredDown Usage
-	deliveredAt                time.Time
+	deliveredAt                stamp
 }
 
 // AssociationEnded implements n4.SessionHandler: no session of the association

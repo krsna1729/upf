@@ -1119,7 +1119,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				// make a URR out of half a request.
 				return fmt.Errorf("%w: the URR %d is not in the session", errNotExpressible, u.id)
 			}
-			entry = &urr{id: u.id, reported: time.Now()}
+			entry = &urr{id: u.id, reported: stampOf(time.Now())}
 			s.URRs.set(u.id, entry)
 		}
 		// An Update URR carries what changed (7.5.4.4); the fields it names

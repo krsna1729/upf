@@ -214,9 +214,9 @@ type Report struct {
 // measured from, and that window's stamps.
 type urrBase struct {
 	uid                     uint32
-	reported                time.Time
+	reported                stamp
 	lastUp, lastDown        Usage
-	windowFirst, windowLast time.Time
+	windowFirst, windowLast stamp
 }
 
 // Absorb adds another undelivered report of the same session to r, URR by
@@ -782,15 +782,15 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 				// group it belongs to may still be reported, and then it is
 				// carried with a zero window.
 				u.baselined = true
-				u.reported, u.lastUp, u.lastDown = now, up, down
-				u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, now
+				u.reported, u.lastUp, u.lastDown = stampOf(now), up, down
+				u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, stampOf(now)
 				if st.endMarker && !u.linkedReporting {
 					st.trigger, st.due, anyDue = TriggerEndMarker, true, true
 				}
 				states = append(states, st)
 				continue
 			}
-			window := now.Sub(u.reported)
+			window := now.Sub(u.reported.time())
 			if window < 0 {
 				window = 0
 			}
@@ -800,9 +800,9 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 				// activity when the window has none yet, and it is its last one.
 				u.stamped = true
 				if u.windowFirst.IsZero() {
-					u.windowFirst = first
+					u.windowFirst = stampOf(first)
 				}
-				u.windowLast = last
+				u.windowLast = stampOf(last)
 			}
 			// The time a window's traffic ran is what a time limit is measured
 			// against -- the window's own first counted packet to its own last
@@ -814,12 +814,12 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 			if u.stamped {
 				windowActive = 0
 				if !u.windowFirst.IsZero() {
-					windowActive = u.windowLast.Sub(u.windowFirst)
+					windowActive = time.Duration(u.windowLast - u.windowFirst)
 				}
 			}
 			st.up, st.down = upWindow, downWindow
 			st.window = window
-			st.first, st.last = windowTimes(u.windowFirst, u.windowLast, upWindow, downWindow)
+			st.first, st.last = windowTimes(u.windowFirst.time(), u.windowLast.time(), upWindow, downWindow)
 			// A limit that is reached stops the traffic whether or not it is
 			// the reason this report is going: a period that ends in the same
 			// window as a quota must not swallow the enforcement.
@@ -891,8 +891,8 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 			u := s.URRs.at(st.uid)
 			r.bases = append(r.bases, urrBase{uid: st.uid, reported: u.reported, lastUp: u.lastUp,
 				lastDown: u.lastDown, windowFirst: u.windowFirst, windowLast: u.windowLast})
-			u.reported, u.lastUp, u.lastDown = now, st.rawUp, st.rawDown
-			u.windowFirst, u.windowLast = time.Time{}, time.Time{}
+			u.reported, u.lastUp, u.lastDown = stampOf(now), st.rawUp, st.rawDown
+			u.windowFirst, u.windowLast = 0, 0
 		}
 		reports = append(reports, r)
 		s.URRs.at(members[0]).seqn++
@@ -1086,7 +1086,7 @@ type urrWindow struct {
 	duration    time.Duration
 	first, last time.Time
 	groupLeader uint32
-	reportedAt  time.Time // the URR's base time when read: a tick that reported since has moved it
+	reportedAt  stamp // the URR's base time when read: a tick that reported since has moved it
 }
 
 // windowsOf reads the counters of the URRs a session holds and returns the
@@ -1139,11 +1139,11 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 			}
 			w := urrWindow{
 				uid: uid, seqn: seqn, rawUp: nowUp, rawDown: nowDown,
-				duration: max(now.Sub(fromAt), 0), groupLeader: members[0], reportedAt: u.reported,
+				duration: max(now.Sub(fromAt.time()), 0), groupLeader: members[0], reportedAt: u.reported,
 			}
 			if u.baselined {
 				w.up, w.down = nowUp.since(fromUp), nowDown.since(fromDown)
-				first, last := u.windowFirst, u.windowLast
+				first, last := u.windowFirst.time(), u.windowLast.time()
 				if !f.IsZero() && !l.Before(f) {
 					if first.IsZero() {
 						first = f
@@ -1181,15 +1181,15 @@ func (c *Compiler) advanceAfter(s *Session, windows []urrWindow, now time.Time) 
 	bumped := map[uint32]bool{}
 	for _, w := range windows {
 		u := s.URRs.at(w.uid)
-		if u == nil || !u.reported.Equal(w.reportedAt) {
+		if u == nil || u.reported != w.reportedAt {
 			// Gone, or a reporting tick reported it since this reading: moving
 			// the base back would report the same usage twice.
 			continue
 		}
 		u.baselined = true
-		u.reported, u.lastUp, u.lastDown = now, w.rawUp, w.rawDown
-		u.deliveredUp, u.deliveredDown, u.deliveredAt = w.rawUp, w.rawDown, now
-		u.windowFirst, u.windowLast = time.Time{}, time.Time{}
+		u.reported, u.lastUp, u.lastDown = stampOf(now), w.rawUp, w.rawDown
+		u.deliveredUp, u.deliveredDown, u.deliveredAt = w.rawUp, w.rawDown, stampOf(now)
+		u.windowFirst, u.windowLast = 0, 0
 		if lead := s.URRs.at(w.groupLeader); lead != nil && !bumped[w.groupLeader] {
 			bumped[w.groupLeader] = true
 			lead.seqn++
@@ -1214,7 +1214,7 @@ func (c *Compiler) Unreport(r Report) bool {
 		return false
 	}
 	for _, b := range r.bases {
-		if u := s.URRs.at(b.uid); u == nil || !u.reported.Equal(r.DecidedAt) {
+		if u := s.URRs.at(b.uid); u == nil || u.reported != stampOf(r.DecidedAt) {
 			return false
 		}
 	}
@@ -1255,7 +1255,7 @@ func (c *Compiler) ConfirmReport(ctx context.Context, r Report) {
 		if u == nil {
 			return
 		}
-		u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, r.DecidedAt
+		u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, stampOf(r.DecidedAt)
 	}
 	delivered(r.URRID, r.RawUp, r.RawDown)
 	for _, l := range r.Linked {

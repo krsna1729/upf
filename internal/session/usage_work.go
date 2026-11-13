@@ -124,14 +124,14 @@ func (c *Compiler) scheduleUsage(s *Session) {
 			continue
 		}
 		if !u.linkedReporting && u.periodic {
-			add(u.reported.Add(u.period))
+			add(u.reported.time().Add(u.period))
 		}
 		if !u.stamped && u.duration {
 			if !u.linkedReporting && u.onTimeTh && u.hasTimeTh {
-				add(u.reported.Add(u.timeThreshold))
+				add(u.reported.time().Add(u.timeThreshold))
 			}
 			if u.onTimeQuota && u.hasTimeQuota && (!u.linkedReporting || !u.enforcing) {
-				add(u.reported.Add(u.timeQuota))
+				add(u.reported.time().Add(u.timeQuota))
 			}
 		}
 		// Zero limits are already reached even without new packets. Requeue
