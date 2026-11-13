@@ -65,3 +65,81 @@ func TestQueuedReportAnswersOwnTheirDatagrams(t *testing.T) {
 		}
 	}
 }
+
+// shutdownHandler records association teardown; these tests deliberately leave
+// the worker queues unconsumed, as workers are allowed to do after Close.
+type shutdownHandler struct {
+	ended chan string
+}
+
+func (*shutdownHandler) Establish(*message.SessionEstablishmentRequest) message.Message {
+	return nil
+}
+
+func (*shutdownHandler) Modify(*message.SessionModificationRequest) message.Message {
+	return nil
+}
+
+func (*shutdownHandler) Delete(*message.SessionDeletionRequest) message.Message {
+	return nil
+}
+
+func (h *shutdownHandler) AssociationEnded(reason string) { h.ended <- reason }
+
+func TestCloseUnblocksPendingSessionWork(t *testing.T) {
+	for _, operation := range []string{"enqueue", "association drain"} {
+		t.Run(operation, func(t *testing.T) {
+			h := &shutdownHandler{ended: make(chan string, 1)}
+			srv, err := New(Config{
+				NodeID: "127.0.0.1", Listen: "127.0.0.1:0",
+				Sessions: h, SessionWorkers: 2,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { srv.Close() })
+			from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8805}
+			srv.peer = &peer{addr: from}
+			var run func()
+			if operation == "enqueue" {
+				q := srv.work[0]
+				for range cap(q) {
+					q <- sessionWork{}
+				}
+				srv.queued = cap(q)
+				run = func() {
+					srv.onSession(message.NewSessionModificationRequest(0, 0, 2, 1, 0), from)
+				}
+			} else {
+				srv.queued = 1
+				run = func() { srv.ended("released") }
+			}
+			returned := make(chan struct{})
+			go func() {
+				run()
+				close(returned)
+			}()
+			if err := srv.Close(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-returned:
+			case <-time.After(time.Second):
+				t.Fatal("Close left session work blocked")
+			}
+			if operation == "enqueue" {
+				srv.queuedMu.Lock()
+				queued := srv.queued
+				srv.queuedMu.Unlock()
+				if queued != sessionQueue {
+					t.Fatalf("cancelled enqueue left queued = %d, want %d", queued, sessionQueue)
+				}
+			}
+			select {
+			case reason := <-h.ended:
+				t.Fatalf("association ended before pending sessions answered: %s", reason)
+			default:
+			}
+		})
+	}
+}
