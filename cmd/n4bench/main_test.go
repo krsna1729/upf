@@ -4,9 +4,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"flag"
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -137,5 +141,95 @@ func TestQueuedResponsesOwnTheirDatagrams(t *testing.T) {
 		if !bytes.Equal(actual, want) {
 			t.Errorf("response %d payload changed after receive-buffer reuse", i)
 		}
+	}
+}
+
+// An accepted Cause alone is not a successful session: the CLI must fail,
+// report the invalid identity, and never count an undeletable establishment.
+func TestStageRejectsInvalidAcceptedEstablishment(t *testing.T) {
+	accepted := ie.NewCause(ie.CauseRequestAccepted)
+	for _, tc := range []struct {
+		name     string
+		response message.Message
+	}{
+		{"missing", message.NewSessionEstablishmentResponse(0, 0, 0x1000, 0, 0, accepted)},
+		{"malformed", message.NewSessionEstablishmentResponse(0, 0, 0x1000, 0, 0, accepted, ie.New(ie.FSEID, []byte{2}))},
+		{"zero", message.NewSessionEstablishmentResponse(0, 0, 0x1000, 0, 0, accepted, ie.NewFSEID(0, net.IPv4(192, 0, 2, 1), nil))},
+		{"wrong-response-type", message.NewSessionDeletionResponse(0, 0, 0x1000, 0, 0, accepted)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer peer.Close()
+			if err := peer.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				responses := []message.Message{
+					message.NewAssociationSetupResponse(0, accepted),
+					tc.response,
+				}
+				buf := make([]byte, 65535)
+				for _, resp := range responses {
+					n, addr, err := peer.ReadFromUDP(buf)
+					if err != nil {
+						done <- err
+						return
+					}
+					req, err := message.Parse(buf[:n])
+					if err != nil {
+						done <- err
+						return
+					}
+					resp.SetSequenceNumber(req.Sequence())
+					b, err := wire(resp)
+					if err != nil {
+						done <- err
+						return
+					}
+					if _, err := peer.WriteToUDP(b, addr); err != nil {
+						done <- err
+						return
+					}
+				}
+				done <- nil
+			}()
+
+			oldFlags, oldArgs := flag.CommandLine, os.Args
+			defer func() { flag.CommandLine, os.Args = oldFlags, oldArgs }()
+			flag.CommandLine = flag.NewFlagSet("n4bench", flag.ContinueOnError)
+			samples := filepath.Join(t.TempDir(), "samples.json")
+			os.Args = []string{"n4bench", "-upf", peer.LocalAddr().String(), "-mode", "stage",
+				"-stage-count", "1", "-sessions", "1", "-workers", "1", "-timeout", "1s", "-json", samples}
+			if err := run(); err == nil {
+				t.Errorf("run error = %v, want unsuccessful measurement", err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.ReadFile(samples)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var report struct {
+				Ops map[string]opStats `json:"ops"`
+			}
+			if err := json.Unmarshal(b, &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.Ops["establish"].Count != 0 || report.Ops["delete"].Count != 0 {
+				t.Fatalf("invalid success counted as establishment or deletion: %+v", report.Ops)
+			}
+			errors := 0
+			for _, count := range report.Ops["establish"].Errors {
+				errors += count
+			}
+			if errors != 1 {
+				t.Errorf("establishment errors = %v, want exactly one rejected measurement", report.Ops["establish"].Errors)
+			}
+		})
 	}
 }

@@ -208,8 +208,9 @@ func (c *client) read() {
 // builders number requests by session index, and with several workers the
 // indices and the calls advance in different orders, so a request could carry
 // one number while its waiter was registered under another -- the reply then
-// matched nothing ("answer to no request") or the wrong request.
-func (c *client) send(m message.Message, kind opKind, timeout time.Duration) (message.Message, time.Duration, error) {
+// matched nothing ("answer to no request") or the wrong request. A successful
+// establishment returns the validated UP F-SEID; other operations return zero.
+func (c *client) send(m message.Message, kind opKind, timeout time.Duration) (uint64, time.Duration, error) {
 	key := c.seq.Add(1)
 	m.SetSequenceNumber(key)
 	ch := make(chan message.Message, 1)
@@ -226,11 +227,11 @@ func (c *client) send(m message.Message, kind opKind, timeout time.Duration) (me
 	b, err := wire(m)
 	if err != nil {
 		c.stats[kind].add(0, err)
-		return nil, 0, err
+		return 0, 0, err
 	}
 	if _, err := c.conn.Write(b); err != nil {
 		c.stats[kind].add(0, err)
-		return nil, 0, err
+		return 0, 0, err
 	}
 	select {
 	case resp := <-ch:
@@ -238,19 +239,44 @@ func (c *client) send(m message.Message, kind opKind, timeout time.Duration) (me
 		cause, err := n4sim.Cause(resp)
 		if err != nil {
 			c.stats[kind].add(0, err)
-			return resp, d, err
+			return 0, d, err
 		}
 		if cause != 1 { // cause 1 = Request accepted
 			err := fmt.Errorf("cause %d", cause)
 			c.stats[kind].add(0, err)
-			return resp, d, err
+			return 0, d, err
+		}
+		var seid uint64
+		if kind == opEstablish {
+			r, ok := resp.(*message.SessionEstablishmentResponse)
+			switch {
+			case !ok:
+				err = fmt.Errorf("expected SessionEstablishmentResponse, got %s", resp.MessageTypeName())
+			case r.UPFSEID == nil:
+				err = errors.New("accepted establishment missing UP F-SEID")
+			default:
+				f, parseErr := r.UPFSEID.FSEID()
+				if parseErr != nil {
+					err = fmt.Errorf("accepted establishment has malformed UP F-SEID: %w", parseErr)
+				} else if f.SEID == 0 {
+					err = errors.New("accepted establishment has zero UP F-SEID")
+				} else {
+					// The response header is our CP SEID; subsequent requests
+					// must instead name the UP F-SEID IE (TS 29.244 7.2.2.4.2).
+					seid = f.SEID
+				}
+			}
+			if err != nil {
+				c.stats[kind].add(0, err)
+				return 0, d, err
+			}
 		}
 		c.stats[kind].add(d, nil)
-		return resp, d, nil
+		return seid, d, nil
 	case <-time.After(timeout):
 		err := errors.New("no answer within " + timeout.String())
 		c.stats[kind].add(0, err)
-		return nil, 0, err
+		return 0, 0, err
 	}
 }
 
@@ -266,8 +292,8 @@ func run() error {
 	nodeID := flag.String("node-id", "smf.local", "the Node ID this client advertises")
 	workers := flag.Int("workers", 16, "concurrent requests in flight")
 	sessions := flag.Int("sessions", 512, "sessions the phase covers")
-	mode := flag.String("mode", "bulk", "establish | cycle | bulk | handover: what the sessions do "+
-		"(handover: establish, then move each downlink tunnel with SNDEM and keep the sessions)")
+	mode := flag.String("mode", "bulk", "establish | cycle | bulk | handover | stage: what the sessions do "+
+		"(stage: establish/delete the -stage-count graph fixture)")
 	rate := flag.Float64("rate", 0, "operations per second (0: as fast as the UPF answers)")
 	timeout := flag.Duration("timeout", 5*time.Second, "per-request timeout")
 	fteid := flag.Uint("fteid", 0,
@@ -283,6 +309,7 @@ func run() error {
 		"after a successful run, keep the association (answering the UPF's heartbeats) this long, "+
 			"so the sessions outlive the run while a harness sends traffic through them")
 	level := flag.String("log-level", "warn", "log level: debug, info, warn, error")
+	stageCount := flag.Int("stage-count", 0, "distinct graph resources in the stage fixture: 1, 2, 3, 4 or 8 (mode stage only)")
 	flag.Parse()
 
 	var lvl slog.Level
@@ -296,6 +323,15 @@ func run() error {
 	}
 	if *workers > *sessions {
 		*workers = *sessions
+	}
+	if *mode == "stage" {
+		switch *stageCount {
+		case 1, 2, 3, 4, 8:
+		default:
+			return fmt.Errorf("-mode stage needs -stage-count 1, 2, 3, 4 or 8")
+		}
+	} else if *stageCount != 0 {
+		return fmt.Errorf("-stage-count is only valid with -mode stage")
 	}
 	base, err := poolBase(*uePool, *sessions)
 	if err != nil {
@@ -341,17 +377,9 @@ func run() error {
 						// message naming SEID 0 would ask a different question.
 						continue
 					}
-					resp, _, err := c.send(m, kind, *timeout)
-					if err == nil && kind == opEstablish && resp != nil {
-						// The answer's header carries *our* SEID (the CP F-SEID,
-						// the identity the UPF addresses its answers to); the
-						// UPF's own is the F-SEID IE, and every later request
-						// must use it (TS 29.244 7.2.2.4.2).
-						if r, ok := resp.(*message.SessionEstablishmentResponse); ok && r.UPFSEID != nil {
-							if f, err := r.UPFSEID.FSEID(); err == nil {
-								seids[i] = f.SEID
-							}
-						}
+					seid, _, err := c.send(m, kind, *timeout)
+					if err == nil && kind == opEstablish {
+						seids[i] = seid
 					}
 				}
 			}(lo, hi)
@@ -361,6 +389,26 @@ func run() error {
 	}
 
 	switch *mode {
+	case "stage":
+		// Prepared PFCP inputs match the compiler-only fixture. This is real
+		// session establishment/deletion, not generic ExactMatch replacement.
+		requests := make([]message.Message, len(params))
+		for i, p := range params {
+			req, err := n4sim.StageEstablish(2+uint32(i), p, *stageCount)
+			if err != nil {
+				return err
+			}
+			requests[i] = req
+		}
+		work(opEstablish, *sessions, func(i int) (message.Message, uint64) {
+			return requests[i], 0
+		})
+		work(opDelete, *sessions, func(i int) (message.Message, uint64) {
+			if seids[i] == 0 {
+				return nil, 0
+			}
+			return n4sim.Delete(2+uint32(*sessions+i), seids[i]), 0
+		})
 	case "establish":
 		work(opEstablish, *sessions, func(i int) (message.Message, uint64) {
 			return n4sim.Establish(2+uint32(i), params[i]), 0
@@ -418,7 +466,7 @@ func run() error {
 			return n4sim.Handover(2+uint32(*sessions+i), seids[i], 2, s.TEID+handoverTEIDStep, s.GnBIP), 0
 		})
 	default:
-		return fmt.Errorf("-mode %q: want establish, cycle, bulk or handover", *mode)
+		return fmt.Errorf("-mode %q: want establish, cycle, bulk, handover or stage", *mode)
 	}
 
 	fmt.Printf("target %s, %d workers, %d sessions, mode %s\n\n", *target, *workers, *sessions, *mode)
@@ -429,9 +477,11 @@ func run() error {
 		Mode     string             `json:"mode"`
 		Workers  int                `json:"workers"`
 		Sessions int                `json:"sessions"`
+		Stages   int                `json:"stage_count,omitempty"`
 		Ops      map[string]opStats `json:"ops"`
 	}
 	out.Target, out.Mode, out.Workers, out.Sessions = *target, *mode, *workers, *sessions
+	out.Stages = *stageCount
 	out.Ops = map[string]opStats{}
 	for k := opAssoc; k < opKindCount; k++ {
 		st := c.stats[k]
@@ -472,6 +522,13 @@ func run() error {
 	}
 	if bad > 0 {
 		return fmt.Errorf("%d of %d requests did not get an accepted answer", bad, total)
+	}
+	if *mode == "stage" {
+		established, deleted := c.stats[opEstablish].count(), c.stats[opDelete].count()
+		if established != *sessions || deleted != *sessions {
+			return fmt.Errorf("stage requires %d accepted establishments and deletions, got %d and %d",
+				*sessions, established, deleted)
+		}
 	}
 	if *hold > 0 {
 		// The line a harness waits for: every phase was answered, and the
