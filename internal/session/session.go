@@ -914,8 +914,8 @@ type pdr struct {
 	// matches.
 	sdfs []*sdfFilter
 	// tunnelEnd is the local end of the tunnel record a downlink PDR's FAR
-	// writes, nil for none; shared by every PDR with the same one (localEnds),
-	// so two PDRs name the same end exactly when they hold the same pointer.
+	// writes, nil for none; usually shared with every PDR naming the same one
+	// (localEnds). Compare two with sameLocalEnd, not ==.
 	tunnelEnd *localEnd
 
 	precedence uint32
@@ -1018,6 +1018,13 @@ func newLocalEnd(address netip.Addr, domain uint32) *localEnd {
 	}
 	key := localEnd{address: address, domain: domain}
 	return localEnds.get(key, func() *localEnd { e := key; return &e })
+}
+
+// sameLocalEnd reports whether two PDRs name the same local end. Interning is
+// lossy (a table slot goes to the latest end), so equal ends may be different
+// copies: compare what they hold.
+func sameLocalEnd(a, b *localEnd) bool {
+	return a == b || (a != nil && b != nil && *a == *b)
 }
 
 // tunnelLocalAddress is the local end's address, none without one.

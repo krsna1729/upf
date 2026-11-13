@@ -2486,7 +2486,7 @@ func samePDRTunnel(before *modelSnapshot, s *Session, p *pdr) bool {
 	// Drop/buffer compiles can resolve a FAR without publishing its tunnel.
 	// Their model is not a written baseline when forwarding resumes.
 	if old == nil || old.drop || old.buffer || old.tunnel != p.tunnel || old.writtenTunnel != p.tunnel ||
-		old.actionID != p.actionID || old.tunnelEnd != p.tunnelEnd ||
+		old.actionID != p.actionID || !sameLocalEnd(old.tunnelEnd, p.tunnelEnd) ||
 		old.hasEncapQFI != p.hasEncapQFI || old.encapQFI != p.encapQFI {
 		return false
 	}
@@ -2532,7 +2532,7 @@ func sameAdmissions(before *modelSnapshot, s *Session) bool {
 			old.wantIPv4 != p.wantIPv4 || old.wantIPv6 != p.wantIPv6 ||
 			old.endpointFamily != p.endpointFamily || old.down != p.down ||
 			old.fteidContext != p.fteidContext || old.hasMAR != p.hasMAR ||
-			old.tunnelEnd != p.tunnelEnd {
+			!sameLocalEnd(old.tunnelEnd, p.tunnelEnd) {
 			return false
 		}
 		if p.hasMAR || !p.tunnelLocalAddress().IsValid() || p.transportRouteDomain() == 0 {
