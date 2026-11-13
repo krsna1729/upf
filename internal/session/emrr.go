@@ -74,7 +74,7 @@ func endMarkerRelays(s *Session, endpoint, teid uint32) []map[string]any {
 		if f == nil || !f.hasOuter || f.teid == 0 {
 			continue
 		}
-		t := tunnel{teid: f.teid, local: p.tunnelLocalAddress(), peer: f.peer, domain: p.transportRouteDomain()}
+		t := tunnel{teid: f.teid, local: p.tunnelLocalAddress(), peer: f.peer(), domain: p.transportRouteDomain()}
 		if slices.Contains(seen, t) {
 			continue
 		}

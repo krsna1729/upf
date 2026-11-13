@@ -260,7 +260,7 @@ func (c *Compiler) sendTunnelEndMarker(tunnel tunnelEndMarker) error {
 	if tunnel.transportRouteDomain == 0 {
 		return fmt.Errorf("the old tunnel has no transport route domain")
 	}
-	frame, err := endMarkerFrame(tunnel.teid, tunnel.peer, tunnel.localAddress)
+	frame, err := endMarkerFrame(tunnel.teid, tunnel.peer(), tunnel.localAddress)
 	if err != nil {
 		return err
 	}
@@ -277,7 +277,7 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 		if old == nil || !old.hasOuter || old.teid == 0 {
 			continue
 		}
-		tunnelChanged := f.hasOuter && (f.teid != old.teid || f.peer != old.peer)
+		tunnelChanged := f.hasOuter && (f.teid != old.teid || f.peer != old.peer())
 		egressChanged := (f.hasDestIfc && f.destIfc != old.destIfc) ||
 			(f.hasInstance && f.instance != old.instance)
 		if !tunnelChanged && !egressChanged {

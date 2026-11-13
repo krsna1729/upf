@@ -1085,9 +1085,9 @@ func newPDRExt(v4, v6 netip.Addr, instance, reference string, qfis []uint8) *pdr
 
 // far is one compiled FAR.
 type far struct {
-	// Pointer-bearing fields precede scalar fields and presence flags, keeping
-	// this record in the 64 B amd64 class.
-	peer netip.Addr
+	// The peer's address bytes and family, read through peer: a netip.Addr's
+	// zone pointer would keep this record out of the 48 B class.
+	peerAddr [16]byte
 	// farExt holds the forwarding parameters' strings, which a usual FAR does
 	// not name; they read as the FAR's own. Never nil, never written in place:
 	// change one through setInstance, setPolicy or setReference.
@@ -1125,6 +1125,32 @@ type far struct {
 	hasBAR     bool
 	barID      uint8
 	hasMarking bool
+	peerFamily uint8 // 4, 6, or 0 for no peer
+}
+
+// peer is the Outer Header Creation's peer address, none without one.
+func (f *far) peer() netip.Addr {
+	switch f.peerFamily {
+	case 4:
+		return netip.AddrFrom4([4]byte(f.peerAddr[:4]))
+	case 6:
+		return netip.AddrFrom16(f.peerAddr)
+	}
+	return netip.Addr{}
+}
+
+// setPeer stores the peer address; one with a zone, which an Outer Header
+// Creation cannot carry, keeps only its bytes.
+func (f *far) setPeer(a netip.Addr) {
+	f.peerAddr, f.peerFamily = [16]byte{}, 0
+	switch {
+	case a.Is4():
+		v := a.As4()
+		copy(f.peerAddr[:], v[:])
+		f.peerFamily = 4
+	case a.Is6():
+		f.peerAddr, f.peerFamily = a.As16(), 6
+	}
 }
 
 // farExt is the part of a FAR's forwarding parameters a usual session does not

@@ -1001,7 +1001,8 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			entry.setPolicy(f.policy)
 		}
 		if f.hasOuter {
-			entry.teid, entry.peer, entry.hasOuter = f.teid, f.peer, true
+			entry.teid, entry.hasOuter = f.teid, true
+			entry.setPeer(f.peer)
 		}
 		if f.hasBAR {
 			entry.hasBAR, entry.barID = true, f.barID
@@ -2491,7 +2492,7 @@ func samePDRTunnel(before *modelSnapshot, s *Session, p *pdr) bool {
 		return false
 	}
 	a, b := before.fars.at(old.farID), s.FARs.at(p.farID)
-	return a != nil && b != nil && a.teid == b.teid && a.peer == b.peer &&
+	return a != nil && b != nil && a.teid == b.teid && a.peer() == b.peer() &&
 		a.hasMarking == b.hasMarking && a.marking == b.marking
 }
 
@@ -2543,7 +2544,7 @@ func sameAdmissions(before *modelSnapshot, s *Session) bool {
 			if a != b {
 				return false
 			}
-		} else if a.hasOuter != b.hasOuter || a.teid != b.teid || a.peer != b.peer {
+		} else if a.hasOuter != b.hasOuter || a.teid != b.teid || a.peer() != b.peer() {
 			return false
 		}
 	}
@@ -3103,7 +3104,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 			value := map[string]any{
 				"teid":                   far.teid,
 				"local_address":          p.tunnelLocalAddress().AsSlice(),
-				"peer_address":           far.peer.AsSlice(),
+				"peer_address":           far.peer().AsSlice(),
 				"transport_route_domain": p.transportRouteDomain(),
 			}
 			if p.hasEncapQFI {
@@ -3248,7 +3249,7 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 			value := map[string]any{
 				"teid":                   far.teid,
 				"local_address":          m.tunnelLocalAddresses[which].AsSlice(),
-				"peer_address":           far.peer.AsSlice(),
+				"peer_address":           far.peer().AsSlice(),
 				"transport_route_domain": m.transportRouteDomains[which],
 			}
 			if far.hasMarking {
