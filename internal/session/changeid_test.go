@@ -110,8 +110,8 @@ func TestChangeIDSeparatesWhatFmtConflated(t *testing.T) {
 func TestARuleKeyIdentityAllocatesItsString(t *testing.T) {
 	p := &pdr{teid: 0x77, fteidContext: 5, ueIP: netip.MustParseAddr("10.45.0.2"),
 		wantIPv4: true, pdrExt: &pdrExt{qfis: []uint8{9}}, sdfs: []*sdfFilter{{proto: 17, protoOK: true}}}
-	p.sdf, p.hasQFI, p.qfi = p.sdfs[0], true, p.qfis[0]
-	key, err := p.ruleKey([]Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain, FTEIDContext, QFI})
+	v := ruleVariant{sdf: p.sdfs[0], hasQFI: true, qfi: p.qfis[0]}
+	key, err := p.ruleKey([]Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain, FTEIDContext, QFI}, v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,9 +128,9 @@ func TestARuleKeyIsAFewAllocations(t *testing.T) {
 	p := &pdr{teid: 0x77, fteidContext: 5, ueIP: netip.MustParseAddr("10.45.0.2"),
 		srcIfc: ie.SrcInterfaceAccess, wantIPv4: true, pdrExt: &pdrExt{qfis: []uint8{9}},
 		sdfs: []*sdfFilter{{proto: 17, protoOK: true}}}
-	p.sdf, p.hasQFI, p.qfi = p.sdfs[0], true, p.qfis[0]
+	v := ruleVariant{sdf: p.sdfs[0], hasQFI: true, qfi: p.qfis[0]}
 	fields := []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain, FTEIDContext, QFI}
-	if allocs := testing.AllocsPerRun(100, func() { _, _ = p.ruleKey(fields) }); allocs > 17 {
+	if allocs := testing.AllocsPerRun(100, func() { _, _ = p.ruleKey(fields, v) }); allocs > 17 {
 		t.Errorf("an 8-field rule key made %.0f allocations, want <= 17", allocs)
 	}
 }
@@ -140,8 +140,8 @@ func TestARuleKeyIsAFewAllocations(t *testing.T) {
 func TestARuleIdentityIsOneAllocation(t *testing.T) {
 	p := &pdr{teid: 0x77, fteidContext: 5, ueIP: netip.MustParseAddr("10.45.0.2"),
 		wantIPv4: true, pdrExt: &pdrExt{qfis: []uint8{9}}, sdfs: []*sdfFilter{{proto: 17, protoOK: true}}}
-	p.sdf, p.hasQFI, p.qfi = p.sdfs[0], true, p.qfis[0]
-	key, err := p.ruleKey([]Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain, FTEIDContext, QFI})
+	v := ruleVariant{sdf: p.sdfs[0], hasQFI: true, qfi: p.qfis[0]}
+	key, err := p.ruleKey([]Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain, FTEIDContext, QFI}, v)
 	if err != nil {
 		t.Fatal(err)
 	}

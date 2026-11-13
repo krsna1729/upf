@@ -1788,8 +1788,7 @@ func (c *Compiler) resolve(s *Session) error {
 		}
 		p.meterID = 0
 		p.tunnel = noTunnel
-		p.tunnelLocalAddress = netip.Addr{}
-		p.transportRouteDomain = 0
+		p.tunnelEnd = nil
 		p.encapQFI = 0
 		p.hasEncapQFI = false
 		var sharedUL, ownUL, sharedDL, ownDL uint32
@@ -1899,8 +1898,7 @@ func (c *Compiler) resolve(s *Session) error {
 			if err != nil {
 				return fmt.Errorf("PDR %d's outer GTP-U tunnel: %w", p.id, err)
 			}
-			p.tunnelLocalAddress = local
-			p.transportRouteDomain = endpoint.TransportRouteDomain
+			p.tunnelEnd = newLocalEnd(local, endpoint.TransportRouteDomain)
 			p.tunnel = tunnelSideOf(p.downlink())
 		}
 		for _, uid := range p.urrIDs {
@@ -2480,8 +2478,7 @@ func samePDRTunnel(before *modelSnapshot, s *Session, p *pdr) bool {
 	// Drop/buffer compiles can resolve a FAR without publishing its tunnel.
 	// Their model is not a written baseline when forwarding resumes.
 	if old == nil || old.drop || old.buffer || old.tunnel != p.tunnel || old.writtenTunnel != p.tunnel ||
-		old.actionID != p.actionID || old.tunnelLocalAddress != p.tunnelLocalAddress ||
-		old.transportRouteDomain != p.transportRouteDomain ||
+		old.actionID != p.actionID || old.tunnelEnd != p.tunnelEnd ||
 		old.hasEncapQFI != p.hasEncapQFI || old.encapQFI != p.encapQFI {
 		return false
 	}
@@ -2527,11 +2524,10 @@ func sameAdmissions(before *modelSnapshot, s *Session) bool {
 			old.wantIPv4 != p.wantIPv4 || old.wantIPv6 != p.wantIPv6 ||
 			old.endpointFamily != p.endpointFamily || old.down != p.down ||
 			old.fteidContext != p.fteidContext || old.hasMAR != p.hasMAR ||
-			old.tunnelLocalAddress != p.tunnelLocalAddress ||
-			old.transportRouteDomain != p.transportRouteDomain {
+			old.tunnelEnd != p.tunnelEnd {
 			return false
 		}
-		if p.hasMAR || !p.tunnelLocalAddress.IsValid() || p.transportRouteDomain == 0 {
+		if p.hasMAR || !p.tunnelLocalAddress().IsValid() || p.transportRouteDomain() == 0 {
 			continue
 		}
 		a, b := before.fars.at(old.farID), s.FARs.at(p.farID)
@@ -3098,9 +3094,9 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 			far := s.FARs.at(p.farID)
 			value := map[string]any{
 				"teid":                   far.teid,
-				"local_address":          p.tunnelLocalAddress.AsSlice(),
+				"local_address":          p.tunnelLocalAddress().AsSlice(),
 				"peer_address":           far.peer.AsSlice(),
-				"transport_route_domain": p.transportRouteDomain,
+				"transport_route_domain": p.transportRouteDomain(),
 			}
 			if p.hasEncapQFI {
 				// QFI 0 is valid; qfi_present distinguishes it from no QFI.
@@ -3305,7 +3301,7 @@ func rulePriority(precedence uint32) int64 {
 //
 // The value must be canonical (value & ^mask == 0), and the key is the
 // concatenation of mask then value per field, then the ranges.
-func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
+func (p *pdr) ruleKey(fields []Field, v ruleVariant) (map[string]any, error) {
 	// The table's key message is WildcardMatchRuleKey: one FieldData per
 	// field, values and masks in two parallel lists, and the ranges by field
 	// index. A FieldData here is its bytes field, value_bin, alone, so each
@@ -3322,12 +3318,12 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 		total += f.width()
 	}
 	mem := make([]byte, 2*total)
-	sd := p.oriented()
+	sd := p.oriented(v.sdf)
 	for i, f := range fields {
 		width := f.width()
 		mask, value := mem[:width:width], mem[width:2*width:2*width]
 		mem = mem[2*width:]
-		m, ok, err := p.matchValue(f, sd)
+		m, ok, err := p.matchValue(f, v, sd)
 		if err != nil {
 			return nil, fmt.Errorf("the PDI's %s: %w", f, err)
 		}
@@ -3347,6 +3343,14 @@ func (p *pdr) ruleKey(fields []Field) (map[string]any, error) {
 	return key, nil
 }
 
+// ruleVariant is the one SDF filter and QFI a rule key of a PDR matches: a PDI
+// that names several of either is one rule per combination (ruleKeys).
+type ruleVariant struct {
+	sdf    *sdfFilter // nil for a PDI that names no SDF filter
+	hasQFI bool
+	qfi    uint8
+}
+
 // ruleKeys expands "match any" SDF/QFI combinations without allocating a
 // whole PDR per variant. Repeated filters still make only one dataplane key.
 func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
@@ -3363,12 +3367,11 @@ func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 	}
 	for _, sd := range sdfs {
 		for i := range qfis {
-			v := *p
-			v.sdf, v.hasQFI, v.qfi = sd, len(p.qfis) > 0, 0
+			v := ruleVariant{sdf: sd, hasQFI: len(p.qfis) > 0}
 			if v.hasQFI {
 				v.qfi = p.qfis[i]
 			}
-			key, err := v.ruleKey(fields)
+			key, err := p.ruleKey(fields, v)
 			if err != nil {
 				return nil, err
 			}
@@ -3650,12 +3653,13 @@ func pref(p netip.Prefix) (match, error) {
 // form a 4-byte mask cannot carry is a session the SMF is told to fix, not one
 // whose rule quietly matches everything.
 //
-// sd is p.oriented(), the filter as the packets this PDR selects carry it (the
-// SMF provisions the downlink form on both PDRs, and an ACCESS PDR's is
-// swapped, 5.2.1A.2A): a key orients it once, not once per field.
-func (p *pdr) matchValue(f Field, sd *sdfFilter) (match, bool, error) {
-	if p.sdf != nil && p.sdf.bare {
-		return match{}, false, fmt.Errorf("%w: SDF Filter ID %d was never resolved to a flow description", errNotExpressible, p.sdf.id)
+// v is the SDF filter and QFI this key is for; sd is p.oriented(v.sdf), the
+// filter as the packets this PDR selects carry it (the SMF provisions the
+// downlink form on both PDRs, and an ACCESS PDR's is swapped, 5.2.1A.2A): a key
+// orients it once, not once per field.
+func (p *pdr) matchValue(f Field, v ruleVariant, sd *sdfFilter) (match, bool, error) {
+	if v.sdf != nil && v.sdf.bare {
+		return match{}, false, fmt.Errorf("%w: SDF Filter ID %d was never resolved to a flow description", errNotExpressible, v.sdf.id)
 	}
 	switch f {
 	case SrcIP:
@@ -3761,8 +3765,8 @@ func (p *pdr) matchValue(f Field, sd *sdfFilter) (match, bool, error) {
 		// matching where a later PDR of the session names a QFI -- which is
 		// what the masked-out byte says (its value is 0, the canonical form
 		// under a zero mask).
-		if p.hasQFI {
-			return match{value: []byte{p.qfi}, mask: ones(1)}, true, nil
+		if v.hasQFI {
+			return match{value: []byte{v.qfi}, mask: ones(1)}, true, nil
 		}
 		return match{}, false, nil
 	case RouteDomain:
@@ -5168,23 +5172,24 @@ func resolveSDFIDs(s *Session) error {
 	return nil
 }
 
-// oriented is the PDR's SDF filter as the packets it selects carry it. The CP
-// function provisions the PCF's Flow Description -- always the downlink form,
-// "from the remote side to the UE" -- in the PDI of the uplink and the downlink
-// PDR alike, and the UP function applies it as is for a CORE PDR and with the
-// source and destination, address and port, swapped for an ACCESS one (TS
-// 29.244 5.2.1A.2A: "shall swap the source and destination address/port in the
-// Flow Description"). Open5GS's UPF does the same (lib/pfcp/handler.c,
-// ogs_ipfw_rule_swap, for a PDR whose source interface is ACCESS).
-func (p *pdr) oriented() *sdfFilter {
-	if p.sdf == nil || p.srcIfc != ie.SrcInterfaceAccess {
-		return p.sdf
+// oriented is one of the PDR's SDF filters, sdf, as the packets it selects
+// carry it. The CP function provisions the PCF's Flow Description -- always
+// the downlink form, "from the remote side to the UE" -- in the PDI of the
+// uplink and the downlink PDR alike, and the UP function applies it as is for
+// a CORE PDR and with the source and destination, address and port, swapped
+// for an ACCESS one (TS 29.244 5.2.1A.2A: "shall swap the source and
+// destination address/port in the Flow Description"). Open5GS's UPF does the
+// same (lib/pfcp/handler.c, ogs_ipfw_rule_swap, for a PDR whose source
+// interface is ACCESS).
+func (p *pdr) oriented(sdf *sdfFilter) *sdfFilter {
+	if sdf == nil || p.srcIfc != ie.SrcInterfaceAccess {
+		return sdf
 	}
-	f := *p.sdf
-	f.src, f.srcOK, f.srcAssigned = p.sdf.dst, p.sdf.dstOK, p.sdf.dstAssigned
-	f.dst, f.dstOK, f.dstAssigned = p.sdf.src, p.sdf.srcOK, p.sdf.srcAssigned
-	f.sportLo, f.sportHi, f.sportOK = p.sdf.dportLo, p.sdf.dportHi, p.sdf.dportOK
-	f.dportLo, f.dportHi, f.dportOK = p.sdf.sportLo, p.sdf.sportHi, p.sdf.sportOK
+	f := *sdf
+	f.src, f.srcOK, f.srcAssigned = sdf.dst, sdf.dstOK, sdf.dstAssigned
+	f.dst, f.dstOK, f.dstAssigned = sdf.src, sdf.srcOK, sdf.srcAssigned
+	f.sportLo, f.sportHi, f.sportOK = sdf.dportLo, sdf.dportHi, sdf.dportOK
+	f.dportLo, f.dportHi, f.dportOK = sdf.sportLo, sdf.sportHi, sdf.sportOK
 	return &f
 }
 

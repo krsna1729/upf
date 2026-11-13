@@ -524,8 +524,8 @@ func TestLeavingTunnelsCapturesSharedPDRAndMARRoutedEndpoints(t *testing.T) {
 	s := &Session{
 		FARs: idMapOf(map[uint32]*far{2: old}),
 		PDRs: idMapOf(map[uint16]*pdr{
-			1: {id: 1, farID: 2, tunnelLocalAddress: localN3, transportRouteDomain: 1},
-			2: {id: 2, farID: 2, tunnelLocalAddress: localN3, transportRouteDomain: 1},
+			1: {id: 1, farID: 2, tunnelEnd: newLocalEnd(localN3, 1)},
+			2: {id: 2, farID: 2, tunnelEnd: newLocalEnd(localN3, 1)},
 		}),
 		ext: &sessionExt{MARs: map[uint16]*mar{
 			1: {
@@ -568,7 +568,7 @@ func TestLeavingTunnelsDoesNotEndAnUnchangedRoutedEndpoint(t *testing.T) {
 		FARs: idMapOf(map[uint32]*far{2: old}),
 		PDRs: idMapOf(map[uint16]*pdr{
 			1: {id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, pdrExt: &pdrExt{instance: "internet"},
-				tunnelLocalAddress: local, transportRouteDomain: 2},
+				tunnelEnd: newLocalEnd(local, 2)},
 		}),
 	}
 	for _, update := range []farReq{

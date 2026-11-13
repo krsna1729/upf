@@ -311,12 +311,12 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 			})
 		}
 		for _, p := range pdrsInOrder(s) {
-			if p.hasMAR || p.farID != old.id || !p.tunnelLocalAddress.IsValid() {
+			if p.hasMAR || p.farID != old.id || !p.tunnelLocalAddress().IsValid() {
 				continue
 			}
 			ifc, err := c.interfaceFor(p)
 			if err == nil {
-				add(p.tunnelLocalAddress, p.transportRouteDomain, ifc)
+				add(p.tunnelLocalAddress(), p.transportRouteDomain(), ifc)
 			}
 		}
 		for _, m := range s.rare().MARs {

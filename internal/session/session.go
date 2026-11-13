@@ -913,11 +913,10 @@ type pdr struct {
 	// sdfs is the SDF filters the PDI named (the SDF Filter IE), any of which
 	// matches.
 	sdfs []*sdfFilter
-	// sdf, hasQFI and qfi select one combination of sdfs and qfis, only on the
-	// stack copies ruleKeys makes: each matcher reads one filter and one QFI.
-	sdf *sdfFilter
-
-	tunnelLocalAddress netip.Addr
+	// tunnelEnd is the local end of the tunnel record a downlink PDR's FAR
+	// writes, nil for none; shared by every PDR with the same one (localEnds),
+	// so two PDRs name the same end exactly when they hold the same pointer.
+	tunnelEnd *localEnd
 
 	precedence uint32
 	farID      uint32
@@ -931,12 +930,11 @@ type pdr struct {
 	// forwards toward the data network (resolve).
 	nextHop uint32
 
-	teid                 uint32 // local ingress TEID, in either direction (0 for plain N6)
-	endpointID           uint32
-	fteidContext         uint32 // the admission context the decap writes for this PDR's F-TEID
-	transportRouteDomain uint32
-	actionID             uint32 // the ActionId carried in this PDR rule's result
-	meterID              uint32 // the meter record a QER resolved to, in this chain's Meter
+	teid         uint32 // local ingress TEID, in either direction (0 for plain N6)
+	endpointID   uint32
+	fteidContext uint32 // the admission context the decap writes for this PDR's F-TEID
+	actionID     uint32 // the ActionId carried in this PDR rule's result
+	meterID      uint32 // the meter record a QER resolved to, in this chain's Meter
 	// ownMeterID and sharedMeterID are that choice's halves: the PDR's own
 	// last rate-bearing QER, and the session's shared QER (0 when the PDR
 	// names none). The PDR result writes the own meter ID first and the shared
@@ -965,8 +963,6 @@ type pdr struct {
 	// 29.244 8.2.34). A MAR PDR has no FAR of its own: the MAR's two access
 	// actions are its egress.
 	hasMAR bool
-	hasQFI bool
-	qfi    uint8
 	// encapQFI is the QFI of the QER this PDR's downlink record carries
 	// (resolve). hasEncapQFI distinguishes an absent QFI from valid QFI 0
 	// (TS 38.415 5.5.3.3).
@@ -1007,11 +1003,46 @@ type pdr struct {
 	notify bool
 }
 
+// localEnd is the local end of a downlink tunnel record: the endpoint address
+// and its transport route domain, one of a handful a deployment has.
+type localEnd struct {
+	address netip.Addr
+	domain  uint32
+}
+
+var localEnds interner[localEnd, localEnd]
+
+// newLocalEnd is the shared local end for address and domain, nil for
+// neither.
+func newLocalEnd(address netip.Addr, domain uint32) *localEnd {
+	if !address.IsValid() && domain == 0 {
+		return nil
+	}
+	key := localEnd{address: address, domain: domain}
+	return localEnds.get(key, func() *localEnd { e := key; return &e })
+}
+
+// tunnelLocalAddress is the local end's address, none without one.
+func (p *pdr) tunnelLocalAddress() netip.Addr {
+	if p.tunnelEnd == nil {
+		return netip.Addr{}
+	}
+	return p.tunnelEnd.address
+}
+
+// transportRouteDomain is the local end's transport route domain, 0 without
+// one.
+func (p *pdr) transportRouteDomain() uint32 {
+	if p.tunnelEnd == nil {
+		return 0
+	}
+	return p.tunnelEnd.domain
+}
+
 // pdrExt is the part of a PDI that a usual session's PDRs do not name. A PDR
 // points at noPDRExt until its PDI names one of them, which keeps 104 B out of
 // every PDR of a million sessions. An extension is immutable once built, so
-// PDRs (and the stack copies ruleKeys makes) share it: merge builds a new one
-// rather than writing a field.
+// PDRs share it: merge builds a new one rather than writing a field.
 type pdrExt struct {
 	// fteidIPv4 and fteidIPv6 are the F-TEID addresses the SMF named; none
 	// when it asked this UP to choose (CHOOSE), as a 5G SMF usually does.
