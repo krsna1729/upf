@@ -1122,40 +1122,43 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				// make a URR out of half a request.
 				return fmt.Errorf("%w: the URR %d is not in the session", errNotExpressible, u.id)
 			}
-			entry = &urr{id: u.id, reported: stampOf(time.Now())}
+			entry = &urr{id: u.id, reported: stampOf(time.Now()), urrLimits: noURRLimits}
 			s.URRs.set(u.id, entry)
 		}
 		// An Update URR carries what changed (7.5.4.4); the fields it names
-		// replace the ones before, and the ones it leaves out stay.
+		// replace the ones before, and the ones it leaves out stay. The
+		// provisioning is shared, so the change is made on a copy.
+		l := *entry.urrLimits
 		if u.hasMethod {
-			entry.volume, entry.duration = u.volume, u.duration
+			l.volume, l.duration = u.volume, u.duration
 		}
 		if u.hasTriggers {
-			entry.periodic, entry.onVolumeTh, entry.onTimeTh = u.periodic, u.onVolumeTh, u.onTimeTh
-			entry.onVolQuota, entry.onTimeQuota = u.onVolQuota, u.onTimeQuota
-			entry.onEndMarker = u.onEndMarker
-			entry.linkedReporting = u.linkedReporting
+			l.periodic, l.onVolumeTh, l.onTimeTh = u.periodic, u.onVolumeTh, u.onTimeTh
+			l.onVolQuota, l.onTimeQuota = u.onVolQuota, u.onTimeQuota
+			l.onEndMarker = u.onEndMarker
+			l.linkedReporting = u.linkedReporting
 		}
 		if u.hasPeriod {
-			entry.period = u.period
+			l.period = u.period
 		}
 		if u.hasVolThreshold {
-			entry.volThreshold = u.volThreshold
+			l.volThreshold = u.volThreshold
 		}
 		if u.hasTimeTh {
-			entry.timeThreshold, entry.hasTimeTh = u.timeThreshold, true
+			l.timeThreshold, l.hasTimeTh = u.timeThreshold, true
 		}
 		if u.hasVolQuota {
-			entry.volQuota = u.volQuota
+			l.volQuota = u.volQuota
 		}
 		if u.hasTimeQuota {
-			entry.timeQuota, entry.hasTimeQuota = u.timeQuota, true
+			l.timeQuota, l.hasTimeQuota = u.timeQuota, true
 		}
 		if u.hasLinked {
 			// The Linked URR IDs the update named replace the set; the links
 			// themselves are checked once the whole message is folded in.
-			entry.linked = u.linked
+			l.linked = u.linked
 		}
+		entry.urrLimits = urrLimitsOf(l)
 		if u.hasVolQuota || u.hasTimeQuota || u.hasVolThreshold || u.hasTimeTh {
 			// A new quota (or threshold) is the SMF granting more usage: the
 			// drop a quota exhaustion put on this URR's PDRs is lifted, and the

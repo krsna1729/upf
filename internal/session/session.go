@@ -1337,56 +1337,16 @@ type urr struct {
 	id   uint32
 	seqn uint32 // UR-SEQN of the next report (5.2.2.3), initially 0
 
-	// The Measurement Method (8.2.40): VOLUM, DURAT or both. EVENT is refused
-	// when the URR is read (this UP detects no events), so at least one of
-	// these is set.
-	volume   bool
-	duration bool
+	// The window-state flags.
+	enforcing bool // a reached quota compiles its PDRs to drop
+	stamped   bool // the current window has packet timestamps
+	baselined bool // the first counter reading has set its base
 
-	// The Reporting Triggers (8.2.19) this UP implements: the ones a report is
-	// generated from. A trigger the SMF sets and this UP does not implement is
-	// refused when the URR is read -- a URR that reports less often than asked
-	// is a session the SMF mis-bills.
-	periodic    bool
-	onVolumeTh  bool
-	onTimeTh    bool
-	onVolQuota  bool
-	onTimeQuota bool
-	// onEndMarker is REEMR (8.2.19 octet 7): report when an End Marker arrives
-	// on the local F-TEID of a PDR this URR measures (Usage Report Trigger
-	// EMRRE, 8.2.41).
-	onEndMarker bool
-
-	// linkedReporting is LIUSA (8.2.19): the URR is reported through its link,
-	// not on its own triggers -- the group's report is owed when a URR it is
-	// linked to is due, and this URR is carried in it. Its own limits still
-	// stop the traffic (quotaReached), and its window still moves with the
-	// group's report. A LIUSA URR with nothing linked to it is refused when
-	// the session is resolved (compile.go, `resolve`).
-	linkedReporting bool
-
-	// Keep presence and window-state flags together: spreading them between
-	// 8-byte counters and times adds padding to every session's URRs.
-	hasTimeTh, hasTimeQuota bool
-	enforcing               bool // a reached quota compiles its PDRs to drop
-	stamped                 bool // the current window has packet timestamps
-	baselined               bool // the first counter reading has set its base
-
-	// period is the Measurement Period (8.2.42) in seconds, with periodic set.
-	period time.Duration
-
-	// The thresholds (8.2.13, 8.2.14) and quotas (8.2.50, 8.2.51). A quota is
-	// what stops the traffic (5.2.2.2.1): when it is reached the PDRs that name
-	// this URR compile to a drop (enforcing).
-	volThreshold  volumeLimit
-	timeThreshold time.Duration
-	volQuota      volumeLimit
-	timeQuota     time.Duration
-
-	// linked are the URR's Linked URR IDs (TS 29.244 8.2.55): the URRs this one
-	// reports with. A session's URRs joined by these edges are one linked group
-	// and share one UR-SEQN (report.go, "the group").
-	linked []uint32
+	// urrLimits is what the SMF provisioned: method, triggers, period,
+	// thresholds, quotas and links, read as the URR's own fields. Every URR
+	// provisioned alike shares one (urrLimitsOf); merge changes it by building
+	// another, never by writing it.
+	*urrLimits
 
 	// reported is where the last report ended, so the next periodic report
 	// has a period to measure. A stamp keeps the monotonic reading:
@@ -1421,6 +1381,90 @@ type urr struct {
 	// (docs/claims.md, finding 20).
 	deliveredUp, deliveredDown Usage
 	deliveredAt                stamp
+}
+
+// urrLimits is a URR's provisioning: what reports it and what stops its
+// traffic. A plan provisions the same to every subscriber, so URRs share it
+// (urrLimitsOf); it is never written once shared.
+type urrLimits struct {
+	urrConfig
+
+	// linked are the URR's Linked URR IDs (TS 29.244 8.2.55): the URRs this one
+	// reports with. A session's URRs joined by these edges are one linked group
+	// and share one UR-SEQN (report.go, "the group").
+	linked []uint32
+}
+
+// urrConfig is the comparable part of a URR's provisioning.
+type urrConfig struct {
+	// The Measurement Method (8.2.40): VOLUM, DURAT or both. EVENT is refused
+	// when the URR is read (this UP detects no events), so at least one of
+	// these is set.
+	volume   bool
+	duration bool
+
+	// The Reporting Triggers (8.2.19) this UP implements: the ones a report is
+	// generated from. A trigger the SMF sets and this UP does not implement is
+	// refused when the URR is read -- a URR that reports less often than asked
+	// is a session the SMF mis-bills.
+	periodic    bool
+	onVolumeTh  bool
+	onTimeTh    bool
+	onVolQuota  bool
+	onTimeQuota bool
+	// onEndMarker is REEMR (8.2.19 octet 7): report when an End Marker arrives
+	// on the local F-TEID of a PDR this URR measures (Usage Report Trigger
+	// EMRRE, 8.2.41).
+	onEndMarker bool
+
+	// linkedReporting is LIUSA (8.2.19): the URR is reported through its link,
+	// not on its own triggers -- the group's report is owed when a URR it is
+	// linked to is due, and this URR is carried in it. Its own limits still
+	// stop the traffic (quotaReached), and its window still moves with the
+	// group's report. A LIUSA URR with nothing linked to it is refused when
+	// the session is resolved (compile.go, `resolve`).
+	linkedReporting bool
+
+	hasTimeTh, hasTimeQuota bool
+
+	// period is the Measurement Period (8.2.42) in seconds, with periodic set.
+	period time.Duration
+
+	// The thresholds (8.2.13, 8.2.14) and quotas (8.2.50, 8.2.51). A quota is
+	// what stops the traffic (5.2.2.2.1): when it is reached the PDRs that name
+	// this URR compile to a drop (enforcing).
+	volThreshold  volumeLimit
+	timeThreshold time.Duration
+	volQuota      volumeLimit
+	timeQuota     time.Duration
+}
+
+// noURRLimits is a URR's provisioning before merge reads any.
+var noURRLimits = &urrLimits{}
+
+// urrLimitsKey is a urrLimits as a key: the links as a string.
+type urrLimitsKey struct {
+	urrConfig
+	linked string
+}
+
+func (l *urrLimits) key() urrLimitsKey {
+	key := urrLimitsKey{urrConfig: l.urrConfig}
+	if len(l.linked) != 0 {
+		b := make([]byte, 0, 4*len(l.linked))
+		for _, id := range l.linked {
+			b = binary.BigEndian.AppendUint32(b, id)
+		}
+		key.linked = string(b)
+	}
+	return key
+}
+
+var urrLimitSets = interner[urrLimitsKey, urrLimits]{keyOf: (*urrLimits).key}
+
+// urrLimitsOf returns a shared provisioning equal to l, or a copy of l.
+func urrLimitsOf(l urrLimits) *urrLimits {
+	return urrLimitSets.get(l.key(), func() *urrLimits { v := l; return &v })
 }
 
 // AssociationEnded implements n4.SessionHandler: no session of the association
