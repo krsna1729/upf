@@ -4492,7 +4492,7 @@ func parsePDI(p *pdrReq, children []*ie.IE) error {
 			if fields.HasBID() {
 				filter.id, filter.hasID = fields.SDFFilterID, true
 			}
-			p.sdfs = append(p.sdfs, filter)
+			p.sdfs = append(p.sdfs, internSDF(filter))
 		case ie.ApplicationID, ie.TrafficEndpointID, ie.EthernetPacketFilter,
 			ie.EthernetPDUSessionInformation, ie.FramedRoute, ie.FramedRouting,
 			ie.FramedIPv6Route, ie.IPMulticastAddressingInfo:
