@@ -213,6 +213,10 @@ def main():
     p.add_argument('--worker-cpu', type=int, required=True)
     p.add_argument('--client-cpus', required=True)
     p.add_argument('--bess-mib', type=int, default=3000)
+    p.add_argument('--bess-mem-backing', choices=['normal', 'hugepages', 'auto'], default='normal',
+                   help="bessd --mem_backing; hugepages are never swapped")
+    p.add_argument('--bess-buffers', type=int, default=131072,
+                   help='bessd packet buffers (about 2.3 KB each)')
     p.add_argument('--upfd-mib', type=int, default=5300)
     p.add_argument('--lane-mib', type=int, default=7872)
     p.add_argument('--instrumented', action='store_true', help='Measurement-overlay runtime/heap snapshots; not an uninstrumented product run')
@@ -353,7 +357,9 @@ def main():
         lane_group = Path('/sys/fs/cgroup') / group.lstrip('/')
         maximum = max(rates)
         capacity = args.sessions + args.cohort + max(65536, maximum)
-        counters = 1 << (max(65536, 2 * capacity) - 1).bit_length()
+        # Twice the sessions: released counter ids age before reuse. The
+        # counter banks size to this exactly; no power-of-two rounding.
+        counters = max(65536, 2 * capacity)
         fteids = 1 << (max(65536, args.sessions + args.cohort + 5 * maximum) - 1).bit_length()
         summary.update(session_capacity=capacity, counters=counters, fteids=fteids)
         save(out / 'graph.json', graph(args, capacity, counters, fteids))
@@ -362,8 +368,8 @@ def main():
             summary.setdefault('sha256', {})[name] = hashlib.sha256(binary.read_bytes()).hexdigest()
         for binary in args.plugin.resolve().glob('*.so'):
             summary['sha256']['plugin/' + binary.name] = hashlib.sha256(binary.read_bytes()).hexdigest()
-        daemon_command = [daemon, '--mem_backing=normal', f'--mem_limit_mb={args.bess_mib}',
-             '--buffers=131072', '-skip_root_check', f'--grpc_url={endpoint}',
+        daemon_command = [daemon, f'--mem_backing={args.bess_mem_backing}', f'--mem_limit_mb={args.bess_mib}',
+             f'--buffers={args.bess_buffers}', '-skip_root_check', f'--grpc_url={endpoint}',
              f'--control_cpus={args.bess_control_cpu}',
              '-modules=' + str(args.plugin.resolve()), '-f', '-logtostderr']
         if args.perf:
