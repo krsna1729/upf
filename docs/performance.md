@@ -1178,13 +1178,14 @@ BESS #151 merged (develop 733ddb19, tree-identical to the measured SDK), and
 upfd now dials `DialTransactionStreams(target, kMaxInFlight)`, the measured
 arm.
 
-**Session action index candidate (2026-11-14; not merge-qualified).**
+**Session action index (2026-11-14).**
 Replace the session-major plugin's glibc action-id tree with a DPDK array,
 admitted up front through the module memory scope. Action ids are now bounded
 by `counters.capacity`; this changes only the UPF plugin, not BESS core.
 `get_counts` keeps id-ordered pagination and bounds sparse scans per lock hold.
 The session-store and datapath meson test targets both pass.
 
+Accounting campaign (the collector overlaps the timed window):
 Matched 1M-session ABBA on one vendored BESS 733ddb19 stage, one upfd binary,
 UDS, FAR 1K/s for 10 s, no_turbo=1, AC online, no concurrent build or analysis.
 Raw: `.scratch/evidence/session-action-index-1m-abba-run2/`; plugin hashes and
@@ -1207,9 +1208,28 @@ the other three send and complete 10000. The lane is capped at 4600 MiB;
 the largest lane peak plus the tab's 1-second-sampled peak is 5540.3 MiB
 (sampling is not a hard combined cap).
 
-**Open gate:** p99 is worse in both adjacent pairs (+18.2%, +2.4%; mean +10.8%).
-Cause unassigned; memory savings do not establish timing non-regression.
-Do not merge on this campaign alone.
+The accounting run's p99 is worse in both adjacent pairs (+18.2%, +2.4%;
+mean +10.8%). File timestamps show the collector overlaps the first
+0.9–2.3 seconds of each timed window. Retain those results as accounting
+evidence, not as a clean timing comparison; they did not qualify the change.
+
+**Observer-free timing qualification.** Repeat the same ABBA with the same
+plugin hashes, stage, upfd, budgets and CPU pins, but no account collector:
+`.scratch/evidence/session-action-index-1m-quiet-abba/`. Turbo off, AC online;
+no concurrent build or analysis. Every run exits 0 and sends/completes 10000
+modifications, with zero timeouts, refusals or cgroup OOM events.
+
+| Metric | Tree (A, mean of 2) | Array (B, mean of 2) |
+|---|---:|---:|
+| FAR-1K p50, ms | 0.360 | 0.350 |
+| FAR-1K p99, ms | 35.21 | 31.36 |
+| Lane peak, MiB | 4355.99 | 4311.11 |
+
+The p99 improves in both adjacent pairs (−0.8%, −19.6%; mean −10.9%).
+p50 is mixed by pair (mean −2.8%); no consistent median improvement is claimed.
+The maximum lane peak plus the 1-second-sampled tab peak is 5574.2 MiB.
+The accounting campaign remains the memory proof; this separate campaign
+clears its loaded-tail gate. Datapath code on the packet path is unchanged.
 
 Quota-only URR changes issue **zero native transactions**, yet target 10K has
 147 timeouts and target 100K completes 965,751 of 3,000,000 scheduled cycles.
