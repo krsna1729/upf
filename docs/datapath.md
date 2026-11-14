@@ -195,8 +195,11 @@ by action id, is a DPDK array of 4 B per id over `1..counters.capacity`.
 Control mirrors and their slot-owner slices are fixed DPDK arrays too: each
 session has `2·A + 3·Q` 32-bit owners/refs, and no slot-owner vector allocation.
 Module creation admits those arrays, `capacity × stride` and the action index
-through the memory scope or is refused. Rule/F-TEID vectors and meter profiles
-still grow under scope admission; a rewrite allocates nothing on the DPDK side.
+through the memory scope or is refused. PDR mask/value keys are inline in
+their rule records; only ranged rules allocate a range list. A session stores
+F-TEID ids, not copies of the F-TEID resource's records or relay lists. These
+control vectors and meter profiles still grow under scope admission; a rewrite
+allocates nothing on the DPDK side.
 
 **Live rewrite.** A PDR rule's result is `session << 5 | version << 4 |
 action`. An update writes the inactive version, then commits the rules

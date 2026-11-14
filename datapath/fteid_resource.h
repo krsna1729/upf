@@ -111,6 +111,16 @@ class FteidResource final : public bess::dataplane::Resource {
     }
   }
 
+  std::optional<FteidRecord> Find(const FteidId &id) const {
+    std::lock_guard lock(control_mu_);
+    const auto it = entries_.find(id);
+    if (it == entries_.end() || !it->second.live) return std::nullopt;
+    const auto &entry = it->second;
+    const auto *relays = entry.record->relays.load(std::memory_order_relaxed);
+    return FteidRecord{entry.direction, entry.context_id,
+                       relays ? *relays : EndMarkerRelays{}};
+  }
+
   bool Contains(const bess::dataplane::ResourceKey &key) const override {
     uint64_t value = 0;
     if (!Lookup(key, &value)) return false;

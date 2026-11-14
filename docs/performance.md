@@ -1265,6 +1265,41 @@ zero timeouts/refusals/OOMs; lane peak plus sampled tab peak ≤5486.5 MiB.
 The session-store and datapath meson test targets pass; capped `-j1` build
 peaks at 1272 MiB with no OOM events.
 
+**Inline rule keys and single-owned F-TEID records (2026-11-14).** Store each
+PDR's mask/value bytes inline in a 56-byte rule record (the longer DL key is
+22 bytes); range lists are optional and remain fully supported. Retain only
+25-byte F-TEID ids in a session, reading canonical records under the F-TEID
+resource's control lock instead of keeping another record/relay copy.
+This trades a control-side tree lookup for the eliminated duplicate record.
+Replaced mirror vectors now release their capacity at publish, as the memory
+account returns their bytes, rather than retaining capacity in receipt-owned
+staged operations. Packet layout and RCU publication order are unchanged.
+
+Matched 1M-session ABBA against #76, same stage/upfd/pins/budgets, turbo off,
+AC online; synchronous account capture precedes each timed baseline.
+Raw: `.scratch/evidence/session-inline-keys/abba/` (binary hashes, exact runner
+and per-run accounts retained).
+
+| Metric | #76 (A, mean of 2) | Compact records (B, mean of 2) |
+|---|---:|---:|
+| Session account, MiB | 1208.99 | 1124.11 |
+| Session glibc, MiB | 215.53 | 130.65 |
+| bessd RSS at fill, MiB | 2039.33 | 1962.01 |
+| Lane peak, MiB | 4266.00 | 4154.00 |
+| FAR-1K p50, ms | 0.399 | 0.323 |
+| FAR-1K p99, ms | 29.04 | 10.23 |
+
+The account saves **84.9 MiB** (89 B per live session in this image), RSS
+77.3 MiB. p99 improves in both pairs, but candidate p99 spans 2.9–17.6 ms:
+the −64.8% mean is this campaign's outcome, not a stable capacity claim.
+Every sent modification completes (A1 has one client PacerSkip; 39999 sent
+and completed overall), with no timeouts/refusals/OOMs. Maximum lane peak plus
+the 1-second-sampled tab peak is 5876.2 MiB; this is not a hard aggregate cap.
+Unattributed working set is still open (26.5 → 34.0 MiB in this campaign).
+Both focused meson targets pass, including ranged-rule readback/replacement
+and existing End Marker relay/readback coverage. The capped single-job build
+peaks at 1194 MiB with zero OOM events.
+
 Quota-only URR changes issue **zero native transactions**, yet target 10K has
 147 timeouts and target 100K completes 965,751 of 3,000,000 scheduled cycles.
 Thus transport removal alone cannot establish a 100K N4 rating. Current
