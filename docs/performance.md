@@ -1178,6 +1178,39 @@ BESS #151 merged (develop 733ddb19, tree-identical to the measured SDK), and
 upfd now dials `DialTransactionStreams(target, kMaxInFlight)`, the measured
 arm.
 
+**Session action index candidate (2026-11-14; not merge-qualified).**
+Replace the session-major plugin's glibc action-id tree with a DPDK array,
+admitted up front through the module memory scope. Action ids are now bounded
+by `counters.capacity`; this changes only the UPF plugin, not BESS core.
+`get_counts` keeps id-ordered pagination and bounds sparse scans per lock hold.
+The session-store and datapath meson test targets both pass.
+
+Matched 1M-session ABBA on one vendored BESS 733ddb19 stage, one upfd binary,
+UDS, FAR 1K/s for 10 s, no_turbo=1, AC online, no concurrent build or analysis.
+Raw: `.scratch/evidence/session-action-index-1m-abba-run2/`; plugin hashes and
+gates in `gates.txt`, per-run accounts in `bessd-memstatus.json`.
+
+| Metric | Tree (A, mean of 2) | Array (B, mean of 2) |
+|---|---:|---:|
+| Session account, MiB | 1297.54 | 1229.88 |
+| Session glibc, MiB | 468.04 | 391.75 |
+| bessd RSS at fill, MiB | 2169.90 | 2061.97 |
+| Lane peak, MiB | 4383.22 | 4265.78 |
+| FAR-1K p99, ms | 35.40 | 39.23 |
+
+The account saving is **67.7 MiB**, not the earlier 87 MiB estimate: 2M tree
+nodes account for 76.3 MiB, replaced by an 8.6 MiB array. RSS falls 107.9 MiB;
+allocator retention makes that different from the admitted-byte saving.
+All sent modifications complete, with no timeouts, refusals, socket receive
+drops or cgroup OOM events. A's last run has one client PacerSkip (9999 sent);
+the other three send and complete 10000. The lane is capped at 4600 MiB;
+the largest lane peak plus the tab's 1-second-sampled peak is 5540.3 MiB
+(sampling is not a hard combined cap).
+
+**Open gate:** p99 is worse in both adjacent pairs (+18.2%, +2.4%; mean +10.8%).
+Cause unassigned; memory savings do not establish timing non-regression.
+Do not merge on this campaign alone.
+
 Quota-only URR changes issue **zero native transactions**, yet target 10K has
 147 timeouts and target 100K completes 965,751 of 3,000,000 scheduled cycles.
 Thus transport removal alone cannot establish a 100K N4 rating. Current

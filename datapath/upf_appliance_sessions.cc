@@ -285,9 +285,11 @@ SessionResource::SessionResource(std::string name, std::string next_hops, std::s
       domain_(domain),
       storage_(limits.capacity * Stride(limits) / sizeof(Line)),
       active_(limits.capacity),
-      mirrors_(limits.capacity) {
+      mirrors_(limits.capacity),
+      actions_(limits.max_action_id + 1) {
   CHECK(limits.max_actions >= 1 && limits.max_actions <= kMaxActions && limits.max_qers <= kMaxQers);
   CHECK(limits.capacity <= kMaxCapacity);
+  CHECK(limits.max_action_id >= 1 && limits.max_action_id <= UINT32_MAX);
   base_ = storage_.size() ? reinterpret_cast<std::byte *>(storage_.data()) : nullptr;
   for (uint32_t s = 1; s <= limits.capacity; ++s) {
     active_[s - 1].store(kGone, std::memory_order_relaxed);
@@ -301,7 +303,8 @@ SessionResource::SessionResource(std::string name, std::string next_hops, std::s
 SessionResource::~SessionResource() = default;
 
 size_t SessionResource::bytes() const noexcept {
-  return limits_.capacity * (stride_ + sizeof(std::atomic<uint8_t>)) + GlibcBytes(limits_) +
+  return limits_.capacity * (stride_ + sizeof(std::atomic<uint8_t>)) +
+         (limits_.max_action_id + 1) * sizeof(uint32_t) + GlibcBytes(limits_) +
          mirror_bytes_.load(std::memory_order_relaxed);
 }
 
@@ -336,6 +339,8 @@ std::expected<std::vector<uint8_t>, std::string> SessionResource::Validate(const
   std::set<uint32_t> ids;
   for (const auto &a : v.actions) {
     if (a.action_id == 0) return std::unexpected("action id 0 names no action");
+    if (a.action_id > limits_.max_action_id)
+      return std::unexpected(std::format("action id {} exceeds max_action_id {}", a.action_id, limits_.max_action_id));
     if (!ids.insert(a.action_id).second) return std::unexpected(std::format("action id {} twice", a.action_id));
     for (uint8_t q : a.qer)
       if (q > v.qers.size()) return std::unexpected(std::format("action {} names QER {} of {}", a.action_id, q, v.qers.size()));
@@ -513,11 +518,8 @@ class SessionResource::Staged final : public dp::StagedOp {
     commit(break_);
     for (auto &f : fteid_erases_) f->Publish(retirer);
     // The session's old action ids leave the index, its new ones enter it.
-    for (uint8_t i = 0; i < m.actions; ++i) {
-      auto node = owner_.actions_.extract(owner_.Config(session_, m.active, i).action_id);
-      if (!node.empty()) removed_.insert(std::move(node));
-    }
-    while (!added_.empty()) owner_.actions_.insert(added_.extract(added_.begin()));
+    for (uint8_t i = 0; i < m.actions; ++i) owner_.actions_[owner_.Config(session_, m.active, i).action_id] = 0;
+    for (const auto &[id, at] : added_) owner_.actions_[id] = at;
     switch (kind_) {
       case Kind::kInsert:
         m.state = Mirror::State::kLive;
@@ -593,7 +595,7 @@ class SessionResource::Staged final : public dp::StagedOp {
   };
   std::vector<RuleChange> make_, break_;
   std::vector<std::unique_ptr<dp::StagedOp>> fteid_upserts_, fteid_erases_;
-  std::map<uint32_t, uint32_t> added_, removed_;
+  std::vector<std::pair<uint32_t, uint32_t>> added_;  // action id, index value
   std::vector<const meter::MeterProfile *> acquired_;
   std::vector<uint32_t> slots_;
   std::vector<Rule> rules_mirror_;
@@ -658,8 +660,8 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   auto directions = Validate(*v);
   if (!directions) return std::unexpected(directions.error());
   for (const auto &a : v->actions) {
-    const auto it = actions_.find(a.action_id);
-    if ((it != actions_.end() && SessionOf(it->second) != session) || tx_actions_.contains(a.action_id))
+    const uint32_t at = actions_[a.action_id];  // Validate bounded the id
+    if ((at != 0 && SessionOf(at) != session) || tx_actions_.contains(a.action_id))
       return std::unexpected(std::format("action id {} belongs to another session", a.action_id));
   }
   std::vector<Rule> rules;
@@ -844,13 +846,13 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   std::ranges::stable_sort(staged->make_, std::ranges::greater{}, &Staged::RuleChange::order);
   std::ranges::stable_sort(staged->break_, std::ranges::less{}, &Staged::RuleChange::order);
   for (size_t k = 0; k < 2 * limits_.max_actions; ++k)
-    if (staged->cells_live_ >> k & 1) staged->added_.emplace(owner(cell_owners + k), session << (kActionBits + 1) | static_cast<uint32_t>(k));
+    if (staged->cells_live_ >> k & 1) staged->added_.emplace_back(owner(cell_owners + k), session << (kActionBits + 1) | static_cast<uint32_t>(k));
   if (live) ++r.footprint.callbacks;
   staged->rules_mirror_ = rules;
   staged->fteids_mirror_ = v->fteids;
   size_t bytes = staged->rules_mirror_.capacity() * sizeof(Rule) +
                  staged->fteids_mirror_.capacity() * sizeof(SessionValue::Fteid) +
-                 staged->slots_.capacity() * sizeof(uint32_t) + v->actions.size() * kNodeBytes;
+                 staged->slots_.capacity() * sizeof(uint32_t);
   for (const Rule &rule : staged->rules_mirror_) bytes += rule.key.capacity() + 1;
   for (const auto &f : staged->fteids_mirror_) bytes += f.record.relays.capacity() * sizeof(upf::datapath::EndMarkerRelay);
   if (growth_ != nullptr) growth_->Grow(bytes, bytes);
@@ -974,32 +976,32 @@ uint32_t SessionResource::Counts(bool dl, std::span<const uint32_t> ids, bool re
       work_.max_per_hold = std::max(work_.max_per_hold, end - i);
       for (; i < end; ++i) {
         ++work_.action_finds;
-        const auto it = actions_.find(ids[i]);
-        Report(ids[i], it == actions_.end() ? 0 : it->second, dl, restart, out);
+        Report(ids[i], ids[i] <= limits_.max_action_id ? actions_[ids[i]] : 0, dl, restart, out);
       }
     }
     return 0;
   }
   // Every counted action above `after` in id order, at most `limit`,
   // resuming each hold where the last stopped: one index walk, no lookup
-  // per entry.
+  // per entry. A hold scans at most kScanPerHold cells.
   size_t reported = 0;
   uint32_t last = after;
-  for (std::optional<uint64_t> next = uint64_t{after} + 1; next;) {
+  const uint64_t top = limits_.max_action_id;
+  for (uint64_t id = uint64_t{after} + 1; id <= top;) {
     std::lock_guard lock(mu_);
-    auto it = actions_.lower_bound(static_cast<uint32_t>(std::min<uint64_t>(*next, UINT32_MAX)));
-    if (*next > UINT32_MAX) it = actions_.end();
     size_t n = 0;
-    for (; it != actions_.end() && n < kEntriesPerHold; ++it, ++n) {
-      const uint8_t slot = static_cast<uint8_t>(it->second & ((uint32_t{1} << (kActionBits + 1)) - 1));
-      if (!(mirrors_[SessionOf(it->second) - 1].banks[dl] >> slot & 1)) continue;
+    for (const uint64_t end = std::min(top, id + kScanPerHold - 1); id <= end && n < kEntriesPerHold; ++id) {
+      const uint32_t at = actions_[id];
+      if (at == 0) continue;
+      ++n;
+      const uint8_t slot = static_cast<uint8_t>(at & ((uint32_t{1} << (kActionBits + 1)) - 1));
+      if (!(mirrors_[SessionOf(at) - 1].banks[dl] >> slot & 1)) continue;
       if (reported == limit) return last;
-      Report(it->first, it->second, dl, restart, out);
+      Report(static_cast<uint32_t>(id), at, dl, restart, out);
       ++reported;
-      last = it->first;
+      last = static_cast<uint32_t>(id);
     }
     work_.max_per_hold = std::max(work_.max_per_hold, n);
-    next = it == actions_.end() ? std::nullopt : std::optional<uint64_t>(it->first);
   }
   return 0;
 }

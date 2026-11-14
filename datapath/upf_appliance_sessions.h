@@ -203,20 +203,23 @@ class SessionResource final : public bess::dataplane::Resource {
   // result ids are session << 5 | ...; kPendingResult-free and nonzero.
   static constexpr size_t kMaxCapacity = (size_t{1} << (32 - kActionBits - 1)) - 2;
 
+  // max_action_id: the module's ActionId space (counters.capacity), which
+  // the action index spans and the buffering branch's tables span too.
   struct Limits {
-    size_t capacity = 0, max_actions = 0, max_qers = 0;
+    size_t capacity = 0, max_actions = 0, max_qers = 0, max_action_id = 0;
   };
   static size_t Stride(const Limits &l) noexcept {
     return 2 * l.max_actions * (sizeof(ActionConfig) + sizeof(SessionCells)) +
            2 * l.max_qers * sizeof(MeterSlot);
   }
-  // Admitted before construction (D-198): the flat array and the active
-  // versions (DPDK), and the control-side record per id (glibc). Per-session
-  // control growth -- slot owners, rule keys, F-TEIDs, action-index nodes,
-  // interned meter profiles -- is admitted per transaction.
+  // Admitted before construction (D-198): the flat array, the active
+  // versions and the action index (DPDK), and the control-side record per
+  // id (glibc). Per-session control growth -- slot owners, rule keys,
+  // F-TEIDs, interned meter profiles -- is admitted per transaction.
   static size_t GlibcBytes(const Limits &l) noexcept;
   static size_t Bytes(const Limits &l) noexcept {
-    return l.capacity * (Stride(l) + sizeof(std::atomic<uint8_t>)) + GlibcBytes(l);
+    return l.capacity * (Stride(l) + sizeof(std::atomic<uint8_t>)) +
+           (l.max_action_id + 1) * sizeof(uint32_t) + GlibcBytes(l);
   }
 
   // `meters`: the shared meters' resource name, which a session's
@@ -274,8 +277,10 @@ class SessionResource final : public bess::dataplane::Resource {
   // Old cells of a deleted/replaced action have no current owner to notify.
   void ChangedActions(bool dl, upf::pb::UrrCountCommandGetChangesResponse *out) const;
   // The most entries ForEachLive and Counts handle per hold of the lock a
-  // transaction needs.
+  // transaction needs, and the most action-index cells Counts' id-order walk
+  // scans per hold (free cells included: a sparse index stays one chunk).
   static constexpr size_t kEntriesPerHold = 1024;
+  static constexpr size_t kScanPerHold = 64 * kEntriesPerHold;
   // Control-side work, for tests: action-index lookups by id (Counts with
   // ids), the most entries one hold handled, and grace-period waits in Reserve.
   struct Work {
@@ -327,8 +332,7 @@ class SessionResource final : public bess::dataplane::Resource {
     std::vector<Rule> rules;
     std::vector<SessionValue::Fteid> fteids;
   };
-  // An action-index node's and a profile node's glibc cost, estimates.
-  static constexpr size_t kNodeBytes = sizeof(std::pair<const uint32_t, uint32_t>) + 4 * sizeof(void *);
+  // A profile node's glibc cost, an estimate.
   static constexpr size_t kProfileBytes = sizeof(std::pair<const ProfileKey, Profile>) + 4 * sizeof(void *);
 
   std::byte *Stride(uint32_t session) const noexcept { return base_ + (session - 1) * stride_; }
@@ -377,7 +381,8 @@ class SessionResource final : public bess::dataplane::Resource {
   // Guards everything below; get_counts reads beside a transaction.
   mutable std::mutex mu_;
   std::vector<Mirror> mirrors_;  // index session - 1
-  std::map<uint32_t, uint32_t> actions_;  // action id -> session << 5 | cell slot
+  // Indexed by action id (1..max_action_id): session << 5 | cell slot, 0 free.
+  bess::utils::DpdkArray<uint32_t> actions_;
   std::map<ProfileKey, Profile> profiles_;
   std::set<uint32_t> tx_sessions_, tx_actions_;  // this transaction's
   std::set<std::string> tx_rules_;

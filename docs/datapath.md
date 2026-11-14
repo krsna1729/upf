@@ -190,9 +190,10 @@ aged pool of `-max-sessions`. `get_counts` keeps `table=counters_ul|counters_dl|
 **Memory.** Session `s` owns a fixed stride of one DPDK array: two versions of
 the action configuration (one 64 B line per action each), `2·max_actions` URR
 cell slots and `2·max_qers` meter slots — `256·A + 128·Q` bytes (768 B at
-2/2, 1536 B at the default 4/4). Module creation admits `capacity × stride`
-through the memory scope or is refused; a rewrite allocates nothing on the
-DPDK side.
+2/2, 1536 B at the default 4/4). The action index, which `get_counts` reads
+by action id, is a DPDK array of 4 B per id over `1..counters.capacity`.
+Module creation admits `capacity × stride` and the index through the memory
+scope or is refused; a rewrite allocates nothing on the DPDK side.
 
 **Live rewrite.** A PDR rule's result is `session << 5 | version << 4 |
 action`. An update writes the inactive version, then commits the rules
@@ -209,7 +210,9 @@ release, or dropped as `session_gone` when the session was erased.
 **Limits.** At most `max_actions` (≤ 16) actions and `max_qers` (≤ 16) QER
 meters per session (a QER with a rate is one meter per policed direction);
 upfd refuses a session beyond them before anything is sent. Sessions ≤
-`capacity` ≤ 2^27 − 1. The PDR keys use the default field lists only.
+`capacity` ≤ 2^27 − 1; action ids ≤ `counters.capacity` (the module's ActionId
+space, which the buffering branch's tables span too; upfd's ids come from a
+pool of that size). The PDR keys use the default field lists only.
 Not provided: atomic replacement of a session's whole rule *set* (a packet
 can match a transitional winner among overlapping rules whose keys or
 priorities change during the commit, as in graph and appliance); QER

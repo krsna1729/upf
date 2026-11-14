@@ -579,7 +579,8 @@ CommandResponse UpfAppliance::InitSessions(
   const SessionResource::Limits limits{
       .capacity = arg.session().capacity() ? arg.session().capacity() : 65536,
       .max_actions = arg.session().max_actions() ? arg.session().max_actions() : 4,
-      .max_qers = arg.session().max_qers() ? arg.session().max_qers() : 4};
+      .max_qers = arg.session().max_qers() ? arg.session().max_qers() : 4,
+      .max_action_id = capacity_};
   if (limits.capacity > SessionResource::kMaxCapacity ||
       limits.max_actions > SessionResource::kMaxActions || limits.max_qers > SessionResource::kMaxQers)
     return CommandFailure(EINVAL, "session capacity (at most %zu), max_actions (1..%zu) or "

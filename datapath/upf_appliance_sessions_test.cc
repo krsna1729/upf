@@ -44,6 +44,7 @@ using Reference = dp::Reference;
 using Table = bess::classifier::ConcurrentMaskedTable;
 
 constexpr uint32_t kSession = 3, kId = 0x7e57;
+constexpr size_t kMaxActionId = size_t{1} << 18;  // the fixture's ActionId space
 constexpr uint32_t kSharedMeter = 77;
 
 // A memory scope's growth hook with a budget (D-198's refusal).
@@ -80,7 +81,8 @@ struct Result {
 };
 
 struct Store {
-  explicit Store(SessionResource::Limits limits = {.capacity = 8, .max_actions = 4, .max_qers = 4})
+  explicit Store(SessionResource::Limits limits = {.capacity = 8, .max_actions = 4, .max_qers = 4,
+                                                   .max_action_id = kMaxActionId})
       : domain(64),
         index(bess::flow::SharedExactIndex::Create(sizeof(upf::datapath::FteidId), 64, domain,
                                                    bess::utils::MemoryNode())),
@@ -601,7 +603,7 @@ TEST(SessionStore, MemoryRefusalLeavesNothingAndTheLiveVersionServing) {
 
 TEST(SessionStore, BulkReadsHoldTheLockForAChunkAndNeverReFind) {
   constexpr uint32_t kN = 100000;
-  Store s({.capacity = kN, .max_actions = 1, .max_qers = 1});
+  Store s({.capacity = kN, .max_actions = 1, .max_qers = 1, .max_action_id = kMaxActionId});
   for (uint32_t i = 0; i < kN; ++i) ASSERT_TRUE(Applied(s.Put(Counted(i), i + 1))) << "session " << i + 1;
   // Pages of 30000: 4 pages, every action once, in order.
   upf::pb::UrrCountCommandGetCountsResponse out;
@@ -624,7 +626,7 @@ TEST(SessionStore, BulkReadsHoldTheLockForAChunkAndNeverReFind) {
 
 TEST(SessionStore, ReUpdatingManySessionsInOneTransactionWaitsOnce) {
   constexpr uint32_t kN = 1000;
-  Store s({.capacity = kN, .max_actions = 1, .max_qers = 1});
+  Store s({.capacity = kN, .max_actions = 1, .max_qers = 1, .max_action_id = kMaxActionId});
   const auto images = [](uint32_t route_domain) {
     std::vector<SessionValue> v;
     for (uint32_t i = 0; i < kN; ++i) v.push_back(Counted(i, route_domain));
@@ -643,10 +645,27 @@ TEST(SessionStore, ReUpdatingManySessionsInOneTransactionWaitsOnce) {
   s.Finish(again);
 }
 
-TEST(SessionStore, DirtyCellsResolveWideActionIdsAndIgnoreRetiredOwners) {
+TEST(SessionStore, ActionIdsStayInsideTheActionIdSpace) {
   Store s;
   SessionValue image = Image(false);
-  constexpr uint32_t kWideId = 0xfffffff0;
+  image.actions[0].action_id = static_cast<uint32_t>(kMaxActionId) + 1;
+  const Result refused = s.Put(image);
+  EXPECT_NE(refused.error.find("exceeds max_action_id"), std::string::npos) << refused.error;
+  EXPECT_FALSE(s.sessions->Contains(dp::EncodeKey(kSession)));
+  image.actions[0].action_id = static_cast<uint32_t>(kMaxActionId);
+  EXPECT_TRUE(Applied(s.Put(image)));
+  upf::pb::UrrCountCommandGetCountsResponse out;
+  const uint32_t beyond[] = {static_cast<uint32_t>(kMaxActionId) + 1};
+  s.sessions->Counts(false, beyond, false, 0, SIZE_MAX, &out);
+  ASSERT_EQ(out.counts_size(), 1);
+  EXPECT_EQ(out.counts(0).packets(), 0u);
+}
+
+TEST(SessionStore, DirtyCellsResolveTopActionIdsAndIgnoreRetiredOwners) {
+  Store s;
+  SessionValue image = Image(false);
+  // The top of the ActionId space (the next id is its last).
+  constexpr uint32_t kWideId = static_cast<uint32_t>(kMaxActionId) - 1;
   image.actions[0].action_id = kWideId;
   ASSERT_TRUE(Applied(s.Put(image)));
   const auto config = Classify(s).config;
