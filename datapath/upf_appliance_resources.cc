@@ -604,7 +604,7 @@ CommandResponse UpfAppliance::InitSessions(
     return CommandFailure(EINVAL, "%s", r.error().c_str());
   // Refused here, before anything is built, when the scope cannot hold every
   // stride (D-198): the whole flat array is admitted up front.
-  auto lease = memory.Lease("sessions", SessionResource::Bytes(limits), SessionResource::GlibcBytes(limits));
+  auto lease = memory.Lease("sessions", SessionResource::Bytes(limits));
   sessions_ = bess::framework::MemoryScope::Adopt(
       std::move(lease),
       std::make_unique<SessionResource>(name() + "/sessions", name() + "/next_hops",

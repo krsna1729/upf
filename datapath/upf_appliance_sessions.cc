@@ -267,7 +267,11 @@ std::expected<SessionValue, std::string> DecodeSession(const upf::pb::UpfSession
 
 // -- the resource ---------------------------------------------------------------
 
-size_t SessionResource::GlibcBytes(const Limits &l) noexcept { return l.capacity * sizeof(Mirror); }
+size_t SessionResource::Bytes(const Limits &l) noexcept {
+  return l.capacity * (Stride(l) + sizeof(std::atomic<uint8_t>) + sizeof(Mirror) +
+                       SlotsSize(l) * sizeof(uint32_t)) +
+         (l.max_action_id + 1) * sizeof(uint32_t);
+}
 
 SessionResource::SessionResource(std::string name, std::string next_hops, std::string meters,
                                  Limits limits, Table &ul, Table &dl,
@@ -286,6 +290,7 @@ SessionResource::SessionResource(std::string name, std::string next_hops, std::s
       storage_(limits.capacity * Stride(limits) / sizeof(Line)),
       active_(limits.capacity),
       mirrors_(limits.capacity),
+      slot_owners_(limits.capacity * SlotsSize(limits)),
       actions_(limits.max_action_id + 1) {
   CHECK(limits.max_actions >= 1 && limits.max_actions <= kMaxActions && limits.max_qers <= kMaxQers);
   CHECK(limits.capacity <= kMaxCapacity);
@@ -303,9 +308,7 @@ SessionResource::SessionResource(std::string name, std::string next_hops, std::s
 SessionResource::~SessionResource() = default;
 
 size_t SessionResource::bytes() const noexcept {
-  return limits_.capacity * (stride_ + sizeof(std::atomic<uint8_t>)) +
-         (limits_.max_action_id + 1) * sizeof(uint32_t) + GlibcBytes(limits_) +
-         mirror_bytes_.load(std::memory_order_relaxed);
+  return Bytes(limits_) + mirror_bytes_.load(std::memory_order_relaxed);
 }
 
 std::string SessionResource::RuleKey(const SessionValue::Pdr &pdr) {
@@ -389,7 +392,7 @@ std::vector<dp::Reference> SessionResource::References(uint32_t session) const {
     if (const uint32_t hop = Config(session, m.active, i).next_hop_id)
       refs.push_back({next_hops_, dp::EncodeKey(dp::ActionId(hop))});
   for (uint8_t q = 0; q < m.qers; ++q) {
-    const uint32_t ref = m.slots[2 * limits_.max_actions + 2 * limits_.max_qers + q];
+    const uint32_t ref = Slots(session)[2 * limits_.max_actions + 2 * limits_.max_qers + q];
     if (SharedRef(ref)) refs.push_back({meters_, dp::EncodeKey(Meter(session, SlotOf(ref)).shared())});
   }
   return refs;
@@ -462,12 +465,12 @@ void SessionResource::ReleaseOld(Mirror &m, uint32_t session) noexcept {
       ReleaseProfile(Meter(session, k).meter().profile());
       Meter(session, k).meter().~MeterState();
     }
-    MeterOwner(m, k) = 0;
+    MeterOwner(session, k) = 0;
   }
   m.meters_shared &= ~m.meters_old;
   m.meters_old = 0;
   for (size_t k = 0; k < 2 * limits_.max_actions; ++k)
-    if (m.cells_old >> k & 1) CellOwner(m, k) = 0;
+    if (m.cells_old >> k & 1) CellOwner(session, k) = 0;
   m.banks[0] &= ~m.cells_old;
   m.banks[1] &= ~m.cells_old;
   m.cells_old = 0;
@@ -483,7 +486,7 @@ void SessionResource::Free(uint32_t session) noexcept {
   // The erase gave the mirror's bytes back at publish; its slot owners stay
   // until here, so this release can name the slots.
   ReleaseOld(m, session);
-  m.slots = {};
+  std::ranges::fill(Slots(session), 0);
   m.actions = m.qers = 0;
   m.flipped = false;
   m.flip = 0;
@@ -519,7 +522,10 @@ class SessionResource::Staged final : public dp::StagedOp {
     for (auto &f : fteid_erases_) f->Publish(retirer);
     // The session's old action ids leave the index, its new ones enter it.
     for (uint8_t i = 0; i < m.actions; ++i) owner_.actions_[owner_.Config(session_, m.active, i).action_id] = 0;
-    for (const auto &[id, at] : added_) owner_.actions_[id] = at;
+    for (uint8_t i = 0; i < actions_count_; ++i) {
+      const ActionConfig &a = owner_.Config(session_, version_, i);
+      owner_.actions_[a.action_id] = session_ << (kActionBits + 1) | (a.cell & ActionConfig::kCellSlot);
+    }
     switch (kind_) {
       case Kind::kInsert:
         m.state = Mirror::State::kLive;
@@ -555,7 +561,7 @@ class SessionResource::Staged final : public dp::StagedOp {
       owner_.active_[session_ - 1].store(version_, std::memory_order_release);
     }
     published_ = true;
-    if (kind_ != Kind::kErase) std::swap(m.slots, slots_);
+    if (kind_ != Kind::kErase) std::copy_n(slots_.begin(), owner_.SlotsSize(), owner_.Slots(session_).begin());
     std::swap(m.rules, rules_mirror_);
     std::swap(m.fteids, fteids_mirror_);
     std::swap(m.bytes, bytes_);
@@ -565,7 +571,6 @@ class SessionResource::Staged final : public dp::StagedOp {
     // unaccount it here (freeing does not allocate). The engine may keep a
     // published op past the module's teardown, so its destructor must not
     // reach the owner.
-    slots_ = {};
     rules_mirror_ = {};
     fteids_mirror_ = {};
     if (bytes_ != 0 && owner_.growth_ != nullptr) owner_.growth_->Shrink(bytes_, bytes_);
@@ -595,9 +600,8 @@ class SessionResource::Staged final : public dp::StagedOp {
   };
   std::vector<RuleChange> make_, break_;
   std::vector<std::unique_ptr<dp::StagedOp>> fteid_upserts_, fteid_erases_;
-  std::vector<std::pair<uint32_t, uint32_t>> added_;  // action id, index value
   std::vector<const meter::MeterProfile *> acquired_;
-  std::vector<uint32_t> slots_;
+  std::array<uint32_t, 2 * kMaxActions + 3 * kMaxQers> slots_;
   std::vector<Rule> rules_mirror_;
   std::vector<SessionValue::Fteid> fteids_mirror_;
   size_t bytes_ = 0;
@@ -693,7 +697,8 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   const uint8_t version = live ? m.active ^ 1 : 0;
   staged = std::make_unique<Staged>(*this, session, live ? Staged::Kind::kUpdate : Staged::Kind::kInsert);
   staged->version_ = version;
-  staged->slots_ = live ? m.slots : std::vector<uint32_t>(SlotsSize(), 0);
+  if (live) std::ranges::copy(Slots(session), staged->slots_.begin());
+  else std::fill_n(staged->slots_.begin(), SlotsSize(), 0);
   const auto owner = [&](size_t index) -> uint32_t & { return staged->slots_[index]; };
   const size_t cell_owners = 0, meter_owners = 2 * limits_.max_actions,
                qer_refs = 2 * limits_.max_actions + 2 * limits_.max_qers;
@@ -710,9 +715,9 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
     const auto &q = v->qers[j];
     std::optional<size_t> keep;
     for (size_t p = 0; live && p < m.qers; ++p) {
-      const uint32_t ref = QerRef(m, p);
+      const uint32_t ref = QerRef(session, p);
       const size_t slot = SlotOf(ref);
-      if (MeterOwner(m, slot) != q.qer_id) continue;
+      if (MeterOwner(session, slot) != q.qer_id) continue;
       if (q.spec ? !SharedRef(ref) && Meter(session, slot).meter().profile().spec() == *q.spec
                  : SharedRef(ref) && Meter(session, slot).shared() == q.shared)
         keep = slot;
@@ -748,7 +753,7 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
     const auto &a = v->actions[i];
     std::optional<size_t> keep;
     for (size_t k = 0; live && k < 2 * limits_.max_actions; ++k)
-      if ((cells_busy >> k & 1) && CellOwner(m, k) == a.action_id) { keep = k; break; }
+      if ((cells_busy >> k & 1) && CellOwner(session, k) == a.action_id) { keep = k; break; }
     const size_t slot = keep ? *keep : FreeSlot(cells_busy, staged->cells_live_, 2 * limits_.max_actions);
     const uint32_t bit = uint32_t{1} << slot;
     if (!keep) {
@@ -845,14 +850,11 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   }
   std::ranges::stable_sort(staged->make_, std::ranges::greater{}, &Staged::RuleChange::order);
   std::ranges::stable_sort(staged->break_, std::ranges::less{}, &Staged::RuleChange::order);
-  for (size_t k = 0; k < 2 * limits_.max_actions; ++k)
-    if (staged->cells_live_ >> k & 1) staged->added_.emplace_back(owner(cell_owners + k), session << (kActionBits + 1) | static_cast<uint32_t>(k));
   if (live) ++r.footprint.callbacks;
   staged->rules_mirror_ = rules;
   staged->fteids_mirror_ = v->fteids;
   size_t bytes = staged->rules_mirror_.capacity() * sizeof(Rule) +
-                 staged->fteids_mirror_.capacity() * sizeof(SessionValue::Fteid) +
-                 staged->slots_.capacity() * sizeof(uint32_t);
+                 staged->fteids_mirror_.capacity() * sizeof(SessionValue::Fteid);
   for (const Rule &rule : staged->rules_mirror_) bytes += rule.key.capacity() + 1;
   for (const auto &f : staged->fteids_mirror_) bytes += f.record.relays.capacity() * sizeof(upf::datapath::EndMarkerRelay);
   if (growth_ != nullptr) growth_->Grow(bytes, bytes);
@@ -877,7 +879,8 @@ void SessionResource::EndTransaction() noexcept {
 
 upf::pb::UpfSession SessionResource::Read(uint32_t session) const {
   const Mirror &m = mirrors_[session - 1];
-  const auto ref_at = [&](size_t q) { return m.slots[2 * limits_.max_actions + 2 * limits_.max_qers + q]; };
+  const auto slots = Slots(session);
+  const auto ref_at = [&](size_t q) { return slots[2 * limits_.max_actions + 2 * limits_.max_qers + q]; };
   upf::pb::UpfSession out;
   for (const auto &f : m.fteids) {
     auto *o = out.add_fteids();
@@ -887,7 +890,7 @@ upf::pb::UpfSession SessionResource::Read(uint32_t session) const {
   for (uint8_t q = 0; q < m.qers; ++q) {
     const uint32_t ref = ref_at(q);
     auto *o = out.add_qers();
-    o->set_qer_id(m.slots[2 * limits_.max_actions + SlotOf(ref)]);
+    o->set_qer_id(slots[2 * limits_.max_actions + SlotOf(ref)]);
     if (SharedRef(ref)) o->set_shared_meter_id(Meter(session, SlotOf(ref)).shared());
     else EncodeSpec(Meter(session, SlotOf(ref)).meter().profile().spec(), o);
   }
@@ -1023,7 +1026,7 @@ void SessionResource::ChangedActions(
       // version names still lists its retired owner until ReleaseOld.
       if (m.state != Mirror::State::kLive || !(m.cells_live >> slot & 1) ||
           !(m.banks[dl] >> slot & 1)) continue;
-      if (const uint32_t owner = m.slots[slot]; owner != 0) values[kept++] = owner;
+      if (const uint32_t owner = Slots(static_cast<uint32_t>(session + 1))[slot]; owner != 0) values[kept++] = owner;
     }
   }
   ids->Truncate(static_cast<int>(kept));
