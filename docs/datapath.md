@@ -192,8 +192,11 @@ the action configuration (one 64 B line per action each), `2·max_actions` URR
 cell slots and `2·max_qers` meter slots — `256·A + 128·Q` bytes (768 B at
 2/2, 1536 B at the default 4/4). The action index, which `get_counts` reads
 by action id, is a DPDK array of 4 B per id over `1..counters.capacity`.
-Module creation admits `capacity × stride` and the index through the memory
-scope or is refused; a rewrite allocates nothing on the DPDK side.
+Control mirrors and their slot-owner slices are fixed DPDK arrays too: each
+session has `2·A + 3·Q` 32-bit owners/refs, and no slot-owner vector allocation.
+Module creation admits those arrays, `capacity × stride` and the action index
+through the memory scope or is refused. Rule/F-TEID vectors and meter profiles
+still grow under scope admission; a rewrite allocates nothing on the DPDK side.
 
 **Live rewrite.** A PDR rule's result is `session << 5 | version << 4 |
 action`. An update writes the inactive version, then commits the rules

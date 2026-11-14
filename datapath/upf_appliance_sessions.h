@@ -212,15 +212,10 @@ class SessionResource final : public bess::dataplane::Resource {
     return 2 * l.max_actions * (sizeof(ActionConfig) + sizeof(SessionCells)) +
            2 * l.max_qers * sizeof(MeterSlot);
   }
-  // Admitted before construction (D-198): the flat array, the active
-  // versions and the action index (DPDK), and the control-side record per
-  // id (glibc). Per-session control growth -- slot owners, rule keys,
-  // F-TEIDs, interned meter profiles -- is admitted per transaction.
-  static size_t GlibcBytes(const Limits &l) noexcept;
-  static size_t Bytes(const Limits &l) noexcept {
-    return l.capacity * (Stride(l) + sizeof(std::atomic<uint8_t>)) +
-           (l.max_action_id + 1) * sizeof(uint32_t) + GlibcBytes(l);
-  }
+  // Admitted before construction (D-198): packet state, mirrors, slot
+  // owners and the action index (DPDK). Rule keys, F-TEIDs and interned
+  // meter profiles grow under the scope per transaction.
+  static size_t Bytes(const Limits &l) noexcept;
 
   // `meters`: the shared meters' resource name, which a session's
   // shared_meter_id references.
@@ -325,10 +320,7 @@ class SessionResource final : public bess::dataplane::Resource {
     // (unreachable once `flip` completes); meters_shared: holds a SharedRef.
     uint32_t cells_live = 0, cells_old = 0, meters_live = 0, meters_old = 0, meters_shared = 0;
     uint32_t banks[2] = {0, 0};   // per direction: cell slots ever counted
-    size_t bytes = 0;             // admitted glibc bytes of the vectors and index nodes
-    // 2 x max_actions cell owners (action ids), 2 x max_qers meter owners
-    // (qer ids), then the active version's QER refs by position.
-    std::vector<uint32_t> slots;
+    size_t bytes = 0;             // admitted glibc bytes of rule and F-TEID vectors
     std::vector<Rule> rules;
     std::vector<SessionValue::Fteid> fteids;
   };
@@ -336,12 +328,23 @@ class SessionResource final : public bess::dataplane::Resource {
   static constexpr size_t kProfileBytes = sizeof(std::pair<const ProfileKey, Profile>) + 4 * sizeof(void *);
 
   std::byte *Stride(uint32_t session) const noexcept { return base_ + (session - 1) * stride_; }
-  uint32_t &CellOwner(Mirror &m, size_t slot) const noexcept { return m.slots[slot]; }
-  uint32_t &MeterOwner(Mirror &m, size_t slot) const noexcept { return m.slots[2 * limits_.max_actions + slot]; }
-  uint32_t &QerRef(Mirror &m, size_t position) const noexcept {
-    return m.slots[2 * limits_.max_actions + 2 * limits_.max_qers + position];
+  // 2 x max_actions cell owners, 2 x max_qers meter owners, then the
+  // active version's QER refs. Every session owns one fixed slice.
+  static size_t SlotsSize(const Limits &l) noexcept { return 2 * l.max_actions + 3 * l.max_qers; }
+  size_t SlotsSize() const noexcept { return SlotsSize(limits_); }
+  std::span<uint32_t> Slots(uint32_t session) noexcept {
+    return {slot_owners_.data() + (session - 1) * SlotsSize(), SlotsSize()};
   }
-  size_t SlotsSize() const noexcept { return 2 * limits_.max_actions + 3 * limits_.max_qers; }
+  std::span<const uint32_t> Slots(uint32_t session) const noexcept {
+    return {slot_owners_.data() + (session - 1) * SlotsSize(), SlotsSize()};
+  }
+  uint32_t &CellOwner(uint32_t session, size_t slot) noexcept { return Slots(session)[slot]; }
+  uint32_t &MeterOwner(uint32_t session, size_t slot) noexcept {
+    return Slots(session)[2 * limits_.max_actions + slot];
+  }
+  uint32_t &QerRef(uint32_t session, size_t position) noexcept {
+    return Slots(session)[2 * limits_.max_actions + 2 * limits_.max_qers + position];
+  }
 
   Table &TableOf(bool dl) const noexcept { return dl ? dl_ : ul_; }
   size_t KeyLen(bool dl) const noexcept { return dl ? 22 : 18; }
@@ -380,7 +383,8 @@ class SessionResource final : public bess::dataplane::Resource {
 
   // Guards everything below; get_counts reads beside a transaction.
   mutable std::mutex mu_;
-  std::vector<Mirror> mirrors_;  // index session - 1
+  bess::utils::DpdkArray<Mirror> mirrors_;  // index session - 1
+  bess::utils::DpdkArray<uint32_t> slot_owners_;
   // Indexed by action id (1..max_action_id): session << 5 | cell slot, 0 free.
   bess::utils::DpdkArray<uint32_t> actions_;
   std::map<ProfileKey, Profile> profiles_;

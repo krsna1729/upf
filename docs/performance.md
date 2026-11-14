@@ -1231,6 +1231,40 @@ The maximum lane peak plus the 1-second-sampled tab peak is 5574.2 MiB.
 The accounting campaign remains the memory proof; this separate campaign
 clears its loaded-tail gate. Datapath code on the packet path is unchanged.
 
+**Flat control mirrors and slot owners (2026-11-14).** Move the fixed mirror
+records from a glibc vector to a DPDK array and give every session one fixed
+`2·A + 3·Q` slot-owner slice. Remove the slot-owner vector from each mirror.
+Transaction scratch slots are a bounded inline array; the action index is
+published directly from prepared action configs, without an added-index vector.
+Packet-visible strides, RCU publication and id-space limits are unchanged.
+
+Matched 1M-session ABBA against #75, same stage/upfd/budgets/pins as above,
+turbo off and AC online. The measurement-only runner completes account
+collection synchronously before timed churn (23–50 ms before the baseline
+snapshot), not concurrently. Raw: `.scratch/evidence/session-mirror-flat/abba/`;
+the exact runner is retained as each run's `runner.py`.
+
+| Metric | #75 (A, mean of 2) | Flat mirrors (B, mean of 2) |
+|---|---:|---:|
+| Session account, MiB | 1229.88 | 1208.99 |
+| Session glibc, MiB | 391.75 | 215.53 |
+| Session framework normal heap, MiB | 838.13 | 993.46 |
+| bessd RSS at fill, MiB | 2074.48 | 2072.66 |
+| Lane peak, MiB | 4312.32 | 4281.55 |
+| FAR-1K p50, ms | 0.359 | 0.301 |
+| FAR-1K p99, ms | 32.21 | 28.79 |
+
+The admitted saving is 20.9 MiB: the 128-byte mirror becomes 104 bytes, and
+slot owners now cover all 1,131,072 slots rather than just the 1M live sessions.
+176.2 MiB leaves glibc while 155.3 MiB enters the framework heap. **RSS is
+essentially unchanged** (−1.8 MiB); this is an accounting/layout cut, not a
+176 MiB resident-memory saving. Unattributed working set averages 60.4 MiB
+after the move versus 41.3 MiB before it, and remains an open attribution item.
+p99 improves in both pairs (mean −10.6%). All 40000 modifications complete,
+zero timeouts/refusals/OOMs; lane peak plus sampled tab peak ≤5486.5 MiB.
+The session-store and datapath meson test targets pass; capped `-j1` build
+peaks at 1272 MiB with no OOM events.
+
 Quota-only URR changes issue **zero native transactions**, yet target 10K has
 147 timeouts and target 100K completes 965,751 of 3,000,000 scheduled cycles.
 Thus transport removal alone cannot establish a 100K N4 rating. Current
