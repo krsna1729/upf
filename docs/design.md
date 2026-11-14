@@ -35,6 +35,21 @@ retries, and no other writer exists to race. A model-only modification can
 need no dataplane write; it must not split a dataplane change across
 transactions.
 
+Resource changes carry compact typed Go structs (`bess.Fields`) rather than
+per-record field maps. JSON tags name fields in the daemon's current descriptor;
+the transaction encoder validates field types, oneofs and required-field
+presence before sending the unchanged protobuf protocol. Optional pointers keep
+present-zero values distinct from absent fields. Arbitrary runtime-discovered
+messages use an explicit `bess.JSON` payload, parsed against that same schema;
+action/query `Message` arguments retain their separate field-map API.
+Payload structs are shallow snapshots: their arrays, slices and pointed-to
+values remain immutable until `Apply` returns. Encoding copies message bytes
+into transaction-owned storage. `BenchmarkChangeLifecycle` in
+`internal/session` compares the real compiler's establishment, FAR update,
+selector replacement and deletion paths for graph, appliance and session-major
+targets while retaining at most one live session; it does not measure native
+dataplane application.
+
 ```mermaid
 flowchart TB
     smf["SMF"] -->|PFCP session message| n4["internal/n4<br/>association, sequence numbers,<br/>restart detection"]
@@ -1017,18 +1032,35 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   takes 0.63-0.75 ms and is 91% of the load wall time.
   `-session-workers 8` overlaps those transactions: 2,140/s at 100K and 1,425/s
   at 1M.
-- **N4 receive buffer.** The read loop stops reading while a session worker's
-  64-entry queue is full, so requests arriving meanwhile wait in the socket's
-  receive buffer or the kernel drops them. With the 208 KiB system default,
-  1K/s delete+establish churn over 1M residents lost 239 and 307 of 10,000
-  cycles, each loss one UDP receive drop at `upfd`, with p99 350-370 ms; a
-  flight-recorder trace showed no single stall above 53 ms, but 433 read-loop
-  waits totalling 1.8 s in 20 s. `-n4-receive-buffer` (default 4 MiB, capped by
-  `net.core.rmem_max`, which `upfd` warns about) removed every drop.
+- **N4 work admission.** With more than one session worker, each shard has a
+  64-entry queue; workers are capped at 64. A full shard now replies with PFCP
+  cause 75 instead of stopping socket reads. Modification/deletion refusals use
+  the CP's response SEID, not the local UP SEID; heartbeats and report answers
+  remain serviceable. Accepted requests retain per-session FIFO order. The
+  default single-worker mode still handles work in the read loop: use multiple
+  workers when control-message progress must be independent of a stalled apply.
+  `-n4-receive-buffer` (default 4 MiB, Linux-capped) absorbs earlier UDP bursts;
+  it does not replace bounded application admission.
+- **Hard session capacity.** Graph/appliance default to `-capacity`;
+  session-major uses `-max-sessions`. The compiler reserves a slot before model
+  construction or dataplane work, counting established, in-flight and uncertain
+  establishments. Full capacity returns cause 75. Known refusals (including
+  native busy with no earlier unanswered attempt) release slots and resource
+  IDs; uncertain outcomes retain them rather than risking reuse of applied
+  state. Deletion returns established capacity; retransmission of an existing
+  session remains accepted. Checkpoint replay is subject to this hard bound.
+  `upf_session_capacity` and `upf_sessions_reserved` expose the bound and the
+  in-flight/uncertain part.
 - **GOMEMLIMIT.** `upfd` sets it from the smallest cgroup v2 `memory.max` on
   its path, minus max(32 MiB, 10%); a GOMEMLIMIT in the environment wins. At 1M
   in a 4000 MiB scope (limit 3600 MiB), RSS settles at 3.5 GiB and GC takes
   14-17% of `upfd`'s CPU.
+  This is a soft target, not an RSS/cgroup guarantee. The inherited parent may
+  be shared: its unused capacity is not a per-process entitlement. Budget native
+  heaps, packet buffers, mappings, gRPC buffers and sibling processes separately.
+  `upf_go_gc_assist_cpu_seconds_total`, `upf_go_gc_cpu_seconds_total` and
+  `upf_go_heap_allocated_bytes_total` expose collection work and allocation churn;
+  short stop-the-world pauses do not prove low request latency.
 - **Admission.** `upfd` answers a new establishment cause 75 (no resources
   available) while the heap its last collection kept live is over
   `-heap-admission` (default 0.7) of that limit; modifications, deletions, a

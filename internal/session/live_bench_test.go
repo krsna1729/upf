@@ -52,7 +52,7 @@ func (r *recordingApplier) Apply(ctx context.Context, changes ...bess.Change) er
 }
 
 // BenchmarkLiveChangesToMessages converts the changes one establishment produced:
-// every key and every value, by their real field maps -- the work Client.Apply
+// every key and every value, by their real typed payloads -- the work Client.Apply
 // does before it commits. It is the session-shaped counterpart of internal/bess's
 // per-type BenchmarkLiveMessage, and the number to quote for a session's
 // conversion rather than whichever type a graph happened to declare first.
@@ -89,7 +89,7 @@ func BenchmarkLiveChangesToMessages(b *testing.B) {
 	// the same: count and convert a key only where one exists.
 	type step struct {
 		keyType, valueType string
-		key, value         map[string]any
+		key, value         bess.Payload
 	}
 	steps := make([]step, 0, len(changes))
 	messages := 0
@@ -112,14 +112,14 @@ func BenchmarkLiveChangesToMessages(b *testing.B) {
 	for b.Loop() {
 		for _, s := range steps {
 			if s.key != nil {
-				if _, err := client.Message(s.keyType, s.key); err != nil {
+				if _, err := client.PayloadMessage(s.keyType, s.key); err != nil {
 					b.Fatal(err)
 				}
 			}
 			if s.value == nil {
 				continue
 			}
-			if _, err := client.Message(s.valueType, s.value); err != nil {
+			if _, err := client.PayloadMessage(s.valueType, s.value); err != nil {
 				b.Fatal(err)
 			}
 		}

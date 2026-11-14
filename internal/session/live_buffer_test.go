@@ -455,7 +455,10 @@ func setSourceBurst(t *testing.T, ctx context.Context, client *bess.Client, modu
 	t.Helper()
 	if err := client.Apply(ctx, bess.Change{
 		Resource: module + "/settings",
-		Value:    map[string]any{"pkt_size": 51, "burst": burst},
+		Value: bess.Fields(struct {
+			PacketSize int `json:"pkt_size"`
+			Burst      int `json:"burst"`
+		}{PacketSize: 51, Burst: burst}),
 	}); err != nil {
 		t.Fatalf("setting %s/settings to burst %d: %v", module, burst, err)
 	}

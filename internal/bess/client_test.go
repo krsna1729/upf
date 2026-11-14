@@ -3,6 +3,9 @@
 package bess
 
 import (
+	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +19,49 @@ import (
 
 	"github.com/krsna1729/upf/internal/scaletest"
 )
+
+type admissionWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *admissionWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
+// A deadline while waiting for the admission slot is a definite cancellation:
+// no schema lookup, encoding, SDK request or slot release has happened.
+func TestApplyCancellationWhileWaitingForSlot(t *testing.T) {
+	c := &Client{inFlight: make(chan struct{}, 1)}
+	c.inFlight <- struct{}{}
+	defer func() { <-c.inFlight }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waiting := &admissionWaitContext{Context: ctx, waiting: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Apply(waiting, Change{Resource: "never-looked-up", Value: Fields(struct{}{})})
+	}()
+	select {
+	case <-waiting.waiting:
+	case <-time.After(time.Second):
+		t.Fatal("Apply did not reach cancellable admission")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Apply returned %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled Apply remained blocked on admission")
+	}
+	if len(c.inFlight) != 1 {
+		t.Fatal("cancelled Apply released another transaction's slot")
+	}
+}
 
 // TestUintFieldOnASchemaWithoutIt is the fallback a daemon running an older
 // plugin needs: its schema has no stamp and clock fields at all, so a reading

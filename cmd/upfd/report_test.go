@@ -54,10 +54,11 @@ func (f *fakeDataplane) Apply(_ context.Context, changes ...bess.Change) error {
 		if !strings.HasSuffix(ch.Resource, "/counters") {
 			continue
 		}
-		id, ok := ch.Key["action_id"].(uint32)
+		key, ok := bess.Get[session.ActionKey](ch.Key)
 		if !ok {
 			continue
 		}
+		id := key.ActionID
 		// By module, the name a reading is addressed to, not the resource.
 		module := strings.TrimSuffix(ch.Resource, "/counters")
 		if ch.Value == nil {
@@ -815,7 +816,7 @@ func dropRule(changes []bess.Change, resource string) bool {
 		if ch.Resource != resource || ch.Value == nil {
 			continue
 		}
-		if gate, ok := ch.Value["gate"].(uint64); ok && gate == 8192 {
+		if rule, ok := bess.Get[session.RuleEntry](ch.Value); ok && rule.Gate == 8192 {
 			return true
 		}
 	}

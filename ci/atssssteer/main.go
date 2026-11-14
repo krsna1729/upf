@@ -94,37 +94,49 @@ func main() {
 func setBurst(ctx context.Context, client *bess.Client, burst int) error {
 	return client.Apply(ctx, bess.Change{
 		Resource: source + "/settings",
-		Value:    map[string]any{"pkt_size": 51, "burst": burst},
+		Value: bess.Fields(struct {
+			PacketSize int `json:"pkt_size"`
+			Burst      int `json:"burst"`
+		}{51, burst}),
 	})
 }
 
 func healthChange(id int, available bool) bess.Change {
 	return bess.Change{
 		Resource: health,
-		Key:      map[string]any{"health_id": id},
-		Value:    map[string]any{"available": available},
+		Key: bess.Fields(struct {
+			HealthID int `json:"health_id"`
+		}{id}),
+		Value: bess.Fields(struct {
+			Available bool `json:"available"`
+		}{available}),
 	}
 }
 
 func policyErase(id int) bess.Change {
 	return bess.Change{
 		Resource: policy,
-		Key:      map[string]any{"policy_id": id},
+		Key: bess.Fields(struct {
+			PolicyID int `json:"policy_id"`
+		}{id}),
 	}
 }
 
 func policyChange(id int, preferred, hop int) bess.Change {
+	type access struct {
+		NextHopID int `json:"next_hop_id"`
+		HealthID  int `json:"health_id"`
+	}
 	return bess.Change{
 		Resource: policy,
-		Key:      map[string]any{"policy_id": id},
-		Value: map[string]any{
-			"mode":      "ATSSS_ACTIVE_STANDBY",
-			"preferred": preferred,
-			"access": []any{
-				map[string]any{"next_hop_id": hop, "health_id": 1},
-				map[string]any{"next_hop_id": 2, "health_id": 2},
-			},
-		},
+		Key: bess.Fields(struct {
+			PolicyID int `json:"policy_id"`
+		}{id}),
+		Value: bess.Fields(struct {
+			Mode      string   `json:"mode"`
+			Preferred int      `json:"preferred"`
+			Access    []access `json:"access"`
+		}{"ATSSS_ACTIVE_STANDBY", preferred, []access{{hop, 1}, {2, 2}}}),
 	}
 }
 

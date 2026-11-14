@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -162,7 +163,7 @@ func TestTheSweepTakesTheSubscribersARPEntriesAndLeavesTheDeployments(t *testing
 	}
 	entries := []bess.Entry{
 		{Key: map[string]any{"ip": "192.0.2.2"}, Value: map[string]any{"mac_addr": "02:00:00:00:06:01"}},
-		{Key: map[string]any{"ip": "10.45.0.2"}},
+		{Key: map[string]any{"ip": "10.45.0.2", "endpoint_id": uint32(0)}},
 		{Key: map[string]any{"ip": "10.45.0.7"}},
 	}
 
@@ -176,8 +177,17 @@ func TestTheSweepTakesTheSubscribersARPEntriesAndLeavesTheDeployments(t *testing
 	for _, batch := range fake.changes {
 		for _, ch := range batch {
 			if ch.Resource == "arp_n6/entries" {
-				ip, _ := ch.Key["ip"].(string)
+				ip := sweptARPKey(t, ch.Key).IP
 				erased[ip] = true
+				if ip == "10.45.0.2" {
+					want, err := json.Marshal(entries[1].Key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := ch.Key.(bess.JSON); string(got) != string(want) {
+						t.Errorf("sweep key %s lost runtime fields or present-zero values, want %s", got, want)
+					}
+				}
 			}
 		}
 	}
@@ -348,7 +358,7 @@ func TestSweepErasesInBoundedBatchesAtScale(t *testing.T) {
 				t.Errorf("transaction %d wrote %s with a value: an erase carries a key and no value",
 					i+1, ch.Resource)
 			}
-			ip, _ := ch.Key["ip"].(string)
+			ip := sweptARPKey(t, ch.Key).IP
 			erased[ip]++
 		}
 	}
@@ -432,4 +442,17 @@ func TestSweepReportsAnUnreadableDataplane(t *testing.T) {
 	if err := blind.Sweep(context.Background()); err == nil {
 		t.Fatal("the sweep reported success over an applier that cannot read back")
 	}
+}
+
+func sweptARPKey(t *testing.T, p bess.Payload) ARPKey {
+	t.Helper()
+	raw, ok := p.(bess.JSON)
+	if !ok {
+		t.Fatalf("swept key has type %T, want explicit runtime JSON", p)
+	}
+	var key ARPKey
+	if err := json.Unmarshal(raw, &key); err != nil {
+		t.Fatal(err)
+	}
+	return key
 }

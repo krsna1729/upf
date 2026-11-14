@@ -11,16 +11,16 @@ import (
 
 // defaultHeapAdmission is the share of the runtime's memory limit the live heap
 // may fill before upfd stops admitting new sessions. The limit (memlimit.go)
-// keeps the heap under the cgroup, but the nearer the live heap is to it, the
-// more often the collector runs to stay there. 100K sessions (bulk n4bench:
-// establish, modify, delete), whose live heap peaked at 385 MB in modify, under
-// three limits (evidence/go-garbage, -tight{640,520,440}-trim):
+// is a soft Go runtime target, not a heap/RSS/cgroup ceiling. Near a live-heap
+// floor it can cause frequent GC. Historical 100K-session bulk measurements
+// (establish, modify, delete; live heap 385 MB in modify) under three limits
+// (evidence/go-garbage, -tight{640,520,440}-trim):
 //
 //	live/limit  0.64  0.78  0.93
 //	modify GC   12.5% 40.7% 78.2% of upfd's CPU
 //
-// 0.7 is the measured edge: past it the collector, not the sessions, is what
-// the CPU does.
+// 0.7 is the current policy, not a universal workload optimum. This sampled
+// check cannot replace hard capacity reservations or account for non-Go memory.
 const defaultHeapAdmission = 0.7
 
 // heapGauge reads the heap the last collection kept live and the runtime's
@@ -50,9 +50,8 @@ func (g *heapGauge) read() (live, limit uint64) {
 	return live, limit
 }
 
-// heapAdmits says whether a live heap leaves room for another session under
-// limit: it may fill fraction of it. A fraction of 0 admits everything, and so
-// does no limit -- there is nothing to hold the heap under.
+// heapAdmits compares the last collection's live heap to a share of the soft
+// runtime target. A fraction of 0 or no runtime target disables this check.
 func heapAdmits(live, limit uint64, fraction float64) bool {
 	return fraction <= 0 || limit == 0 || float64(live) <= fraction*float64(limit)
 }

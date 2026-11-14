@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -174,7 +175,11 @@ func (c *Compiler) Sweep(ctx context.Context) error {
 		err := c.contents.ResourcePages(ctx, a.resource, func(e bess.Entry) error {
 			ip, _ := e.Key["ip"].(string)
 			if addr, err := netip.ParseAddr(ip); err == nil && inPools(addr, a.pools) {
-				changes = append(changes, bess.Change{Resource: a.resource, Key: e.Key})
+				raw, err := json.Marshal(e.Key)
+				if err != nil {
+					return fmt.Errorf("encoding %s erase key: %w", a.resource, err)
+				}
+				changes = append(changes, bess.Change{Resource: a.resource, Key: bess.JSON(raw)})
 			}
 			return nil
 		})

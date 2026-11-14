@@ -14,14 +14,14 @@ import (
 // meterOf finds the meter entry a rule's action names, in the direction's own
 // meter table. The action is what puts the id on the packet, so reading the
 // resource without it would pin an entry and not the enforcement.
-func meterOf(t *testing.T, changes []bess.Change, r rule, dir Direction) map[string]any {
+func meterOf(t *testing.T, changes []bess.Change, r rule, dir Direction) MeterProfile {
 	t.Helper()
 	meterID, _ := actionFields(t, changes, dir, r.actionID())["meter_id"].(uint32)
 	if meterID == 0 {
 		t.Fatalf("rule %v names no meter", r.change.Key)
 	}
-	trtcm, _ := find(t, changes, metersRes(dir), "id", meterID).Value["tr_tcm"].(map[string]any)
-	if trtcm == nil {
+	trtcm := payload[MeterEntry](find(t, changes, metersRes(dir), "id", meterID).Value).TrTCM
+	if trtcm == (MeterProfile{}) {
 		t.Fatalf("meter %d has no two-rate profile", meterID)
 	}
 	return trtcm
@@ -61,10 +61,10 @@ func TestAQERsGBRIsTheMetersCommittedRate(t *testing.T) {
 	}
 	trtcm := meterOf(t, rec.last(), uplinkRule(t, rec.last(), 0), testConfig().Up)
 	// kbit/s -> bytes/s, the unit the MBR and GBR IEs share (uint40).
-	if got, want := trtcm["committed_rate"], uint64(500*1000/8); got != want {
+	if got, want := trtcm.CommittedRate, uint64(500*1000/8); got != want {
 		t.Errorf("the committed rate is %v, want the GBR (%d bytes/s)", got, want)
 	}
-	if got, want := trtcm["peak_rate"], uint64(1000*1000/8); got != want {
+	if got, want := trtcm.PeakRate, uint64(1000*1000/8); got != want {
 		t.Errorf("the peak rate is %v, want the MBR (%d bytes/s)", got, want)
 	}
 }
@@ -98,7 +98,7 @@ func TestAQERsAveragingWindowIsTheMetersBurst(t *testing.T) {
 				t.Fatalf("the establishment answered cause %d", got)
 			}
 			trtcm := meterOf(t, rec.last(), uplinkRule(t, rec.last(), 0), testConfig().Up)
-			if got := trtcm["peak_burst"]; got != tc.burst {
+			if got := trtcm.PeakBurst; got != tc.burst {
 				t.Errorf("the peak burst is %v, want the rate over the window (%d bytes)", got, tc.burst)
 			}
 		})
@@ -163,8 +163,8 @@ func TestAPDRWithSeveralRateBearingQERsEnforcesTheSharedOne(t *testing.T) {
 		return v
 	}
 	peak := func(id uint32) uint64 {
-		trtcm, _ := find(t, rec.last(), metersRes(up), "id", id).Value["tr_tcm"].(map[string]any)
-		v, _ := trtcm["peak_rate"].(uint64)
+		trtcm := payload[MeterEntry](find(t, rec.last(), metersRes(up), "id", id).Value).TrTCM
+		v := trtcm.PeakRate
 		return v
 	}
 	// Both flows that share QER 1 carry the same meter, and it is QER 1's rate.
@@ -248,8 +248,8 @@ func TestAPDRNamingNoQERTheSessionSharesKeepsItsOwn(t *testing.T) {
 		return v
 	}
 	peak := func(id uint32) uint64 {
-		trtcm, _ := find(t, rec.last(), metersRes(up), "id", id).Value["tr_tcm"].(map[string]any)
-		v, _ := trtcm["peak_rate"].(uint64)
+		trtcm := payload[MeterEntry](find(t, rec.last(), metersRes(up), "id", id).Value).TrTCM
+		v := trtcm.PeakRate
 		return v
 	}
 	own := meterID(uplinkRule(t, rec.last(), 9))
@@ -288,8 +288,8 @@ func TestADuplicateQERReferenceCountsOnce(t *testing.T) {
 	}
 	up := testConfig().Up
 	peak := func(id uint32) uint64 {
-		trtcm, _ := find(t, rec.last(), metersRes(up), "id", id).Value["tr_tcm"].(map[string]any)
-		v, _ := trtcm["peak_rate"].(uint64)
+		trtcm := payload[MeterEntry](find(t, rec.last(), metersRes(up), "id", id).Value).TrTCM
+		v := trtcm.PeakRate
 		return v
 	}
 	r := uplinkRule(t, rec.last(), 0)

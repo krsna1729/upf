@@ -22,8 +22,8 @@ type counters struct {
 	// A retransmitted establishment or deletion is not one of them: the answer
 	// repeats what the SMF already had.
 	refused atomic.Uint64
-	// unadmitted counts the establishments Config.Admit turned away (each is
-	// also one of refused): the node said it had no room before it tried.
+	// unadmitted counts establishments the hard capacity or Config.Admit
+	// turned away (each is also one of refused), before dataplane work.
 	unadmitted atomic.Uint64
 	// markers counts the End Marker packets this UPF constructed and sent
 	// (TS 29.244 5.3.2, on the SNDEM flag); markerFailures counts the ones the
@@ -46,14 +46,16 @@ type counters struct {
 // StatsSnapshot is the counters at one instant, copied out so a reader is
 // served without holding the compiler's lock.
 type StatsSnapshot struct {
-	Sessions       int    // the sessions this compiler holds now
-	Established    uint64 // establishments that became a session
-	Modified       uint64 // modifications applied
-	Deleted        uint64 // deletions applied
-	Refused        uint64 // requests answered with a cause other than accepted
-	Unadmitted     uint64 // establishments Config.Admit refused (also in Refused)
-	Markers        uint64 // End Marker packets sent
-	MarkerFailures uint64 // End Marker packets the graph's port refused
+	Sessions         int    // the sessions this compiler holds now
+	SessionCapacity  uint32 // hard bound, including in-flight/uncertain establishments
+	ReservedSessions uint32 // in-flight/uncertain establishments not in Sessions
+	Established      uint64 // establishments that became a session
+	Modified         uint64 // modifications applied
+	Deleted          uint64 // deletions applied
+	Refused          uint64 // requests answered with a cause other than accepted
+	Unadmitted       uint64 // establishments hard capacity or Config.Admit refused
+	Markers          uint64 // End Marker packets sent
+	MarkerFailures   uint64 // End Marker packets the graph's port refused
 	// The buffering half: the release and drop commands the SMF's instruction
 	// produced for buffering flows, and the commands the store refused. Counted
 	// when the daemon accepted a command, not when the store applied it (the
@@ -85,19 +87,22 @@ func (c *Compiler) Stats() StatsSnapshot {
 	}
 	c.mu.Lock()
 	sessions := len(c.sessions)
+	reserved := c.reservedSessions
 	c.mu.Unlock()
 	return StatsSnapshot{
-		Sessions:        sessions,
-		Established:     c.stats.established.Load(),
-		Modified:        c.stats.modified.Load(),
-		Deleted:         c.stats.deleted.Load(),
-		Refused:         c.stats.refused.Load(),
-		Unadmitted:      c.stats.unadmitted.Load(),
-		Markers:         c.stats.markers.Load(),
-		BuffersReleased: c.stats.buffersReleased.Load(),
-		BuffersDropped:  c.stats.buffersDropped.Load(),
-		BufferFailures:  c.stats.bufferFailures.Load(),
-		MarkerFailures:  c.stats.markerFailures.Load(),
+		Sessions:         sessions,
+		SessionCapacity:  c.cfg.MaxSessions,
+		ReservedSessions: reserved,
+		Established:      c.stats.established.Load(),
+		Modified:         c.stats.modified.Load(),
+		Deleted:          c.stats.deleted.Load(),
+		Refused:          c.stats.refused.Load(),
+		Unadmitted:       c.stats.unadmitted.Load(),
+		Markers:          c.stats.markers.Load(),
+		BuffersReleased:  c.stats.buffersReleased.Load(),
+		BuffersDropped:   c.stats.buffersDropped.Load(),
+		BufferFailures:   c.stats.bufferFailures.Load(),
+		MarkerFailures:   c.stats.markerFailures.Load(),
 	}
 }
 

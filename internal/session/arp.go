@@ -51,14 +51,14 @@ func (e arpEntry) claim() string {
 func (e arpEntry) change() bess.Change {
 	return bess.Change{
 		Resource: e.resource,
-		Key:      map[string]any{"ip": e.addr.String()},
-		Value:    map[string]any{"mac_addr": macString(e.mac)},
+		Key:      bess.Fields(ARPKey{IP: e.addr.String()}),
+		Value:    bess.Fields(ARPEntry{MACAddr: macString(e.mac)}),
 	}
 }
 
 // erasure is the change that takes the entry out.
 func (e arpEntry) erasure() bess.Change {
-	return bess.Change{Resource: e.resource, Key: map[string]any{"ip": e.addr.String()}}
+	return bess.Change{Resource: e.resource, Key: bess.Fields(ARPKey{IP: e.addr.String()})}
 }
 
 // arpEntryOf is the entry one PDR's address is answered by: a subscriber-side

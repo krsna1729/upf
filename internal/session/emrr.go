@@ -55,14 +55,14 @@ func endMarkerArrived(s *Session, uid uint32, markers map[endMarkerKey]bool) boo
 // the received one arrived in, behind the G-PDUs that preceded it. A PDR whose
 // FAR adds no outer header (N6, 5G VN Internal), drops, buffers or names a MAR
 // relays nothing; the arrival is still reported. The caller holds the lock.
-func endMarkerRelays(s *Session, endpoint, teid uint32) []map[string]any {
+func endMarkerRelays(s *Session, endpoint, teid uint32) []RelayTunnel {
 	type tunnel struct {
 		teid        uint32
 		local, peer netip.Addr
 		domain      uint32
 	}
 	var seen []tunnel
-	var relays []map[string]any
+	var relays []RelayTunnel
 	for _, p := range pdrsInOrder(s) {
 		// The tunnel's local end is resolved only for a PDR whose FAR
 		// forwards with an Outer Header Creation (resolve).
@@ -79,10 +79,7 @@ func endMarkerRelays(s *Session, endpoint, teid uint32) []map[string]any {
 			continue
 		}
 		seen = append(seen, t)
-		relays = append(relays, map[string]any{
-			"teid": t.teid, "local_address": t.local.AsSlice(), "peer_address": t.peer.AsSlice(),
-			"transport_route_domain": t.domain,
-		})
+		relays = append(relays, RelayTunnel{TEID: t.teid, LocalAddress: t.local.AsSlice(), PeerAddress: t.peer.AsSlice(), TransportRouteDomain: t.domain})
 	}
 	return relays
 }

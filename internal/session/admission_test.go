@@ -3,11 +3,16 @@
 package session
 
 import (
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/krsna1729/upf/internal/bess"
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
+	"google.golang.org/grpc/codes"
 )
 
 // TestANodeWithNoRoomRefusesOnlyNewSessions: Config.Admit is asked about new
@@ -71,5 +76,92 @@ func TestANodeWithNoRoomRefusesOnlyNewSessions(t *testing.T) {
 	room = true
 	if got := cause(t, c.Establish(establishment(0xa002, "10.45.0.3")).(*message.SessionEstablishmentResponse)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the refused session, sent again with room, answered cause %d", got)
+	}
+}
+
+func TestSessionCapacityReservesBeforeApplyAndDeletionReturnsRoom(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxSessions = 1
+	gate := &gatedApply{inner: &recorder{}, entered: make(chan struct{}), release: make(chan struct{})}
+	unblock := sync.OnceFunc(func() { close(gate.release) })
+	defer unblock()
+	c := New(cfg, gate, quietLogger())
+	first := make(chan *message.SessionEstablishmentResponse, 1)
+	go func() {
+		first <- c.Establish(establishment(0xa101, "10.45.0.2")).(*message.SessionEstablishmentResponse)
+	}()
+	select {
+	case <-gate.entered:
+	case response := <-first:
+		t.Fatalf("first establishment did not reach Apply: %v", response)
+	}
+	if s := c.Stats(); s.Sessions != 0 || s.ReservedSessions != 1 {
+		t.Fatalf("in-flight establishment: %+v", s)
+	}
+	if got := cause(t, c.Establish(establishment(0xa102, "10.45.0.3"))); got != ie.CauseNoResourcesAvailable {
+		t.Fatalf("overlapping establishment at capacity: cause %d", got)
+	}
+	unblock()
+	accepted := <-first
+	if got := cause(t, accepted); got != ie.CauseRequestAccepted {
+		t.Fatalf("first establishment: cause %d", got)
+	}
+	if s := c.Stats(); s.Sessions != 1 || s.ReservedSessions != 0 {
+		t.Fatalf("committed establishment: %+v", s)
+	}
+	again := c.Establish(establishment(0xa101, "10.45.0.2")).(*message.SessionEstablishmentResponse)
+	if cause(t, again) != ie.CauseRequestAccepted || upFSEID(t, again) != upFSEID(t, accepted) {
+		t.Fatal("retransmission at capacity did not preserve the accepted session")
+	}
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upFSEID(t, accepted), 3, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("deletion at capacity: cause %d", got)
+	}
+	if got := cause(t, c.Establish(establishment(0xa102, "10.45.0.3"))); got != ie.CauseRequestAccepted {
+		t.Fatalf("capacity was not returned after deletion: cause %d", got)
+	}
+}
+
+func TestSessionCapacityReleasesKnownRefusalsButKeepsUnknownOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		unknown bool
+	}{
+		{"capacity", &bess.InvalidRequestError{Code: codes.ResourceExhausted}, false},
+		{"busy", &bess.BusyError{Attempts: 1}, false},
+		{"rejected", &bess.RejectedError{}, false},
+		{"unanswered", errors.New("reply lost"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.MaxSessions = 1
+			if !tc.unknown {
+				cfg.MaxTEIDs = 2
+			} // a leaked id prevents recovery
+			rec := &recorder{fail: tc.err}
+			c := New(cfg, rec, quietLogger())
+			now := time.Unix(1700000000, 0)
+			c.teids.now = func() time.Time { return now }
+			if got := cause(t, c.Establish(establishment(0xa201, "10.45.0.2"))); got == ie.CauseRequestAccepted {
+				t.Fatal("failed Apply was answered accepted")
+			}
+			rec.fail = nil
+			now = now.Add(time.Minute) // allow the legitimate F-TEID reuse grace
+			if tc.unknown {
+				if s := c.Stats(); s.Sessions != 0 || s.ReservedSessions != 1 {
+					t.Fatalf("unknown outcome lost its reservation: %+v", s)
+				}
+				if got := cause(t, c.Establish(establishment(0xa202, "10.45.0.3"))); got != ie.CauseNoResourcesAvailable {
+					t.Fatalf("unknown outcome let capacity be reused: cause %d", got)
+				}
+				if len(rec.txns) != 0 {
+					t.Fatal("capacity refusal reached the dataplane")
+				}
+			} else {
+				if got := cause(t, c.Establish(establishment(0xa201, "10.45.0.2"))); got != ie.CauseRequestAccepted {
+					t.Fatalf("known refusal leaked capacity or ids: cause %d", got)
+				}
+			}
+		})
 	}
 }

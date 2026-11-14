@@ -13,12 +13,10 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// fill sets m from field values named the way protojson names them (the
-// proto name or the JSON name), for the Go types the session compiler writes:
-// integers, bools, strings, []byte, enum names, nested maps and slices of
-// those. Every change of every transaction is built here, and the JSON path it
-// replaces (json.Marshal, then protojson.Unmarshal) was the control plane's
-// largest source of garbage.
+// fill sets an action/query message from field values named the way protojson
+// names them (the proto name or the JSON name): integers, bools, strings,
+// []byte, enum names, nested maps and slices of those. Resource Changes use
+// the typed Payload encoder instead.
 //
 // It reports false wherever its message could differ from protojson's -- a
 // type it does not convert (json.Number, a string for a bytes or number field,

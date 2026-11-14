@@ -369,9 +369,9 @@ func TestRateAndQuotaModificationsPreserveTheUsageWindow(t *testing.T) {
 		peak  uint64
 	}{{MetersUplink, ul, 2000 * 1000 / 8}, {MetersDownlink, dl, 4000 * 1000 / 8}} {
 		ch := find(t, rec.last(), c.res(meter.table), "id", meter.id)
-		profile, _ := ch.Value["tr_tcm"].(map[string]any)
-		if profile["peak_rate"] != meter.peak {
-			t.Errorf("meter %d peak %v, want %d", meter.id, profile["peak_rate"], meter.peak)
+		profile := payload[MeterEntry](ch.Value).TrTCM
+		if profile.PeakRate != meter.peak {
+			t.Errorf("meter %d peak %v, want %d", meter.id, profile.PeakRate, meter.peak)
 		}
 	}
 	completed := len(rec.txns)

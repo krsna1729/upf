@@ -4,11 +4,10 @@
 // (github.com/krsna1729/bess/sdk/go), the daemon's own schema, and one
 // transaction per session change.
 //
-// A change is a resource by name ("at/actions", "pdr/rules") with key and value
-// fields as plain Go values. The messages are built from the descriptor set the
-// daemon reports (control_v2.GetSchema), so the UPF needs no generated code for
-// BESS's protobufs or for the datapath plugin's: the daemon's schema is the
-// contract, exactly as it is for a manifest or the C++ perf clients.
+// A change is a resource by name ("at/actions", "pdr/rules") with typed struct
+// payloads. The messages are built from the descriptor set the daemon reports
+// (control_v2.GetSchema), so the UPF needs no generated code for BESS's protobufs
+// or the datapath plugin's: the daemon's schema remains the contract.
 //
 // Nothing here holds session state. A compiler rebuilds a session from the PFCP
 // message it is handling, and a restarted controller rebuilds it from the
@@ -512,8 +511,8 @@ func packetTime(stamp, mono uint64, wallNs int64) time.Time {
 // and value, or a singleton's value alone. A nil Value erases the key.
 type Change struct {
 	Resource string
-	Key      map[string]any
-	Value    map[string]any
+	Key      Payload
+	Value    Payload
 }
 
 // ReleaseFlow tells a packet store to send the packets it holds for one flow
@@ -598,14 +597,19 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 	// and past it every transaction slows and answers busy; firing hundreds of
 	// applies at once therefore stalls the control plane instead of going
 	// faster. Holding this slot until the commit returns is the whole fix.
-	c.inFlight <- struct{}{}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case c.inFlight <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	defer func() { <-c.inFlight }()
 
 	tx := c.sdk.Transaction()
-	// Every key and value of the transaction is encoded into this one buffer
-	// (encoded) and handed to the SDK as bytes: a few growths per transaction,
-	// and no message built per key or value only to be marshalled. A change
-	// whose fields encode does not convert goes the way Message builds it.
+	// Payload bytes belong to this transaction. Struct payloads retain only
+	// their actual fields; every field is read without an interface box.
 	buf := make([]byte, 0, 64*len(changes))
 	for i, ch := range changes {
 		r, err := c.Resource(ch.Resource)
@@ -622,16 +626,11 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 				return fmt.Errorf("change %d: %w", i, err)
 			}
 			var v []byte
-			var ok bool
-			if v, ok, buf = encoded(buf, vmd, ch.Value); ok {
-				err = tx.SetEncoded(r, v)
-			} else {
-				m, merr := messageOf(vmd, r.ValueType, ch.Value)
-				if merr != nil {
-					return fmt.Errorf("change %d: %w", i, merr)
-				}
-				err = tx.Set(r, m)
+			v, buf, err = encodePayload(buf, vmd, ch.Value)
+			if err != nil {
+				return fmt.Errorf("change %d: %w", i, err)
 			}
+			err = tx.SetEncoded(r, v)
 			if err != nil {
 				return fmt.Errorf("change %d (%s): %w", i, ch.Resource, err)
 			}
@@ -645,18 +644,12 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 			return fmt.Errorf("change %d: %w", i, err)
 		}
 		var k []byte
-		var kok bool
-		k, kok, buf = encoded(buf, kmd, ch.Key)
+		k, buf, err = encodePayload(buf, kmd, ch.Key)
+		if err != nil {
+			return fmt.Errorf("change %d: %w", i, err)
+		}
 		if ch.Value == nil {
-			if kok {
-				err = tx.EraseEncoded(r, k)
-			} else {
-				km, merr := messageOf(kmd, r.KeyType, ch.Key)
-				if merr != nil {
-					return fmt.Errorf("change %d: %w", i, merr)
-				}
-				err = tx.Erase(r, km)
-			}
+			err = tx.EraseEncoded(r, k)
 			if err != nil {
 				return fmt.Errorf("change %d (%s): %w", i, ch.Resource, err)
 			}
@@ -667,20 +660,11 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 			return fmt.Errorf("change %d: %w", i, err)
 		}
 		var v []byte
-		var vok bool
-		if v, vok, buf = encoded(buf, vmd, ch.Value); kok && vok {
-			err = tx.UpsertEncoded(r, k, v)
-		} else {
-			km, merr := messageOf(kmd, r.KeyType, ch.Key)
-			if merr != nil {
-				return fmt.Errorf("change %d: %w", i, merr)
-			}
-			vm, merr := messageOf(vmd, r.ValueType, ch.Value)
-			if merr != nil {
-				return fmt.Errorf("change %d: %w", i, merr)
-			}
-			err = tx.Upsert(r, km, vm)
+		v, buf, err = encodePayload(buf, vmd, ch.Value)
+		if err != nil {
+			return fmt.Errorf("change %d: %w", i, err)
 		}
+		err = tx.UpsertEncoded(r, k, v)
 		if err != nil {
 			return fmt.Errorf("change %d (%s): %w", i, ch.Resource, err)
 		}

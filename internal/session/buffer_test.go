@@ -176,7 +176,7 @@ func TestDeletingABufferingSessionErasesItsBufferCounter(t *testing.T) {
 		if ch.Resource != bufferCountersRes(cfg.Buffering) || ch.Value != nil {
 			continue
 		}
-		if id, ok := ch.Key["action_id"].(uint32); ok && id == flow {
+		if id := payload[ActionKey](ch.Key).ActionID; id == flow {
 			return
 		}
 	}
@@ -292,10 +292,10 @@ func TestABufferingFlowsOwnNumbersAreWrittenToTheStore(t *testing.T) {
 		t.Fatal("a BUFF FAR's rule carries no ActionId")
 	}
 	entry := find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
-	if got := entry.Value["timeout_ns"]; got != uint64(30*time.Second) {
+	if got := optional(payload[FlowEntry](entry.Value).TimeoutNS); got != uint64(30*time.Second) {
 		t.Errorf("the flow's entry carries timeout_ns %v, want the BAR's 30s", got)
 	}
-	if got := entry.Value["max_packets_per_flow"]; got != uint32(16) {
+	if got := optional(payload[FlowEntry](entry.Value).MaxPacketsPerFlow); got != uint32(16) {
 		t.Errorf("the flow's entry carries max_packets_per_flow %v, want the BAR's 16", got)
 	}
 
@@ -312,10 +312,10 @@ func TestABufferingFlowsOwnNumbersAreWrittenToTheStore(t *testing.T) {
 		t.Fatalf("the modification answered cause %d", got)
 	}
 	entry = find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
-	if got := entry.Value["timeout_ns"]; got != uint64(10*time.Second) {
+	if got := optional(payload[FlowEntry](entry.Value).TimeoutNS); got != uint64(10*time.Second) {
 		t.Errorf("after the update the flow's entry carries timeout_ns %v, want 10s", got)
 	}
-	if got := entry.Value["max_packets_per_flow"]; got != uint32(64) {
+	if got := optional(payload[FlowEntry](entry.Value).MaxPacketsPerFlow); got != uint32(64) {
 		t.Errorf("after the update the flow's entry carries max_packets_per_flow %v, want 64", got)
 	}
 
@@ -333,10 +333,10 @@ func TestABufferingFlowsOwnNumbersAreWrittenToTheStore(t *testing.T) {
 		t.Fatalf("the modification answered cause %d", got)
 	}
 	entry = find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
-	if _, ok := entry.Value["timeout_ns"]; ok {
+	if _, ok := present(payload[FlowEntry](entry.Value).TimeoutNS); ok {
 		t.Errorf("a deactivated timer still wrote a timeout: %+v", entry.Value)
 	}
-	if _, ok := entry.Value["max_packets_per_flow"]; ok {
+	if _, ok := present(payload[FlowEntry](entry.Value).MaxPacketsPerFlow); ok {
 		t.Errorf("a zero count still wrote a cap: %+v", entry.Value)
 	}
 
@@ -352,7 +352,7 @@ func TestABufferingFlowsOwnNumbersAreWrittenToTheStore(t *testing.T) {
 		t.Fatalf("the modification answered cause %d", got)
 	}
 	entry = find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
-	got, ok := entry.Value["timeout_ns"]
+	got, ok := present(payload[FlowEntry](entry.Value).TimeoutNS)
 	if !ok || got != uint64(0) {
 		t.Errorf("the infinite timer wrote timeout_ns %v (present %v), want a present 0", got, ok)
 	}
@@ -366,7 +366,7 @@ func TestABufferingFlowsOwnNumbersAreWrittenToTheStore(t *testing.T) {
 		if ch.Resource != flowsRes(cfg.Buffering) || ch.Value != nil {
 			continue
 		}
-		if id, ok := ch.Key["id"].(uint32); ok && id == flow {
+		if id := payload[IDKey](ch.Key).ID; id == flow {
 			erased = true
 		}
 	}
@@ -480,10 +480,10 @@ func TestAnUpdateBARInAReportResponseRewritesTheStoreEntry(t *testing.T) {
 		ie.NewDLBufferingSuggestedPacketCount(64),
 	))
 	entry := find(t, rec.last(), flowsRes(cfg.Buffering), "id", flow)
-	if got := entry.Value["timeout_ns"]; got != uint64(10*time.Second) {
+	if got := optional(payload[FlowEntry](entry.Value).TimeoutNS); got != uint64(10*time.Second) {
 		t.Errorf("the response left the store entry's timeout_ns %v, want 10s", got)
 	}
-	if got := entry.Value["max_packets_per_flow"]; got != uint32(64) {
+	if got := optional(payload[FlowEntry](entry.Value).MaxPacketsPerFlow); got != uint32(64) {
 		t.Errorf("the response left the store entry's max_packets_per_flow %v, want 64", got)
 	}
 }

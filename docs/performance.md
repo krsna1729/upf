@@ -2665,3 +2665,145 @@ without a local module replacement or profiling overlay.
   smoke. These small-population offers, run during functional verification,
   are not loss-free capacity points or a TCP-versus-Unix performance comparison.
 
+
+## Fixed-budget audit: Go SDK and upfd
+
+The allocation comparisons below were retaken on AC power with turbo disabled.
+The guard samples power continuously, listens for power-supply events and
+invalidates a run if either setting changes. Earlier unverified retention
+measurements were moved to `discarded-power-unverified`; they are not evidence.
+Artifacts: `.scratch/evidence/cross-stack-budget-audit/`.
+
+### Powered directional allocation evidence
+
+One lifecycle cycle is establish, FAR-only modification, selector replacement
+and deletion: four transactions, one live session, a discard applier. ABBA,
+three samples per arm, 2000 cycles/sample, `GOGC=100`, `GOMEMLIMIT=512MiB`,
+`GOMAXPROCS=2`, fixed CPU affinity. This isolates typed-payload construction;
+it excludes SDK encoding, RPC, native work and packet delivery. The measured
+typed arm predates the separate hard-session-capacity guard, so it is not a
+bit-identical qualification of every later audit change.
+
+| Target | Baseline B/cycle | Typed B/cycle | Byte reduction | Baseline allocs/cycle | Typed allocs/cycle |
+|---|---:|---:|---:|---:|---:|
+| Graph | 23549 | 16596 | 29.5% | 274 | 203 |
+| Masked appliance | 23533 | 16581 | 29.5% | 273–274 | 203 |
+| Session-major | 46459 | 25140 | 45.9% | 546 | 356 |
+
+An independent guarded ABBA retained 64 completed SDK transactions with 1 MiB
+inputs each. Clearing successful operation payloads reduced retained Go heap
+from 67,189,336 B to 12,760–12,776 B while a second Commit still returned the
+cached result. This is a synthetic ownership test, not an RSS or latency claim.
+
+The separate SDK `BenchmarkBuild` ABBA used 10000 iterations/sample, three
+samples per arm, with the same powered GC/CPU settings. Bytes and allocations
+were unchanged across all 1/2/8/11/32-operation shapes. The bounded weak cache
+cost about 8–9% in the 8/11/32-operation warm protobuf-build shapes. This is an
+explicit memory-ownership/CPU tradeoff, not a generic SDK speedup; raw prepared
+payload construction and full RPC latency are different paths.
+
+### Applied boundaries and remaining limits
+
+- The shared Go SDK now reserves transaction count and aggregate wire bytes
+  before encoding. Queued cancellation detaches payload/context ownership;
+  active drivers own an immutable snapshot. Scatter/gather avoids another
+  full-frame copy. Packers and type URLs have bounded memoization; weak packers
+  do not pin descriptor graphs. Optional-cache bypass retains validation.
+- An unanswered send stays UNKNOWN through later local/native refusals or a
+  newer rejected record after resending. A definite native busy releases upfd
+  reservations without changing its retryable PFCP cause. These distinctions
+  prevent capacity reuse from overwriting possibly committed state.
+- upfd reserves hard session capacity independently of the sampled heap check.
+  N4 worker count and per-worker queues are bounded; full queues return cause
+  75 instead of blocking all socket reads. Single-worker mode remains inline.
+- Native EventHub ring/registry/retention allocations now participate in
+  runtime accounting. Refused operational observations consume sequence
+  numbers and increment `bess_events_memory_lost_total`; readers get explicit
+  gaps. Transaction commands and durable replay records are not this loss
+  policy. Read-batch copies and producer temporaries remain separate exposure;
+  count bounds and admitted hub storage are not a process-wide RSS proof.
+- The Go memory target is soft. Shared parent cgroup capacity is not an
+  exclusive per-process allowance. Leave measured headroom for native memory,
+  packet pools, mappings, sockets, decoded messages and temporary work.
+  The heap-admission sample can remain stale while refusing: forced collection
+  is not enabled by this change. No universal GOGC setting is inferred.
+- Measure protocol response tails, throughput/refusals, queued work, allocation
+  rate, GC assist/total CPU and cgroup peak together. The new GC CPU counters
+  expose work that pause duration misses. Allocation-only results above do not
+  close the loaded end-to-end latency gate.
+
+The ownership and batching decisions follow the same mechanisms described in
+Tailscale's [throughput work](https://tailscale.com/blog/throughput-improvements)
+and [later allocation/queue work](https://tailscale.com/blog/making-tailscale-faster):
+batch where ordering permits, shorten measured queues, avoid concatenation
+copies, and make shared-buffer lifetimes explicit. UDP GRO/GSO, multi-message
+syscalls or a C rewrite are not applied without a profile proving that boundary
+is the bottleneck. The [Go GC guide](https://go.dev/doc/gc-guide) explains soft
+limits, assists and collection headroom.
+
+
+### Powered full-path qualification at 1M residents
+
+Ordinary binaries, common rebuilt native runtime/plugin, Unix transport,
+eight N4 workers, one Go execution slot, `GOGC=25`, 1000 FAR updates/s for
+10 seconds per arm. Resident state remained at 1M and packet forwarding plus
+acknowledged usage reports were checked. Native memory accounting was collected
+synchronously before each measured before-snapshot, never during the window.
+
+| Arm | Sent/completed | p99 ms | upfd CPU seconds | Lane peak bytes |
+|---|---:|---:|---:|---:|
+| Baseline A1 | 10000 | 18.778 | 3.465 | 4262162432 |
+| Candidate B1 | 10000 | 3.286 | 1.211 | 4298600448 |
+| Candidate B2 | 9999 | 3.243 | 1.181 | 4239683584 |
+| Baseline A2 | 10000 | 3.466 | 1.094 | 4309880832 |
+
+All sent requests completed: no timeout, refusal, uncertain remainder or UDP
+socket drop. B2 had one pacer skip: it did not send every scheduled offer.
+All four power traces ended valid; all lane OOM counters stayed zero and both
+daemons exited cleanly. The sum of independently observed tab/lane maxima was
+5,725,569,024 B (5460.3 MiB), below the 6144 MiB combined budget. This is a
+sampled bound for these runs, not an arbitrary-input RSS guarantee.
+
+The variable baseline tail/CPU forbids a stable percentage-speedup claim.
+Candidate GC CPU/assist counters had zero deltas in these short windows, with
+about 115 MB allocated per window. Thus these cells do not measure collection
+cost under sustained churn; they cannot establish that GC assists improved.
+Loaded upfd RSS also varied, so no stable RSS reduction is inferred.
+
+The shared runtime charged about 11.8 MB to EventHub at the loaded point.
+Its signed RSS reconciliation remainder ranged from -3.4 MB to +23.7 MB:
+admitted allocations and resident pages are not identical quantities. This
+improves ownership accounting but is not an exact every-byte attribution.
+
+
+### Sustained GOGC comparison under a fixed budget
+
+Six powered ordinary runs in order 10/25/50/50/25/10, each with 1M residents
+and 90 seconds of 1000 FAR updates/s. `GOMEMLIMIT=2400MiB` was identical in
+every arm; native/upfd/aggregate caps remained 2600/2900/4600 MiB. This compares
+collection policy, not differently sized memory targets.
+
+| GOGC | p99 range ms | upfd CPU seconds | GC CPU seconds | upfd peak MiB | Aggregate lane peak MiB |
+|---|---:|---:|---:|---:|---:|
+| 10 | 16.06–16.70 | 26.76–29.31 | 15.82–18.37 | 1866–1897 | 3888–3906 |
+| 25 | 12.73–13.80 | 18.44–19.78 | 6.91–9.05 | 2051–2058 | 4082–4089 |
+| 50 | 9.83–10.72 | 15.28–16.56 | 4.58–4.60 | 2328–2329 | 4366–4370 |
+
+All six completed all 90,000 scheduled requests with no skip, timeout,
+refusal, UDP socket drop or uncertain remainder. All power verdicts were valid;
+OOM counters stayed zero. One GOGC=25 repeat counted one socket-throttle event,
+not a dropped request. The conservative sum of independent tab/lane maxima was
+5755.3 MiB, below 6144 MiB.
+
+Allocations were about 1.036 GB per 90-second window across settings. Allocating-
+goroutine assists consumed only 0.12–1.47 **milliseconds** per window; total GC
+CPU consumed 4.58–18.37 **seconds**. Concurrent collection CPU, not just assists
+or stop-the-world pauses, must therefore remain in the response-cost budget.
+This does not uniquely attribute every tail sample to GC.
+
+For this exact resident/FAR workload, GOGC=50 bought lower CPU and response tails
+at roughly 275 MiB more upfd peak than GOGC=25 and roughly 440 MiB more than 10.
+Use that setting only with the measured headroom; it is not a universal default.
+The daemon's default policy and its stale-live-heap admission behavior are not
+changed by this experiment.
+

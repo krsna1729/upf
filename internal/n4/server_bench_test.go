@@ -38,6 +38,8 @@ func (cannedHandler) Delete(req *message.SessionDeletionRequest) message.Message
 
 func (cannedHandler) AssociationEnded(string) {}
 
+func (cannedHandler) ResponseSEID(uint64) uint64 { return 0x1122 }
+
 // benchPeer is the CP function's address as the server sees it: the association
 // has to arrive from the same one before session messages are answered.
 // benchStart is the recovery time stamp the peer advertises: any time works, as

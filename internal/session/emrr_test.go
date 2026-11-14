@@ -138,13 +138,13 @@ func TestEndMarkerRelaysAreWrittenWithTheirFTEIDsAdmission(t *testing.T) {
 	}
 	// relays is the End Marker relays the last transaction wrote with the
 	// F-TEID's admission entry.
-	relays := func(teid uint32) []map[string]any {
+	relays := func(teid uint32) []RelayTunnel {
 		t.Helper()
 		ch, ok := teidRule(rec.last(), cfg.GTPUDecap+"/fteids", teid)
 		if !ok || ch.Value == nil {
 			t.Fatalf("the transaction writes no admission entry for TEID %#x", teid)
 		}
-		r, _ := ch.Value["end_marker_relays"].([]map[string]any)
+		r := payload[FTEIDEntry](ch.Value).EndMarkerRelays
 		return r
 	}
 	expect := func(teid, relayTEID uint32, peer, local string, domain uint32) {
@@ -154,9 +154,9 @@ func TestEndMarkerRelaysAreWrittenWithTheirFTEIDsAdmission(t *testing.T) {
 			t.Fatalf("the F-TEID %#x relays through %d tunnels, want 1: %v", teid, len(got), got)
 		}
 		r := got[0]
-		if r["teid"] != relayTEID || r["transport_route_domain"] != domain ||
-			!bytes.Equal(r["peer_address"].([]byte), netip.MustParseAddr(peer).AsSlice()) ||
-			!bytes.Equal(r["local_address"].([]byte), netip.MustParseAddr(local).AsSlice()) {
+		if r.TEID != relayTEID || r.TransportRouteDomain != domain ||
+			!bytes.Equal(r.PeerAddress, netip.MustParseAddr(peer).AsSlice()) ||
+			!bytes.Equal(r.LocalAddress, netip.MustParseAddr(local).AsSlice()) {
 			t.Errorf("the F-TEID %#x relays through %v, want TEID %#x toward %s from %s in domain %d",
 				teid, r, relayTEID, peer, local, domain)
 		}

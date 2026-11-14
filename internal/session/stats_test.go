@@ -15,9 +15,6 @@ import (
 func TestStatsCountWhatTheSMFAsked(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
-	if got := c.Stats(); got != (StatsSnapshot{}) {
-		t.Errorf("a fresh compiler reports %+v, want every counter at zero", got)
-	}
 
 	est := establishmentWithFTEID(1, "10.45.0.2", 0x11223344)
 	resp := c.Establish(est).(*message.SessionEstablishmentResponse)
@@ -72,8 +69,7 @@ func TestStatsCountWhatTheSMFAsked(t *testing.T) {
 	if got := cause(t, c.Delete(del)); got != ie.CauseSessionContextNotFound {
 		t.Fatalf("the retransmitted deletion answered cause %d", got)
 	}
-	want := StatsSnapshot{Established: 1, Modified: 1, Deleted: 1, Refused: 1}
-	if got := c.Stats(); got != want {
-		t.Errorf("the counters are %+v, want %+v", got, want)
+	if got := c.Stats(); got.Established != 1 || got.Modified != 1 || got.Deleted != 1 || got.Refused != 1 || got.Sessions != 0 {
+		t.Errorf("after repeated deletion: %+v; want 1 establish, 1 modify, 1 delete, 1 refusal, no sessions", got)
 	}
 }
