@@ -64,6 +64,7 @@
 #include <expected>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -300,8 +301,15 @@ class SessionResource final : public bess::dataplane::Resource {
  private:
   class Staged;
   struct Rule {
+    static constexpr size_t kKeyBytes = 44;  // twice the longer, 22-byte DL key
+    explicit Rule(const SessionValue::Pdr &pdr);
+    bool operator==(const Rule &other) const noexcept;
+    Table::Ranges Ranges() const noexcept {
+      return ranges ? Table::Ranges(*ranges) : Table::Ranges{};
+    }
     bool dl = false;
-    std::string key;  // mask | value | ranges, as a MaskedRuleResource key
+    std::array<char, kKeyBytes> key{};  // mask | value
+    std::unique_ptr<std::vector<Table::KeyRange>> ranges;  // absent for exact masks
   };
   // One interned profile: the MeterStates built under it point here.
   struct Profile {
@@ -322,7 +330,7 @@ class SessionResource final : public bess::dataplane::Resource {
     uint32_t banks[2] = {0, 0};   // per direction: cell slots ever counted
     size_t bytes = 0;             // admitted glibc bytes of rule and F-TEID vectors
     std::vector<Rule> rules;
-    std::vector<SessionValue::Fteid> fteids;
+    std::vector<upf::datapath::FteidId> fteids;  // records belong to fteids_
   };
   // A profile node's glibc cost, an estimate.
   static constexpr size_t kProfileBytes = sizeof(std::pair<const ProfileKey, Profile>) + 4 * sizeof(void *);

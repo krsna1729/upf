@@ -645,6 +645,38 @@ TEST(SessionStore, ReUpdatingManySessionsInOneTransactionWaitsOnce) {
   s.Finish(again);
 }
 
+TEST(SessionStore, RangedRuleKeysSurviveReadbackAndReplacement) {
+  Store s;
+  SessionValue image = Image(false);
+  auto &pdr = image.pdrs.front();
+  pdr.mask[9] = pdr.mask[10] = std::byte{0};  // UL source-port field
+  pdr.ranges = {{9, 2, 0, 1000}};
+  ASSERT_TRUE(Applied(s.Put(image)));
+  EXPECT_TRUE(Classify(s).hit);  // the fixture's source port is 0
+  upf::pb::UpfSession wire;
+  const auto read = [&] {
+    wire.Clear();
+    s.sessions->ForEachLive([&](uint32_t id, const upf::pb::UpfSession &value) {
+      if (id == kSession) wire = value;
+    });
+  };
+  read();
+  ASSERT_EQ(wire.pdrs_size(), 1);
+  ASSERT_EQ(wire.pdrs(0).ranges_size(), 1);
+  EXPECT_EQ(wire.pdrs(0).ranges(0).field(), 3u);
+  EXPECT_EQ(wire.pdrs(0).ranges(0).high(), 1000u);
+  pdr.ranges = {{9, 2, 1001, 2000}};
+  ASSERT_TRUE(Applied(s.Put(image)));
+  EXPECT_FALSE(Classify(s).hit) << "the old port range still matches";
+  read();
+  ASSERT_EQ(wire.pdrs_size(), 1);
+  ASSERT_EQ(wire.pdrs(0).ranges_size(), 1);
+  EXPECT_EQ(wire.pdrs(0).ranges(0).low(), 1001u);
+  EXPECT_EQ(wire.pdrs(0).ranges(0).high(), 2000u);
+  ASSERT_TRUE(Applied(s.Apply(dp::Op::Erase(s.sessions->name(), dp::EncodeKey(kSession)))));
+  EXPECT_FALSE(s.ul->FindRule(pdr.mask, pdr.value, pdr.ranges));
+}
+
 TEST(SessionStore, ActionIdsStayInsideTheActionIdSpace) {
   Store s;
   SessionValue image = Image(false);

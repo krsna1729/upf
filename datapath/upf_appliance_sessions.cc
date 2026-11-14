@@ -318,12 +318,21 @@ std::string SessionResource::RuleKey(const SessionValue::Pdr &pdr) {
   return key;
 }
 
+SessionResource::Rule::Rule(const SessionValue::Pdr &pdr) : dl(pdr.dl) {
+  const size_t len = pdr.mask.size();  // Validate checked the table's key width
+  std::memcpy(key.data(), pdr.mask.data(), len);
+  std::memcpy(key.data() + len, pdr.value.data(), len);
+  if (!pdr.ranges.empty()) ranges = std::make_unique<std::vector<KeyRange>>(pdr.ranges);
+}
+
+bool SessionResource::Rule::operator==(const Rule &other) const noexcept {
+  return dl == other.dl && key == other.key && std::ranges::equal(Ranges(), other.Ranges());
+}
+
 std::optional<SessionResource::Table::Prepared> SessionResource::PrepareErase(const Rule &rule) const {
   const size_t len = KeyLen(rule.dl);
-  std::vector<KeyRange> ranges((rule.key.size() - 2 * len) / sizeof(KeyRange));
-  if (!ranges.empty()) std::memcpy(ranges.data(), rule.key.data() + 2 * len, ranges.size() * sizeof(KeyRange));
   const auto *bytes = reinterpret_cast<const std::byte *>(rule.key.data());
-  return TableOf(rule.dl).PrepareErase(ConstBytes(bytes, len), ConstBytes(bytes + len, len), ranges);
+  return TableOf(rule.dl).PrepareErase(ConstBytes(bytes, len), ConstBytes(bytes + len, len), rule.Ranges());
 }
 
 std::expected<std::vector<uint8_t>, std::string> SessionResource::Validate(const SessionValue &v) const {
@@ -354,6 +363,7 @@ std::expected<std::vector<uint8_t>, std::string> SessionResource::Validate(const
   for (const auto &p : v.pdrs) {
     const size_t len = KeyLen(p.dl);
     if (p.mask.size() != len || p.value.size() != len) return std::unexpected("PDR key length differs from its table");
+    if (len > Rule::kKeyBytes / 2) return std::unexpected("PDR key exceeds the session-major field layout");
     if (!bess::IsValidGateValue(p.gate)) return std::unexpected("invalid PDR gate");
     if (!keys.insert(std::string(p.dl ? "d" : "u") + RuleKey(p)).second)
       return std::unexpected("two PDRs of the session have one key");
@@ -571,8 +581,8 @@ class SessionResource::Staged final : public dp::StagedOp {
     // unaccount it here (freeing does not allocate). The engine may keep a
     // published op past the module's teardown, so its destructor must not
     // reach the owner.
-    rules_mirror_ = {};
-    fteids_mirror_ = {};
+    std::vector<Rule>{}.swap(rules_mirror_);
+    std::vector<upf::datapath::FteidId>{}.swap(fteids_mirror_);
     if (bytes_ != 0 && owner_.growth_ != nullptr) owner_.growth_->Shrink(bytes_, bytes_);
     bytes_ = 0;
   }
@@ -603,7 +613,7 @@ class SessionResource::Staged final : public dp::StagedOp {
   std::vector<const meter::MeterProfile *> acquired_;
   std::array<uint32_t, 2 * kMaxActions + 3 * kMaxQers> slots_;
   std::vector<Rule> rules_mirror_;
-  std::vector<SessionValue::Fteid> fteids_mirror_;
+  std::vector<upf::datapath::FteidId> fteids_mirror_;
   size_t bytes_ = 0;
   uint32_t cells_live_ = 0, meters_live_ = 0, meters_shared_ = 0, banks_[2] = {0, 0};
   uint8_t version_ = 0, actions_count_ = 0, qers_count_ = 0;
@@ -650,8 +660,8 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
       CHECK(prepared) << "a live session's rule is missing from its table";
       staged->break_.push_back({&TableOf(rule.dl), std::move(*prepared), 0});
     }
-    for (const auto &f : m.fteids)
-      if (auto ok = add_fteid(staged->fteid_erases_, dp::Op::Erase({}, dp::EncodeKey(f.id))); !ok)
+    for (const auto &id : m.fteids)
+      if (auto ok = add_fteid(staged->fteid_erases_, dp::Op::Erase({}, dp::EncodeKey(id))); !ok)
         return std::unexpected(ok.error());
     r.footprint.removals += static_cast<uint32_t>(m.rules.size()) + 1;
     tx_sessions_.insert(session);
@@ -669,12 +679,13 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
       return std::unexpected(std::format("action id {} belongs to another session", a.action_id));
   }
   std::vector<Rule> rules;
+  rules.reserve(v->pdrs.size());
   for (const auto &p : v->pdrs) {
-    Rule rule{p.dl, RuleKey(p)};
+    Rule rule(p);
     const auto found = TableOf(p.dl).FindRule(p.mask, p.value, p.ranges);
     if ((found && SessionOf(found->result_id) != session && !(live && std::ranges::any_of(
-             m.rules, [&](const Rule &o) { return o.dl == rule.dl && o.key == rule.key; }))) ||
-        tx_rules_.contains((p.dl ? "d" : "u") + rule.key))
+             m.rules, [&](const Rule &o) { return o == rule; }))) ||
+        tx_rules_.contains((p.dl ? "d" : "u") + RuleKey(p)))
       return std::unexpected("a PDR key belongs to another session");
     rules.push_back(std::move(rule));
   }
@@ -792,21 +803,23 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   // F-TEIDs: gone ones erased, new ones inserted, kept ones untouched unless
   // their End Marker relays changed -- the tunnels the F-TEID's PDRs forward
   // into moved -- which the F-TEID resource replaces whole.
-  for (const auto &old : m.fteids) {
-    const auto it = std::ranges::find(v->fteids, old.id, &SessionValue::Fteid::id);
+  for (const auto &id : m.fteids) {
+    const auto it = std::ranges::find(v->fteids, id, &SessionValue::Fteid::id);
     if (it == v->fteids.end()) {
-      if (auto ok = add_fteid(staged->fteid_erases_, dp::Op::Erase({}, dp::EncodeKey(old.id))); !ok)
+      if (auto ok = add_fteid(staged->fteid_erases_, dp::Op::Erase({}, dp::EncodeKey(id))); !ok)
         return std::unexpected(ok.error());
-    } else if (it->record.direction != old.record.direction ||
-               it->record.context_id != old.record.context_id) {
+      continue;
+    }
+    const auto old = fteids_.Find(id);
+    CHECK(old) << "a live session's F-TEID is missing";
+    if (it->record.direction != old->direction || it->record.context_id != old->context_id)
       return std::unexpected("an F-TEID keeps its direction and context; erase the session to change them");
-    } else if (it->record.relays != old.record.relays) {
+    if (it->record.relays != old->relays)
       if (auto ok = add_fteid(staged->fteid_upserts_, dp::Op::Upsert({}, dp::EncodeKey(it->id), std::any(it->record))); !ok)
         return std::unexpected(ok.error());
-    }
   }
   for (const auto &f : v->fteids) {
-    if (std::ranges::find(m.fteids, f.id, &SessionValue::Fteid::id) != m.fteids.end()) continue;
+    if (std::ranges::find(m.fteids, f.id) != m.fteids.end()) continue;
     // A live F-TEID outside this session's set is another session's (the
     // index would answer an identical insert as a no-op, sharing it).
     if (fteids_.Contains(dp::EncodeKey(f.id))) return std::unexpected("an F-TEID belongs to another session");
@@ -818,7 +831,7 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   // (by descending new priority), lowerings break. Distinct keys: Validate
   // and the ownership check above.
   for (const Rule &old : m.rules) {
-    if (std::ranges::any_of(rules, [&](const Rule &n) { return n.dl == old.dl && n.key == old.key; })) continue;
+    if (std::ranges::find(rules, old) != rules.end()) continue;
     auto prepared = PrepareErase(old);
     CHECK(prepared) << "a live session's rule is missing from its table";
     const int64_t priority = TableOf(old.dl).RuleAt(prepared->old).priority;
@@ -851,12 +864,13 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   std::ranges::stable_sort(staged->make_, std::ranges::greater{}, &Staged::RuleChange::order);
   std::ranges::stable_sort(staged->break_, std::ranges::less{}, &Staged::RuleChange::order);
   if (live) ++r.footprint.callbacks;
-  staged->rules_mirror_ = rules;
-  staged->fteids_mirror_ = v->fteids;
+  staged->rules_mirror_ = std::move(rules);
+  staged->fteids_mirror_.reserve(v->fteids.size());
+  for (const auto &f : v->fteids) staged->fteids_mirror_.push_back(f.id);
   size_t bytes = staged->rules_mirror_.capacity() * sizeof(Rule) +
-                 staged->fteids_mirror_.capacity() * sizeof(SessionValue::Fteid);
-  for (const Rule &rule : staged->rules_mirror_) bytes += rule.key.capacity() + 1;
-  for (const auto &f : staged->fteids_mirror_) bytes += f.record.relays.capacity() * sizeof(upf::datapath::EndMarkerRelay);
+                 staged->fteids_mirror_.capacity() * sizeof(upf::datapath::FteidId);
+  for (const Rule &rule : staged->rules_mirror_)
+    if (rule.ranges) bytes += sizeof(*rule.ranges) + rule.ranges->capacity() * sizeof(KeyRange);
   if (growth_ != nullptr) growth_->Grow(bytes, bytes);
   staged->bytes_ = bytes;
   staged->actions_count_ = static_cast<uint8_t>(v->actions.size());
@@ -882,10 +896,12 @@ upf::pb::UpfSession SessionResource::Read(uint32_t session) const {
   const auto slots = Slots(session);
   const auto ref_at = [&](size_t q) { return slots[2 * limits_.max_actions + 2 * limits_.max_qers + q]; };
   upf::pb::UpfSession out;
-  for (const auto &f : m.fteids) {
+  for (const auto &id : m.fteids) {
+    const auto record = fteids_.Find(id);
+    CHECK(record) << "a live session's F-TEID is missing";
     auto *o = out.add_fteids();
-    *o->mutable_key() = EncodeFteidKey(f.id);
-    *o->mutable_entry() = upf::datapath::EncodeFteidEntry(f.record);
+    *o->mutable_key() = EncodeFteidKey(id);
+    *o->mutable_entry() = upf::datapath::EncodeFteidEntry(*record);
   }
   for (uint8_t q = 0; q < m.qers; ++q) {
     const uint32_t ref = ref_at(q);
@@ -912,8 +928,7 @@ upf::pb::UpfSession SessionResource::Read(uint32_t session) const {
   }
   for (const Rule &rule : m.rules) {
     const size_t len = KeyLen(rule.dl);
-    std::vector<KeyRange> ranges((rule.key.size() - 2 * len) / sizeof(KeyRange));
-    if (!ranges.empty()) std::memcpy(ranges.data(), rule.key.data() + 2 * len, ranges.size() * sizeof(KeyRange));
+    const auto ranges = rule.Ranges();
     const auto *bytes = reinterpret_cast<const std::byte *>(rule.key.data());
     const auto found = TableOf(rule.dl).FindRule(ConstBytes(bytes, len), ConstBytes(bytes + len, len), ranges);
     CHECK(found) << "a live session's rule is missing from its table";
