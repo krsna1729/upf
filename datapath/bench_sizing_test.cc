@@ -29,4 +29,13 @@ TEST(BenchSizing, FteidIndexHoldsOneKeyPerSession) {
   }
 }
 
+TEST(BenchSizing, SessionSlotsCoverResidentsChurnAndSelfTestGrace) {
+  for (uint32_t n : {1u, 1024u, 1000000u}) {
+    EXPECT_EQ(uint64_t{n} + 1, upf::bench::SessionCapacity(n, false));
+    EXPECT_EQ(uint64_t{n} + 1025, upf::bench::SessionCapacity(n, true));
+    EXPECT_EQ(upf::bench::SessionCapacity(n, true), upf::bench::FteidCapacity(n, true));
+    EXPECT_GE(upf::bench::ActionCapacity(n, true), 2 * (uint64_t{n} + 1024));
+  }
+}
+
 }  // namespace

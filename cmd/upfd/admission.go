@@ -3,10 +3,13 @@
 package main
 
 import (
+	"context"
 	"math"
+	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
 	"sync"
+	"time"
 )
 
 // defaultHeapAdmission is the share of the runtime's memory limit the live heap
@@ -54,4 +57,81 @@ func (g *heapGauge) read() (live, limit uint64) {
 // runtime target. A fraction of 0 or no runtime target disables this check.
 func heapAdmits(live, limit uint64, fraction float64) bool {
 	return fraction <= 0 || limit == 0 || float64(live) <= fraction*float64(limit)
+}
+
+// heapAdmissionRecovery only signals under Compiler.mu. Its single worker
+// observes successful deletions through Stats outside that lock, then refreshes
+// a stale closed sample at most once per second, only after new deletion progress.
+type heapAdmissionRecovery struct {
+	fraction float64
+	read     func() (uint64, uint64)
+	refused  chan struct{}
+	collect  func()
+	pause    func(context.Context) bool
+}
+
+func newHeapAdmission(fraction float64, read func() (uint64, uint64)) *heapAdmissionRecovery {
+	return &heapAdmissionRecovery{
+		fraction: fraction,
+		read:     read,
+		refused:  make(chan struct{}, 1),
+		collect:  runtime.GC,
+		pause: func(ctx context.Context) bool {
+			timer := time.NewTimer(time.Second)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return false
+			case <-timer.C:
+				return true
+			}
+		},
+	}
+}
+
+func (h *heapAdmissionRecovery) admit() bool {
+	live, limit := h.read()
+	if heapAdmits(live, limit, h.fraction) {
+		return true
+	}
+	select {
+	case h.refused <- struct{}{}:
+	default:
+	}
+	return false
+}
+
+// run keeps watching after a refusal so a later deletion can reopen an idle
+// node without another PFCP request. Cancellation stops the wait, not an
+// in-flight runtime.GC: the caller must join this worker on shutdown.
+func (h *heapAdmissionRecovery) run(ctx context.Context, deletions func() uint64) {
+	var collected uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-h.refused:
+		}
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			deleted := deletions()
+			live, limit := h.read()
+			if heapAdmits(live, limit, h.fraction) {
+				break
+			}
+			if deleted > collected {
+				if ctx.Err() != nil {
+					return
+				}
+				collected = deleted
+				h.collect()
+			}
+			// This also rate-limits collections across reopen/refusal cycles.
+			if !h.pause(ctx) {
+				return
+			}
+		}
+	}
 }

@@ -3107,14 +3107,14 @@ not another latency reference.
 
 ### Packet candidates do not clear the landing gate (2026-11-16)
 
-The two queued packet candidates were measured against current develop
+The two queued packet candidates were measured against their common parent
 (`e339f5e0`) with the format-preserving `live_perf` ABBA: eight palindromic
 rounds, two seconds each, worker on CPU 8, control on CPU 6, buffers 32768,
-ordinary pages. Each branch is develop plus a 33-commit modernization series
-and one candidate tip: `15ed4668` (head ownership per batch, D-204) or
-`780a3ae0` (two-store `AllocBulk` reset). Both historical trees predate
-`--mem_backing`; the launcher maps that harness flag to `-m 0`. Module rows are
-ns/packet above `M.base`, so a framework shift does not appear nine times.
+ordinary pages. Each candidate is one commit on `e339f5e0`: `f2f09179`
+(head ownership per batch, D-204) or `b86fe273` (two-store `PacketRef::reset`).
+Both trees predate `--mem_backing`; the launcher maps that harness flag to
+`-m 0`. Module rows are ns/packet above `M.base`, so a framework shift does not
+appear nine times.
 
 | Test | develop | D-204 tip | Change | Pairs | develop | Reset tip | Change | Pairs |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -3131,14 +3131,23 @@ ns/packet above `M.base`, so a framework shift does not appear nine times.
 | F.size/1500 | - | - | - | - | 4.15 | 2.75 | -33.7% | 3/8 |
 | F.flowgen | - | - | - | - | 109.84 | 112.67 | +2.6% | 8/8 |
 
-D-204 keeps `M.base` and `M.macswap` flat to slightly better and makes seven
-localised cells 0.7–10.6% slower, with `M.update_ttl` and `M.ipswap` over 7% in
-7/8 pairs. The reset tip wins the framework floor by a third but costs 18.5% on
-`M.base` and 36.5% on `M.macswap`, all 8/8 pairs, and `F.flowgen` slower 8/8.
-Both candidates were queued under the rule that each lands only on a measured
-gain; a net packet regression in the main path is not such a gain. **Neither
-lands.** The evidence is preserved, and the branches are archived as bundles
-before deletion rather than merged.
+In D-204 (`f2f09179`), `M.base` and `M.macswap` do not call `HeadsOwned`; all
+five modules modified to call `HeadsOwned` before their packet loop (`IPSwap`,
+`UpdateTTL`, `StaticNAT`, `IPChecksum`, `L4Checksum` non-verify) regress by
+0.7–10.6%, with `M.update_ttl` (+10.6%) and `M.ipswap` (+7.9%) slower in 7/8
+pairs. Walking the `rte_mbuf*` batch a second time while `WritableHead` still
+checks length per packet costs more than the inline `RTE_MBUF_DIRECT && refcnt == 1`
+check when mbuf headers are already in L1. In `PacketRef::reset` (`b86fe273`),
+`F.floor` and `F.size/1500` (`Source -> Sink`) never call `PacketRef::reset()`;
+their apparent -34.3% / -33.7% delta is four `base` rounds stepping to
+`5.54–5.78 ns` while four match `cand` at `2.74–2.76 ns` (4/8 and 3/8 pairs).
+Every cell that calls `PacketRef::reset()` regresses in 8/8 pairs: `F.flowgen`
+(`FlowGen`) +2.6%, `M.base` (`Rewrite`) +18.5%, and `M.macswap` +36.5% above
+`M.base` (`12.62 -> 15.29 ns` total), where storing two 16-byte vectors right
+before `Rewrite` scalar-writes `pkt_len` and `data_len` inside the second
+16-byte region loses to `rte_pktmbuf_reset`. Both candidates were queued under
+the rule that each lands only on a measured gain; **neither lands**, and both
+branches are archived as bundles before deletion.
 
 ### Applying the Tailscale lessons to this stack
 

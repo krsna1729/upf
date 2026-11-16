@@ -332,14 +332,27 @@ func run() error {
 				graph.N4Addr = a
 			}
 		}
+		var admission *heapAdmissionRecovery
 		if fraction := *heapAdmission; fraction > 0 {
-			graph.Admit = func() bool {
-				live, limit := heap.read()
-				return heapAdmits(live, limit, fraction)
-			}
+			admission = newHeapAdmission(fraction, heap.read)
+			graph.Admit = admission.admit
 		}
 		cfg.Sessions = session.New(graph, client, log)
 		compiler = cfg.Sessions.(*session.Compiler)
+		if admission != nil {
+			recoveryCtx, cancelRecovery := context.WithCancel(ctx)
+			recoveryDone := make(chan struct{})
+			go func() {
+				defer close(recoveryDone)
+				admission.run(recoveryCtx, func() uint64 { return compiler.Stats().Deleted })
+			}()
+			defer func() {
+				cancelRecovery()
+				// runtime.GC cannot be cancelled; join any collection in flight
+				// before closing the session layer's client and checkpoint.
+				<-recoveryDone
+			}()
+		}
 		// The restart wall (docs/design.md): the daemon may still hold an
 		// earlier controller's sessions, and this process knows none of them --
 		// they would match packets with ids nothing here can name. They go

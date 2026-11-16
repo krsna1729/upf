@@ -2,6 +2,7 @@
 #include "counter_changes.h"
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -63,6 +64,44 @@ TEST(CounterChanges, RetryPaginationAndAcknowledgementDoNotLoseActivity) {
   ASSERT_TRUE(changes.Read(arg, &retained));
   ASSERT_EQ(retained.action_ids_size(), 1);
   EXPECT_EQ(retained.action_ids(0), 9u);
+}
+
+TEST(CounterChanges, SparseBlockMasksRetainEveryWordAndClearOnlyAcknowledgedBank) {
+  constexpr uint32_t kCapacity = (1u << 22) + 1024;
+  bess::rcu::RcuDomain domain(2);
+  CounterChanges changes(kCapacity, 2, domain);
+  EXPECT_EQ(changes.bytes(), CounterChanges::Bytes(kCapacity, 2, domain));
+  const size_t old_payload = 2 * 2 * ((kCapacity / 64 + 16) & ~size_t{15}) * 12;
+  EXPECT_LT(changes.bytes(), old_payload * 3 / 4);
+  const std::vector<uint32_t> ids{1023, 1, 64, 1024, kCapacity, kCapacity - 64};
+  for (uint32_t id : ids) {
+    changes.ForWorker(0).Mark(id);
+    changes.ForWorker(0).Mark(id);
+  }
+  Reply first;
+  ASSERT_TRUE(changes.Read(Arg{}, &first));
+  std::vector<uint32_t> got(first.action_ids().begin(), first.action_ids().end());
+  auto want = ids;
+  std::sort(got.begin(), got.end());
+  std::sort(want.begin(), want.end());
+  EXPECT_EQ(want, got);
+  changes.ForWorker(1).Mark(1023);
+  changes.ForWorker(1).Mark(kCapacity);
+  Arg arg;
+  arg.set_acknowledge(first.sequence());
+  Reply next;
+  ASSERT_TRUE(changes.Read(arg, &next));
+  ASSERT_EQ(2, next.action_ids_size());
+  EXPECT_EQ(1023u, next.action_ids(0));
+  EXPECT_EQ(kCapacity, next.action_ids(1));
+  // This reuses the cleared bitmap's former blocks; no stale word mask may
+  // suppress adding the block to the touched list.
+  changes.ForWorker(0).Mark(64);
+  arg.set_acknowledge(next.sequence());
+  Reply reused;
+  ASSERT_TRUE(changes.Read(arg, &reused));
+  ASSERT_EQ(1, reused.action_ids_size());
+  EXPECT_EQ(64u, reused.action_ids(0));
 }
 
 TEST(CounterChanges, BatchGracePeriodsNeverLoseTheLastPacketOfARule) {

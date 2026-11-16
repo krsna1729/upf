@@ -482,8 +482,8 @@ class Study {
     else {
       // Session layout: QERs and tunnels are sized per session (two of
       // each per session here), so meter.capacity and encap.max_tunnels
-      // stay 0; the session ids and the F-TEIDs need N (+1024 churn) slots,
-      // the action-id space (buffer_counters) keeps `cap`.
+      // stay 0; session/F-TEID spaces hold N residents, 1024 churn IDs when
+      // enabled, and a disjoint self-test/grace slot. ActionIds keep `cap`.
       const std::string sized =
           session_layout()
               ? R"({"decap": {"max_fteids": )" + fteidj + R"(}, "counters": {"capacity": )" + capj +

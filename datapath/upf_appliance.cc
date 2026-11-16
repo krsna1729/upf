@@ -237,8 +237,8 @@ CheckConstraintResult UpfAppliance::CheckModuleConstraints() const {
   auto result = Module::CheckModuleConstraints();
   // Every bank has the same planes; buffer_counters exists in both layouts.
   // One plane is written by whichever worker runs the module.
-  if (buffer_counters_.cells && buffer_counters_.cells->workers() > 1) {
-    for (size_t wid = buffer_counters_.cells->workers(); wid < active_workers().size(); ++wid)
+  if (buffer_counters_.pages && buffer_counters_.pages->workers() > 1) {
+    for (size_t wid = buffer_counters_.pages->workers(); wid < active_workers().size(); ++wid)
       if (active_workers()[wid]) {
         LOG(ERROR) << name() << ": active worker id exceeds counter worker_planes";
         return CHECK_FATAL_ERROR;

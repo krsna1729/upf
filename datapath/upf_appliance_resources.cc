@@ -335,16 +335,27 @@ CommandResponse UpfAppliance::InitResources(const upf::pb::UpfApplianceArg &arg)
       return CommandFailure(EINVAL, "%s", r.error().c_str());
   }
   auto init_counter = [&](Counters &bank, const char *table) -> std::expected<void, std::string> {
-    bank.cells = memory.Create<bess::stats::KeyedCounters>(std::string(table) + "_cells", capacity_, 2, planes);
-    bank.stamps_lease = memory.Lease(std::string(table) + "_stamps", bess::utils::DpdkArray<Stamps>::Bytes(capacity_, memory.socket()));
-    bank.stamps = bess::utils::DpdkArray<Stamps>(capacity_, memory.socket());
-    bank.stamps_lease.Track(bank.stamps);
+    if (&bank == &buffer_counters_) {
+      bank.pages = memory.Create<BufferCounterPages>(std::string(table) + "_cells", capacity_, planes);
+      bank.paged_entries = memory.Create<dataplane::SlotTable<Id, CounterEntry, true>>(table, capacity_);
+    } else {
+      bank.cells = memory.Create<bess::stats::KeyedCounters>(std::string(table) + "_cells", capacity_, 2, planes);
+      bank.stamps_lease = memory.Lease(std::string(table) + "_stamps", bess::utils::DpdkArray<Stamps>::Bytes(capacity_, memory.socket()));
+      bank.stamps = bess::utils::DpdkArray<Stamps>(capacity_, memory.socket());
+      bank.stamps_lease.Track(bank.stamps);
+      bank.entries = memory.Create<dataplane::SlotTable<Id, CounterEntry>>(table, capacity_);
+    }
     bank.live_lease = memory.Lease(std::string(table) + "_live", upf::appliance::LiveIds::Bytes(capacity_, memory.socket()));
     bank.live = std::make_unique<upf::appliance::LiveIds>(capacity_, memory.socket());
     bank.live_lease.Track(bank.live->array());
-    bank.entries = memory.Create<dataplane::SlotTable<Id, CounterEntry>>(table, capacity_);
-    bank.resource = std::make_unique<upf::appliance::TrackedSlotResource<Id, CounterEntry>>(
-        name() + "/" + table, *bank.entries, *bank.live);
+    if (&bank == &buffer_counters_) {
+      bank.resource = std::make_unique<upf::appliance::TrackedSlotResource<Id, CounterEntry, true>>(
+          name() + "/" + table, *bank.paged_entries, *bank.live,
+          [&bank](uint32_t id) { bank.pages->Prepare(id); });
+    } else {
+      bank.resource = std::make_unique<upf::appliance::TrackedSlotResource<Id, CounterEntry>>(
+          name() + "/" + table, *bank.entries, *bank.live);
+    }
     bindings_.push_back(init_context().codecs().Bind(*bank.resource,
       std::make_shared<bess::framework::TypedCodec<upf::pb::CounterKey, upf::pb::CounterEntry>>(
         [](const upf::pb::CounterKey &key) -> std::expected<dataplane::ResourceKey, std::string> {
@@ -652,6 +663,7 @@ void UpfAppliance::ReleaseResources() {
   policies_.reset(); health_.reset(); tunnels_.reset();
   for (auto *bank : {&counters_ul_, &counters_dl_, &buffer_counters_}) {
     bank->resource.reset(); bank->entries.reset(); bank->cells.reset();
+    bank->paged_entries.reset(); bank->pages.reset();
     bank->stamps = {}; bank->stamps_lease.reset();
     bank->live.reset(); bank->live_lease.reset();
   }
@@ -688,6 +700,10 @@ CommandResponse UpfAppliance::CommandGetCounts(const upf::pb::UrrCountCommandGet
     auto *count = response.add_counts();
     count->set_action_id(id);
     if (!id || id > capacity_) return;
+    if (bank->pages) {
+      bank->pages->Read(id, arg.restart_window(), count);
+      return;
+    }
     // Plane by plane, the pair a worker added together (UrrCount::Counts).
     uint64_t packets = 0, octets = 0;
     for (size_t w = 0; w < bank->cells->workers(); ++w) {

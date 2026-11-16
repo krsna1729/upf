@@ -430,8 +430,9 @@ message UpfApplianceArg {
   repeated UpfApplianceNextHopClass next_hop_classes = 14;
   uint64 recovery_time_stamp = 15; // zero: this module's start, NTP seconds
   // UpfSessionAppliance (the session-major profile) only; UpfAppliance refuses
-  // it. With it, counters.capacity sizes buffer_counters alone, meter.capacity
-  // the shared meters ("upf/meters"), and encap.max_tunnels must be 0.
+  // it. With it, counters.capacity bounds ActionIds, including buffer counters
+  // and per-flow limits (1024-ID pages admitted on upsert, retained to teardown).
+  // meter.capacity sizes shared meters ("upf/meters"); encap.max_tunnels must be 0.
   UpfApplianceSessionArg session = 16;
 }
 
