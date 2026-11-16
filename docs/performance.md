@@ -2,8 +2,9 @@
 
 Use this page to choose and assess performance changes. Preserve dated baselines;
 append measured outcomes instead of replacing old evidence with a new claim.
-The deployment and capacity record remains in
-[design.md](design.md#final-1m-session-churn-measurement-2026-11-05).
+The deployment and capacity record — including the
+[final product dimensioning, floor vs. tradeoff verdict, and takeaways](design.md#final-product-dimensioning-and-floor-vs-tradeoff-verdict-2026-11-16)
+— remains in [design.md](design.md#final-1m-session-churn-measurement-2026-11-05).
 Follow the [measurement rules](engineering-guide.md#6-measurement).
 
 ## Power qualification correction — 2026-11-06
@@ -3168,3 +3169,42 @@ optimization for a DPDK path. Kernel UDP offloads additionally require the
 correct checksum/segmentation contract; enabling GRO without splitting the
 received segments correctly would break datagram framing. No PFCP socket
 offload or language rewrite is introduced by this audit.
+
+## Final product dimensioning, floor vs tradeoff verdict, and takeaways (2026-11-16)
+
+The complete dimensioning tables (per-account 1M memory ledger, 0-to-1.494M
+session scaling matrix, throughput/churn/overload matrix, and 4-quadrant
+floor-vs-tradeoff table) live in
+[design.md](design.md#final-product-dimensioning-and-floor-vs-tradeoff-verdict-2026-11-16).
+Summary of the landed state on `upf/main` (`33208e5`) + `bess/develop`
+(`e38f36d1`):
+
+1. **1M-session memory fits inside 4.1 GiB (`< 6 GiB` tab+lane envelope):**
+   `bessd` loaded RSS is **1,848.8 MiB** (`1,812.5 MiB` admitted: `1,575.4 MB`
+   normal/DPDK + `325.1 MB` glibc, startup baseline `68.6 MiB`, signed residual
+   `−32.3 MiB`, unassigned glibc growth `2.59 MB / 0.86%`). `upfd` holds
+   **1,511 B/session** of live heap (`1,441 MiB` at 1M, down 40% from
+   `2,518 B/session`) and peaks at **1,866–1,897 MiB (`GOGC=10`)**,
+   **2,051–2,058 MiB (`GOGC=25`)**, or **2,328–2,329 MiB (`GOGC=50`)**, for a
+   combined product lane peak of **3,888–4,089 MiB** at `GOGC=10/25` with zero
+   OOM events.
+2. **Minimum floor to maximum scale:** Empty floor is **125–180 MiB** on **2
+   cores** (`upfd` 20–48 MiB + `bessd` 68.6 MiB baseline + 33.6 MiB at 8,192
+   buffers); default `-capacity 65536` is **~425 MiB** (`[INFERENCE]`); marginal
+   slope is **~3.7 GiB per 1M sessions** at `GOGC=25`, with a power-of-two step
+   in `upf/fteids` (`SharedExactIndex`, $72\text{ B} \times 2^k$) at 747,094 and
+   1,494,204 keys and a fixed **100.3 MiB per route domain** when destination
+   routing is enabled.
+3. **Hotpath and control-plane capacity:** One worker core forwards **7.25 Mpps
+   per direction (14.5 Mpps total)**. On 1 `upfd` P-core + 1 `bessd` control
+   P-core (`no_turbo=1`), 1M sessions sustain **1,000/s** modifications at
+   **3.24–4.29 ms p99** (12–22% of one `upfd` core) and saturate at **10,000/s
+   URR**, **3,461–4,113/s FAR/PDR/QER**, and **1,007/s replacements**, refusing
+   excess load above capacity (10K–100K/s) with **PFCP cause 75** and zero
+   timeouts or UDP drops.
+4. **Floor vs. optimal tradeoff:** `bessd` packet hotpath and `bessd` memory
+   accounting are **at their structural floor**; `upfd` N4 overload/tick
+   handling and `upfd` session memory (`GOGC=25`, pre-encoded wire payloads,
+   persistent transaction streams) are **at their optimal Go tradeoff point**,
+   sitting **427–647 B/session** above the theoretical `864–1,084 B/session`
+   pointer-free slab floor.

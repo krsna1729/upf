@@ -1051,11 +1051,14 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   caches are walked rather than kept. At 1M in the lane run
   (`evidence/upfd-mem-20261113/1m-lane5000-u2700`) HeapAlloc after the fill
   was 1,501 MiB, 1.57 KB per session with the compiler's own maps.
-- **Garbage: ~28 KB per establishment** end to end. The 1M lane run
+- **Garbage: ~28 KB per establishment before typed payloads; −29.5% to −45.9%
+  lifecycle construction bytes after (`#78`).** The earlier 1M lane run
   allocated 30.6 GB over ~1M establishments; reading grouped IEs' children
   once instead of through go-pfcp's re-parsing accessors removed 2.7 KB of it
-  (20.2 → 17.5 KB in-process). The largest remaining share is the
-  `map[string]any` keys and values of each dataplane change.
+  (20.2 → 17.5 KB in-process), and replacing `map[string]any` dataplane change
+  payloads with typed pre-encoded wire values (`internal/bess/payload.go`,
+  `internal/session/payload.go`, `UpsertEncoded`) cut lifecycle construction
+  allocations by 29.5% for graph/appliance and 45.9% for session-major.
 - **Rate with one worker: 1,450/s at 100K and 1,220/s at 1M.** bessd's Apply
   takes 0.63-0.75 ms and is 91% of the load wall time.
   `-session-workers 8` overlaps those transactions: 2,140/s at 100K and 1,425/s
@@ -1137,9 +1140,11 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
     refuses establishments from 167,678.
   - In 3 GiB (upfd 1472 + bessd 1600 MiB), 300K fit. bessd refuses from
     373,556.
-  - At 1M, `upfd` peaks at 2,265 MiB in a 2,700 MiB scope and bessd at
-    2,158 MiB (16,384 packet buffers, exact counters); the lane's three
-    processes total 4,537 MiB with no OOM event.
+  - At 1M (`#75`–`#78`, BESS `#151`–`#152`, `16,384` packet buffers), `bessd`
+    loaded RSS is 1,848.8 MiB (`1,812.5 MiB` admitted across normal and glibc
+    heaps), `upfd` peaks at 1,866–1,897 MiB (`GOGC=10`), 2,051–2,058 MiB
+    (`GOGC=25`) or 2,328–2,329 MiB (`GOGC=50`), and the combined product lane
+    peaks at 3,888–4,089 MiB (`GOGC=10/25`) with zero OOM events.
 - **Association end.** It erases in transactions of up to 1,000 changes. 1M
   sessions leave in 488 s once BESS's RecordArena grows its retirement queue
   geometrically (krsna1729/bess#116); before that fix, it took 4,246 s.
@@ -1378,6 +1383,106 @@ deadline semantics, and no merging of independent transactions. Against unary
 calls at 1M loaded sessions (gated ABBA, 4 pairs), streams raise replacement
 capacity 22.7% and FAR capacity 5.7%, and cut the 1K replacement p99 36%
 (`docs/performance.md`, "Loaded UPFD at 1M").
+
+### Final product dimensioning and floor vs tradeoff verdict (2026-11-16)
+
+#### Takeaway
+
+- **Memory at 1M sessions (`upf/main` `33208e5` + `bess/develop` `e38f36d1`):**
+  Combined product footprint is **3.89–4.09 GiB** (`bessd` loaded RSS
+  **1,848.8 MiB**, `upfd` peak RSS **1,866–2,058 MiB** at `GOGC=10/25`),
+  fitting inside the 6 GiB no-swap envelope with zero OOM events. Marginal cost
+  is **~3.45 KiB of live state per session** (`1,511 B` in `upfd` Go live heap
+  plus `1,900.5 B` admitted in `bessd`).
+- **Minimum floor to maximum scale:** The empty product floor is **125–180 MiB**
+  on **2 CPU cores** (`upfd` 20–48 MiB + `bessd` 68.6 MiB baseline + 33.6 MiB
+  for 8,192 packet buffers). The default `-capacity 65536` profile fits in
+  **~425 MiB** (`[INFERENCE]` from per-table formulas). Memory scales linearly
+  at **~3.7 GiB per million sessions** (`GOGC=25`), with one power-of-two step
+  in `SharedExactIndex` (`upf/fteids`, $72\text{ B} \times 2^k$) at
+  747,094 and 1,494,204 keys.
+- **Throughput and churn:** One `bessd` worker core forwards **7.25 Mpps per
+  direction (14.5 Mpps bidirectional)**. On two control P-cores (`upfd` +
+  `bessd` control, `no_turbo=1`), 1M resident sessions sustain **1,000/s**
+  N4 modifications at **3.24–4.29 ms p99** (using 12–22% of one `upfd` core)
+  and saturate at **10,000/s URR**, **3,461–4,113/s FAR/PDR/QER**, and
+  **1,007/s full replacements**. Above capacity (10K–100K/s offered), bounded
+  worker queues and admission guards answer excess requests with **PFCP cause
+  75** with zero timeouts, zero UDP drops, and uninterrupted heartbeats.
+- **Floor vs. optimal tradeoff status:**
+  - **`bessd` packet hotpath:** **At floor** (zero hotpath allocations; flat
+    920 B session slots, flat action index, inline keys, lockless 16-bit masked
+    counter bitmaps; ±0.7% Mpps invariance).
+  - **`bessd` control path & memory accounting:** **At floor and accounted**
+    (dormant buffer tables paged `113.1 MB → 53 KB`; flat session mirrors;
+    duplicate F-TEID map removed; cold F-TEID and snapshot allocations charged
+    at exact glibc chunk size via `AdmittedGlibcAllocator`; unattributed loaded
+    glibc growth is **2.59 MB / 0.86%**).
+  - **`upfd` N4 read loop, overload & URR tick:** **At optimal tradeoff**
+    (immediate cause 75 refusal on full queues, dirty-bitmap URR selection with
+    zero RPCs for idle sessions, and a 1 Hz deletion-progress GC watcher).
+  - **`upfd` session model & GC:** **At optimal Go tradeoff (`GOGC=25`),
+    427–647 B/session above the theoretical pointer-free slab floor**
+    (`1,511 B/session` live heap vs `864–1,084 B/session` packed slab budget).
+
+#### 1. Per-account memory ledger at 1,000,000 sessions (`native-exact`)
+
+Configured spaces: `1,131,072` session slots (`max_actions=2`, `max_qers=2`),
+`2,262,144` ActionIds, `2,097,152` F-TEIDs, `16,384` packet buffers, 2 PDRs +
+2 FARs + 1 QER + 1 volume-quota URR + 1 uplink F-TEID per session
+(`.scratch/evidence/cross-stack-budget-audit/native-exact/`).
+
+| Daemon / Resource | 0 Sessions (MiB) | 1M Sessions (MiB) | 1M Delta (MiB) | Per Session at 1M | Backing & Scaling Law |
+|---|---:|---:|---:|---:|---|
+| `bessd` `upf/sessions` (slot array + flat mirror) | 993.46 | 993.46 | 0.00 | 1,041.7 B | DPDK/normal slab: `920 B × max_sessions` (`1,131,072`) |
+| `bessd` `upf/sessions` (cold control snapshots) | 0.00 | 167.85 | +167.85 | 176.0 B | `AdmittedGlibcAllocator` chunks (`#77`, `#78`) |
+| `bessd` `upf/fteids` (`SharedExactIndex` `rte_hash`) | 204.00 | 204.00 | 0.00 | 213.9 B | Power-of-two $P=2^{21}$: $72\text{ B} \times P$ (`101–202 B/key`) |
+| `bessd` `upf/fteid_records` (direction + relay) | 0.00 | 122.08 | +122.08 | 128.0 B | `16.0 MiB` normal slab (`16 B/key`) + `112.0 MiB` glibc (`112 B/node`) |
+| `bessd` `upf/pdr_ul` + `upf/pdr_dl` (masked rules) | 0.25 | 217.32 | +217.07 | 227.9 B | `ConcurrentMaskedTable` + `RecordArena` (`108.66 MiB` each) |
+| `bessd` `packet_pool` (`--buffers 16384`) | 64.00 | 64.00 | 0.00 | Fixed pool | `67.11 MB` (`33.55 MB` at `8,192` buffers) |
+| `bessd` `buffer_continuations` + `buffer_store` + pages | 25.32 | 25.32 | 0.00 | Fixed + paged | `21.50 MB` continuations + `4.72 MB` store + `53 KB` dormant pages (`#78`) |
+| `bessd` `counter_changes_ul` + `dl` | 2.26 | 2.26 | 0.00 | 2.4 B | 2 bitmap banks + 16-bit word masks (`1.13 MiB` each, `#78`) |
+| `bessd` `event_hub` + `transaction_records` + misc | 5.12 | 16.18 | +11.06 | Bounded | `16,384`-event ring (`#152`), hop-mode routers (`0.38 MiB`), policies |
+| **`bessd` Total Admitted / Process RSS** | **1,294.41 / 1,200.36** | **1,812.47 / 1,848.80** | **+518.06 / +648.44** | **1,900.5 B / 1,938.6 B** | Startup baseline `68.64 MiB`; signed residual `−32.3 MiB` |
+| **`upfd` Live Heap / Peak RSS (`GOGC=10`)** | 8.9 / 20.3 | 1,441.0 / 1,866–1,897 | +1,432.1 / +1,846 | 1,511.0 B / 1,957 B | `GOMEMLIMIT=2400MiB`, GC CPU `15.82–18.37 s`, p99 `16.06–16.70 ms` |
+| **`upfd` Live Heap / Peak RSS (`GOGC=25`, default)** | 8.9 / 20.3 | 1,441.0 / 2,051–2,058 | +1,432.1 / +2,031 | 1,511.0 B / 2,150 B | `GOMEMLIMIT=2400MiB`, GC CPU `6.91–9.05 s`, p99 `12.73–13.80 ms` |
+| **`upfd` Live Heap / Peak RSS (`GOGC=50`)** | 8.9 / 20.3 | 1,441.0 / 2,328–2,329 | +1,432.1 / +2,308 | 1,511.0 B / 2,441 B | `GOMEMLIMIT=2400MiB`, GC CPU `4.58–4.60 s`, p99 `9.83–10.72 ms` |
+
+#### 2. Dimensioning matrix from empty floor to 1.494M sessions
+
+Rows marked **Measured** are direct campaign observations; rows marked
+**`[INFERENCE]`** evaluate the measured per-table formulas (`bench_sizing.h`,
+`bench_sizing_test.cc`) at `GOGC=25` with hop-mode routing (destination-mode
+routing adds a fixed **100.3 MiB per route domain** in `bessd`).
+
+| Session Scale | `upfd` Live Heap (MiB) | `upfd` Peak RSS (`GOGC=25`, MiB) | `bessd` Admitted / RSS (MiB) | Combined Product RAM (MiB) | Min CPU Cores (worker + `bessd` ctl + `upfd`) | Provenance |
+|---:|---:|---:|---:|---:|---:|---|
+| **0 (Empty Floor)** | 8.9 | 20–48 | 102–135 | **125–180** | **2 cores** (1 worker + 1 shared ctl) | **Measured** (`ci/check-test-memory.py`, `bessd` baseline + `8,192` buffers) |
+| **1,000** | 1.5 | 48 | 145 | **~195** | **2 cores** | **`[INFERENCE]`** (`bench_sizing.h`: `65,536` min action-ID floor) |
+| **65,536 (`-capacity` default)** | 94.4 | 160 | 265 | **~425** | **2–3 cores** | **`[INFERENCE]`** ($N=65,536$, $P=2^{17}$ F-TEID index) |
+| **500,000** | 720.5 | 1,050 | 1,020 | **~2,070** | **3 cores** | **`[INFERENCE]`** ($N=500,000$, $P=2^{20}$ F-TEID index) |
+| **1,000,000 (Target 1M)** | 1,441.0 | 1,866 (`GOGC=10`) / 2,051 (`GOGC=25`) | 1,849 | **3,888–4,089** | **3 P-cores** (CPU 8 worker, CPU 6 `bessd`, CPU 4 `upfd`) | **Measured** (`native-exact`, `sparse-A/B`, `GOGC` sweep) |
+| **1,494,000 ($P=2^{21}$ F-TEID cap)** | 2,153.0 | 2,850 | 2,610 | **~5,460** | **3–4 P-cores** | **`[INFERENCE]`** (`bench_sizing_test.cc`: top of $P=2^{21}$ `SharedExactIndex`) |
+
+#### 3. Throughput, churn capacity, and overload dimensioning (at 1M sessions)
+
+| Workload / Metric | Sustained Rate | Latency (p50 / p99) | CPU Requirement (`no_turbo=1`, 2.6 GHz) | Overload / Loss Behavior | Evidence |
+|---|---:|---:|---|---|---|
+| **GTP-U Packet Hotpath (UL + DL)** | **7.25 Mpps/dir** (**14.5 Mpps** total) | Batch-synchronous | **1.0 worker core** (`0` control CPU) | 0 drops up to rate; meter drops excess | `ci/bench-graph.sh`, `bess #151` ABBA |
+| **Idle 1M Control Plane (1s URR tick)** | 0 churn/s | — | **`bessd` ctl: 1.0–1.5% core** (`10.2 ms/s` P, `15.0 ms/s` E) | Dirty bitmap skips idle sessions (`0` RPCs) | `idle-isolation` (32 arms) |
+| **1,000 / s N4 FAR / PDR / QER Modify** | **1,000/s** (100% accepted) | p99 **3.24–4.29 ms** (90s: **9.8–13.8 ms**) | **`upfd`: 0.12–0.22 P-core**; **`bessd` ctl: ~0.15 P-core** | **0** timeouts, **0** refusals, **0** UDP drops | `performance.md` (`GOGC` + `sparse` sweeps) |
+| **1,000 / s N4 Session Replace** | **1,000/s** (`2,000` tx/s) | p99 **588 ms** (`−36%` vs unary) | **~0.85 `upfd` P-core + ~0.65 `bessd` ctl P-core** | **0** timeouts, **0** refusals | `abba2` + `#74` streams |
+| **Single-Instance Saturation (10K/s offered)** | **URR: 10,000/s**; **QER: 4,113/s**; **PDR: 3,856/s**; **FAR: 3,461/s**; **Est: 1,672/s**; **Del: 1,538/s**; **Repl: 1,007/s** | Accepted p99 **0.465–2.206 s** | **1.0 `upfd` P-core + 1.0 `bessd` ctl P-core** | **0** timeouts, **0** UDP drops; excess answered with **PFCP cause 75** | `sparse-B1` (`performance.md:2913`) |
+| **Native In-Process 8-Stage Ceiling** | **62.1K–79.9K tx/s** (`12.51–16.11 µs/tx` public; `2.00 µs/tx` typed) | `12.51–16.11 µs` | **1.0 `bessd` ctl P-core** (before IPC/Go) | Serialized by one `TransactionEngine` mutex per instance | `performance.md:808-823` |
+
+#### 4. Floor vs. optimal tradeoff verdict
+
+| Subsystem | Verdict | Achieved State and Remaining Structural Boundaries |
+|---|---|---|
+| **`bessd` Hotpath (Packet Path)** | **At Floor** | Zero hotpath allocations; flat `920 B` `SessionSlot`, flat action index (`#75`), inline rule keys (`#77`), lockless worker-local `CounterChanges` bitmaps with 16-bit word masks (`#78`). Packet rate stayed within **±0.7% Mpps** across all control/memory PRs; both queued micro-optimizations (`D-204` batch head ownership, two-store `PacketRef::reset`) regressed `live_perf` and were dropped. |
+| **`bessd` Control Path & Memory Accounting** | **At Floor & Accounted** | Dormant buffer tables paged in 1,024-ID chunks (`113.1 MB → 53 KB`, `#78`); session mirrors/owners moved to flat framework arrays (`−67.7 MiB`, `#76`); duplicate cold F-TEID `std::map` removed (`−84.9 MiB`, `#77`); remaining cold F-TEID and snapshot allocations charged at exact glibc chunk size (`AdmittedGlibcAllocator`, `#78`/`#152`). Unassigned loaded glibc growth is **2.59 MB out of 302.20 MB (0.86%)**. The only remaining non-linear steps are `SharedExactIndex`'s power-of-two `rte_hash` ($204\text{ MiB}$ at $10^6$ keys) and `std::map` nodes (`112 B/node`) in `fteid_records`. Scaling accepted native-transaction churn past ~3.5–4.1K/s requires sharding sessions across multiple `bessd` instances or batching multiple session changes per transaction. |
+| **`upfd` Hotpath (N4 Read Loop, Overload & URR Tick)** | **At Optimal Tradeoff** | Full worker queues immediately return **PFCP cause 75** with zero UDP drops and live heartbeats (`#78`); 4 MiB UDP receive buffer absorbs bursts (`#73`); URR tick reads only dirty/due sessions via `get_changes` bitmaps (`0` RPCs for idle volume sessions); closed heap admission wakes one background watcher at most once/s and runs `runtime.GC()` only after `DeleteSucceeded()` advances (`#78`). |
+| **`upfd` Control Path & Session Memory** | **At Optimal Go Tradeoff** | Live heap cut **40%** (`2,518 → 1,511 B/session`, `#72`), change payloads pre-encoded (`−29.5%` / `−45.9%` alloc bytes, `#78`), and persistent batched `TransactionChannel` streams cut 1K replace p99 by **36%** and raised 10K replace goodput by **22.7%** (`#74`/`#151`). Across the mapped `GOGC` curve (`10 / 25 / 50`), `GOGC=25` is the optimal point inside 6 GiB (`2,051 MiB` peak RSS), while `GOGC=50` trades `+275 MiB` for `−23%` p99 and `−42%` GC CPU. `1,511 B/session` remains **427–647 B/session above** the `864–1,084 B/session` pointer-free slab floor (`performance.md:58-88`); closing that last ~450 MiB at 1M would require replacing Go `Session`/`pdr`/`urr` structs and Go `map` buckets with pointer-free arena slabs and integer handles. |
 
 ## What proves it
 
