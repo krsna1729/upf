@@ -1142,8 +1142,9 @@ With a 2,700 MiB UPFD scope the same campaign stopped at replacement-1K: after
 the 100K cells admission's live-heap reading stood at 1,708 MiB against its
 1,701 MiB threshold, and refused establishments allocate too little to start
 the collection that would refresh it, so all 10,000 were refused (cause 75)
-while deletions proceeded (`1m-matrix-rcvbuf4m`). The guard refuses on a
-stale reading until something else allocates.
+while deletions proceeded (`1m-matrix-rcvbuf4m`). That historical binary kept
+refusing until unrelated allocation refreshed the sample. The recovery worker
+below addresses this stale-sample case; the historical throughput is unchanged.
 
 **Loaded UPFD at 1M: unary vs persistent transaction streams.** Same lane and
 binaries except `sdk.Dial` → `sdk.DialTransactionStreams(target, 32)` in UPF's
@@ -1399,6 +1400,69 @@ waive the earlier native regression gates, or claim poller count is/no longer
 is the cause. Worker task time stays near a full core, while sampled frequency
 varies; effective PMU cycles/ref-cycles and IPC isolation remain unperformed.
 The user prioritizes gRPC overhead decomposition before further idle experiments.
+
+### Idle control CPU is unchanged between the frozen retention revisions (2026-11-16)
+
+The retained TCP/P and TCP/E idle regressions needed the worker cycles,
+instructions and frequency evidence the section above names. This run compares
+`f5d94731` with `529e5374` (`control: reuse RPC workers and cached SDK
+resources`, #149), the revision the source inspection named as the
+control-poller retention treatment. The two trees differ in `core/api_server.cc`,
+`core/control/api_v2.{cc,h}`, the Go/C++/Python SDK clients, `docs/limits.md`
+and live test helpers. **Every packet-path source file is identical**, and both
+builds use the same meson options (`release`, `x86-64-v3`, no LTO).
+
+Method: one fresh daemon per arm from each frozen tree, one identical current
+C++ client and SDK library for both, 32,768 sessions pre-established, rate 0
+(no transactions during the window), ten-second steady-idle windows, and the
+palindrome before/after/after/before repeated four times per cell and mode.
+The PMU arm brackets the single worker TID with `perf stat --all-user
+cycles,ref-cycles,instructions,cache-misses`; the plain arm omits both PMU and
+clock overlay. All 32 arms have AC on and turbo off, package temperature
+52–57 C, CPU 6 throttle count 38, load average at most 1.19. Endpoint window
+bounds differ by at most 1.4 ms.
+
+| TCP shape | Control CPU ms/s, before → after | Idle packet rate, paired median | Negative pairs | Cycles/packet | Instructions/packet | IPC | Cycles/ref-cycle |
+|---|---|---:|---:|---:|---:|---:|---:|
+| P, 1 caller (plain) | 10.0 → 10.2 | 23.925 → 22.900 (-3.66%) | 4/4 | - | - | - | - |
+| P, 1 caller (PMU) | 10.2 → 10.2 | 23.980 → 23.495 (-2.11%) | 3/4 | 107.79 → 109.89 (+1.95%) | 278.68 → 278.79 (+0.04%) | 2.585 → 2.537 (-1.89%) | 0.8643 → 0.8634 |
+| E, 8 callers (plain) | 15.0 → 15.0 | 23.295 → 22.940 (-1.95%) | 3/4 | - | - | - | - |
+| E, 8 callers (PMU) | 15.1 → 15.0 | 22.605 → 22.805 (+0.89%) | 1/4 | 114.16 → 113.13 (-0.90%) | 278.71 → 278.77 (+0.02%) | 2.442 → 2.464 (+0.90%) | 0.8640 → 0.8638 |
+
+What this establishes, and what it does not:
+
+- **No idle control CPU cost.** The control threads consume 10.0–10.2 ms CPU/s
+  in both revisions of the P shape and 15.0 in both of the E shape, profiled
+  and plain. The reuse of RPC workers and cached SDK resources adds no idle
+  CPU, so control-side spinning or retained pollers are excluded as the
+  mechanism.
+- **Worker task time cannot separate the arms.** The packet worker uses
+  997–998 ms of every second in all 32 arms: the poll loop keeps a core by
+  design, in both revisions.
+- **The retained TCP/P regression reproduces; the TCP/E one does not.** The
+  P-shape plain delta (-3.66%, 4/4 negative) matches the retained -4.112%
+  (4/4) and stays over the 3% gate. Its PMU arm (-2.11%, 3/4) is under the
+  gate. The E shape gives -1.95% (3/4) plain and +0.89% (1/4) PMU, against the
+  retained -3.664%, so that gate does not reproduce.
+- **Not more work, not frequency.** Instructions per packet are equal within
+  0.04% in both shapes, and the cycle/ref-cycle ratio is 0.864 in all four
+  arms, so neither extra instructions nor frequency residency explains the
+  P-shape shift. It appears as +1.95% cycles per packet, that is IPC -1.89%,
+  in an identical packet loop.
+- **The miss counter does not attribute it.** `cache-misses` counts 411k–570k
+  events in roughly 231M forwarded packets (0.0017–0.0024 per packet); L1/L2
+  miss events were not collected.
+- **Arm spread exceeds the effect.** P-shape cycles/packet spans 107.5–111.7
+  before and 109.1–112.1 after. The paired design removes the drift; the arms
+  themselves overlap.
+
+Conclusion: the control-poller retention revision carries no measurable idle
+control cost and no extra instructions per packet. The TCP/P c1 rate delta is a
+per-instruction throughput shift in identical code. That is consistent with
+binary layout, but an A/A same-binary repeat is the missing control that would
+show it, so layout is not claimed. No poller policy, engine or packet change
+follows. The TCP/P c1 gate stays open and non-blocking, with the E gate closed
+by this retake.
 
 ### Locality-aware cross-language API shortlist
 
@@ -2725,8 +2789,14 @@ payload construction and full RPC latency are different paths.
 - The Go memory target is soft. Shared parent cgroup capacity is not an
   exclusive per-process allowance. Leave measured headroom for native memory,
   packet pools, mappings, sockets, decoded messages and temporary work.
-  The heap-admission sample can remain stale while refusing: forced collection
-  is not enabled by this change. No universal GOGC setting is inferred.
+  With explicit approval, closed heap admission now has one background recovery
+  worker: at most one collection per second, and only after new successful
+  deletion progress. It keeps watching an idle closed node without another
+  request; repeated refusals and elapsed time alone do not trigger collection.
+  Collection holds no compiler/session lock, and shutdown joins it. Race-tested
+  recovery/cancellation contracts and a disposable real-runtime collection
+  probe passed. This is not a promise that deletion always releases enough
+  live heap. No universal GOGC setting is inferred.
 - Measure protocol response tails, throughput/refusals, queued work, allocation
   rate, GC assist/total CPU and cgroup peak together. The new GC CPU counters
   expose work that pause duration misses. Allocation-only results above do not
@@ -2807,3 +2877,222 @@ Use that setting only with the measured headroom; it is not a universal default.
 The daemon's default policy and its stale-live-heap admission behavior are not
 changed by this experiment.
 
+
+### Dormant native capacity and overload retake (2026-11-15)
+
+Powered serial A B B A, ordinary pages, the same recovery-enabled upfd binary,
+GOGC=25 and GOMEMLIMIT=2400MiB. Before/after use their own matched native daemon
+and plugin. All four fills accepted 1M residents with the same spaces:
+1,131,072 sessions, 2,262,144 ActionIds, 2,097,152 F-TEIDs, two actions/two QERs
+per session and one counter plane. No buffer rule was provisioned.
+
+| Quantity | Eager before | Paged/compact after |
+|---|---:|---:|
+| Dormant buffer directories/cells/stamps/limits, excluding unchanged live-ID bitmap | 113,107,218 B | 53,040 B |
+| Activity tracking, each direction | 1,697,280 B | 1,185,024 B |
+| Total native admitted | 1868.8 MiB | 1760.0 MiB |
+| Loaded native RSS range | 1929.3–1955.7 MiB | 1823.3–1849.4 MiB |
+| FAR-1K accepted-response p99 range | 4.604–4.629 ms | 3.975–4.287 ms |
+
+Admitted savings are about 108.8 MiB at unchanged spaces. RSS falls 132.4 and
+79.9 MiB in the two adjacent pairs; paired FAR p99 falls 7.4% and 13.7%.
+These two pairs are not a universal latency or dense-buffering claim. Native
+forwarded packet counters continue advancing; the main output-gate rates are
+0.922–0.930 Mpps before and 0.941–0.980 Mpps after in these FAR windows.
+Native contract targets cover sparse page boundaries/refusal, packet-visible
+grace, historical counts, abort/reuse and charged teardown. Actual N4 packet,
+checkpoint/restart and buffer hold/report/release/expiry lanes pass. Benchmark
+capacity-slack changes are not included in these same-space savings.
+
+The first B arm then offers above-capacity work. Every sent operation receives
+an accepted result or explicit PFCP cause 75; none times out. The table reports
+actual offers, not a promise that every offered operation can be accepted:
+
+| 10K/s target mode | Sent cycles | Completed cycles | Explicitly refused cycles | Timed out |
+|---|---:|---:|---:|---:|
+| FAR | 100,000 | 34,612 | 65,388 | 0 |
+| PDR | 100,000 | 38,563 | 61,437 | 0 |
+| QER | 100,000 | 41,131 | 58,869 | 0 |
+| URR | 100,000 | 100,000 | 0 | 0 |
+| Replacement | 100,000 | 10,072 | 89,928 | 0 |
+| Establish, finite cohort | 65,536 | 16,720 | 48,816 | 0 |
+| Delete, finite cohort | 65,536 | 15,377 | 50,159 | 0 |
+
+Replacement is a delete followed by an establishment, not one atomic protocol
+operation: it sends 124,358 wire requests here. Accepted deletion followed by
+refused establishment leaves a known absent session; the timed population
+ends at 985,714, then untimed reconciliation restores exactly 1M. Every cell
+reconciles, with zero pending/uncertain remainder and zero client/server UDP
+receive-drop increments. The finite establish/delete cohorts shorten their
+offer windows; the 1K establishment cell has one unsent pacer skip.
+
+At overload, accepted-response p99 reaches 0.465–2.206 seconds in native
+transaction modes; refusal latency is not separately sampled by this driver.
+Loss-free refusal is not a low-tail-latency or 10K accepted-capacity rating.
+The earlier socket-timeout result above remains historical, not current
+behavior. One socket-throttle event is recorded, with no dropped request.
+Aggregate product-lane peak is 4259.5 MiB; OOM counters remain zero. This peak
+excludes the terminal/editor, whose concurrent maximum was not recorded in
+this retake. Every run's continuous AC/turbo verdict is valid.
+
+Raw: `.scratch/evidence/cross-stack-budget-audit/sparse-{A1,B1,B2,A2}/`,
+`sparse-derived.json` and corresponding power traces. The separate ordinary
+glibc allocator diagnostic is not a timing reference.
+
+### Tachyon fourth-transport study: actual bessd, bounded CPU (2026-11-15)
+
+Tachyon v0.5.1 (`bddcf0f017b85db9d45dc53260cfe390c3d737ba`) is a
+measurement-only Go cgo/C++ arm, not a production dependency change. The new
+scratch daemon keeps bessd's real entry point, maintenance loop, pipeline and
+one `ControlV2Service` instance; a scratch API-server overlay adds Tachyon
+listeners sharing that instance. The same daemon binary serves both measured
+transports. The earlier Cap'n Proto/FlatBuffers numbers used a BESS-linked
+fixture, so they are not combined with these results into a four-way ranking.
+
+Seventy-two powered runs cover one/eight native ExactMatch stages, one/sixteen
+transactions per frame and 1/8/32 independent Go processes. Each process owns
+one stream or SPSC RpcBus, with one frame outstanding; 32 callers do not write
+one SPSC arena concurrently. Each run seeds the same 1024 resident keys per
+stage and warms callers before an untimed gate, connected idle and measured
+32,768 transactions. Native control is CPU6; clients share CPU10/11, the two
+logical threads of one P-core. This is an oversubscribed fixed-CPU comparison,
+not 32 dedicated cores. The control fixture has no packet source.
+
+For every cell the order is gRPC, futex, polling, polling, futex, gRPC:
+both comparisons therefore retain adjacent A B B A arms. Every individual
+receipt checks request identity, daemon epoch, outcome, visibility and each
+operation status. All 72 runs complete with clean daemon/client shutdown and
+a valid continuous AC/turbo verdict. Native/client roles share an 1800 MiB
+hard aggregate scope, no swap.
+
+Representative one-stage, one-transaction-frame ranges over the two repeats:
+
+| Callers | Transport | Frame RTT p99 us | Native CPU us/transaction | Client CPU us/transaction |
+|---|---|---:|---:|---:|
+| 1 | Streaming gRPC | 201.2–208.0 | 115.7–119.1 | 50.1–52.6 |
+| 1 | Tachyon futex | 96.1–154.3 | 43.2–50.9 | 8.2–9.0 |
+| 1 | Tachyon max-threshold polling | 66.5–66.9 | 37.5–37.7 | 37.9–38.1 |
+| 8 | Streaming gRPC | 1774.2–1774.3 | 97.1–97.9 | 64.8–66.6 |
+| 8 | Tachyon futex | 379.9–461.2 | 42.4–44.2 | 12.9–13.0 |
+| 8 | Tachyon max-threshold polling | 19,892.8–19,936.3 | 207.8–212.3 | 411.0–419.6 |
+| 32 | Streaming gRPC | 10,288.4–10,523.2 | 99.8–104.5 | 90.8–92.4 |
+| 32 | Tachyon futex | 4760.5–4981.7 | 46.2–47.1 | 22.8–24.3 |
+| 32 | Tachyon max-threshold polling | 111,221.0–111,694.3 | 760.6–771.7 | 1497.6–1521.1 |
+
+Native CPU includes normal daemon maintenance during the completion window.
+Polling uses `UINT32_MAX` as the spin threshold with wake suppression; this
+is not an infinite-spin guarantee. In the approximately three-second idle
+windows it consumes 99.5–99.6% of the native control CPU, versus 7.2–8.6% for
+gRPC/futex, including the common maintenance work. Idle clients sleep with no
+outstanding call; their idle CPU does not represent a blocked spinning wait.
+At 8/32 callers, polling's oversubscription cost reverses its single-caller
+RTT benefit.
+
+Batching narrows the transport-only opportunity. Across all twelve cells,
+the futex/gRPC ratio of paired-cell mean native CPU is 0.401–0.888, but p99
+is not universally better: at 32 callers and sixteen transactions/frame,
+futex frame p99 is 11.2% worse for one stage and 11.5% worse for eight.
+The eight-stage cell also uses 13.4% more client CPU. These adverse cells
+remain in the evidence; none is corrected by a scalar factor or hidden by
+the representative table.
+
+Ownership remains explicit: protobuf encoding allocates an owned Go payload,
+RpcBus copies it into the bounded arena, native parsing uses a per-frame
+protobuf arena, and Go decodes an owned reply before releasing its SHM guard.
+There is no claimed end-to-end zero copy. Each direction reserves 8 MiB per
+caller; this prototype is not the production API's full 64 MiB contract.
+
+The published v0.5.1 Go module failed to build because its `_core_local`
+headers/sources were absent. This study uses a scratch workspace and core
+symlink from the exact pinned upstream clone, not a product SDK replacement.
+Tachyon lacks per-call cancellation/deadlines in this binding; failed peers
+are bounded only by the experiment supervisor. Graceful peer closure must
+precede daemon shutdown. Restart/recovery, typed error parity, authentication,
+permissions and deployment compatibility are not qualified by successful
+transaction receipts. These limits block a production cutover.
+
+Raw: `.scratch/evidence/cross-stack-budget-audit/rpc-real/`,
+`rpc-real-derived.json`, `rpc-real.log.power.jsonl`; sources remain in
+`.scratch/rpcalt/`. This is a measured transport option, not a claim that
+rewriting the dataplane in C/C++ fixes a network bottleneck.
+
+### Native allocator capacity is not an RSS partition (2026-11-15)
+
+The earlier remaining-86-MiB observation is not a fixed allocation bucket.
+`GetResourceStatus` subtracts admitted allocator capacity and a startup baseline
+from the current working set. With an explicit memory limit and ordinary pages,
+this run's working set is process RSS. Automatic cgroup discovery instead uses
+the cgroup working set; those scopes must not be mixed.
+
+The powered, ordinary-glibc diagnostic in `native-attribution/` retained these
+snapshots before correcting cold allocation estimates (MiB):
+
+| Snapshot | RSS | Admitted capacity | Normal-backend resident pages | glibc live chunks | Signed residual |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Before population | 1200.754 | 1294.411 | 1027.453 | 43.012 | -162.430 |
+| 1M sessions | 1849.391 | 1760.012 | 1383.188 | 331.296 | 20.606 |
+| After `malloc_trim(0)` | 1849.277 | 1760.012 | 1383.188 | 331.306 | 20.492 |
+
+The baseline is 72,113,889 bytes. The negative initial residual already disproves
+an interpretation as unexplained resident bytes. Backend residency uses
+`mincore` over ordinary heap segments, including free pages and metadata;
+allocator charges need not all be faulted. Neither it nor glibc live chunk
+capacity is an exclusive partition of process RSS. Trimming removed only
+118,784 RSS bytes, so retained free glibc chunks do not explain the loaded gap.
+
+Source inspection and actual glibc size-class probes found 55,000,000 omitted
+capacity bytes at 1M sessions: 16 bytes per F-TEID map node, 16 per two-rule
+snapshot vector, and 23 per one-F-TEID snapshot vector. The node allocator now
+charges actual chunks through `AdmittedGlibcAllocator`; snapshot vectors and
+optional range storage likewise charge `MallocBytes`, not element payloads.
+Refusal must leave the index/session unpublished. Seven F-TEID/counter contracts
+and thirteen session-store contracts pass, including refused-node admission.
+
+For corroboration, loaded-minus-initial RSS grew 680,144,896 bytes; normal-backend
+residency grew 373,014,528 and glibc live capacity grew 302,287,520. Their growth
+sum differs from RSS growth by 4,842,848 bytes, but the quantities have different
+semantics and sampling times. That difference is **not** a proven physical
+allocation bucket. Neither a small nor a negative residual means every byte has
+been attributed; no 100%-attribution claim is made.
+
+The powered `native-exact/` retake validates the corrected allocator path at
+the same 1M population and configured spaces. Loaded glibc admission is
+325,110,560 bytes, up 55,006,368 from the diagnostic above; normal admission is
+unchanged at 1,575,401,985. This is corrected accounting, not an RSS saving.
+The F-TEID index charges exactly 112,000,000 glibc bytes, and session snapshots
+charge 176,005,472. Loaded RSS is 1,938,608,128; total admission is 1,900,512,545
+and the baseline is 71,978,721, yielding a **negative** 33,883,138-byte residual.
+
+Glibc live capacity grows 302,197,280 bytes from initial to loaded, while glibc
+admission grows 299,602,752. The remaining 2,594,528-byte growth difference is
+not yet assigned to individual control/transport allocations. It is neither
+zero nor proof of that many resident pages. The actual capacity-accounting bug
+is fixed without inventing a complete physical-RSS partition.
+
+All 1000 FAR modifications complete, with zero refusals/timeouts and exact
+1M reconciliation; daemon/upfd shutdown succeeds. The driver is deliberately
+terminated after its completed workload. Lane peak is 4,185,968,640 bytes with
+zero OOM events. Lane peak plus the 100ms-sampled terminal maximum is
+5734.1 MiB; this is not a hard aggregate cap. All 2356 power-trace records have
+AC on and turbo disabled. The allocator observer makes this a diagnostic,
+not another latency reference.
+
+### Applying the Tailscale lessons to this stack
+
+[Tailscale's wireguard-go work](https://tailscale.com/blog/more-throughput)
+separates three costs: syscalls, per-packet kernel-stack traversal, and checksum
+work. `sendmmsg`/`recvmmsg` reduce the first; UDP GSO/GRO also reduce the second.
+Batching must survive the whole pipeline, not stop at one interface.
+
+For the SDK, bounded transaction batches and outstanding windows amortize
+transport overhead without making queues or retained payloads unbounded.
+The real-daemon transport experiment above also shows why caller count,
+batch size, tails and idle CPU must be measured together: a cheaper syscall
+path does not guarantee better tails under oversubscription.
+
+For the dataplane, retain existing packet batches and qualify ownership/reset
+changes on actual busy-worker paths. TUN/socket GSO is not automatically an
+optimization for a DPDK path. Kernel UDP offloads additionally require the
+correct checksum/segmentation contract; enabling GRO without splitting the
+received segments correctly would break datagram framing. No PFCP socket
+offload or language rewrite is introduced by this audit.
