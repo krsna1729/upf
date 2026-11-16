@@ -1361,7 +1361,9 @@ The observer's median paired legacy-rate shift is -0.258%, range
 | Unix/P, 1 client, later 8 ops | -1.619% | -0.839% | 3/4 | Below threshold |
 | Unix/P, 8 clients, later 2 ops | -2.231% | -1.443% | 3/4 | Below threshold |
 
-The two TCP regressions remain open, not waived by the control-rate gains.
+The two TCP regressions remain open at this point, not waived by the
+control-rate gains; the matched retake below closes the E gate and keeps the P
+gate open.
 Packet workers use almost a full core in both arms and sampled CPU 8 frequency
 is generally near the same 2.6-GHz ceiling; these observations do not attribute
 instruction, cache/TLB, allocation-layout or frequency-residency effects.
@@ -3076,6 +3078,41 @@ zero OOM events. Lane peak plus the 100ms-sampled terminal maximum is
 5734.1 MiB; this is not a hard aggregate cap. All 2356 power-trace records have
 AC on and turbo disabled. The allocator observer makes this a diagnostic,
 not another latency reference.
+
+### Packet candidates do not clear the landing gate (2026-11-16)
+
+The two queued packet candidates were measured against current develop
+(`e339f5e0`) with the format-preserving `live_perf` ABBA: eight palindromic
+rounds, two seconds each, worker on CPU 8, control on CPU 6, buffers 32768,
+ordinary pages. Each branch is develop plus a 33-commit modernization series
+and one candidate tip: `15ed4668` (head ownership per batch, D-204) or
+`780a3ae0` (two-store `AllocBulk` reset). Both historical trees predate
+`--mem_backing`; the launcher maps that harness flag to `-m 0`. Module rows are
+ns/packet above `M.base`, so a framework shift does not appear nine times.
+
+| Test | develop | D-204 tip | Change | Pairs | develop | Reset tip | Change | Pairs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| M.base | 10.47 | 10.43 | -0.4% | 4/8 | 10.74 | 12.73 | +18.5% | 8/8 |
+| M.macswap | 1.58 | 1.55 | -1.9% | 5/8 | 1.88 | 2.56 | +36.5% | 8/8 |
+| M.ipswap | 5.18 | 5.59 | +7.9% | 7/8 | - | - | - | - |
+| M.update_ttl | 6.42 | 7.10 | +10.6% | 7/8 | - | - | - | - |
+| M.static_nat | 11.48 | 11.55 | +0.7% | 6/8 | - | - | - | - |
+| M.ip_checksum | 9.02 | 9.36 | +3.8% | 6/8 | - | - | - | - |
+| M.ip_checksum/verify | 9.16 | 9.24 | +0.9% | 3/8 | - | - | - | - |
+| M.l4_checksum | 12.92 | 13.11 | +1.5% | 6/8 | - | - | - | - |
+| M.l4_checksum/verify | 7.70 | 8.05 | +4.6% | 6/8 | - | - | - | - |
+| F.floor | - | - | - | - | 4.18 | 2.75 | -34.3% | 4/8 |
+| F.size/1500 | - | - | - | - | 4.15 | 2.75 | -33.7% | 3/8 |
+| F.flowgen | - | - | - | - | 109.84 | 112.67 | +2.6% | 8/8 |
+
+D-204 keeps `M.base` and `M.macswap` flat to slightly better and makes seven
+localised cells 0.7–10.6% slower, with `M.update_ttl` and `M.ipswap` over 7% in
+7/8 pairs. The reset tip wins the framework floor by a third but costs 18.5% on
+`M.base` and 36.5% on `M.macswap`, all 8/8 pairs, and `F.flowgen` slower 8/8.
+Both candidates were queued under the rule that each lands only on a measured
+gain; a net packet regression in the main path is not such a gain. **Neither
+lands.** The evidence is preserved, and the branches are archived as bundles
+before deletion rather than merged.
 
 ### Applying the Tailscale lessons to this stack
 
