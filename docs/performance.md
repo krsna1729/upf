@@ -2941,7 +2941,13 @@ Raw: `.scratch/evidence/cross-stack-budget-audit/sparse-{A1,B1,B2,A2}/`,
 `sparse-derived.json` and corresponding power traces. The separate ordinary
 glibc allocator diagnostic is not a timing reference.
 
-### Tachyon fourth-transport study: actual bessd, bounded CPU (2026-11-15)
+### Transport comparison: Tachyon RpcBus against streaming gRPC on the actual daemon (2026-11-15)
+
+**This is a two-arm comparison: streaming gRPC versus the Tachyon RpcBus
+(futex and polling modes) on the same daemon. It is not a four-arm ranking.**
+The Cap'n Proto and FlatBuffers numbers come from a different fixture and stay
+in their own section; the marked comparison block at the end of this section
+states exactly what may and may not be compared.
 
 Tachyon v0.5.1 (`bddcf0f017b85db9d45dc53260cfe390c3d737ba`) is a
 measurement-only Go cgo/C++ arm, not a production dependency change. The new
@@ -3012,6 +3018,26 @@ are bounded only by the experiment supervisor. Graceful peer closure must
 precede daemon shutdown. Restart/recovery, typed error parity, authentication,
 permissions and deployment compatibility are not qualified by successful
 transaction receipts. These limits block a production cutover.
+
+#### Marked comparison: which arms are comparable
+
+| Arm | Where measured | Fixture and scope | What it answers | Result |
+|---|---|---|---|---|
+| Streaming gRPC | this study | actual bessd, one `ControlV2Service`, maintenance loop and packet path live | transport cost of the production API | baseline |
+| Tachyon futex | this study | same daemon binary, same service, scratch listener overlay | can a local RpcBus replace gRPC's transport? | native CPU 0.401–0.888 of gRPC; p99 lower in 10 of 12 cells, 11.2–11.5% worse in two adverse cells |
+| Tachyon max-threshold polling | this study | same | does a spinning transport pay off? | only at 1 caller; 19.9 ms and 111 ms p99 at 8 and 32 callers |
+| Cap'n Proto RPC v1.5.0 | the Cap'n Proto / FlatBuffers section above (2026-11-11) | benchmark-only C++ server, **not bessd**, 8-stage fixture, no maintenance loop | transport cost without gRPC's server | 28–35% lower wall than gRPC+protobuf at one transaction per message |
+| gRPC + FlatBuffers | same section | same benchmark server, gRPC transport kept | codec cost at the same transport | 26–42% faster than gRPC+protobuf when batched |
+
+**No four-way ranking exists, and none is implied.** The Cap'n Proto and
+FlatBuffers arms time a benchmark server that has no maintenance loop, packet
+path, retained streams or real daemon entry point; the Tachyon arms time bessd
+itself. Their CPU and latency figures therefore answer different questions and
+must not be placed in one table or ratio. The valid Tachyon comparison is the
+gRPC column of the table above, where daemon, service, CPUs, frame contents and
+receipt checks are identical. A four-way table would need either the
+benchmark-only server rebuilt to serve Tachyon or the Tachyon listener added to
+that fixture; neither was run.
 
 Raw: `.scratch/evidence/cross-stack-budget-audit/rpc-real/`,
 `rpc-real-derived.json`, `rpc-real.log.power.jsonl`; sources remain in
