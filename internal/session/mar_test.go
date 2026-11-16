@@ -107,31 +107,31 @@ func TestMARProgramsPolicyAndSteeringRule(t *testing.T) {
 		t.Fatalf("establishment with a MAR was refused with cause %d", got)
 	}
 	policy := changeWithResource(t, lastChanges(t, rec), "atsss/policies")
-	policyID, ok := policy.Key["policy_id"].(uint32)
-	if !ok || policyID == 0 {
+	policyID := payload[PolicyKey](policy.Key).PolicyID
+	if policyID == 0 {
 		t.Fatalf("policy key is %v, want a nonzero global policy id", policy.Key)
 	}
-	value := policy.Value
-	if value["preferred"] != uint32(0) {
-		t.Errorf("preferred is %v, want the 3GPP access (0)", value["preferred"])
+	value := payload[PolicyEntry](policy.Value)
+	if value.Preferred != uint32(0) {
+		t.Errorf("preferred is %v, want the 3GPP access (0)", value.Preferred)
 	}
-	access, ok := value["access"].([]map[string]any)
-	if !ok || len(access) != 2 {
-		t.Fatalf("policy access list is %#v, want two accesses", value["access"])
+	access := value.Access
+	if len(access) != 2 {
+		t.Fatalf("policy access list is %#v, want two accesses", value.Access)
 	}
-	if access[0]["next_hop_id"] != uint32(2) || access[0]["health_id"] != uint32(1) {
+	if access[0].NextHopID != uint32(2) || access[0].HealthID != uint32(1) {
 		t.Errorf("3GPP access is %v, want next hop 2 and health 1", access[0])
 	}
-	if access[0]["tunnel_id"] == uint32(0) {
+	if access[0].TunnelID == uint32(0) {
 		t.Error("the 3GPP access adds an outer header, and names no tunnel record")
 	}
-	if access[1]["next_hop_id"] != uint32(2) || access[1]["health_id"] != uint32(2) {
+	if access[1].NextHopID != uint32(2) || access[1].HealthID != uint32(2) {
 		t.Errorf("non-3GPP access is %v, want next hop 2 and health 2", access[1])
 	}
-	if access[1]["tunnel_id"] != uint32(0) {
-		t.Errorf("the non-3GPP access is plain IP, and names tunnel %v", access[1]["tunnel_id"])
+	if access[1].TunnelID != uint32(0) {
+		t.Errorf("the non-3GPP access is plain IP, and names tunnel %v", access[1].TunnelID)
 	}
-	if _, ok := changeWithResource(t, lastChanges(t, rec), "enc/tunnels").Key["action_id"]; !ok {
+	if _, ok := bess.Get[ActionKey](changeWithResource(t, lastChanges(t, rec), "enc/tunnels").Key); !ok {
 		t.Error("the tunnelled access has no encap record")
 	}
 
@@ -163,9 +163,9 @@ func TestUpdateMARMovesThePreferredAccess(t *testing.T) {
 		t.Fatalf("MAR update was refused with cause %d", got)
 	}
 	policy := changeWithResource(t, lastChanges(t, rec), "atsss/policies")
-	if policy.Value["preferred"] != uint32(1) {
+	if payload[PolicyEntry](policy.Value).Preferred != uint32(1) {
 		t.Errorf("preferred is %v after the update, want the non-3GPP access (1)",
-			policy.Value["preferred"])
+			payload[PolicyEntry](policy.Value).Preferred)
 	}
 }
 
@@ -256,12 +256,12 @@ func TestMARWithOneAccessAndNoStandby(t *testing.T) {
 	if got := answerCause(c.Establish(req)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a one-access MAR was refused with cause %d", got)
 	}
-	value := changeWithResource(t, lastChanges(t, rec), "atsss/policies").Value
-	access := value["access"].([]map[string]any)
-	if access[0]["health_id"] != uint32(1) {
+	value := payload[PolicyEntry](changeWithResource(t, lastChanges(t, rec), "atsss/policies").Value)
+	access := value.Access
+	if access[0].HealthID != uint32(1) {
 		t.Errorf("the 3GPP access is %v, want health 1", access[0])
 	}
-	if access[1]["health_id"] != uint32(0) || access[1]["next_hop_id"] != uint32(0) {
+	if access[1].HealthID != uint32(0) || access[1].NextHopID != uint32(0) {
 		t.Errorf("the missing non-3GPP access is %v, want zeros", access[1])
 	}
 }
@@ -298,16 +298,16 @@ func TestMARPolicyIDsAreGlobal(t *testing.T) {
 		t.Fatalf("first establishment was refused with cause %d", got)
 	}
 	first := changeWithResource(t, lastChanges(t, rec), "atsss/policies")
-	firstID, ok := first.Key["policy_id"].(uint32)
-	if !ok || firstID == 0 {
+	firstID := payload[PolicyKey](first.Key).PolicyID
+	if firstID == 0 {
 		t.Fatalf("first policy key is %v", first.Key)
 	}
 	if got := answerCause(c.Establish(marEstablishmentTEID(0x7011, "10.45.0.21", 0x55667788))); got != ie.CauseRequestAccepted {
 		t.Fatalf("second establishment was refused with cause %d", got)
 	}
 	second := changeWithResource(t, lastChanges(t, rec), "atsss/policies")
-	secondID, ok := second.Key["policy_id"].(uint32)
-	if !ok || secondID == 0 {
+	secondID := payload[PolicyKey](second.Key).PolicyID
+	if secondID == 0 {
 		t.Fatalf("second policy key is %v", second.Key)
 	}
 	if firstID == secondID {
@@ -333,9 +333,9 @@ func TestMARNoStandbyIsIneligible(t *testing.T) {
 	if got := answerCause(c.Establish(req)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a No Standby access was refused with cause %d", got)
 	}
-	value := changeWithResource(t, lastChanges(t, rec), "atsss/policies").Value
-	access := value["access"].([]map[string]any)
-	if access[1]["health_id"] != uint32(0) || access[1]["next_hop_id"] != uint32(0) {
+	value := payload[PolicyEntry](changeWithResource(t, lastChanges(t, rec), "atsss/policies").Value)
+	access := value.Access
+	if access[1].HealthID != uint32(0) || access[1].NextHopID != uint32(0) {
 		t.Errorf("the No Standby access is %v, want an ineligible zero entry", access[1])
 	}
 }

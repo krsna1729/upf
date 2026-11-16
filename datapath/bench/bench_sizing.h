@@ -19,10 +19,11 @@ inline uint64_t ActionCapacity(uint32_t sessions, bool churn) {
   return std::max<uint64_t>(65536, 2 * uint64_t{sessions} + (churn ? 2048 : 16));
 }
 
-// Per-session tables: session ids 1..N, and N+1..N+1024 for churn; the self
-// test uses the last id.
+// Per-session tables: ids 1..N and N+1..N+1024 for churn. The disjoint
+// final id belongs to self_test and may still be in its removal grace when
+// population starts. No session table needs the ActionId-space floor.
 inline uint64_t SessionCapacity(uint32_t sessions, bool churn) {
-  return std::max<uint64_t>(65536, uint64_t{sessions} + (churn ? 2048 : 16));
+  return uint64_t{sessions} + (churn ? 1024 : 0) + 1;
 }
 
 // The F-TEID index (decap max_fteids): every layout writes one F-TEID key per

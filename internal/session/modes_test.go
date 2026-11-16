@@ -126,11 +126,11 @@ func openAddresses(t *testing.T, r rule, what string) {
 }
 
 // tunnelLocal is the tunnel record's local address and transport domain.
-func tunnelLocal(t *testing.T, changes []bess.Change, cfg Config, actionID uint32) (netip.Addr, any, map[string]any) {
+func tunnelLocal(t *testing.T, changes []bess.Change, cfg Config, actionID uint32) (netip.Addr, any, TunnelEntry) {
 	t.Helper()
 	ch := find(t, changes, cfg.Down.Tunnels+"/tunnels", "action_id", actionID)
-	a, _ := netip.AddrFromSlice(ch.Value["local_address"].([]byte))
-	return a, ch.Value["transport_route_domain"], ch.Value
+	a, _ := netip.AddrFromSlice(payload[TunnelEntry](ch.Value).LocalAddress)
+	return a, payload[TunnelEntry](ch.Value).TransportRouteDomain, payload[TunnelEntry](ch.Value)
 }
 
 // TestCascadedN9TransitUsesTheN9EndpointBothWays is Mode 4: an UL CL inserted
@@ -179,11 +179,11 @@ func TestCascadedN9TransitUsesTheN9EndpointBothWays(t *testing.T) {
 			t.Errorf("PDR %d's F-TEID is on %s, want the N9 endpoint %s", id, addr, modesN9)
 		}
 		adm, ok := teidRule(changes, cfg.GTPUDecap+"/fteids", teid)
-		if !ok || adm.Key["endpoint_id"] != uint32(2) {
+		if !ok || payload[FTEIDKey](adm.Key).EndpointID != uint32(2) {
 			t.Errorf("PDR %d's admission is not on endpoint 2: %v", id, adm.Key)
 		}
-		if want := uint32(id - 1); adm.Value["direction"] != want {
-			t.Errorf("PDR %d's admission direction is %v, want %d", id, adm.Value["direction"], want)
+		if want := uint32(id - 1); payload[FTEIDEntry](adm.Value).Direction != want {
+			t.Errorf("PDR %d's admission direction is %v, want %d", id, payload[FTEIDEntry](adm.Value).Direction, want)
 		}
 	}
 	ul := ruleCarrying(t, changes, fieldSrcIP, []byte{10, 45, 4, 2})
@@ -269,7 +269,7 @@ func TestPSABehindAnIUPFTakesItsN9UplinkAsAccess(t *testing.T) {
 		t.Errorf("the N9 uplink's F-TEID is on %s, want the N9 endpoint %s", addr, modesN9)
 	}
 	adm, ok := teidRule(changes, cfg.GTPUDecap+"/fteids", teid)
-	if !ok || adm.Key["endpoint_id"] != uint32(2) || adm.Value["direction"] != uint32(0) {
+	if !ok || payload[FTEIDKey](adm.Key).EndpointID != uint32(2) || payload[FTEIDEntry](adm.Value).Direction != uint32(0) {
 		t.Errorf("the N9 uplink's admission is %v -> %v, want endpoint 2 toward the uplink chain", adm.Key, adm.Value)
 	}
 	ul := ruleCarrying(t, changes, fieldSrcIP, []byte{10, 45, 3, 2})
@@ -351,10 +351,10 @@ func TestN19GroupLevelSessionBesideItsMembers(t *testing.T) {
 		t.Errorf("the N19 F-TEID is on %s, want the N9/N19 endpoint %s", addr, modesN9)
 	}
 	adm, ok := teidRule(changes, cfg.GTPUDecap+"/fteids", teid)
-	if !ok || adm.Value["direction"] != uint32(1) {
+	if !ok || payload[FTEIDEntry](adm.Value).Direction != uint32(1) {
 		t.Fatalf("the N19 admission is not toward the subscriber side: %v", adm)
 	}
-	n19 := ruleWithContext(t, changes, modesDownCtx, adm.Value["context_id"].(uint32))
+	n19 := ruleWithContext(t, changes, modesDownCtx, payload[FTEIDEntry](adm.Value).ContextID)
 	if !strings.HasPrefix(n19.change.Resource, cfg.Down.PDRTable) {
 		t.Errorf("the N19 PDR's rule is in %s, want the subscriber-side table", n19.change.Resource)
 	}
@@ -373,10 +373,10 @@ func TestN19GroupLevelSessionBesideItsMembers(t *testing.T) {
 		t.Errorf("traffic to the peer PSA's UE leaves by hop %d, want the tunnel's %d", got, modesHopTun)
 	}
 	local, _, rec19 := tunnelLocal(t, changes, cfg, out.actionID())
-	peer, _ := netip.AddrFromSlice(rec19["peer_address"].([]byte))
-	if local.String() != modesN9 || peer.String() != "198.51.100.19" || rec19["teid"] != uint32(0x77000002) {
+	peer, _ := netip.AddrFromSlice(rec19.PeerAddress)
+	if local.String() != modesN9 || peer.String() != "198.51.100.19" || rec19.TEID != uint32(0x77000002) {
 		t.Errorf("the N19 tunnel is %s -> %s TEID %v, want %s -> 198.51.100.19 TEID 0x77000002",
-			local, peer, rec19["teid"], modesN9)
+			local, peer, rec19.TEID, modesN9)
 	}
 
 	// Releasing the group session (TS 23.502 4.13.8.2.2, the last member on
@@ -396,7 +396,7 @@ func TestN19GroupLevelSessionBesideItsMembers(t *testing.T) {
 	}
 	// The response's SEID is the CP's; the UP's is in the answer's F-SEID.
 	for _, ch := range rec.last() {
-		if ch.Resource == cfg.GTPUDecap+"/fteids" && ch.Value == nil && ch.Key["teid"] != teid {
+		if ch.Resource == cfg.GTPUDecap+"/fteids" && ch.Value == nil && payload[FTEIDKey](ch.Key).TEID != teid {
 			t.Errorf("the group release erased another session's admission %v", ch.Key)
 		}
 	}
@@ -464,16 +464,16 @@ func TestIndirectForwardingTunnelsFollowTheHandoverProcedure(t *testing.T) {
 	if !ok {
 		t.Fatal("the forwarding tunnel is not admitted")
 	}
-	fwd := ruleWithContext(t, changes, modesUpCtx, adm.Value["context_id"].(uint32))
+	fwd := ruleWithContext(t, changes, modesUpCtx, payload[FTEIDEntry](adm.Value).ContextID)
 	openAddresses(t, fwd, "the forwarding tunnel's PDR")
 	if got := fwd.nextHop(); got != modesHopAcc {
 		t.Errorf("forwarded data leaves by hop %d, want the access side's %d", got, modesHopAcc)
 	}
 	local, _, frec := tunnelLocal(t, changes, cfg, fwd.actionID())
-	if peer, _ := netip.AddrFromSlice(frec["peer_address"].([]byte)); local.String() != modesN3 ||
-		peer.String() != "10.20.30.3" || frec["teid"] != uint32(0x66000003) {
+	if peer, _ := netip.AddrFromSlice(frec.PeerAddress); local.String() != modesN3 ||
+		peer.String() != "10.20.30.3" || frec.TEID != uint32(0x66000003) {
 		t.Errorf("the forward is %s -> %s TEID %v, want %s -> the T-RAN's 10.20.30.3 TEID 0x66000003",
-			local, peer, frec["teid"], modesN3)
+			local, peer, frec.TEID, modesN3)
 	}
 
 	// Step 8a: the T-RAN's DL AN tunnel.
@@ -496,7 +496,7 @@ func TestIndirectForwardingTunnelsFollowTheHandoverProcedure(t *testing.T) {
 	erased := false
 	for _, ch := range rec.last() {
 		if ch.Resource == cfg.GTPUDecap+"/fteids" && ch.Value == nil {
-			if ch.Key["teid"] != fwdTEID {
+			if payload[FTEIDKey](ch.Key).TEID != fwdTEID {
 				t.Errorf("step 15a erased another admission: %v", ch.Key)
 			}
 			erased = true
@@ -547,7 +547,7 @@ func TestIndirectForwardingTunnelsFollowTheHandoverProcedure(t *testing.T) {
 	gone := map[uint32]bool{}
 	for _, ch := range rec.last() {
 		if ch.Resource == cfg.GTPUDecap+"/fteids" && ch.Value == nil {
-			gone[ch.Key["teid"].(uint32)] = true
+			gone[payload[FTEIDKey](ch.Key).TEID] = true
 		}
 	}
 	if !gone[sFwd] || len(gone) != 3 {

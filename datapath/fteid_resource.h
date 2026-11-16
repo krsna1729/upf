@@ -54,7 +54,7 @@ struct FteidRecord {
 // changed: the worker-visible DirectionRecord, from an ObjectSlab (DPDK heap
 // on the memory node, 1024 records per chunk rather than one malloc each;
 // chunks are kept while the resource lives), and the control-side mirror's
-// map node (glibc, kMirrorNodeBytes, an estimate), given back when the node
+// map node (glibc, its measured allocation chunk), given back when the node
 // is erased.
 class FteidResource final : public bess::dataplane::Resource {
  public:
@@ -86,8 +86,7 @@ class FteidResource final : public bess::dataplane::Resource {
   }
   // The record chunks made so far plus the mirror's nodes.
   size_t bytes() const noexcept {
-    return records_->bytes() +
-           mirror_nodes_.load(std::memory_order_relaxed) * kMirrorNodeBytes;
+    return records_->bytes() + mirror_bytes_.load(std::memory_order_relaxed);
   }
   // The admission each record chunk and mirror node asks first (D-198).
   void set_memory_growth(bess::utils::MemoryGrowth *growth) noexcept {
@@ -201,15 +200,15 @@ class FteidResource final : public bess::dataplane::Resource {
     if (!value->relays.empty())
       entry.record->relays.store(new EndMarkerRelays(value->relays),
                                  std::memory_order_relaxed);
-    const auto it = EmplaceMirror(id, std::move(entry));
-    if (it == entries_.end())
+    const auto [it, inserted] = entries_.emplace(id, std::move(entry));
+    if (!inserted)
       return std::unexpected("F-TEID key reservation is inconsistent");
     const uint64_t record_word = static_cast<uint64_t>(
         reinterpret_cast<uintptr_t>(it->second.record.get()));
     const auto status = index_.InsertIfAbsent(
         reinterpret_cast<const std::byte *>(id.data()), record_word);
     if (status != bess::flow::SharedExactIndex::InsertStatus::kInserted) {
-      EraseMirror(it);
+      entries_.erase(it);
       return std::unexpected(
           status == bess::flow::SharedExactIndex::InsertStatus::kFull
               ? "fteids exact index is full"
@@ -227,41 +226,26 @@ class FteidResource final : public bess::dataplane::Resource {
     bool erase_pending = false;
     bess::utils::SlabUnique<DirectionRecord> record;
   };
-  using Mirror = std::map<FteidId, Entry>;
+  using MirrorValue = std::pair<const FteidId, Entry>;
+  using Mirror = std::map<FteidId, Entry, std::less<FteidId>,
+                          bess::utils::AdmittedGlibcAllocator<MirrorValue>>;
 
-  // What one mirror node costs glibc (D-198), an estimate: the value plus
-  // the red-black tree's three links and color.
-  static constexpr size_t kMirrorNodeBytes =
-      sizeof(Mirror::value_type) + 4 * sizeof(void *);
-
-  // Inserts `id`'s mirror node, its bytes admitted first (throws
-  // utils::MemoryRefused: nothing inserted); entries_.end() if `id` already
-  // has one.
-  Mirror::iterator EmplaceMirror(const FteidId &id, Entry &&entry) {
-    if (growth_ != nullptr) growth_->Grow(kMirrorNodeBytes, kMirrorNodeBytes);
-    const auto [it, inserted] = [&] {
-      try {
-        return entries_.emplace(id, std::move(entry));
-      } catch (...) {
-        ShrinkMirror();
-        throw;
-      }
-    }();
-    if (!inserted) {
-      ShrinkMirror();
-      return entries_.end();
+  // Keep the resource's current-byte snapshot in step with the shared
+  // allocator's exact admission, including size-class/header overhead.
+  class MirrorGrowth final : public bess::utils::MemoryGrowth {
+   public:
+    explicit MirrorGrowth(FteidResource &owner) : owner_(owner) {}
+    void Grow(size_t bytes, size_t glibc_bytes) override {
+      if (owner_.growth_ != nullptr) owner_.growth_->Grow(bytes, glibc_bytes);
+      owner_.mirror_bytes_.fetch_add(bytes, std::memory_order_relaxed);
     }
-    mirror_nodes_.fetch_add(1, std::memory_order_relaxed);
-    return it;
-  }
-  void EraseMirror(Mirror::iterator it) noexcept {
-    entries_.erase(it);
-    mirror_nodes_.fetch_sub(1, std::memory_order_relaxed);
-    ShrinkMirror();
-  }
-  void ShrinkMirror() noexcept {
-    if (growth_ != nullptr) growth_->Shrink(kMirrorNodeBytes, kMirrorNodeBytes);
-  }
+    void Shrink(size_t bytes, size_t glibc_bytes) noexcept override {
+      if (owner_.growth_ != nullptr) owner_.growth_->Shrink(bytes, glibc_bytes);
+      owner_.mirror_bytes_.fetch_sub(bytes, std::memory_order_relaxed);
+    }
+   private:
+    FteidResource &owner_;
+  };
 
   bool Lookup(const bess::dataplane::ResourceKey &key,
               uint64_t *value) const noexcept {
@@ -323,7 +307,7 @@ class FteidResource final : public bess::dataplane::Resource {
             reinterpret_cast<const std::byte *>(id_.data())));
         const auto token = owner_.domain_.StartGracePeriod();
         owner_.domain_.Retire(token, std::move(it->second.record));
-        owner_.EraseMirror(it);
+        owner_.entries_.erase(it);
         --owner_.pending_inserts_;
       }
       finished_ = true;
@@ -345,7 +329,7 @@ class FteidResource final : public bess::dataplane::Resource {
             it->second.erase_pending);
       CHECK(owner_.index_.Erase(reinterpret_cast<const std::byte *>(id_.data())));
       retirer.Retire(std::move(it->second.record));
-      owner_.EraseMirror(it);
+      owner_.entries_.erase(it);
       owner_.live_.fetch_sub(1, std::memory_order_relaxed);
       finished_ = true;
     }
@@ -370,9 +354,10 @@ class FteidResource final : public bess::dataplane::Resource {
   bess::utils::ObjectSlab<DirectionRecord>::Owner records_;
   bess::utils::MemoryGrowth *growth_ = nullptr;  // D-198: admits mirror nodes
   mutable std::mutex control_mu_;
-  Mirror entries_;
+  std::atomic<size_t> mirror_bytes_{0};
+  MirrorGrowth mirror_growth_{*this};
+  Mirror entries_{Mirror::allocator_type{&mirror_growth_}};
   std::atomic<size_t> live_{0};
-  std::atomic<size_t> mirror_nodes_{0};  // entries_.size(), read by bytes()
   size_t pending_inserts_ = 0;
 };
 

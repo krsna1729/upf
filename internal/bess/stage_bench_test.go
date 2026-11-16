@@ -10,7 +10,7 @@ import (
 )
 
 // BenchmarkStageApply feeds the generic stage fixture through upfd's real
-// map-to-wire adapter and public SDK transaction path. It excludes PFCP/model
+// typed-to-wire adapter and public SDK transaction path. It excludes PFCP/model
 // compilation. Create the idle eight-stage graph with bessbench -stage-graph-only,
 // then select -run '^$' -bench '^BenchmarkStageApply$' with UPF_BESS_TARGET set.
 // This benchmark must not run against the session-live graph.
@@ -21,11 +21,15 @@ func BenchmarkStageApply(b *testing.B) {
 				c := liveClient(b)
 				ctx := context.Background()
 				var key [4]byte
-				keyFields := map[string]any{"fields": []any{map[string]any{"value_bin": key[:]}}}
-				value := map[string]any{"gate": uint64(1)}
+				keyFields := Fields(struct {
+					Fields [][]byte `json:"fields"`
+				}{Fields: [][]byte{key[:]}})
+				value := &struct {
+					Gate uint64 `json:"gate"`
+				}{Gate: 1}
 				changes := make([]Change, 8)
 				for i := range changes {
-					changes[i] = Change{Resource: fmt.Sprintf("stage%d/rules", i), Key: keyFields, Value: value}
+					changes[i] = Change{Resource: fmt.Sprintf("stage%d/rules", i), Key: keyFields, Value: Fields(value)}
 				}
 				// All eight stages retain 1024 entries, independent of prefix size.
 				for slot := 0; slot < 1024; slot++ {
@@ -40,7 +44,7 @@ func BenchmarkStageApply(b *testing.B) {
 						slot, period = ordinal%1024, 1024
 					}
 					binary.BigEndian.PutUint32(key[:], 0x0b000001+uint32(slot))
-					value["gate"] = uint64(2 - (ordinal/period)%2)
+					value.Gate = uint64(2 - (ordinal/period)%2)
 				}
 				set(0)
 				if err := c.Apply(ctx, changes[:stages]...); err != nil {

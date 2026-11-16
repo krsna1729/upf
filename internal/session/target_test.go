@@ -109,7 +109,7 @@ func TestApplianceSweepClearsEverySubscriberPool(t *testing.T) {
 	for _, txn := range fake.changes {
 		for _, ch := range txn {
 			if ch.Resource == "upf/entries" {
-				erased = append(erased, ch.Key["ip"].(string))
+				erased = append(erased, sweptARPKey(t, ch.Key).IP)
 			}
 		}
 	}

@@ -41,22 +41,22 @@ func sessionEntry(t *testing.T, changes []bess.Change) bess.Change {
 }
 
 // entryAction is the action the entry's first rule of a direction names.
-func entryAction(t *testing.T, value map[string]any, downlink bool) map[string]any {
+func entryAction(t *testing.T, value bess.Payload, downlink bool) SessionAction {
 	t.Helper()
-	actions, _ := value["actions"].([]map[string]any)
-	pdrs, _ := value["pdrs"].([]map[string]any)
+	entry := payload[SessionEntry](value)
+	actions, pdrs := entry.Actions, entry.PDRs
 	for _, p := range pdrs {
-		if p["downlink"] != downlink {
+		if p.Downlink != downlink {
 			continue
 		}
-		pos, _ := p["action"].(uint32)
+		pos := p.Action
 		if pos == 0 || int(pos) > len(actions) {
 			t.Fatalf("a rule names action %d of %d", pos, len(actions))
 		}
 		return actions[pos-1]
 	}
 	t.Fatalf("the entry has no downlink=%v rule", downlink)
-	return nil
+	return SessionAction{}
 }
 
 // TestSessionMajorWritesOneEntryPerSession: under -target session-major an
@@ -73,26 +73,31 @@ func TestSessionMajorWritesOneEntryPerSession(t *testing.T) {
 		t.Fatalf("establishment cause %d", got)
 	}
 	est := sessionEntry(t, rec.last())
-	id, _ := est.Key["session_id"].(uint32)
+	id := payload[SessionKey](est.Key).SessionID
 	if id == 0 || id > 8 || est.Value == nil {
 		t.Fatalf("entry key %v value %v: want an upsert of a session id in 1..8", est.Key, est.Value)
 	}
 	// QER 1 has a rate, so it is a meter per policed direction, as in the
 	// masked layout: two of the entry's QER slots.
-	for field, want := range map[string]int{"fteids": 1, "qers": 2, "actions": 2, "pdrs": 2} {
-		if got, _ := est.Value[field].([]map[string]any); len(got) != want {
-			t.Errorf("the entry has %d %s, want %d", len(got), field, want)
+	entry := payload[SessionEntry](est.Value)
+	for field, got := range map[string]int{"fteids": len(entry.FTEIDs), "qers": len(entry.QERs), "actions": len(entry.Actions), "pdrs": len(entry.PDRs)} {
+		want := 2
+		if field == "fteids" {
+			want = 1
+		}
+		if got != want {
+			t.Errorf("the entry has %d %s, want %d", got, field, want)
 		}
 	}
 	ul, dl := entryAction(t, est.Value, false), entryAction(t, est.Value, true)
-	qers, _ := est.Value["qers"].([]map[string]any)
-	if pos, _ := ul["pdr_qer"].(uint32); pos == 0 || int(pos) > len(qers) || qers[pos-1]["tr_tcm"] == nil {
+	qers := payload[SessionEntry](est.Value).QERs
+	if pos, ok := present(ul.PDRQER); !ok || pos == 0 || int(pos) > len(qers) || qers[pos-1].TrTCM == (MeterProfile{}) {
 		t.Errorf("the uplink action is not policed by the session's QER: %v", ul)
 	}
-	if ul["next_hop_id"] != uint32(1) || dl["next_hop_id"] != uint32(2) {
-		t.Errorf("next hops ul %v dl %v, want the directions' 1 and 2", ul["next_hop_id"], dl["next_hop_id"])
+	if optional(ul.NextHopID) != uint32(1) || optional(dl.NextHopID) != uint32(2) {
+		t.Errorf("next hops ul %v dl %v, want the directions' 1 and 2", optional(ul.NextHopID), optional(dl.NextHopID))
 	}
-	tunnel, _ := dl["tunnel"].(map[string]any)
+	tunnel := dl.Tunnel
 	if tunnel == nil {
 		t.Fatal("the downlink action carries no tunnel")
 	}
@@ -105,15 +110,15 @@ func TestSessionMajorWritesOneEntryPerSession(t *testing.T) {
 		t.Fatalf("modification cause %d", got)
 	}
 	upd := sessionEntry(t, rec.last())
-	if upd.Key["session_id"] != id || upd.Value == nil {
+	if payload[SessionKey](upd.Key).SessionID != id || upd.Value == nil {
 		t.Fatalf("the modification wrote key %v value-nil=%v, want an upsert of session %d", upd.Key, upd.Value == nil, id)
 	}
 	ul2, dl2 := entryAction(t, upd.Value, false), entryAction(t, upd.Value, true)
-	if ul2["action_id"] != ul["action_id"] || dl2["action_id"] != dl["action_id"] {
+	if ul2.ActionID != ul.ActionID || dl2.ActionID != dl.ActionID {
 		t.Errorf("the rewrite renamed the actions: ul %v->%v dl %v->%v",
-			ul["action_id"], ul2["action_id"], dl["action_id"], dl2["action_id"])
+			ul.ActionID, ul2.ActionID, dl.ActionID, dl2.ActionID)
 	}
-	if tunnel2, _ := dl2["tunnel"].(map[string]any); tunnel2 == nil || tunnel2["teid"] == tunnel["teid"] {
+	if tunnel2 := dl2.Tunnel; tunnel2 == nil || tunnel2.TEID == tunnel.TEID {
 		t.Errorf("the downlink tunnel %v did not follow the FAR (was %v)", tunnel2, tunnel)
 	}
 
@@ -121,7 +126,7 @@ func TestSessionMajorWritesOneEntryPerSession(t *testing.T) {
 		t.Fatalf("deletion cause %d", got)
 	}
 	del := sessionEntry(t, rec.last())
-	if del.Key["session_id"] != id || del.Value != nil {
+	if payload[SessionKey](del.Key).SessionID != id || del.Value != nil {
 		t.Fatalf("the deletion wrote key %v value %v, want the erase of session %d", del.Key, del.Value, id)
 	}
 }
@@ -193,7 +198,7 @@ func TestSessionMajorAssociationEndErasesOneEntryPerSession(t *testing.T) {
 				t.Errorf("the end wrote %s (erase %v); want only upf/sessions erases", ch.Resource, ch.Value == nil)
 				continue
 			}
-			id, _ := ch.Key["session_id"].(uint32)
+			id := payload[SessionKey](ch.Key).SessionID
 			ids[id] = true
 		}
 	}
@@ -237,13 +242,13 @@ func TestSessionMajorQuotaOnlyUpdatePreservesForwarding(t *testing.T) {
 		t.Fatalf("FAR update cause %d", got)
 	}
 	entry := sessionEntry(t, rec.last())
-	pdrs, _ := entry.Value["pdrs"].([]map[string]any)
+	pdrs := payload[SessionEntry](entry.Value).PDRs
 	if len(pdrs) != 2 {
 		t.Fatalf("FAR update replaced the session with %d PDRs, want both directions", len(pdrs))
 	}
 	ul, dl := entryAction(t, entry.Value, false), entryAction(t, entry.Value, true)
-	tunnel, _ := dl["tunnel"].(map[string]any)
-	if tunnel["teid"] != uint32(0x55667788) || ul["count"] != true {
+	tunnel := dl.Tunnel
+	if tunnel.TEID != uint32(0x55667788) || ul.Count != true {
 		t.Fatalf("full forwarding/counting state was not preserved: ul=%v dl=%v", ul, dl)
 	}
 }
@@ -277,8 +282,8 @@ func TestSessionMajorEarlierNoopDoesNotOverwriteLaterForwarding(t *testing.T) {
 	}
 	entry := sessionEntry(t, rec.last())
 	dl := entryAction(t, entry.Value, true)
-	tunnel, _ := dl["tunnel"].(map[string]any)
-	if tunnel["teid"] != uint32(0x66778899) {
+	tunnel := dl.Tunnel
+	if tunnel.TEID != uint32(0x66778899) {
 		t.Fatalf("the earlier no-op overwrote the later tunnel: %v", dl)
 	}
 	entryAction(t, entry.Value, false)

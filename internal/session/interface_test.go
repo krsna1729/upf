@@ -333,7 +333,7 @@ func TestTemporaryAccessForwardFARRetainsSessionAfterCleanup(t *testing.T) {
 	if _, ok := find0(base, resource, "action_id", uplink.actionID()); ok {
 		t.Fatal("the steady uplink FAR unexpectedly has an outer-header tunnel")
 	}
-	if got := find(t, base, resource, "action_id", downlink.actionID()).Value["teid"]; got != uint32(0x22334460) {
+	if got := payload[TunnelEntry](find(t, base, resource, "action_id", downlink.actionID()).Value).TEID; got != uint32(0x22334460) {
 		t.Fatalf("the steady downlink tunnel has TEID %v, want 0x22334460", got)
 	}
 
@@ -361,7 +361,7 @@ func TestTemporaryAccessForwardFARRetainsSessionAfterCleanup(t *testing.T) {
 	if got := nextHop(t, temporary, uplink.actionID()); got != cfg.AccessNextHop {
 		t.Fatalf("the temporary forward takes next hop %d, want access hop %d", got, cfg.AccessNextHop)
 	}
-	if got := find(t, temporary, resource, "action_id", uplink.actionID()).Value["teid"]; got != uint32(0x55aa55aa) {
+	if got := payload[TunnelEntry](find(t, temporary, resource, "action_id", uplink.actionID()).Value).TEID; got != uint32(0x55aa55aa) {
 		t.Fatalf("the temporary uplink tunnel has TEID %v, want 0x55aa55aa", got)
 	}
 
@@ -610,7 +610,7 @@ func TestAnUplinkForwardWithAnOuterHeaderWritesTheTunnelRecord(t *testing.T) {
 	// ... and the record the encap resolves by that action carries the FAR's
 	// own outer header.
 	record := find(t, changes, tunnelsRes(cfg.Up), "action_id", ul.actionID())
-	if got := record.Value["teid"]; got != uint32(0x22334455) {
+	if got := payload[TunnelEntry](record.Value).TEID; got != uint32(0x22334455) {
 		t.Errorf("the uplink tunnel record's TEID is %v, want the FAR's 0x22334455", got)
 	}
 }

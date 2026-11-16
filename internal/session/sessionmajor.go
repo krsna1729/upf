@@ -124,7 +124,7 @@ func (c *Compiler) foldSession(s *Session, changes []bess.Change, mode sessionEn
 	if mode != replaceSessionEntry {
 		out = out[1:]
 		if mode == eraseSessionEntry && s.sessionLive {
-			out = append(out, bess.Change{Resource: sessionsRes, Key: map[string]any{"session_id": s.sessionID}})
+			out = append(out, bess.Change{Resource: sessionsRes, Key: bess.Fields(SessionKey{SessionID: s.sessionID})})
 		}
 		return out, nil
 	}
@@ -146,35 +146,34 @@ func (c *Compiler) foldSession(s *Session, changes []bess.Change, mode sessionEn
 		if ch.Resource != c.res(Policies) || ch.Value == nil {
 			continue
 		}
-		v := maps.Clone(ch.Value)
-		accesses, _ := v["access"].([]map[string]any)
-		local := make([]map[string]any, len(accesses))
-		for j, a := range accesses {
-			local[j] = maps.Clone(a)
-			if id, _ := a["tunnel_id"].(uint32); id != 0 {
+		v, ok := bess.Get[PolicyEntry](ch.Value)
+		if !ok {
+			return nil, fmt.Errorf("invalid typed policy entry for %s", ch.Resource)
+		}
+		v.Access = slices.Clone(v.Access)
+		for j, a := range v.Access {
+			if id := a.TunnelID; id != 0 {
 				pos, ok := positions[id]
 				if !ok {
-					return nil, fmt.Errorf("%w: an ATSSS access names tunnel %d, which the session does not hold",
-						errNotExpressible, id)
+					return nil, fmt.Errorf("%w: an ATSSS access names tunnel %d, which the session does not hold", errNotExpressible, id)
 				}
-				local[j]["tunnel_id"] = uint32(pos)
+				v.Access[j].TunnelID = uint32(pos)
 			}
 		}
-		v["access"] = local
-		out[i].Value = v
+		out[i].Value = bess.Fields(v)
 	}
 	// The entry first: a policy's tunnels are positions in it.
 	out[0] = bess.Change{Resource: sessionsRes,
-		Key: map[string]any{"session_id": s.sessionID}, Value: value}
+		Key: bess.Fields(SessionKey{SessionID: s.sessionID}), Value: bess.Fields(value)}
 	return out, nil
 }
 
 // sessionValue is the UpfSession the session's appliance writes make, and the
 // 1-based position of each action id in it. The caller holds the lock.
-func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[string]Table) (map[string]any, map[uint32]int, error) {
+func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[string]Table) (SessionEntry, map[uint32]int, error) {
 	var fteids, rules []bess.Change
-	meters := map[uint32]map[string]any{}
-	tunnels := map[uint32]map[string]any{}
+	meters := map[uint32]MeterEntry{}
+	tunnels := map[uint32]TunnelEntry{}
 	counted := map[uint32]bool{}
 	for _, ch := range writes {
 		t, ok := mine[ch.Resource]
@@ -187,11 +186,16 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 		case PDRUplink, PDRDownlink:
 			rules = append(rules, ch)
 		case MetersUplink:
-			meters[mapUint(ch.Key, "id")] = ch.Value
+			key, _ := bess.Get[IDKey](ch.Key)
+			value, _ := bess.Get[MeterEntry](ch.Value)
+			meters[key.ID] = value
 		case CountersUplink, CountersDownlink:
-			counted[mapUint(ch.Key, "action_id")] = true
+			key, _ := bess.Get[ActionKey](ch.Key)
+			counted[key.ActionID] = true
 		case TunnelsUplink:
-			tunnels[mapUint(ch.Key, "action_id")] = ch.Value
+			key, _ := bess.Get[ActionKey](ch.Key)
+			value, _ := bess.Get[TunnelEntry](ch.Value)
+			tunnels[key.ActionID] = value
 		}
 	}
 	// A dropping rule's result is empty; its PDR says which action it is,
@@ -204,7 +208,7 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 		}
 		ids, _, err := c.pdrRuleIDs(p)
 		if err != nil {
-			return nil, nil, fmt.Errorf("PDR %d: %w", p.id, err)
+			return SessionEntry{}, nil, fmt.Errorf("PDR %d: %w", p.id, err)
 		}
 		for id := range ruleIdentities(ids) {
 			owners[id] = p
@@ -214,11 +218,10 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 	// Every meter the session writes is one of its QERs, in id order, named
 	// or not: a QER whose rules drop for a while keeps its buckets, as its
 	// meter entry does in the masked layout.
-	qers := make([]map[string]any, 0, len(meters))
+	qers := make([]SessionQER, 0, len(meters))
 	qerAt := map[uint32]int{}
 	for _, id := range slices.Sorted(maps.Keys(meters)) {
-		q := maps.Clone(meters[id])
-		q["qer_id"] = id
+		q := SessionQER{QERID: id, TrTCM: meters[id].TrTCM}
 		qers = append(qers, q)
 		qerAt[id] = len(qers)
 	}
@@ -233,60 +236,60 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 		return pos, nil
 	}
 
-	actions := []map[string]any{}
+	actions := []SessionAction{}
 	at := map[uint32]int{}
-	action := func(id uint32) map[string]any {
+	action := func(id uint32) *SessionAction {
 		if pos, ok := at[id]; ok {
-			return actions[pos-1]
+			return &actions[pos-1]
 		}
-		a := map[string]any{"action_id": id, "count": counted[id]}
+		a := SessionAction{ActionID: id, Count: counted[id]}
 		if t, ok := tunnels[id]; ok {
-			a["tunnel"] = t
+			a.Tunnel = &t
 		}
 		actions = append(actions, a)
 		at[id] = len(actions)
-		return a
+		return &actions[len(actions)-1]
 	}
 
-	pdrs := make([]map[string]any, 0, len(rules))
+	pdrs := make([]SessionPDR, 0, len(rules))
 	for _, ch := range rules {
 		down := mine[ch.Resource] == PDRDownlink
-		value, mask, err := packedKey(ch.Key)
+		key, _ := bess.Get[RuleKey](ch.Key)
+		entry, _ := bess.Get[RuleEntry](ch.Value)
+		value, mask, err := packedKey(key)
 		if err != nil {
-			return nil, nil, err
+			return SessionEntry{}, nil, err
 		}
-		rule := map[string]any{
-			"downlink": down, "value": value, "mask": mask,
-			"priority": ch.Value["priority"], "gate": ch.Value["gate"],
-		}
-		if ranges, ok := ch.Key["ranges"]; ok {
-			rule["ranges"] = ranges
-		}
-		result, _ := ch.Value["result"].([]byte)
+		rule := SessionPDR{Downlink: down, Value: value, Mask: mask, Priority: entry.Priority, Gate: entry.Gate, Ranges: key.Ranges}
+		result := entry.Result
 		id := uint32(0)
 		if len(result) >= resultSize {
 			id = binary.BigEndian.Uint32(result[resultActionID:])
 		}
 		if id != 0 {
 			a := action(id)
-			a["next_hop_id"] = binary.BigEndian.Uint32(result[resultNextHopID:])
-			a["route_domain"] = binary.BigEndian.Uint32(result[resultRouteDomain:])
+			nextHop := binary.BigEndian.Uint32(result[resultNextHopID:])
+			a.NextHopID = &nextHop
+			domain := binary.BigEndian.Uint32(result[resultRouteDomain:])
+			a.RouteDomain = &domain
 			if down && len(result) >= resultSteeringID+4 {
-				a["steering_policy_id"] = binary.BigEndian.Uint32(result[resultSteeringID:])
+				policy := binary.BigEndian.Uint32(result[resultSteeringID:])
+				a.SteeringPolicyID = &policy
 			}
-			for i, field := range []string{"pdr_qer", "session_qer"} {
+			for i, field := range []**uint32{&a.PDRQER, &a.SessionQER} {
 				pos, err := qer(binary.BigEndian.Uint32(result[resultMeterID+4*i:]))
 				if err != nil {
-					return nil, nil, err
+					return SessionEntry{}, nil, err
 				}
-				a[field] = uint32(pos)
+				position := uint32(pos)
+				*field = &position
 			}
-		} else if p := owners[ch.Resource+"\x00"+ruleID(ch.Key)]; p != nil && counted[p.actionID] {
+		} else if p := owners[ch.Resource+"\x00"+ruleID(key)]; p != nil && counted[p.actionID] {
 			id = p.actionID
 			action(id)
 		}
 		if id != 0 {
-			rule["action"] = uint32(at[id])
+			rule.Action = uint32(at[id])
 		}
 		pdrs = append(pdrs, rule)
 	}
@@ -297,21 +300,22 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 		}
 	}
 	if layout := c.cfg.Sessions; len(actions) > layout.Actions || len(qers) > layout.QERs {
-		return nil, nil, fmt.Errorf("%w: the session needs %d actions and %d QER meters; the module holds %d and %d per session (-session-actions, -session-qers)",
+		return SessionEntry{}, nil, fmt.Errorf("%w: the session needs %d actions and %d QER meters; the module holds %d and %d per session (-session-actions, -session-qers)",
 			errNotExpressible, len(actions), len(qers), layout.Actions, layout.QERs)
 	}
-	entries := make([]map[string]any, 0, len(fteids))
+	entries := make([]SessionFTEID, 0, len(fteids))
 	for _, ch := range fteids {
-		entries = append(entries, map[string]any{"key": ch.Key, "entry": ch.Value})
+		key, _ := bess.Get[FTEIDKey](ch.Key)
+		entry, _ := bess.Get[FTEIDEntry](ch.Value)
+		entries = append(entries, SessionFTEID{Key: key, Entry: entry})
 	}
-	return map[string]any{"fteids": entries, "qers": qers, "actions": actions, "pdrs": pdrs}, at, nil
+	return SessionEntry{FTEIDs: entries, QERs: qers, Actions: actions, PDRs: pdrs}, at, nil
 }
 
 // packedKey is a WildcardMatch rule key's values and masks as the session
 // entry's packed bytes, in the table's field order.
-func packedKey(key map[string]any) ([]byte, []byte, error) {
-	values, _ := key["values"].([][]byte)
-	masks, _ := key["masks"].([][]byte)
+func packedKey(key RuleKey) ([]byte, []byte, error) {
+	values, masks := key.Values, key.Masks
 	if len(values) != len(masks) {
 		return nil, nil, fmt.Errorf("a rule key with %d values and %d masks", len(values), len(masks))
 	}
@@ -325,9 +329,4 @@ func packedKey(key map[string]any) ([]byte, []byte, error) {
 		mask = append(mask, masks[i]...)
 	}
 	return value, mask, nil
-}
-
-func mapUint(m map[string]any, field string) uint32 {
-	v, _ := m[field].(uint32)
-	return v
 }

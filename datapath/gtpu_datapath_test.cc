@@ -355,6 +355,60 @@ TEST(FteidResource, RejectsCapacityAndReusesAbortedReservations) {
   EXPECT_TRUE(resource.Contains(bess::dataplane::EncodeKey(second)));
 }
 
+TEST(FteidResource, RefusedNodeAdmissionLeavesNoRuleAndReleasesItsCharge) {
+  struct Budget final : bess::utils::MemoryGrowth {
+    bool refuse_nodes = true;
+    size_t held = 0;
+    void Grow(size_t bytes, size_t glibc_bytes) override {
+      if (refuse_nodes && glibc_bytes != 0)
+        throw bess::utils::MemoryRefused(
+            bess::utils::MemoryRefused::Reason::kNormalLimit, bytes, "node budget");
+      held += bytes;
+    }
+    void Shrink(size_t bytes, size_t) noexcept override { held -= bytes; }
+  } budget;
+  TestIndex table(4);
+  ASSERT_NE(table.index, nullptr);
+  size_t retained_slabs = 0;
+  {
+    upf::datapath::FteidResource resource("decap/fteids", *table.index, table.domain, 4);
+    const size_t initial = resource.bytes();
+    resource.set_memory_growth(&budget);
+    const auto key = Key(1, 4, 123, 1);
+    const auto put = [&] {
+      return resource.Reserve(bess::dataplane::Op::Upsert(
+          resource.name(), bess::dataplane::EncodeKey(key),
+          std::any(upf::datapath::FteidRecord{0, 7})));
+    };
+    EXPECT_THROW((void)put(), bess::utils::MemoryRefused);
+    EXPECT_FALSE(resource.Contains(bess::dataplane::EncodeKey(key)));
+    bool hit = false;
+    TableValue(*table.index, key, &hit);
+    EXPECT_FALSE(hit);
+    EXPECT_EQ(initial + budget.held, resource.bytes());
+    retained_slabs = budget.held;
+
+    budget.refuse_nodes = false;
+    Publish(resource, key, 0);
+    EXPECT_TRUE(resource.Contains(bess::dataplane::EncodeKey(key)));
+    EXPECT_EQ(initial + budget.held, resource.bytes());
+    auto erase = resource.Reserve(bess::dataplane::Op::Erase(
+        resource.name(), bess::dataplane::EncodeKey(key)));
+    ASSERT_TRUE(erase);
+    {
+      bess::dataplane::Retirer retirer;
+      erase->staged->Publish(retirer);
+    }
+    EXPECT_FALSE(resource.Contains(bess::dataplane::EncodeKey(key)));
+    EXPECT_EQ(retained_slabs, budget.held);
+    EXPECT_EQ(initial + budget.held, resource.bytes());
+    table.domain.Drain();
+    Publish(resource, key, 0);  // destruction must release a still-live mirror node too
+  }
+  // Slab capacity belongs to the outer memory scope, not individual nodes.
+  EXPECT_EQ(retained_slabs, budget.held);
+}
+
 TEST(GtpuOuterWriter, BuildsIpv4LengthsChecksumDscpQfiAndPreservesInner) {
   std::array<uint8_t, 16> local{}, peer{};
   local[12] = 10; local[15] = 1;

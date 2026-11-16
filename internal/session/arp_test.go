@@ -95,7 +95,7 @@ func TestASessionsUEAddressIsAnsweredOnItsInterface(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	entry := find(t, rec.last(), "arp_n6/entries", "ip", "10.45.0.2")
-	if got := entry.Value["mac_addr"]; got != "02:00:00:00:06:01" {
+	if got := payload[ARPEntry](entry.Value).MACAddr; got != "02:00:00:00:06:01" {
 		t.Errorf("the entry's MAC is %v, want the interface's own 02:00:00:00:06:01", got)
 	}
 	// A deployment whose interface declares no responder writes nothing: there

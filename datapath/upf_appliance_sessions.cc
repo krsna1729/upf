@@ -867,10 +867,14 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
   staged->rules_mirror_ = std::move(rules);
   staged->fteids_mirror_.reserve(v->fteids.size());
   for (const auto &f : v->fteids) staged->fteids_mirror_.push_back(f.id);
-  size_t bytes = staged->rules_mirror_.capacity() * sizeof(Rule) +
-                 staged->fteids_mirror_.capacity() * sizeof(upf::datapath::FteidId);
-  for (const Rule &rule : staged->rules_mirror_)
-    if (rule.ranges) bytes += sizeof(*rule.ranges) + rule.ranges->capacity() * sizeof(KeyRange);
+  const auto chunk_bytes = [](auto &items) {
+    return items.capacity() == 0 ? size_t{0} : bess::utils::MallocBytes(items.data());
+  };
+  size_t bytes = chunk_bytes(staged->rules_mirror_) + chunk_bytes(staged->fteids_mirror_);
+  for (const Rule &rule : staged->rules_mirror_) {
+    if (rule.ranges)
+      bytes += bess::utils::MallocBytes(rule.ranges.get()) + chunk_bytes(*rule.ranges);
+  }
   if (growth_ != nullptr) growth_->Grow(bytes, bytes);
   staged->bytes_ = bytes;
   staged->actions_count_ = static_cast<uint8_t>(v->actions.size());

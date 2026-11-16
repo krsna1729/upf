@@ -285,10 +285,10 @@ type FTEIDEndpoint struct {
 
 // FTEIDKey is the exact GTP-U admission identity.
 type FTEIDKey struct {
-	EndpointID    uint32
-	AddressFamily uint32
-	LocalAddress  []byte
-	TEID          uint32
+	EndpointID    uint32 `json:"endpoint_id"`
+	AddressFamily uint32 `json:"address_family"`
+	LocalAddress  []byte `json:"local_address"`
+	TEID          uint32 `json:"teid"`
 }
 
 // Direction: where a PDR of this direction sends its matches, and what a
@@ -374,6 +374,11 @@ type Config struct {
 	MaxMeters  uint32
 	MaxTEIDs   uint32
 
+	// MaxSessions bounds established sessions plus in-flight or uncertain
+	// establishments. Zero uses Sessions.MaxSessions for session-major,
+	// otherwise MaxActions, falling back to 65536 when neither is set.
+	MaxSessions uint32
+
 	// IDReuseDelay is how long a released id waits before the pool may hand it
 	// out again. A transaction that removes a record leaves its slot retiring
 	// for a grace period (core/dataplane/slot_table.h), and creating a record
@@ -397,8 +402,8 @@ type Config struct {
 	Sessions *SessionLayout
 
 	// Admit, when set, is asked before a new session is established: false
-	// refuses it with cause 75 (no resources available) before anything is
-	// allocated. A repeated establishment and a checkpoint replay are not new
+	// refuses it with cause 75 before model state or resource ids are reserved.
+	// A repeated establishment and a checkpoint replay are not new
 	// sessions and are not asked. Modifications and deletions never are: a
 	// deletion is how the SMF gives memory back. upfd's is its heap check
 	// (cmd/upfd/admission.go).
@@ -495,9 +500,10 @@ type Compiler struct {
 	journal   *Journal
 	restoring bool
 
-	mu       sync.Mutex
-	sessions map[uint64]*Session
-	byCP     map[uint64]*Session // sessions by CP F-SEID: an establishment's retransmission, found without a walk
+	mu               sync.Mutex
+	sessions         map[uint64]*Session
+	byCP             map[uint64]*Session // sessions by CP F-SEID: an establishment's retransmission, found without a walk
+	reservedSessions uint32              // preparing or unanswered establishments; protected by mu
 	// measured tracks URR membership for activity polling and rare End Marker
 	// events, not an ordinary per-tick walk. buffering is the BUFF+NOCP set
 	// EvaluateDownlinks walks and prunes.
@@ -564,6 +570,16 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		log = slog.Default()
 	}
 	cfg = cfg.withDefaults()
+	if cfg.MaxSessions == 0 {
+		switch {
+		case cfg.Sessions != nil:
+			cfg.MaxSessions = cfg.Sessions.MaxSessions
+		case cfg.MaxActions != 0:
+			cfg.MaxSessions = cfg.MaxActions
+		default:
+			cfg.MaxSessions = 1 << 16
+		}
+	}
 	c := &Compiler{
 		cfg:       cfg,
 		target:    newTarget(cfg),
@@ -606,6 +622,17 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 // findByCP is the session the SMF's F-SEID names; the caller holds the lock.
 func (c *Compiler) findByCP(cpSEID uint64) *Session {
 	return c.byCP[cpSEID]
+}
+
+// ResponseSEID reads the peer's header identity from metadata without doing I/O.
+// The CP SEID is immutable for the session's lifetime.
+func (c *Compiler) ResponseSEID(localSEID uint64) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if s := c.sessions[localSEID]; s != nil {
+		return s.CPSEID
+	}
+	return localSEID
 }
 
 type chosenFTEID struct {
@@ -1625,15 +1652,12 @@ type fteidKey struct {
 	address                  [16]byte // the first 4 bytes for family 4
 }
 
-func (k fteidKey) entry() map[string]any {
+func (k fteidKey) entry() bess.Payload {
 	n := 4
 	if k.family == 6 {
 		n = 16
 	}
-	return map[string]any{
-		"endpoint_id": k.endpointID, "address_family": k.family,
-		"local_address": slices.Clone(k.address[:n]), "teid": k.teid,
-	}
+	return bess.Fields(FTEIDKey{EndpointID: k.endpointID, AddressFamily: k.family, LocalAddress: slices.Clone(k.address[:n]), TEID: k.teid})
 }
 
 // The classifier's result record, as every deployed graph declares it:
@@ -1914,7 +1938,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 			return nil, fmt.Errorf("PDR %d: %w", p.id, err)
 		}
 		for _, key := range keys {
-			add(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: key})
+			add(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: bess.Fields(key)})
 		}
 	}
 	// And the ARP entries the session's subscriber addresses hold: the address
@@ -1930,7 +1954,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	for _, p := range all {
 		dir := c.direction(p)
 		if p.tunnel != noTunnel {
-			add(bess.Change{Resource: c.tunnelRes(p.tunnel), Key: map[string]any{"action_id": p.actionID}})
+			add(bess.Change{Resource: c.tunnelRes(p.tunnel), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
 		}
 		if p.teid != 0 {
 			for _, key := range c.fteidKeysOf(p) {
@@ -1938,7 +1962,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 			}
 		}
 		if dir.Counters != "" && len(p.urrIDs) > 0 && p.actionID != 0 {
-			add(bess.Change{Resource: c.res(counterTable(p.downlink())), Key: map[string]any{"action_id": p.actionID}})
+			add(bess.Change{Resource: c.res(counterTable(p.downlink())), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
 		}
 		// A PDR that buffers is counted by a *second* module, in front of the
 		// store, and compile writes its entry too (writeBufferCounter). The
@@ -1949,7 +1973,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 		// (ci/buffer-path.sh's second test, "cnt_buf already measures 1 rules
 		// before any session exists").
 		if p.buffer && p.actionID != 0 && c.cfg.Buffering != nil && c.cfg.Buffering.Counter != "" {
-			add(bess.Change{Resource: c.res(BufferCounters), Key: map[string]any{"action_id": p.actionID}})
+			add(bess.Change{Resource: c.res(BufferCounters), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
 		}
 		// The store's per-flow "flows" entry is the session's too: compile
 		// writes the SMF's own numbers there (writeFlowEntry), and it is
@@ -1957,7 +1981,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 		// A deletion that left the entry would hand a later session that reuses
 		// the ActionId a timeout and a cap the SMF never sent it.
 		if p.buffer && p.actionID != 0 && c.cfg.Buffering != nil && c.cfg.Buffering.Store != "" {
-			add(bess.Change{Resource: c.res(Flows), Key: map[string]any{"id": p.actionID}})
+			add(bess.Change{Resource: c.res(Flows), Key: bess.Fields(IDKey{ID: p.actionID})})
 		}
 	}
 	// A MAR's policy and the two tunnel records its accesses name are the
@@ -1968,18 +1992,18 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 		for _, m := range append(marsInOrder(s), s.pending.removedPolicies()...) {
 			if m.policyID != 0 {
 				add(bess.Change{Resource: c.res(Policies),
-					Key: map[string]any{"policy_id": m.policyID}})
+					Key: bess.Fields(PolicyKey{PolicyID: m.policyID})})
 			}
 			for _, id := range m.tunnelIDs {
 				if id != 0 {
 					add(bess.Change{Resource: c.res(TunnelsDownlink),
-						Key: map[string]any{"action_id": id}})
+						Key: bess.Fields(ActionKey{ActionID: id})})
 				}
 			}
 		}
 		for _, id := range s.pending.retiredIDs() {
 			add(bess.Change{Resource: c.res(TunnelsDownlink),
-				Key: map[string]any{"action_id": id}})
+				Key: bess.Fields(ActionKey{ActionID: id})})
 		}
 	}
 	// Meters belong to QERs, not to PDRs: compile writes one per policed
@@ -1995,10 +2019,10 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 			continue
 		}
 		if q.meterUL != 0 {
-			add(bess.Change{Resource: c.res(MetersUplink), Key: map[string]any{"id": q.meterUL}})
+			add(bess.Change{Resource: c.res(MetersUplink), Key: bess.Fields(IDKey{ID: q.meterUL})})
 		}
 		if q.meterDL != 0 {
-			add(bess.Change{Resource: c.res(MetersDownlink), Key: map[string]any{"id": q.meterDL}})
+			add(bess.Change{Resource: c.res(MetersDownlink), Key: bess.Fields(IDKey{ID: q.meterDL})})
 		}
 	}
 	// Under -target session-major the session's records are one entry: the

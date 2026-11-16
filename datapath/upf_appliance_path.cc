@@ -329,17 +329,38 @@ void UpfAppliance::MeterSessions(bess::PacketBatch *batch, State *states, size_t
 
 void UpfAppliance::CountUsage(Context *ctx, bess::PacketBatch *batch, State *states,
     size_t n, Counters &bank, bool buffer) {
+  if (buffer) {
+    const auto worker = bank.pages->workers() == 1 ? bess::dataplane::WorkerId(0) : ctx->wid;
+    uint32_t counted[kBurst];
+    size_t count = 0;
+    for (size_t i = 0; i < n; ++i) {
+      const auto &s = states[i];
+      if (s.lane != Lane::kBuffer || !bank.paged_entries->Lookup(Id(s.action_id))) continue;
+      bank.pages->Add(worker, s.action_id,
+          UsageOctets(Bytes(batch->packet(i)), batch->packet(i).total_len()));
+      bool seen = false;
+      for (size_t j = 0; j < count; ++j) seen |= counted[j] == s.action_id;
+      if (!seen) counted[count++] = s.action_id;
+    }
+    for (size_t j = 0; j < count; ++j) {
+      auto &stamp = bank.pages->Stamp(counted[j]);
+      if (stamp.first.load(std::memory_order_relaxed) == 0)
+        stamp.first.store(ctx->current_ns, std::memory_order_relaxed);
+      stamp.last.store(ctx->current_ns, std::memory_order_relaxed);
+    }
+    return;
+  }
   // One plane (the default): the module's only worker writes it, whatever its id.
   const auto plane = bank.cells->ForWorker(
       bank.cells->workers() == 1 ? bess::dataplane::WorkerId(0) : ctx->wid);
   const auto changed = (&bank == &counters_dl_ ? changes_dl_ : changes_ul_)->ForWorker(
-      buffer || bank.cells->workers() == 1 ? 0 : ctx->wid.value());
+      bank.cells->workers() == 1 ? 0 : ctx->wid.value());
   uint32_t counted[kBurst];
   size_t count = 0;
   for (size_t i = 0; i < n; ++i) {
     const auto &s = states[i];
-    if (buffer ? s.lane != Lane::kBuffer : !Active(s)) continue;
-    if (!buffer && ((&bank == &counters_ul_) != (s.direction == 0))) continue;
+    if (!Active(s)) continue;
+    if ((&bank == &counters_ul_) != (s.direction == 0)) continue;
     const Id id(s.action_id);
     if (id.value() == 0 || id.value() > capacity_ || !bank.entries->Lookup(id)) continue;
     plane.Add(id.value() - 1, 0, 1);
@@ -353,7 +374,7 @@ void UpfAppliance::CountUsage(Context *ctx, bess::PacketBatch *batch, State *sta
     if (stamp.first.load(std::memory_order_relaxed) == 0)
       stamp.first.store(ctx->current_ns, std::memory_order_relaxed);
     stamp.last.store(ctx->current_ns, std::memory_order_relaxed);
-    if (!buffer) changed.Mark(counted[j]);
+    changed.Mark(counted[j]);
   }
 }
 

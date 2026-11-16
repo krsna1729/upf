@@ -471,10 +471,10 @@ func TestSNDEMUsesTheOldRoutedEndpointForAccessAndCoreTunnels(t *testing.T) {
 			}
 			dl := ruleIn(t, rec.last(), cfg.Down.PDRTable)
 			tunnel := find(t, rec.last(), tunnelsRes(cfg.Down), "action_id", dl.actionID())
-			if !bytes.Equal(tunnel.Value["local_address"].([]byte), oldLocal.AsSlice()) ||
-				tunnel.Value["transport_route_domain"] != oldDomain {
+			if !bytes.Equal(payload[TunnelEntry](tunnel.Value).LocalAddress, oldLocal.AsSlice()) ||
+				payload[TunnelEntry](tunnel.Value).TransportRouteDomain != oldDomain {
 				t.Fatalf("old tunnel endpoint is %v/domain %v, want %s/domain %d",
-					tunnel.Value["local_address"], tunnel.Value["transport_route_domain"],
+					payload[TunnelEntry](tunnel.Value).LocalAddress, payload[TunnelEntry](tunnel.Value).TransportRouteDomain,
 					oldLocal, oldDomain)
 			}
 			forwarding := []*ie.IE{ie.NewDestinationInterface(tc.newDest)}
@@ -490,10 +490,10 @@ func TestSNDEMUsesTheOldRoutedEndpointForAccessAndCoreTunnels(t *testing.T) {
 			}
 			dl = ruleIn(t, rec.last(), cfg.Down.PDRTable)
 			tunnel = find(t, rec.last(), tunnelsRes(cfg.Down), "action_id", dl.actionID())
-			if !bytes.Equal(tunnel.Value["local_address"].([]byte), newLocal.AsSlice()) ||
-				tunnel.Value["transport_route_domain"] != newDomain {
+			if !bytes.Equal(payload[TunnelEntry](tunnel.Value).LocalAddress, newLocal.AsSlice()) ||
+				payload[TunnelEntry](tunnel.Value).TransportRouteDomain != newDomain {
 				t.Errorf("new tunnel endpoint is %v/domain %v, want %s/domain %d",
-					tunnel.Value["local_address"], tunnel.Value["transport_route_domain"],
+					payload[TunnelEntry](tunnel.Value).LocalAddress, payload[TunnelEntry](tunnel.Value).TransportRouteDomain,
 					newLocal, newDomain)
 			}
 			frame, err := endMarkerFrame(0x11223344, netip.MustParseAddr("10.20.30.2"), oldLocal)

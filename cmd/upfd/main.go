@@ -52,7 +52,7 @@ func run() error {
 		"repeatable endpoint=<id>,reference=<n3|n9>,transport-domain=<id>,source=<access|core>,instance=<name>,ipv4=<addr>,ipv6=<addr>; config/environment entries are ';'-separated")
 	capacity := flag.Uint("capacity", 1<<16,
 		"the id spaces the session compiler keeps: the capacity of the graph's "+
-			"Meter and GtpuEncap tables, which refuse an id beyond it")
+			"Meter and GtpuEncap tables; also the graph/appliance session bound")
 	n6NextHop := flag.Uint("n6-next-hop", 1, "the Router next hop an uplink forward leaves by")
 	n3NextHop := flag.Uint("n3-next-hop", 2,
 		"the Router next hop a downlink forward leaves by: the encap's gate "+
@@ -139,9 +139,9 @@ func run() error {
 		"serve this node's own numbers (Prometheus text format) on host:port; "+
 			"empty: no endpoint")
 	sessionWorkers := flag.Int("session-workers", 1,
-		"how many PFCP session messages are handled at once, each session's in the order "+
-			"they arrived (1: one at a time, in the socket's read loop). More lets the "+
-			"dataplane transactions of different sessions overlap")
+		fmt.Sprintf("how many PFCP session messages are handled at once (1..%d), each session's in arrival order; "+
+			"1 handles them in the socket read loop; more overlaps different sessions' dataplane transactions",
+			n4.MaxSessionWorkers))
 	n4ReceiveBuffer := flag.Int("n4-receive-buffer", 4<<20,
 		"bytes of socket receive buffer for the N4 socket: what holds the PFCP requests "+
 			"that arrive while every session worker is busy (Linux caps it at "+
@@ -332,14 +332,27 @@ func run() error {
 				graph.N4Addr = a
 			}
 		}
+		var admission *heapAdmissionRecovery
 		if fraction := *heapAdmission; fraction > 0 {
-			graph.Admit = func() bool {
-				live, limit := heap.read()
-				return heapAdmits(live, limit, fraction)
-			}
+			admission = newHeapAdmission(fraction, heap.read)
+			graph.Admit = admission.admit
 		}
 		cfg.Sessions = session.New(graph, client, log)
 		compiler = cfg.Sessions.(*session.Compiler)
+		if admission != nil {
+			recoveryCtx, cancelRecovery := context.WithCancel(ctx)
+			recoveryDone := make(chan struct{})
+			go func() {
+				defer close(recoveryDone)
+				admission.run(recoveryCtx, func() uint64 { return compiler.Stats().Deleted })
+			}()
+			defer func() {
+				cancelRecovery()
+				// runtime.GC cannot be cancelled; join any collection in flight
+				// before closing the session layer's client and checkpoint.
+				<-recoveryDone
+			}()
+		}
 		// The restart wall (docs/design.md): the daemon may still hold an
 		// earlier controller's sessions, and this process knows none of them --
 		// they would match packets with ids nothing here can name. They go

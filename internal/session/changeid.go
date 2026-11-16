@@ -4,137 +4,80 @@ package session
 
 import (
 	"encoding/binary"
-	"fmt"
-	"slices"
+	"github.com/krsna1729/upf/internal/bess"
 )
 
-// changeID is the identity of the entry a change names -- its resource and its
-// key -- for the dedupes that keep one transaction from naming an entry twice.
-// It keeps fmt.Sprint's equivalence, which is what these dedupes compared
-// before: integers by value whatever their Go type, lists by their elements
-// (a []byte is a list of integers, as fmt prints it), maps by their entries in
-// name order. It is finer only across kinds, where fmt printed a string like
-// the number or bool it spells; no key holds one field as both. The difference
-// is the cost: fmt sorted each map's names through reflection, which was most
-// of what removing a session allocated. This writes into a buffer on the stack
-// and allocates the string.
-func changeID(resource string, key map[string]any) string {
-	var room [512]byte // a rule key of 8 fields is under 300 bytes
+// changeID retains the canonical resource/key bytes used by transaction dedupes.
+func changeID(resource string, key bess.Payload) string {
+	var room [512]byte
 	b := append(room[:0], resource...)
 	b = append(b, 0)
-	return string(appendIdentity(b, key))
+	if x, ok := bess.Get[ActionKey](key); ok {
+		return string(identityUint(identityMap(b, 1), "action_id", uint64(x.ActionID)))
+	}
+	if x, ok := bess.Get[IDKey](key); ok {
+		return string(identityUint(identityMap(b, 1), "id", uint64(x.ID)))
+	}
+	if x, ok := bess.Get[PolicyKey](key); ok {
+		return string(identityUint(identityMap(b, 1), "policy_id", uint64(x.PolicyID)))
+	}
+	if x, ok := bess.Get[SessionKey](key); ok {
+		return string(identityUint(identityMap(b, 1), "session_id", uint64(x.SessionID)))
+	}
+	if x, ok := bess.Get[ARPKey](key); ok {
+		b = identityField(identityMap(b, 1), "ip")
+		b = binary.AppendUvarint(append(b, 's'), uint64(len(x.IP)))
+		return string(append(b, x.IP...))
+	}
+	if x, ok := bess.Get[FTEIDKey](key); ok {
+		b = identityUint(identityMap(b, 4), "address_family", uint64(x.AddressFamily))
+		b = identityUint(b, "endpoint_id", uint64(x.EndpointID))
+		b = appendByteList(identityField(b, "local_address"), x.LocalAddress)
+		return string(identityUint(b, "teid", uint64(x.TEID)))
+	}
+	if x, ok := bess.Get[RuleKey](key); ok {
+		return string(appendRuleIdentity(b, x))
+	}
+	panic("unsupported compiler resource key")
 }
 
-// appendIdentity writes v so that the writing is injective on the
-// equivalence above: every value is tagged, and every string and list carries
-// its length.
-func appendIdentity(b []byte, v any) []byte {
-	switch x := v.(type) {
-	case nil:
-		return append(b, 'n')
-	case bool:
-		if x {
-			return append(b, 't')
-		}
-		return append(b, 'f')
-	case string:
-		b = binary.AppendUvarint(append(b, 's'), uint64(len(x)))
-		return append(b, x...)
-	case map[string]any:
-		var room [8]string
-		names := room[:0]
-		for name := range x {
-			names = append(names, name)
-		}
-		slices.Sort(names)
-		b = binary.AppendUvarint(append(b, 'm'), uint64(len(names)))
-		for _, name := range names {
-			b = binary.AppendUvarint(b, uint64(len(name)))
-			b = appendIdentity(append(b, name...), x[name])
-		}
-		return b
-	case []byte:
-		return appendByteList(b, x)
-	case []uint32:
-		b = binary.AppendUvarint(append(b, 'l'), uint64(len(x)))
-		for _, e := range x {
-			b = appendInt(b, uint64(e), false)
-		}
-		return b
-	case [][]byte:
-		b = binary.AppendUvarint(append(b, 'l'), uint64(len(x)))
-		for _, e := range x {
-			b = appendByteList(b, e) // not appendIdentity: a []byte in an any is an allocation
-		}
-		return b
-	case []map[string]any:
-		b = binary.AppendUvarint(append(b, 'l'), uint64(len(x)))
-		for _, e := range x {
-			b = appendIdentity(b, e)
-		}
-		return b
-	case []any:
-		b = binary.AppendUvarint(append(b, 'l'), uint64(len(x)))
-		for _, e := range x {
-			b = appendIdentity(b, e)
-		}
-		return b
-	}
-	if n, neg, ok := integer(v); ok {
-		return appendInt(b, n, neg)
-	}
-	// Anything else a key never holds today: fmt's own printing, tagged and
-	// length-prefixed so it cannot pass for one of the forms above.
-	s := fmt.Sprint(v)
-	b = binary.AppendUvarint(append(b, '?'), uint64(len(s)))
-	return append(b, s...)
+func identityMap(b []byte, n int) []byte { return binary.AppendUvarint(append(b, 'm'), uint64(n)) }
+func identityField(b []byte, name string) []byte {
+	return append(binary.AppendUvarint(b, uint64(len(name))), name...)
 }
-
-// appendByteList writes a []byte as the list of integers fmt prints it as.
-func appendByteList(b, x []byte) []byte {
-	b = binary.AppendUvarint(append(b, 'l'), uint64(len(x)))
-	for _, e := range x {
-		b = appendInt(b, uint64(e), false)
+func identityUint(b []byte, name string, n uint64) []byte {
+	return binary.AppendUvarint(append(identityField(b, name), '+'), n)
+}
+func appendRuleIdentity(b []byte, key RuleKey) []byte {
+	n := 2
+	if len(key.Ranges) != 0 {
+		n++
+	}
+	b = identityMap(b, n)
+	b = identityField(b, "masks")
+	b = appendIdentityBins(b, key.Masks)
+	if len(key.Ranges) != 0 {
+		b = identityField(b, "ranges")
+		b = binary.AppendUvarint(append(b, 'l'), uint64(len(key.Ranges)))
+		for _, r := range key.Ranges {
+			b = identityUint(identityMap(b, 3), "field", uint64(r.Field))
+			b = identityUint(b, "high", r.High)
+			b = identityUint(b, "low", r.Low)
+		}
+	}
+	return appendIdentityBins(identityField(b, "values"), key.Values)
+}
+func appendIdentityBins(b []byte, bins [][]byte) []byte {
+	b = binary.AppendUvarint(append(b, 'l'), uint64(len(bins)))
+	for _, x := range bins {
+		b = appendByteList(b, x)
 	}
 	return b
 }
-
-func appendInt(b []byte, n uint64, neg bool) []byte {
-	if neg {
-		return binary.AppendUvarint(append(b, '-'), n)
+func appendByteList(b, x []byte) []byte {
+	b = binary.AppendUvarint(append(b, 'l'), uint64(len(x)))
+	for _, e := range x {
+		b = binary.AppendUvarint(append(b, '+'), uint64(e))
 	}
-	return binary.AppendUvarint(append(b, '+'), n)
-}
-
-// integer is v's magnitude and sign for every Go integer type.
-func integer(v any) (n uint64, neg bool, ok bool) {
-	var i int64
-	switch x := v.(type) {
-	case uint32:
-		return uint64(x), false, true
-	case uint64:
-		return x, false, true
-	case uint:
-		return uint64(x), false, true
-	case uint16:
-		return uint64(x), false, true
-	case uint8:
-		return uint64(x), false, true
-	case int:
-		i = int64(x)
-	case int64:
-		i = x
-	case int32:
-		i = int64(x)
-	case int16:
-		i = int64(x)
-	case int8:
-		i = int64(x)
-	default:
-		return 0, false, false
-	}
-	if i < 0 {
-		return uint64(-(i + 1)) + 1, true, true
-	}
-	return uint64(i), false, true
+	return b
 }

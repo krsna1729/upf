@@ -38,14 +38,15 @@ namespace upf::appliance {
 using Id = bess::dataplane::ActionId;
 using bess::framework::Sized;
 struct CounterEntry {};
-struct Stamps { std::atomic<uint64_t> first{0}, last{0}; };
 struct Counters {
   Sized<bess::dataplane::SlotTable<Id, CounterEntry>> entries;
+  Sized<bess::dataplane::SlotTable<Id, CounterEntry, true>> paged_entries;
+  Sized<BufferCounterPages> pages;
   Sized<bess::stats::KeyedCounters> cells;
   bess::framework::MemoryLease stamps_lease, live_lease;
   bess::utils::DpdkArray<Stamps> stamps;
   std::unique_ptr<LiveIds> live;  // the ids `entries` holds, walked by get_counts
-  std::unique_ptr<bess::dataplane::SlotResource<Id, CounterEntry>> resource;
+  std::unique_ptr<bess::dataplane::Resource> resource;
 };
 struct Pdr {
   bess::framework::MemoryLease table_lease, records_lease;

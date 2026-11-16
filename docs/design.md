@@ -35,6 +35,21 @@ retries, and no other writer exists to race. A model-only modification can
 need no dataplane write; it must not split a dataplane change across
 transactions.
 
+Resource changes carry compact typed Go structs (`bess.Fields`) rather than
+per-record field maps. JSON tags name fields in the daemon's current descriptor;
+the transaction encoder validates field types, oneofs and required-field
+presence before sending the unchanged protobuf protocol. Optional pointers keep
+present-zero values distinct from absent fields. Arbitrary runtime-discovered
+messages use an explicit `bess.JSON` payload, parsed against that same schema;
+action/query `Message` arguments retain their separate field-map API.
+Payload structs are shallow snapshots: their arrays, slices and pointed-to
+values remain immutable until `Apply` returns. Encoding copies message bytes
+into transaction-owned storage. `BenchmarkChangeLifecycle` in
+`internal/session` compares the real compiler's establishment, FAR update,
+selector replacement and deletion paths for graph, appliance and session-major
+targets while retaining at most one live session; it does not measure native
+dataplane application.
+
 ```mermaid
 flowchart TB
     smf["SMF"] -->|PFCP session message| n4["internal/n4<br/>association, sequence numbers,<br/>restart detection"]
@@ -912,6 +927,34 @@ following paths now select or clear work without that population walk:
    `CounterChanges.BatchGracePeriodsNeverLoseTheLastPacketOfARule` pin these
    properties.
 
+**Dormant native buffering state.** Buffer-counter cells/stamps, their slot
+directory and per-flow buffer limits grow in stable 1024-ID pages on the
+control path. The complete configured ActionId range remains legal. A
+reservation admits missing capacity before resource publication; packet
+processing allocates nothing. Sparse late IDs and grace-period reuse preserve
+counter history. Allocated pages remain accounted capacity until module
+teardown, including pages prepared before a later transaction abort.
+
+`CounterChanges` keeps the same two fixed bitmap banks and acknowledgement
+contract, but records touched 16-word blocks with a 16-bit nonzero-word mask
+instead of a four-byte list entry for every touched word. Repeated marks of an
+already-set bit remain unchanged. The smaller metadata adds mask work when a
+word first becomes nonzero and during frozen reads/clear.
+
+The `upf_ab` benchmark reserves exactly its resident population, its 1024
+disjoint churn IDs when enabled, and one self-test/grace slot. This removes
+benchmark-only capacity slack without reducing offered work. It is separate
+from the unchanged spaces in the [powered 1M comparison](performance.md#dormant-native-capacity-and-overload-retake-2026-11-15).
+
+The cold F-TEID index uses `AdmittedGlibcAllocator` to charge actual allocator
+chunks, rather than a fixed node estimate. Session snapshots likewise charge
+the allocated chunks for rule/F-TEID vectors and optional range storage, not
+only their element payloads. A refused charge cannot publish a new index entry
+or session version; separately reserved slab capacity can remain reusable.
+These are allocator-capacity charges, not a partition of resident pages.
+Subtracting them and the startup baseline from RSS yields a signed accounting
+residual, not an exact count of otherwise unexplained live allocations.
+
 ### Final 1M-session churn measurement (2026-11-05)
 
 Frozen URR work-selection code (base `96c69885`, reviewed source delta
@@ -1017,18 +1060,35 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   takes 0.63-0.75 ms and is 91% of the load wall time.
   `-session-workers 8` overlaps those transactions: 2,140/s at 100K and 1,425/s
   at 1M.
-- **N4 receive buffer.** The read loop stops reading while a session worker's
-  64-entry queue is full, so requests arriving meanwhile wait in the socket's
-  receive buffer or the kernel drops them. With the 208 KiB system default,
-  1K/s delete+establish churn over 1M residents lost 239 and 307 of 10,000
-  cycles, each loss one UDP receive drop at `upfd`, with p99 350-370 ms; a
-  flight-recorder trace showed no single stall above 53 ms, but 433 read-loop
-  waits totalling 1.8 s in 20 s. `-n4-receive-buffer` (default 4 MiB, capped by
-  `net.core.rmem_max`, which `upfd` warns about) removed every drop.
+- **N4 work admission.** With more than one session worker, each shard has a
+  64-entry queue; workers are capped at 64. A full shard now replies with PFCP
+  cause 75 instead of stopping socket reads. Modification/deletion refusals use
+  the CP's response SEID, not the local UP SEID; heartbeats and report answers
+  remain serviceable. Accepted requests retain per-session FIFO order. The
+  default single-worker mode still handles work in the read loop: use multiple
+  workers when control-message progress must be independent of a stalled apply.
+  `-n4-receive-buffer` (default 4 MiB, Linux-capped) absorbs earlier UDP bursts;
+  it does not replace bounded application admission.
+- **Hard session capacity.** Graph/appliance default to `-capacity`;
+  session-major uses `-max-sessions`. The compiler reserves a slot before model
+  construction or dataplane work, counting established, in-flight and uncertain
+  establishments. Full capacity returns cause 75. Known refusals (including
+  native busy with no earlier unanswered attempt) release slots and resource
+  IDs; uncertain outcomes retain them rather than risking reuse of applied
+  state. Deletion returns established capacity; retransmission of an existing
+  session remains accepted. Checkpoint replay is subject to this hard bound.
+  `upf_session_capacity` and `upf_sessions_reserved` expose the bound and the
+  in-flight/uncertain part.
 - **GOMEMLIMIT.** `upfd` sets it from the smallest cgroup v2 `memory.max` on
   its path, minus max(32 MiB, 10%); a GOMEMLIMIT in the environment wins. At 1M
   in a 4000 MiB scope (limit 3600 MiB), RSS settles at 3.5 GiB and GC takes
   14-17% of `upfd`'s CPU.
+  This is a soft target, not an RSS/cgroup guarantee. The inherited parent may
+  be shared: its unused capacity is not a per-process entitlement. Budget native
+  heaps, packet buffers, mappings, gRPC buffers and sibling processes separately.
+  `upf_go_gc_assist_cpu_seconds_total`, `upf_go_gc_cpu_seconds_total` and
+  `upf_go_heap_allocated_bytes_total` expose collection work and allocation churn;
+  short stop-the-world pauses do not prove low request latency.
 - **Admission.** `upfd` answers a new establishment cause 75 (no resources
   available) while the heap its last collection kept live is over
   `-heap-admission` (default 0.7) of that limit; modifications, deletions, a
@@ -1040,6 +1100,12 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   event, peak 349 MiB; the live heap read 0.76 of the limit at the end, because
   the sessions admitted between two collections are not yet in the reading.
   The pod figures below were measured before admission.
+  While admission is closed, one background worker watches successful session
+  deletions. It rechecks at most once per second and requests a full Go
+  collection only after new deletion progress. Repeated refusals alone do not
+  trigger collection; an idle node can recover after a later deletion without
+  another request. Collection runs outside compiler/session locks. Shutdown
+  cancels the watcher and joins any collection already in flight.
 - **Session-model layout.** The controller keeps small rule sets in sorted
   slices, promoting to maps after 16 entries; unused BAR/MAR/CHOOSE-ID maps
   stay nil. PDRs derive endpoint addresses and tunnel resources rather than

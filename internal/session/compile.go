@@ -545,6 +545,11 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 	}
 	// A new session: refused before an id is taken when the node has no room
 	// for it. Admit runs under c.mu, so it reads nothing of the compiler.
+	if uint64(len(c.sessions))+uint64(c.reservedSessions) >= uint64(c.cfg.MaxSessions) {
+		c.mu.Unlock()
+		c.stats.unadmitted.Add(1)
+		return c.establishResponse(req, cpSEID, 0, ie.CauseNoResourcesAvailable, nil)
+	}
 	if admit && c.cfg.Admit != nil && !c.cfg.Admit() {
 		c.mu.Unlock()
 		c.stats.unadmitted.Add(1)
@@ -553,7 +558,16 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 	}
 	local := c.nextSEID
 	c.nextSEID++
+	c.reservedSessions++
 	c.mu.Unlock()
+	releaseReservation := true
+	defer func() {
+		if releaseReservation {
+			c.mu.Lock()
+			c.reservedSessions--
+			c.mu.Unlock()
+		}
+	}()
 
 	s := &Session{
 		LocalSEID: local,
@@ -596,12 +610,18 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 			c.mu.Lock()
 			c.releaseSession(s)
 			c.mu.Unlock()
+		} else {
+			// It may exist in the dataplane. Keep its capacity reservation,
+			// just as we keep its resource ids, until restart/reconciliation.
+			releaseReservation = false
 		}
 		return c.establishResponse(req, cpSEID, local, causeOf(err), nil)
 	}
 
 	c.mu.Lock()
 	c.sessions[local] = s
+	c.reservedSessions--
+	releaseReservation = false
 	// resolve listed it for the ticks before it was a session, and a tick in
 	// between may have dropped it again.
 	c.track(s)
@@ -2368,8 +2388,8 @@ func (c *Compiler) writeCounter(p *pdr) []bess.Change {
 	}
 	return []bess.Change{{
 		Resource: c.res(counterTable(p.downlink())),
-		Key:      map[string]any{"action_id": p.actionID},
-		Value:    map[string]any{},
+		Key:      bess.Fields(ActionKey{ActionID: p.actionID}),
+		Value:    bess.Fields(struct{}{}),
 	}}
 }
 func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
@@ -2434,17 +2454,17 @@ func (c *Compiler) writeFlowEntry(bar *bar, p *pdr) []bess.Change {
 	if b := c.cfg.Buffering; b == nil || b.Store == "" || p.actionID == 0 {
 		return nil
 	}
-	value := map[string]any{}
+	value := FlowEntry{}
 	if ns, ok := bar.timeoutNS(); ok {
-		value["timeout_ns"] = ns
+		value.TimeoutNS = &ns
 	}
 	if bar != nil && bar.hasCount {
-		value["max_packets_per_flow"] = bar.count
+		value.MaxPacketsPerFlow = &bar.count
 	}
 	return []bess.Change{{
 		Resource: c.res(Flows),
-		Key:      map[string]any{"id": p.actionID},
-		Value:    value,
+		Key:      bess.Fields(IDKey{ID: p.actionID}),
+		Value:    bess.Fields(value),
 	}}
 }
 
@@ -2460,8 +2480,8 @@ func (c *Compiler) writeBufferCounter(p *pdr) []bess.Change {
 	}
 	return []bess.Change{{
 		Resource: c.res(BufferCounters),
-		Key:      map[string]any{"action_id": p.actionID},
-		Value:    map[string]any{},
+		Key:      bess.Fields(ActionKey{ActionID: p.actionID}),
+		Value:    bess.Fields(struct{}{}),
 	}}
 }
 
@@ -2659,10 +2679,10 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	// failure rather than half-programmed.
 	writtenRules := map[string]bool{}
 	// The rule identities the session retains in the transaction's end state.
-	// Only changed classifiers need their map-based keys materialized; all
+	// Only changed classifiers need their typed keys materialized; all
 	// identities still participate in collision and ownership validation.
 	type pdrRules struct {
-		keys  []map[string]any
+		keys  []RuleKey
 		ids   string
 		write bool
 		err   error
@@ -2782,7 +2802,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		if liveCounters[c.res(counterTable(p.downlink()))+"\x00"+strconv.FormatUint(uint64(p.actionID), 10)] {
 			return
 		}
-		erase(bess.Change{Resource: c.res(counterTable(p.downlink())), Key: map[string]any{"action_id": p.actionID}})
+		erase(bess.Change{Resource: c.res(counterTable(p.downlink())), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
 	}
 	// liveBuffering is the set of ActionIds a live PDR of this session buffers
 	// under: the entries of both the BUFF branch's counter and the store's
@@ -2808,7 +2828,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 			return
 		}
 		erase(bess.Change{Resource: c.res(BufferCounters),
-			Key: map[string]any{"action_id": p.actionID}})
+			Key: bess.Fields(ActionKey{ActionID: p.actionID})})
 	}
 	// flowEntryErase is the same for the store's "flows" entry: it holds the
 	// SMF's own numbers for the flow, and a flow that no longer buffers (or
@@ -2823,7 +2843,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 			return
 		}
 		erase(bess.Change{Resource: c.res(Flows),
-			Key: map[string]any{"id": p.actionID}})
+			Key: bess.Fields(IDKey{ID: p.actionID})})
 	}
 	for _, p := range s.pending.removedPDRs() {
 		// Removed forms keep their immutable selector identities.
@@ -2833,7 +2853,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		}
 		for _, key := range keys {
 			if !live[c.res(pdrTable(p.downlink()))+"\x00"+ruleID(key)] {
-				erase(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: key})
+				erase(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: bess.Fields(key)})
 			}
 		}
 		if e, ok := c.arpEntryOf(p); ok && !liveARP[e.claim()] {
@@ -2843,10 +2863,10 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 			erase(e.erasure())
 		}
 		if p.tunnel != noTunnel {
-			erase(bess.Change{Resource: c.tunnelRes(p.tunnel), Key: map[string]any{"action_id": p.actionID}})
+			erase(bess.Change{Resource: c.tunnelRes(p.tunnel), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
 		}
 		if p.writtenTunnel != noTunnel {
-			erase(bess.Change{Resource: c.tunnelRes(p.writtenTunnel), Key: map[string]any{"action_id": p.actionID}})
+			erase(bess.Change{Resource: c.tunnelRes(p.writtenTunnel), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
 		}
 		if p.teid != 0 {
 			for _, key := range c.fteidKeysOf(p) {
@@ -2862,7 +2882,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		prev := uint32(0)
 		for _, id := range []uint32{p.meterID, p.ownMeterID} {
 			if id != 0 && id != prev && !qerHoldsMeter(s, id) {
-				erase(bess.Change{Resource: c.res(meterTable(p.downlink())), Key: map[string]any{"id": id}})
+				erase(bess.Change{Resource: c.res(meterTable(p.downlink())), Key: bess.Fields(IDKey{ID: id})})
 			}
 			prev = id
 		}
@@ -2887,11 +2907,11 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		}
 		if c.BufferingConfigured() && id != 0 {
 			erase(bess.Change{Resource: c.res(BufferCounters),
-				Key: map[string]any{"action_id": id}})
+				Key: bess.Fields(ActionKey{ActionID: id})})
 		}
 		if c.cfg.Buffering != nil && c.cfg.Buffering.Store != "" && id != 0 {
 			erase(bess.Change{Resource: c.res(Flows),
-				Key: map[string]any{"id": id}})
+				Key: bess.Fields(IDKey{ID: id})})
 		}
 	}
 	for _, old := range s.pending.stalePDRs() {
@@ -2901,7 +2921,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		}
 		for _, key := range keys {
 			if !live[c.res(pdrTable(old.downlink()))+"\x00"+ruleID(key)] {
-				erase(bess.Change{Resource: c.res(pdrTable(old.downlink())), Key: key})
+				erase(bess.Change{Resource: c.res(pdrTable(old.downlink())), Key: bess.Fields(key)})
 			}
 		}
 		if e, ok := c.arpEntryOf(old); ok && !liveARP[e.claim()] {
@@ -2957,11 +2977,11 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 						continue
 					}
 					writtenFTEIDs[key] = true
-					value := map[string]any{"direction": direction, "context_id": p.fteidContext}
+					value := FTEIDEntry{Direction: direction, ContextID: p.fteidContext}
 					if relays := endMarkerRelays(s, p.endpointID, p.teid); relays != nil {
-						value["end_marker_relays"] = relays
+						value.EndMarkerRelays = relays
 					}
-					changes = append(changes, bess.Change{Resource: c.teidRes(), Key: key.entry(), Value: value})
+					changes = append(changes, bess.Change{Resource: c.teidRes(), Key: key.entry(), Value: bess.Fields(value)})
 				}
 			}
 			if wantCreated {
@@ -3054,12 +3074,8 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 				for _, key := range keys {
 					changes = append(changes, bess.Change{
 						Resource: c.res(pdrTable(p.downlink())),
-						Key:      key,
-						Value: map[string]any{
-							"priority": rulePriority(p.precedence),
-							"gate":     gate,
-							"result":   result,
-						},
+						Key:      bess.Fields(key),
+						Value:    bess.Fields(RuleEntry{Priority: rulePriority(p.precedence), Gate: gate, Result: result}),
 					})
 				}
 			}
@@ -3099,22 +3115,18 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		// A record the action held under its previous FAR and no longer needs
 		// goes, or a later rebind to an encap path would find it stale.
 		if p.writtenTunnel != noTunnel && p.writtenTunnel != p.tunnel {
-			erase(bess.Change{Resource: c.tunnelRes(p.writtenTunnel), Key: map[string]any{"action_id": p.actionID}})
+			erase(bess.Change{Resource: c.tunnelRes(p.writtenTunnel), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
 		}
 		p.writtenTunnel = p.tunnel
 		if p.tunnel != noTunnel && !samePDRTunnel(before, s, p) {
 			resource := c.tunnelRes(p.tunnel)
 			far := s.FARs.at(p.farID)
-			value := map[string]any{
-				"teid":                   far.teid,
-				"local_address":          p.tunnelLocalAddress().AsSlice(),
-				"peer_address":           far.peer().AsSlice(),
-				"transport_route_domain": p.transportRouteDomain(),
-			}
+			value := TunnelEntry{TEID: far.teid, LocalAddress: p.tunnelLocalAddress().AsSlice(), PeerAddress: far.peer().AsSlice(), TransportRouteDomain: p.transportRouteDomain()}
 			if p.hasEncapQFI {
 				// QFI 0 is valid; qfi_present distinguishes it from no QFI.
-				value["qfi"] = uint32(p.encapQFI)
-				value["qfi_present"] = true
+				qfi := uint32(p.encapQFI)
+				value.QFI = &qfi
+				value.QFIPresent = true
 			}
 			if far.hasMarking {
 				// The FAR's Transport Level Marking (8.2.12): the ToS/Traffic
@@ -3125,12 +3137,13 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 				// spec's 0xFC). Written only where the SMF named one: without
 				// the field the encap copies the inner TOS, the behaviour the
 				// session had before this field existed.
-				value["marking"] = uint32(far.marking)
+				marking := uint32(far.marking)
+				value.Marking = &marking
 			}
 			changes = append(changes, bess.Change{
 				Resource: resource,
-				Key:      map[string]any{"action_id": p.actionID},
-				Value:    value,
+				Key:      bess.Fields(ActionKey{ActionID: p.actionID}),
+				Value:    bess.Fields(value),
 			})
 		}
 
@@ -3142,13 +3155,8 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 			for _, key := range keys {
 				changes = append(changes, bess.Change{
 					Resource: c.res(pdrTable(p.downlink())),
-					Key:      key,
-					Value: map[string]any{
-						// Preserve the SMF's precedence, not filter specificity.
-						"priority": rulePriority(p.precedence),
-						"gate":     uint64(0),
-						"result":   result,
-					},
+					Key:      bess.Fields(key),
+					Value:    bess.Fields(RuleEntry{Priority: rulePriority(p.precedence), Gate: 0, Result: result}),
 				})
 			}
 		}
@@ -3221,7 +3229,7 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 	policyRes := c.res(Policies)
 	for _, id := range idsOf(s.rare().MARs) {
 		m := s.rare().MARs[id]
-		accesses := make([]map[string]any, 0, 2)
+		accesses := make([]PolicyAccess, 0, 2)
 		for which := 0; which < 2; which++ {
 			access := m.accesses[which]
 			healthID := uint32(0)
@@ -3233,14 +3241,12 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 				// ineligible; the packet path skips a zero health id.
 				nextHop, tunnelID = 0, 0
 			}
-			accesses = append(accesses, map[string]any{
-				"next_hop_id":   nextHop,
-				"tunnel_id":     tunnelID,
-				"accounting_id": uint32(0),
+			accesses = append(accesses, PolicyAccess{
+				NextHopID: nextHop, TunnelID: tunnelID, AccountingID: 0,
 				// The deployment's two access health records. The compiler
 				// does not write them: their availability is the controller's
 				// or operator's observation, not the SMF's session.
-				"health_id": healthID,
+				HealthID: healthID,
 			})
 			if m.tunnelIDs[which] == 0 {
 				continue
@@ -3250,43 +3256,35 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 				return nil, fmt.Errorf("MAR %d's %s access names FAR %d, which the session does not hold",
 					m.id, []string{"3GPP", "non-3GPP"}[which], access.farID)
 			}
-			value := map[string]any{
-				"teid":                   far.teid,
-				"local_address":          m.tunnelLocalAddresses[which].AsSlice(),
-				"peer_address":           far.peer().AsSlice(),
-				"transport_route_domain": m.transportRouteDomains[which],
-			}
+			value := TunnelEntry{TEID: far.teid, LocalAddress: m.tunnelLocalAddresses[which].AsSlice(), PeerAddress: far.peer().AsSlice(), TransportRouteDomain: m.transportRouteDomains[which]}
 			if far.hasMarking {
-				value["marking"] = uint32(far.marking)
+				marking := uint32(far.marking)
+				value.Marking = &marking
 			}
 			add(bess.Change{
 				Resource: c.res(TunnelsDownlink),
-				Key:      map[string]any{"action_id": m.tunnelIDs[which]},
-				Value:    value,
+				Key:      bess.Fields(ActionKey{ActionID: m.tunnelIDs[which]}),
+				Value:    bess.Fields(value),
 			})
 		}
 		add(bess.Change{
 			Resource: policyRes,
-			Key:      map[string]any{"policy_id": m.policyID},
-			Value: map[string]any{
-				"mode":      uint32(0),
-				"preferred": m.preferred,
-				"access":    accesses,
-			},
+			Key:      bess.Fields(PolicyKey{PolicyID: m.policyID}),
+			Value:    bess.Fields(PolicyEntry{Mode: 0, Preferred: m.preferred, Access: accesses}),
 		})
 	}
 	for _, m := range s.pending.removedPolicies() {
 		if m.policyID != 0 {
-			add(bess.Change{Resource: policyRes, Key: map[string]any{"policy_id": m.policyID}})
+			add(bess.Change{Resource: policyRes, Key: bess.Fields(PolicyKey{PolicyID: m.policyID})})
 		}
 		for _, id := range m.tunnelIDs {
 			if id != 0 {
-				add(bess.Change{Resource: c.res(TunnelsDownlink), Key: map[string]any{"action_id": id}})
+				add(bess.Change{Resource: c.res(TunnelsDownlink), Key: bess.Fields(ActionKey{ActionID: id})})
 			}
 		}
 	}
 	for _, id := range s.pending.retiredIDs() {
-		add(bess.Change{Resource: c.res(TunnelsDownlink), Key: map[string]any{"action_id": id}})
+		add(bess.Change{Resource: c.res(TunnelsDownlink), Key: bess.Fields(ActionKey{ActionID: id})})
 	}
 	return changes, nil
 }
@@ -3314,7 +3312,7 @@ func rulePriority(precedence uint32) int64 {
 //
 // The value must be canonical (value & ^mask == 0), and the key is the
 // concatenation of mask then value per field, then the ranges.
-func (p *pdr) ruleKey(fields []Field, v ruleVariant) (map[string]any, error) {
+func (p *pdr) ruleKey(fields []Field, v ruleVariant) (RuleKey, error) {
 	// The table's key message is WildcardMatchRuleKey: one FieldData per
 	// field, values and masks in two parallel lists, and the ranges by field
 	// index. A FieldData here is its bytes field, value_bin, alone, so each
@@ -3323,7 +3321,7 @@ func (p *pdr) ruleKey(fields []Field, v ruleVariant) (map[string]any, error) {
 	// allocated.
 	lists := make([][]byte, 2*len(fields))
 	values, masks := lists[:len(fields):len(fields)], lists[len(fields):]
-	var ranges []map[string]any
+	var ranges []RuleRange
 	// Every field's mask and value in one allocation, each a capped piece of
 	// it: the pieces live exactly as long as the key that holds them.
 	total := 0
@@ -3338,21 +3336,18 @@ func (p *pdr) ruleKey(fields []Field, v ruleVariant) (map[string]any, error) {
 		mem = mem[2*width:]
 		m, ok, err := p.matchValue(f, v, sd)
 		if err != nil {
-			return nil, fmt.Errorf("the PDI's %s: %w", f, err)
+			return RuleKey{}, fmt.Errorf("the PDI's %s: %w", f, err)
 		}
 		switch {
 		case ok && m.ranged:
-			ranges = append(ranges, map[string]any{"field": uint32(i), "low": m.low, "high": m.high})
+			ranges = append(ranges, RuleRange{Field: uint32(i), Low: m.low, High: m.high})
 		case ok:
 			copy(mask, m.mask)
 			copy(value, m.value)
 		}
 		values[i], masks[i] = value, mask
 	}
-	key := map[string]any{"values": values, "masks": masks}
-	if len(ranges) > 0 {
-		key["ranges"] = ranges
-	}
+	key := RuleKey{Values: values, Masks: masks, Ranges: ranges}
 	return key, nil
 }
 
@@ -3366,14 +3361,14 @@ type ruleVariant struct {
 
 // ruleKeys expands "match any" SDF/QFI combinations without allocating a
 // whole PDR per variant. Repeated filters still make only one dataplane key.
-func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
+func (p *pdr) ruleKeys(fields []Field) ([]RuleKey, error) {
 	sdfs := p.sdfs
 	if len(sdfs) == 0 {
 		sdfs = []*sdfFilter{nil}
 	}
 	qfis := max(len(p.qfis), 1)
 	combinations := len(sdfs) * qfis
-	keys := make([]map[string]any, 0, combinations)
+	keys := make([]RuleKey, 0, combinations)
 	var seen map[string]bool
 	if combinations > 1 {
 		seen = make(map[string]bool, combinations)
@@ -3401,10 +3396,10 @@ func (p *pdr) ruleKeys(fields []Field) ([]map[string]any, error) {
 	return keys, nil
 }
 
-// pdrRuleIDs keeps only the canonical ownership strings, not map-based
+// pdrRuleIDs keeps only the canonical ownership strings, not retained
 // resource changes. On the first derivation return the keys too, so the
 // caller can write them without decoding the identity it just constructed.
-func (c *Compiler) pdrRuleIDs(p *pdr) (string, []map[string]any, error) {
+func (c *Compiler) pdrRuleIDs(p *pdr) (string, []RuleKey, error) {
 	if p.ruleIDs != "" {
 		return p.ruleIDs, nil, nil
 	}
@@ -3457,14 +3452,14 @@ func ruleIdentities(encoded string) iter.Seq[string] {
 // materializeRuleKeys decodes our own canonical identity. Field widths and
 // resource are fixed by the compiler's immutable target, and each trailing
 // range is (field:uint32, low:uint64, high:uint64), as in ruleID.
-func (c *Compiler) materializeRuleKeys(p *pdr) []map[string]any {
+func (c *Compiler) materializeRuleKeys(p *pdr) []RuleKey {
 	fields := c.direction(p).PDRFields
 	width := 0
 	for _, f := range fields {
 		width += f.width()
 	}
 	prefix := len(c.res(pdrTable(p.downlink()))) + 1
-	keys := make([]map[string]any, 0, max(len(p.sdfs), 1)*max(len(p.qfis), 1))
+	keys := make([]RuleKey, 0, max(len(p.sdfs), 1)*max(len(p.qfis), 1))
 	for id := range ruleIdentities(p.ruleIDs) {
 		mem := []byte(id[prefix:])
 		lists := make([][]byte, 2*len(fields))
@@ -3476,25 +3471,21 @@ func (c *Compiler) materializeRuleKeys(p *pdr) []map[string]any {
 			values[j] = mem[width+at : width+at+n : width+at+n]
 			at += n
 		}
-		key := map[string]any{"values": values, "masks": masks}
+		key := RuleKey{Values: values, Masks: masks}
 		if tail := mem[2*width:]; len(tail) != 0 {
-			ranges := make([]map[string]any, len(tail)/20)
+			ranges := make([]RuleRange, len(tail)/20)
 			for j := range ranges {
 				r := tail[20*j:]
-				ranges[j] = map[string]any{
-					"field": binary.BigEndian.Uint32(r),
-					"low":   binary.BigEndian.Uint64(r[4:]),
-					"high":  binary.BigEndian.Uint64(r[12:]),
-				}
+				ranges[j] = RuleRange{Field: binary.BigEndian.Uint32(r), Low: binary.BigEndian.Uint64(r[4:]), High: binary.BigEndian.Uint64(r[12:])}
 			}
-			key["ranges"] = ranges
+			key.Ranges = ranges
 		}
 		keys = append(keys, key)
 	}
 	return keys
 }
 
-func (c *Compiler) pdrRuleKeys(p *pdr) ([]map[string]any, error) {
+func (c *Compiler) pdrRuleKeys(p *pdr) ([]RuleKey, error) {
 	_, keys, err := c.pdrRuleIDs(p)
 	if err == nil && keys == nil {
 		keys = c.materializeRuleKeys(p)
@@ -3506,36 +3497,36 @@ func (c *Compiler) pdrRuleKeys(p *pdr) ([]map[string]any, error) {
 // life of a session: the masks, the values and then the ranges, as bytes. Every
 // field of a table has the table's fixed width, so within one table (the caller
 // prefixes the resource) two keys have one identity only if they are one key.
-func ruleID(key map[string]any) string {
+func ruleID(key RuleKey) string {
 	var b strings.Builder
 	b.Grow(ruleIDSize(key)) // the one allocation: the identity's own bytes
 	writeRuleID(&b, key)
 	return b.String()
 }
 
-func ruleIDSize(key map[string]any) int {
+func ruleIDSize(key RuleKey) int {
 	n := 0
-	for _, list := range [...]string{"masks", "values"} {
-		for _, f := range key[list].([][]byte) {
+	for _, list := range [...][][]byte{key.Masks, key.Values} {
+		for _, f := range list {
 			n += len(f)
 		}
 	}
-	ranges, _ := key["ranges"].([]map[string]any)
+	ranges := key.Ranges
 	return n + 20*len(ranges)
 }
 
-func writeRuleID(b *strings.Builder, key map[string]any) {
-	for _, list := range [...]string{"masks", "values"} {
-		for _, f := range key[list].([][]byte) {
+func writeRuleID(b *strings.Builder, key RuleKey) {
+	for _, list := range [...][][]byte{key.Masks, key.Values} {
+		for _, f := range list {
 			b.Write(f)
 		}
 	}
 	var num [8]byte
-	ranges, _ := key["ranges"].([]map[string]any)
+	ranges := key.Ranges
 	for _, r := range ranges {
-		b.Write(binary.BigEndian.AppendUint32(num[:0], r["field"].(uint32)))
-		b.Write(binary.BigEndian.AppendUint64(num[:0], r["low"].(uint64)))
-		b.Write(binary.BigEndian.AppendUint64(num[:0], r["high"].(uint64)))
+		b.Write(binary.BigEndian.AppendUint32(num[:0], r.Field))
+		b.Write(binary.BigEndian.AppendUint64(num[:0], r.Low))
+		b.Write(binary.BigEndian.AppendUint64(num[:0], r.High))
 	}
 }
 
@@ -5069,15 +5060,8 @@ func meterChange(resource string, id uint32, committed, peak uint64, window time
 	}
 	return bess.Change{
 		Resource: resource,
-		Key:      map[string]any{"id": id},
-		Value: map[string]any{
-			"tr_tcm": map[string]any{
-				"committed_rate":  committed,
-				"committed_burst": burst(committed),
-				"peak_rate":       peak,
-				"peak_burst":      burst(peak),
-			},
-		},
+		Key:      bess.Fields(IDKey{ID: id}),
+		Value:    bess.Fields(MeterEntry{TrTCM: MeterProfile{CommittedRate: committed, CommittedBurst: burst(committed), PeakRate: peak, PeakBurst: burst(peak)}}),
 	}
 }
 
@@ -5449,6 +5433,7 @@ func compileCause(err error) uint8 {
 // of these returns.
 func causeOf(err error) uint8 {
 	var invalid *bess.InvalidRequestError
+	var busy *bess.BusyError
 	switch {
 	case errors.As(err, &invalid) && invalid.Code == codes.ResourceExhausted,
 		errors.Is(err, errNoResources):
@@ -5456,10 +5441,12 @@ func causeOf(err error) uint8 {
 		// definite refusal, nothing was applied, and TS 29.244 has a cause
 		// for it.
 		return ie.CauseNoResourcesAvailable
+	case errors.As(err, &busy):
+		return ie.CauseRequestRejected // known no-apply, but still retryable
 	case definiteRefusal(err):
 		return ie.CauseRuleCreationModificationFailure
 	default:
-		// A conflict, a busy dataplane, a restarted daemon or an unanswered
+		// A conflict, a restarted daemon or an unanswered
 		// request: the SMF retries, and the retry finds the state this attempt
 		// did or did not leave (a repeated establishment is answered with what
 		// is in place).
@@ -5476,7 +5463,8 @@ func causeOf(err error) uint8 {
 func definiteRefusal(err error) bool {
 	var invalid *bess.InvalidRequestError
 	var rejected *bess.RejectedError
-	return errors.As(err, &invalid) || errors.As(err, &rejected) ||
+	var busy *bess.BusyError
+	return errors.As(err, &invalid) || errors.As(err, &rejected) || errors.As(err, &busy) ||
 		errors.Is(err, errNotExpressible) || errors.Is(err, errNoResources)
 }
 

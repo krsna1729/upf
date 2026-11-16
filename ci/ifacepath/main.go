@@ -1311,7 +1311,10 @@ func stopAll(ctx context.Context, client *bess.Client) error {
 func setBurst(ctx context.Context, client *bess.Client, src string, size, burst int) error {
 	err := client.Apply(ctx, bess.Change{
 		Resource: src + "/settings",
-		Value:    map[string]any{"pkt_size": size, "burst": burst},
+		Value: bess.Fields(struct {
+			PacketSize int `json:"pkt_size"`
+			Burst      int `json:"burst"`
+		}{size, burst}),
 	})
 	if err != nil {
 		return fmt.Errorf("setting %s/settings to burst %d: %w", src, burst, err)
@@ -1333,7 +1336,9 @@ func setTemplate(ctx context.Context, client *bess.Client, rewrite string, frame
 	}()
 	err = client.Apply(ctx, bess.Change{
 		Resource: rewrite + "/templates",
-		Value:    map[string]any{"templates": []any{frame}},
+		Value: bess.Fields(struct {
+			Templates [][]byte `json:"templates"`
+		}{[][]byte{frame}}),
 	})
 	if err != nil {
 		return fmt.Errorf("setting %s/templates: %w", rewrite, err)
@@ -1346,7 +1351,9 @@ func setTemplate(ctx context.Context, client *bess.Client, rewrite string, frame
 func setDumpInterval(ctx context.Context, client *bess.Client, dump string, interval float64) error {
 	err := client.Apply(ctx, bess.Change{
 		Resource: dump + "/settings",
-		Value:    map[string]any{"interval": interval},
+		Value: bess.Fields(struct {
+			Interval float64 `json:"interval"`
+		}{interval}),
 	})
 	if err != nil {
 		return fmt.Errorf("setting %s/settings to interval %v: %w", dump, interval, err)

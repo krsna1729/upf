@@ -179,7 +179,7 @@ struct UpfAppliance::Buffer {
   UpfAppliance &owner;
   bess::framework::MemoryLease owner_lease, arrays_lease, ring_lease;
   bess::framework::Sized<dp::PacketStore> store;
-  // Per-flow limits by flow id, the ActionId (BP-6: a dense table).
+  // Per-flow limits by ActionId; directory pages are reserved on upsert.
   bess::framework::Sized<dp::PacketStoreLimitsTable> limits;
   bess::framework::Sized<dp::PacketStoreFlowsResource> resource;
   bess::framework::ResourceBinding binding;
@@ -247,9 +247,8 @@ CommandResponse UpfAppliance::InitBuffer(const upf::pb::UpfApplianceArg &arg) {
   if (!*created) return CommandFailure(ENOMEM, "buffer packet store allocation failed");
   buffer->store = bess::framework::MemoryScope::Adopt(std::move(lease), std::move(*created));
   buffer->store->SetDiscardObserver(buffer.get(), &Buffer::Discard);
-  // Flows are keyed by ActionId, so the limits table spans the ActionId
-  // space the counter banks are sized to (capacity_, set by InitResources):
-  // ids 1..capacity_, admitted whole before it is allocated.
+  // Preserve the entire legal ActionId space. The directory is small; native
+  // flow transactions admit and allocate pages before accepting an upsert.
   buffer->limits = memory.Create<dp::PacketStoreLimitsTable>("buffer_flow_limits", capacity_);
   auto flows_lease = memory.LeaseFor<dp::PacketStoreFlowsResource>("buffer_flows");
   auto flows = std::make_unique<dp::PacketStoreFlowsResource>(

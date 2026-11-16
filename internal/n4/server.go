@@ -73,7 +73,7 @@ const (
 )
 
 // SessionHandler handles the session-level messages of the associated CP
-// function. Each method returns the response to send back; the server echoes
+// function. Session methods return the response to send back; the server echoes
 // the request's sequence number into it. A nil return means no response is
 // sent, and the exchange is logged.
 //
@@ -88,6 +88,11 @@ type SessionHandler interface {
 	Establish(req *message.SessionEstablishmentRequest) message.Message
 	Modify(req *message.SessionModificationRequest) message.Message
 	Delete(req *message.SessionDeletionRequest) message.Message
+
+	// ResponseSEID resolves a local UP SEID to the peer's CP SEID for a
+	// queue-full refusal; an unknown session returns the input unchanged.
+	// This is a metadata lookup, never a dataplane call or other I/O.
+	ResponseSEID(localSEID uint64) uint64
 
 	// AssociationEnded reports that no session of the associated CP function
 	// is valid any more: the association was released or timed out, or the CP
@@ -126,10 +131,9 @@ type Config struct {
 
 	// ReceiveBuffer is the socket receive buffer, in bytes, Listen asks the
 	// kernel for; zero keeps the system default (net.core.rmem_default, often
-	// 208 KiB). The read loop stops reading while a session worker's queue is
-	// full, and every datagram that arrives meanwhile waits in this buffer or
-	// is dropped by the kernel: the buffer is what turns a short stall into a
-	// delay rather than a retransmission. Linux grants at most
+	// 208 KiB). It holds bursts before the read loop can parse them; a full
+	// session queue is answered with cause 75 rather than pausing all socket
+	// reads, including heartbeats and report answers. Linux grants at most
 	// net.core.rmem_max; Listen logs what it got.
 	ReceiveBuffer int
 
@@ -240,9 +244,12 @@ type sessionWork struct {
 	from net.Addr
 }
 
-// sessionQueue is each worker's backlog: past it the read loop waits, which is
-// the socket's own buffer taking the burst, as it does without workers.
+// sessionQueue bounds each worker's backlog. A full queue refuses the request
+// explicitly; it must not stop the socket loop from serving control messages.
 const sessionQueue = 64
+
+// MaxSessionWorkers bounds worker goroutines and their combined queue storage.
+const MaxSessionWorkers = 64
 
 // New returns a Server that will listen on cfg.Listen.
 func New(cfg Config) (*Server, error) {
@@ -251,6 +258,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Listen == "" {
 		return nil, errors.New("n4: Listen is required")
+	}
+	if cfg.SessionWorkers < 0 || cfg.SessionWorkers > MaxSessionWorkers {
+		return nil, fmt.Errorf("n4: SessionWorkers must be between 0 and %d", MaxSessionWorkers)
 	}
 	if cfg.HeartbeatEvery <= 0 {
 		cfg.HeartbeatEvery = DefaultHeartbeatEvery
@@ -684,22 +694,29 @@ func (s *Server) onSession(msg message.Message, from net.Addr) {
 
 	switch {
 	case !associated:
-		s.rejectSession(msg, from, ie.CauseNoEstablishedPFCPAssociation, "no established association")
+		s.rejectSession(msg, from, msg.SEID(), ie.CauseNoEstablishedPFCPAssociation, "no established association")
 	case s.cfg.Sessions == nil:
-		s.rejectSession(msg, from, ie.CauseRequestRejected, "no session layer")
+		s.rejectSession(msg, from, msg.SEID(), ie.CauseRequestRejected, "no session layer")
 	case s.work != nil:
 		s.queuedMu.Lock()
 		s.queued++
 		s.queuedMu.Unlock()
 		select {
 		case s.work[sessionKey(msg)%uint64(len(s.work))] <- sessionWork{msg: msg, from: from}:
+			return
 		case <-s.done:
-			s.queuedMu.Lock()
-			if s.queued--; s.queued == 0 {
-				s.drained.Broadcast()
+		default:
+			headerSEID := msg.SEID()
+			if _, establishing := msg.(*message.SessionEstablishmentRequest); !establishing {
+				headerSEID = s.cfg.Sessions.ResponseSEID(headerSEID)
 			}
-			s.queuedMu.Unlock()
+			s.rejectSession(msg, from, headerSEID, ie.CauseNoResourcesAvailable, "session worker queue full")
 		}
+		s.queuedMu.Lock()
+		if s.queued--; s.queued == 0 {
+			s.drained.Broadcast()
+		}
+		s.queuedMu.Unlock()
 	default:
 		s.answerSession(msg, from)
 	}
@@ -758,9 +775,9 @@ func cpSEIDOf(r *message.SessionEstablishmentRequest) uint64 {
 	return fields.SEID
 }
 
-// rejectSession answers a session-level request with a Cause, echoing the
-// request's sequence number and, where the request carried one, its SEID.
-func (s *Server) rejectSession(req message.Message, from net.Addr, cause uint8, why string) {
+// rejectSession answers a session-level request with a Cause, echoing its
+// sequence and naming the peer session when the caller knows that identity.
+func (s *Server) rejectSession(req message.Message, from net.Addr, headerSEID uint64, cause uint8, why string) {
 	c := ie.NewCause(cause)
 	var resp message.Message
 	switch r := req.(type) {
@@ -771,11 +788,11 @@ func (s *Server) rejectSession(req message.Message, from net.Addr, cause uint8, 
 		// rejection included (TS 29.244 Table 7.5.3.1-1).
 		resp = message.NewSessionEstablishmentResponse(0, 0, cpSEIDOf(r), r.Sequence(), 0, s.nodeID, c)
 	case *message.SessionModificationRequest:
-		// With no session layer there is no CP F-SEID to read; the SEID the
-		// request carried is the only name left to answer under.
-		resp = message.NewSessionModificationResponse(0, 0, r.SEID(), r.Sequence(), 0, c)
+		// A queue-full refusal names the CP session, not the incoming UP SEID.
+		// Without a session context the caller preserves the request's name.
+		resp = message.NewSessionModificationResponse(0, 0, headerSEID, r.Sequence(), 0, c)
 	case *message.SessionDeletionRequest:
-		resp = message.NewSessionDeletionResponse(0, 0, r.SEID(), r.Sequence(), 0, c)
+		resp = message.NewSessionDeletionResponse(0, 0, headerSEID, r.Sequence(), 0, c)
 	default:
 		s.log.Warn("n4: no response type for a session message", "type", req.MessageTypeName())
 		return

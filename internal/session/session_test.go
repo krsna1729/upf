@@ -122,7 +122,7 @@ func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 		if !strings.Contains(ch.Resource, "counters") {
 			continue
 		}
-		key := ch.Resource + "\x00" + fmt.Sprint(ch.Key)
+		key := changeID(ch.Resource, ch.Key)
 		if touched[key] {
 			return fmt.Errorf("change %d touches %s twice in one transaction: %w",
 				i, key, errRepeatedOperation)
@@ -262,7 +262,7 @@ func find(t *testing.T, changes []bess.Change, resource string, keyField string,
 // find0 is find without failing, for negative assertions.
 func find0(changes []bess.Change, resource string, keyField string, keyValue any) (bess.Change, bool) {
 	for _, c := range changes {
-		if c.Resource == resource && c.Key != nil && c.Key[keyField] == keyValue {
+		if c.Resource == resource && c.Key != nil && keyFieldValue(c.Key, keyField) == keyValue {
 			return c, true
 		}
 	}
@@ -278,8 +278,8 @@ func rules(changes []bess.Change) []rule {
 		if !strings.HasPrefix(c.Resource, "pdr_") || !strings.HasSuffix(c.Resource, "/rules") {
 			continue
 		}
-		values, _ := c.Key["values"].([][]byte)
-		masks, _ := c.Key["masks"].([][]byte)
+		values := payload[RuleKey](c.Key).Values
+		masks := payload[RuleKey](c.Key).Masks
 		out = append(out, rule{change: c, values: values, masks: masks})
 	}
 	return out
@@ -311,7 +311,7 @@ func (r rule) value(i int) []byte { return r.values[i] }
 // result is the classifier's result record: what a matching packet carries
 // into the downstream modules (action id, two meter levels, next hop, and --
 // on the downlink -- the steering policy id).
-func (r rule) result() []byte { b, _ := r.change.Value["result"].([]byte); return b }
+func (r rule) result() []byte { b := payload[RuleEntry](r.change.Value).Result; return b }
 
 // actionID is the ActionId the rule's result carries.
 func (r rule) actionID() uint32 {
@@ -355,12 +355,12 @@ func (r rule) steeringID() uint32 {
 }
 
 // gate is the gate the rule delivers.
-func (r rule) gate() uint64 { v, _ := r.change.Value["gate"].(uint64); return v }
+func (r rule) gate() uint64 { v := payload[RuleEntry](r.change.Value).Gate; return v }
 
 // priority is the rule's priority in its table: the classifier's reading of the
 // PDR's Precedence (8.2.11, inverted by rulePriority), which is what decides
 // between two rules of the table that both match a packet.
-func (r rule) priority() int64 { v, _ := r.change.Value["priority"].(int64); return v }
+func (r rule) priority() int64 { v := payload[RuleEntry](r.change.Value).Priority; return v }
 
 // metersErased is actionsErased for meters.
 func metersErased(changes []bess.Change) []bess.Change {
@@ -406,7 +406,7 @@ func onlyErases(changes []bess.Change) []bess.Change {
 // teidRule is the change carrying the requested composite-key admission.
 func teidRule(changes []bess.Change, resource string, teid uint32) (bess.Change, bool) {
 	for _, c := range changes {
-		if c.Resource == resource && c.Key["teid"] == teid {
+		if c.Resource == resource && payload[FTEIDKey](c.Key).TEID == teid {
 			return c, true
 		}
 	}
@@ -421,7 +421,7 @@ func fteidContextOf(t *testing.T, changes []bess.Change, teid uint32) uint32 {
 	if !ok {
 		t.Fatalf("no F-TEID admission entry for %#x", teid)
 	}
-	id, _ := ch.Value["context_id"].(uint32)
+	id := payload[FTEIDEntry](ch.Value).ContextID
 	if id == 0 {
 		t.Fatalf("the admission entry for %#x carries no context: %v", teid, ch.Value)
 	}
@@ -1997,7 +1997,7 @@ func TestThePrecedenceIsInvertedIntoTheClassifiersPriority(t *testing.T) {
 	if !ok {
 		t.Fatal("no F-TEID admission entry for the pinned endpoint")
 	}
-	if got, _ := teid.Value["direction"].(uint32); got != 0 {
+	if got := payload[FTEIDEntry](teid.Value).Direction; got != 0 {
 		t.Errorf("the admission direction is %v, want UL (0)", got)
 	}
 }
@@ -2187,10 +2187,10 @@ func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 	if got := cause(t, c.Establish(withFlow)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a QER naming a QFI answered cause %d, want accepted", got)
 	}
-	if got := tunnelOf(t, rec, "10.45.0.2").Value["qfi"]; got != uint32(5) {
+	if got := optional(payload[TunnelEntry](tunnelOf(t, rec, "10.45.0.2").Value).QFI); got != uint32(5) {
 		t.Errorf("the tunnel record carries QFI %v (%T), want the QER's 5", got, got)
 	}
-	if got := tunnelOf(t, rec, "10.45.0.2").Value["qfi_present"]; got != true {
+	if got := payload[TunnelEntry](tunnelOf(t, rec, "10.45.0.2").Value).QFIPresent; got != true {
 		t.Errorf("the tunnel record qfi_present is %v, want true", got)
 	}
 
@@ -2201,10 +2201,10 @@ func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 	if got := cause(t, c.Establish(noFlow)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a QER with no QFI answered cause %d, want accepted", got)
 	}
-	if got, ok := tunnelOf(t, rec, "10.45.0.3").Value["qfi"]; ok {
+	if got, ok := present(payload[TunnelEntry](tunnelOf(t, rec, "10.45.0.3").Value).QFI); ok {
 		t.Errorf("the tunnel record of a QER with no QFI carries %v, want no field", got)
 	}
-	if got, ok := tunnelOf(t, rec, "10.45.0.3").Value["qfi_present"]; ok {
+	if got := payload[TunnelEntry](tunnelOf(t, rec, "10.45.0.3").Value).QFIPresent; got {
 		t.Errorf("the tunnel record of a QER with no QFI carries qfi_present=%v, want no field", got)
 	}
 
@@ -2220,10 +2220,10 @@ func TestAQERsQFIReachesTheTunnelRecord(t *testing.T) {
 	if got := cause(t, c.Establish(zero)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a QER naming QFI 0 answered cause %d, want accepted", got)
 	}
-	if got, ok := tunnelOf(t, rec, "10.45.0.4").Value["qfi"]; !ok || got != uint32(0) {
+	if got, ok := present(payload[TunnelEntry](tunnelOf(t, rec, "10.45.0.4").Value).QFI); !ok || got != uint32(0) {
 		t.Errorf("the tunnel record of a QER naming QFI 0 carries %v, present=%t; want present zero", got, ok)
 	}
-	if got := tunnelOf(t, rec, "10.45.0.4").Value["qfi_present"]; got != true {
+	if got := payload[TunnelEntry](tunnelOf(t, rec, "10.45.0.4").Value).QFIPresent; got != true {
 		t.Errorf("the tunnel record qfi_present is %v, want true for QFI 0", got)
 	}
 }
@@ -2262,7 +2262,7 @@ func TestAFARsTransportLevelMarkingReachesTheTunnelRecord(t *testing.T) {
 	if got := cause(t, c.Establish(marked)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a FAR naming a Transport Level Marking answered cause %d, want accepted", got)
 	}
-	if got := tunnelOf(t, rec, "10.46.0.2").Value["marking"]; got != uint32(ef) {
+	if got := optional(payload[TunnelEntry](tunnelOf(t, rec, "10.46.0.2").Value).Marking); got != uint32(ef) {
 		t.Errorf("the tunnel record carries marking %v (%T), want the FAR's %#x", got, got, ef)
 	}
 
@@ -2272,7 +2272,7 @@ func TestAFARsTransportLevelMarkingReachesTheTunnelRecord(t *testing.T) {
 	if got := cause(t, c.Establish(plain)); got != ie.CauseRequestAccepted {
 		t.Fatalf("a FAR with no marking answered cause %d, want accepted", got)
 	}
-	if got, ok := tunnelOf(t, rec, "10.46.0.3").Value["marking"]; ok {
+	if got, ok := present(payload[TunnelEntry](tunnelOf(t, rec, "10.46.0.3").Value).Marking); ok {
 		t.Errorf("the tunnel record of a FAR with no marking carries %v, want no field", got)
 	}
 }
@@ -2536,14 +2536,14 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 	if !ok {
 		t.Fatalf("no F-TEID admission entry for %#x among %d changes", fteid.TEID, len(changes))
 	}
-	if got := rule.Value["direction"]; got != uint32(0) {
+	if got := payload[FTEIDEntry](rule.Value).Direction; got != uint32(0) {
 		t.Errorf("the admission direction is %v, want UL (0)", got)
 	}
-	if rule.Key["endpoint_id"] != uint32(1) || rule.Key["address_family"] != uint32(4) ||
-		rule.Key["teid"] != fteid.TEID {
+	if payload[FTEIDKey](rule.Key).EndpointID != uint32(1) || payload[FTEIDKey](rule.Key).AddressFamily != uint32(4) ||
+		payload[FTEIDKey](rule.Key).TEID != fteid.TEID {
 		t.Errorf("the admission key is not endpoint-scoped: %v", rule.Key)
 	}
-	local, _ := rule.Key["local_address"].([]byte)
+	local := payload[FTEIDKey](rule.Key).LocalAddress
 	if len(local) != 4 || !bytes.Equal(local, netip.MustParseAddr("192.0.2.1").AsSlice()) {
 		t.Errorf("the admission local address is %v, want 192.0.2.1", local)
 	}
@@ -2591,16 +2591,16 @@ func TestEstablishCompilesTheSessionIntoOneTransaction(t *testing.T) {
 
 	// The downlink FAR's tunnel is keyed by the same ActionId the rule carries.
 	tunnel := find(t, changes, testConfig().Down.Tunnels+"/tunnels", "action_id", dl.actionID())
-	if got := tunnel.Value["teid"]; got != uint32(0x11223344) {
+	if got := payload[TunnelEntry](tunnel.Value).TEID; got != uint32(0x11223344) {
 		t.Errorf("the tunnel's TEID is %v, want the FAR's", got)
 	}
-	if got := tunnel.Value["local_address"]; !bytes.Equal(got.([]byte), netip.MustParseAddr("192.0.2.1").AsSlice()) {
+	if got := payload[TunnelEntry](tunnel.Value).LocalAddress; !bytes.Equal(got, netip.MustParseAddr("192.0.2.1").AsSlice()) {
 		t.Errorf("the tunnel's local source is %v, want 192.0.2.1", got)
 	}
-	if got := tunnel.Value["peer_address"]; !bytes.Equal(got.([]byte), netip.MustParseAddr("10.20.30.2").AsSlice()) {
+	if got := payload[TunnelEntry](tunnel.Value).PeerAddress; !bytes.Equal(got, netip.MustParseAddr("10.20.30.2").AsSlice()) {
 		t.Errorf("the tunnel's peer is %v, want 10.20.30.2", got)
 	}
-	if got := tunnel.Value["transport_route_domain"]; got != uint32(1) {
+	if got := payload[TunnelEntry](tunnel.Value).TransportRouteDomain; got != uint32(1) {
 		t.Errorf("the tunnel transport route domain is %v, want 1", got)
 	}
 	if _, ok := find0(changes, testConfig().Down.Tunnels+"/tunnels", "action_id", ul.actionID()); ok {
@@ -2674,8 +2674,8 @@ func TestDeleteRemovesWhatTheSessionProgrammed(t *testing.T) {
 		if ch.Resource != testConfig().GTPUDecap+"/fteids" {
 			continue
 		}
-		teid, ok := ch.Key["teid"].(uint32)
-		if !ok || teid == 0 {
+		teid := payload[FTEIDKey](ch.Key).TEID
+		if teid == 0 {
 			t.Fatalf("the FTEIDKey has no TEID: %v", ch.Key)
 		}
 		if _, ok := teidRule(rec.last(), testConfig().GTPUDecap+"/fteids", teid); !ok {
@@ -2734,10 +2734,10 @@ func TestAPortRangeIsARangeOnItsField(t *testing.T) {
 	const dstPort = 4 // testConfig's downlink fields: SrcIP DstIP Proto SrcPort DstPort ...
 	for _, tc := range []struct {
 		filter string
-		ranges []map[string]any
+		ranges []RuleRange
 	}{
 		{"permit out udp from any to assigned 1000-2000",
-			[]map[string]any{{"field": uint32(dstPort), "low": uint64(1000), "high": uint64(2000)}}},
+			[]RuleRange{{Field: uint32(dstPort), Low: 1000, High: 2000}}},
 		{"permit out udp from any to assigned 0-65535", nil},
 	} {
 		rec := &recorder{}
@@ -2762,7 +2762,7 @@ func TestAPortRangeIsARangeOnItsField(t *testing.T) {
 		if m := rs[0].mask(dstPort); !bytes.Equal(m, []byte{0, 0}) {
 			t.Errorf("%q: the destination port's mask is %x, want it masked out", tc.filter, m)
 		}
-		got, _ := rs[0].change.Key["ranges"].([]map[string]any)
+		got := payload[RuleKey](rs[0].change.Key).Ranges
 		if !reflect.DeepEqual(got, tc.ranges) {
 			t.Errorf("%q: the key's ranges are %v, want %v", tc.filter, got, tc.ranges)
 		}
@@ -2807,10 +2807,10 @@ func TestAnIPv6OuterHeaderCreationIsAnIPv6Tunnel(t *testing.T) {
 		}
 		dl := rules(rec.last())[0]
 		tunnel := find(t, rec.last(), cfg.Down.Tunnels+"/tunnels", "action_id", dl.actionID())
-		if p := tunnel.Value["peer_address"]; !bytes.Equal(p.([]byte), netip.MustParseAddr(tc.peer).AsSlice()) {
+		if p := payload[TunnelEntry](tunnel.Value).PeerAddress; !bytes.Equal(p, netip.MustParseAddr(tc.peer).AsSlice()) {
 			t.Errorf("the tunnel's peer is %x, want %s", p, tc.peer)
 		}
-		if l := tunnel.Value["local_address"]; !bytes.Equal(l.([]byte), netip.MustParseAddr("2001:db8:3::1").AsSlice()) {
+		if l := payload[TunnelEntry](tunnel.Value).LocalAddress; !bytes.Equal(l, netip.MustParseAddr("2001:db8:3::1").AsSlice()) {
 			t.Errorf("the tunnel's local address is %x, want the endpoint's IPv6 2001:db8:3::1", l)
 		}
 	}
@@ -3595,7 +3595,7 @@ func TestTunnelModificationDoesNotRewriteUnchangedClassifiers(t *testing.T) {
 	if tunnel.Key == nil {
 		t.Fatal("the modification did not rewrite the tunnel")
 	}
-	if got := tunnel.Value["teid"]; got != uint32(0x55667788) {
+	if got := payload[TunnelEntry](tunnel.Value).TEID; got != uint32(0x55667788) {
 		t.Errorf("the tunnel's TEID is %v after the modification", got)
 	}
 	if n := len(rules(rec.last())); n != 0 {
@@ -3644,7 +3644,7 @@ func TestQuotaGrantPublishesTunnelChangedWhileDropping(t *testing.T) {
 				t.Fatalf("quota grant cause %d", got)
 			}
 			for _, ch := range rec.last() {
-				if ch.Resource == c.res(TunnelsDownlink) && ch.Value["teid"] == uint32(0x55667788) {
+				if ch.Resource == c.res(TunnelsDownlink) && payload[TunnelEntry](ch.Value).TEID == uint32(0x55667788) {
 					return
 				}
 			}
@@ -3705,8 +3705,8 @@ func counterKeys(changes []bess.Change, resource string) []uint32 {
 		if ch.Resource != resource || ch.Value == nil {
 			continue
 		}
-		if id, ok := ch.Key["action_id"].(uint32); ok {
-			out = append(out, id)
+		if key, ok := bess.Get[ActionKey](ch.Key); ok {
+			out = append(out, key.ActionID)
 		}
 	}
 	return out
@@ -5335,9 +5335,48 @@ func TestDualStackFTEIDIsOneContextNotTwoRuleSets(t *testing.T) {
 		t.Fatalf("compiled %d keys, want 2 SDFs × 2 QFIs", len(keys))
 	}
 	for _, key := range keys {
-		values, _ := key["values"].([][]byte)
+		values := key.Values
 		if got := values[0]; !bytes.Equal(got, []byte{0, 0, 0, 5}) {
 			t.Errorf("rule keys context %v, want the PDR's context 5", got)
 		}
 	}
+}
+
+// payload reads the exact compiler record; erased values have no record.
+func payload[T any](p bess.Payload) T {
+	v, ok := bess.Get[T](p)
+	if !ok && p != nil {
+		panic(fmt.Sprintf("unexpected compiler payload %T", p))
+	}
+	return v
+}
+func keyFieldValue(p bess.Payload, name string) any {
+	switch name {
+	case "action_id":
+		return payload[ActionKey](p).ActionID
+	case "id":
+		return payload[IDKey](p).ID
+	case "policy_id":
+		return payload[PolicyKey](p).PolicyID
+	case "session_id":
+		return payload[SessionKey](p).SessionID
+	case "ip":
+		return payload[ARPKey](p).IP
+	case "teid":
+		return payload[FTEIDKey](p).TEID
+	}
+	panic("unknown compiler key field " + name)
+}
+func present[T any](p *T) (T, bool) {
+	if p != nil {
+		return *p, true
+	}
+	var zero T
+	return zero, false
+}
+func optional[T any](p *T) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }

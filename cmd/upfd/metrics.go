@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime/metrics"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -76,18 +77,41 @@ func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportS
 		fmt.Fprintf(&b, "# HELP upf_sessions_refused_total Session requests answered with a cause other than accepted.\n")
 		fmt.Fprintf(&b, "# TYPE upf_sessions_refused_total counter\n")
 		fmt.Fprintf(&b, "upf_sessions_refused_total %d\n", stats.Refused)
-		fmt.Fprintf(&b, "# HELP upf_sessions_unadmitted_total Establishments refused because the live heap had no room for another session (-heap-admission); each is also counted in upf_sessions_refused_total.\n")
+		fmt.Fprintf(&b, "# HELP upf_sessions_unadmitted_total Establishments refused before dataplane work by hard session capacity or -heap-admission; also counted in upf_sessions_refused_total.\n")
 		fmt.Fprintf(&b, "# TYPE upf_sessions_unadmitted_total counter\n")
 		fmt.Fprintf(&b, "upf_sessions_unadmitted_total %d\n", stats.Unadmitted)
+		fmt.Fprintf(&b, "# HELP upf_session_capacity Hard bound on established plus reserved sessions.\n")
+		fmt.Fprintf(&b, "# TYPE upf_session_capacity gauge\n")
+		fmt.Fprintf(&b, "upf_session_capacity %d\n", stats.SessionCapacity)
+		fmt.Fprintf(&b, "# HELP upf_sessions_reserved In-flight or uncertain establishments not included in upf_sessions.\n")
+		fmt.Fprintf(&b, "# TYPE upf_sessions_reserved gauge\n")
+		fmt.Fprintf(&b, "upf_sessions_reserved %d\n", stats.ReservedSessions)
 		live, limit := heap.read()
 		fmt.Fprintf(&b, "# HELP upf_go_heap_live_bytes The heap the last garbage collection kept live.\n")
 		fmt.Fprintf(&b, "# TYPE upf_go_heap_live_bytes gauge\n")
 		fmt.Fprintf(&b, "upf_go_heap_live_bytes %d\n", live)
-		fmt.Fprintf(&b, "# HELP upf_go_memory_limit_bytes The Go memory limit the heap is held under.\n")
+		fmt.Fprintf(&b, "# HELP upf_go_memory_limit_bytes Soft Go runtime memory target; not an RSS or cgroup ceiling.\n")
 		fmt.Fprintf(&b, "# TYPE upf_go_memory_limit_bytes gauge\n")
 		if limit > 0 {
 			fmt.Fprintf(&b, "upf_go_memory_limit_bytes %d\n", limit)
 		}
+		// Cumulative CPU includes concurrent collection and allocating-goroutine
+		// assists; short stop-the-world pauses alone do not measure this cost.
+		gc := [...]metrics.Sample{
+			{Name: "/cpu/classes/gc/mark/assist:cpu-seconds"},
+			{Name: "/cpu/classes/gc/total:cpu-seconds"},
+			{Name: "/gc/heap/allocs:bytes"},
+		}
+		metrics.Read(gc[:])
+		fmt.Fprintf(&b, "# HELP upf_go_gc_assist_cpu_seconds_total CPU seconds spent by allocating goroutines assisting GC.\n")
+		fmt.Fprintf(&b, "# TYPE upf_go_gc_assist_cpu_seconds_total counter\n")
+		fmt.Fprintf(&b, "upf_go_gc_assist_cpu_seconds_total %g\n", gc[0].Value.Float64())
+		fmt.Fprintf(&b, "# HELP upf_go_gc_cpu_seconds_total CPU seconds spent on all GC work, not only pauses.\n")
+		fmt.Fprintf(&b, "# TYPE upf_go_gc_cpu_seconds_total counter\n")
+		fmt.Fprintf(&b, "upf_go_gc_cpu_seconds_total %g\n", gc[1].Value.Float64())
+		fmt.Fprintf(&b, "# HELP upf_go_heap_allocated_bytes_total Cumulative Go heap allocation bytes.\n")
+		fmt.Fprintf(&b, "# TYPE upf_go_heap_allocated_bytes_total counter\n")
+		fmt.Fprintf(&b, "upf_go_heap_allocated_bytes_total %d\n", gc[2].Value.Uint64())
 		fmt.Fprintf(&b, "# HELP upf_end_markers_total End Marker packets by outcome: sent, or refused by the graph's port.\n")
 		fmt.Fprintf(&b, "# TYPE upf_end_markers_total counter\n")
 		fmt.Fprintf(&b, "upf_end_markers_total{outcome=\"sent\"} %d\n", stats.Markers)

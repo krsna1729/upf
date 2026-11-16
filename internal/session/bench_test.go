@@ -8,8 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/krsna1729/upf/internal/bess"
+	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 )
 
@@ -111,5 +113,63 @@ func BenchmarkDelete(b *testing.B) {
 		if resp := c.Delete(del); resp == nil {
 			b.Fatal("Delete answered nothing")
 		}
+	}
+}
+
+// BenchmarkChangeLifecycle keeps one session live at a time and exercises real
+// compiler output for establishment, a FAR-only update, a selector replacement
+// (old-key erase plus new-key upsert), and deletion. No daemon or retained
+// transaction history is needed for a bounded compiler-allocation comparison.
+func BenchmarkChangeLifecycle(b *testing.B) {
+	for _, target := range []string{"graph", "appliance", "session-major"} {
+		b.Run(target, func(b *testing.B) {
+			cfg := testConfig()
+			if target != "graph" {
+				cfg.Appliance = "upf"
+			}
+			if target == "session-major" {
+				cfg.Sessions = &SessionLayout{MaxSessions: 8, Actions: 4, QERs: 4}
+			}
+			// The fixture has no native consumer retaining retired identifiers.
+			cfg.IDReuseDelay = time.Nanosecond
+			ap := &discardApplier{}
+			c := New(cfg, ap, n4Logger())
+			establish := establishment(0x8888, "10.45.0.9")
+			far := ie.NewUpdateFAR(ie.NewFARID(2), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(
+					ie.NewDestinationInterface(ie.DstInterfaceAccess),
+					ie.NewOuterHeaderCreation(0x0100, 0x55667788, "10.20.30.9", "", 0, 0, 0)))
+			pdr := ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewPrecedence(100),
+				ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x06, "10.45.0.9", "", 0, 0),
+					ie.NewSDFFilter("permit out udp from any to assigned 443", "", "", "", 0)),
+				ie.NewFARID(2))
+			check := func(operation string, before int, response message.Message) {
+				b.Helper()
+				if got := answerCause(response); got != ie.CauseRequestAccepted {
+					b.Fatalf("%s answered cause %d", operation, got)
+				}
+				if ap.changes == before {
+					b.Fatalf("%s emitted no resource changes", operation)
+				}
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				before := ap.changes
+				response := c.Establish(establish)
+				check("establish", before, response)
+				seid := upFSEID(b, response.(*message.SessionEstablishmentResponse))
+				before = ap.changes
+				check("FAR update", before, c.Modify(
+					message.NewSessionModificationRequest(0, 0, seid, 2, 0, far)))
+				before = ap.changes
+				check("PDR replacement", before, c.Modify(
+					message.NewSessionModificationRequest(0, 0, seid, 3, 0, pdr)))
+				before = ap.changes
+				check("delete", before, c.Delete(
+					message.NewSessionDeletionRequest(0, 0, seid, 4, 0)))
+			}
+			b.ReportMetric(4, "transactions/cycle")
+		})
 	}
 }

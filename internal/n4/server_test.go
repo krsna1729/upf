@@ -65,6 +65,8 @@ func (r *recorder) Delete(*message.SessionDeletionRequest) message.Message {
 
 func (r *recorder) AssociationEnded(reason string) { r.ended <- reason }
 
+func (*recorder) ResponseSEID(localSEID uint64) uint64 { return localSEID }
+
 func startServer(t *testing.T, cfg n4.Config) (*n4.Server, *net.UDPAddr) {
 	t.Helper()
 	cfg.Listen = "127.0.0.1:0"
