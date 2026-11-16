@@ -927,6 +927,34 @@ following paths now select or clear work without that population walk:
    `CounterChanges.BatchGracePeriodsNeverLoseTheLastPacketOfARule` pin these
    properties.
 
+**Dormant native buffering state.** Buffer-counter cells/stamps, their slot
+directory and per-flow buffer limits grow in stable 1024-ID pages on the
+control path. The complete configured ActionId range remains legal. A
+reservation admits missing capacity before resource publication; packet
+processing allocates nothing. Sparse late IDs and grace-period reuse preserve
+counter history. Allocated pages remain accounted capacity until module
+teardown, including pages prepared before a later transaction abort.
+
+`CounterChanges` keeps the same two fixed bitmap banks and acknowledgement
+contract, but records touched 16-word blocks with a 16-bit nonzero-word mask
+instead of a four-byte list entry for every touched word. Repeated marks of an
+already-set bit remain unchanged. The smaller metadata adds mask work when a
+word first becomes nonzero and during frozen reads/clear.
+
+The `upf_ab` benchmark reserves exactly its resident population, its 1024
+disjoint churn IDs when enabled, and one self-test/grace slot. This removes
+benchmark-only capacity slack without reducing offered work. It is separate
+from the unchanged spaces in the [powered 1M comparison](performance.md#dormant-native-capacity-and-overload-retake-2026-11-15).
+
+The cold F-TEID index uses `AdmittedGlibcAllocator` to charge actual allocator
+chunks, rather than a fixed node estimate. Session snapshots likewise charge
+the allocated chunks for rule/F-TEID vectors and optional range storage, not
+only their element payloads. A refused charge cannot publish a new index entry
+or session version; separately reserved slab capacity can remain reusable.
+These are allocator-capacity charges, not a partition of resident pages.
+Subtracting them and the startup baseline from RSS yields a signed accounting
+residual, not an exact count of otherwise unexplained live allocations.
+
 ### Final 1M-session churn measurement (2026-11-05)
 
 Frozen URR work-selection code (base `96c69885`, reviewed source delta
@@ -1072,6 +1100,12 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   event, peak 349 MiB; the live heap read 0.76 of the limit at the end, because
   the sessions admitted between two collections are not yet in the reading.
   The pod figures below were measured before admission.
+  While admission is closed, one background worker watches successful session
+  deletions. It rechecks at most once per second and requests a full Go
+  collection only after new deletion progress. Repeated refusals alone do not
+  trigger collection; an idle node can recover after a later deletion without
+  another request. Collection runs outside compiler/session locks. Shutdown
+  cancels the watcher and joins any collection already in flight.
 - **Session-model layout.** The controller keeps small rule sets in sorted
   slices, promoting to maps after 16 entries; unused BAR/MAR/CHOOSE-ID maps
   stay nil. PDRs derive endpoint addresses and tunnel resources rather than
