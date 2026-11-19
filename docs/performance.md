@@ -1467,6 +1467,41 @@ show it, so layout is not claimed. No poller policy, engine or packet change
 follows. The TCP/P c1 gate stays open and non-blocking, with the E gate closed
 by this retake.
 
+### Same-binary A/A control closes the TCP/P c1 gate (2026-11-19)
+
+The section above left one control open: the same binary in both arms. This
+run repeats the TCP/P c1 cell (control CPU 6, 1 caller, worker CPU 8, client
+CPUs `2,4,10`) with the release `529e5374` bessd in **both** arms
+(`aa-control.py`, the `idle-isolation.py` method with one binary). Each arm
+starts a fresh daemon. The client is the release `live_transaction_bench`
+from `bess/develop` `e38f36d1`. The palindrome a1/a2/a2/a1 runs twice per
+mode, giving 16 arms. All 3,121 power observations have AC on and turbo off;
+package temperature is 52–62 C.
+
+| Mode | Control CPU ms/s, a1 → a2 | Idle packet rate median, a1 → a2 | Paired median | Pair deltas | Cycles/packet | Instructions/packet | IPC | Cycles/ref-cycle |
+|---|---|---:|---:|---|---:|---:|---:|---:|
+| plain | 9.8 → 8.6 | 23.110 → 22.860 | +0.24% | +0.35, +0.13, +17.75, -6.32% | - | - | - | - |
+| PMU | 9.4 → 9.3 | 22.530 → 23.040 | +2.05% | +1.31, +6.71, -0.88, +2.78% | 114.92 → 112.27 (-2.31%) | 278.16 → 278.15 (-0.01%) | 2.421 → 2.478 (+2.35%) | 0.8629 → 0.8638 |
+
+- **The same binary shows the same shift.** With no code difference, the PMU
+  arm moves by +2.05% (paired median), with cycles/packet -2.31% and IPC
+  +2.35%. Instructions/packet are equal within 0.01%, and cycles/ref-cycle is
+  0.863–0.864. This is the signature of the A/B result (IPC -1.89%,
+  cycles/packet +1.95%), but with the opposite sign.
+- **Plain pairs spread wider than the A/B effect.** One plain a1 arm ran at
+  19.16 Mpps at 62 C. That gives pair deltas from -6.32% to +17.75%. The
+  A/B plain effect (-3.66%, 4/4) is inside that range.
+- **The variance is per daemon, not per revision.** Each arm starts a fresh
+  daemon, so its heap and page placement differ. `[INFERENCE]` Physical
+  placement per daemon is the likely source; this run does not isolate it.
+
+Conclusion: an IPC shift of about 2% at constant instructions/packet occurs
+between fresh daemons of one binary. The `f5d94731` → `529e5374` TCP/P c1
+delta is not attributable to the revision. **The TCP/P c1 gate is closed as
+within fresh-daemon variance.** No code change follows. Evidence:
+`.scratch/evidence/remeasure-20261117/aa/`, `aa-table.txt`, `aa.log.power.jsonl`
+and `remeasure-binaries.sha256`.
+
 ### Locality-aware cross-language API shortlist
 
 This is source review, **not measured performance of replacement libraries**.
@@ -3208,3 +3243,75 @@ Summary of the landed state on `upf/main` (`33208e5`) + `bess/develop`
    persistent transaction streams) are **at their optimal Go tradeoff point**,
    sitting **427–647 B/session** above the theoretical `864–1,084 B/session`
    pointer-free slab floor.
+
+## Re-measurement: 2 MiB hugepages, grpc 1.85.0 and the TCP/P A/A control (2026-11-19)
+
+Three re-measurements follow the 2026-11-16 dimensioning. All runs have AC on
+and turbo off, checked by `power_guard.py` (every observation valid). They use
+the release builds listed with sha256 in
+`.scratch/evidence/remeasure-20261117/remeasure-binaries.sha256`. The host
+now reserves 1,024 × 2 MiB hugepages (2 GiB) at boot, and no 1 GiB pages.
+
+### Hugepage tables were charged by an unmapped 1 GiB page size (fixed in bess #153)
+
+The first 1M `--bess-mem-backing hugepages` run on `bess/develop` `e38f36d1`
+did not fill: bessd refused 813,222 of 1,000,000 establishments from session
+186,778 onward. Each refusal said `refusing 1073741824 bytes (1024 MB) ...
+1436 MB in use`. The cause: under `--in-memory`, DPDK lists every page size
+the kernel offers, including 1 GiB with no pages reserved, largest first
+(`eal_hugepage_info.c`). The charge took the first list's page size, so every
+hugepage table charge rounded up to 1 GiB. Bess #153 (`dd22783d`, now the pin) charges by the page size
+of the lists that hold segments. The same 1M hugepage fill then completes with
+0 refusals. The discarded runs are kept in `discarded-1gib-charge-bug/`.
+
+### 1M sessions: normal vs 2 MiB hugepages × grpc 1.83.2 vs 1.85.0
+
+Setup: 1,000,000 sessions, FAR modification at 1,000/s for 10 s over UDS,
+`GOGC=25 GOMEMLIMIT=2400MiB`, bessd/upfd/lane limits 2,600/2,900/4,600 MiB,
+16,384 buffers, CPUs 6 (bessd control), 4 (upfd), 8 (worker), 10–11
+(driver). One bessd (#153 build, tree `8972ee53` = `dd22783d`), plugin and driver in every arm. upfd is
+built from `bd34d7d` (grpc 1.83.2, x/net 0.60.0) or `9a8007f` (grpc 1.85.0,
+x/net 0.62.0). Order: palindrome N32 N50 H50 H32 H32 H50 N50 N32.
+
+| Run | p99 ms | bessd RSS MiB | `hugetlb` MiB | bessd admitted MiB | bessd cgroup peak MiB | upfd peak MiB | Lane peak MiB | upfd CPU ms/s | GC CPU in window s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 01 normal, 1.83.2 | 16.8 | 1,832.0 | 0 | 1,832.0 | 1,813.9 | 2,089.1 | 4,031.2 | 306.0 | 1.97 |
+| 02 normal, 1.85.0 | 1.6 | 1,837.6 | 0 | 1,837.6 | 1,823.4 | 2,035.1 | 3,970.5 | 113.3 | 0 |
+| 03 hugepages, 1.85.0 | 0.4 | 371.8 | 1,486.0 | 1,857.8 | 1,831.8 | 2,057.6 | 4,006.1 | 110.5 | 0 |
+| 04 hugepages, 1.83.2 | 0.6 | 371.9 | 1,486.0 | 1,857.9 | 1,831.5 | 2,078.1 | 4,020.5 | 111.3 | 0 |
+| 05 hugepages, 1.83.2 | 0.4 | 372.5 | 1,486.0 | 1,858.5 | 1,831.5 | 2,107.2 | 4,056.2 | 111.0 | 0 |
+| 06 hugepages, 1.85.0 | 0.4 | 372.3 | 1,486.0 | 1,858.3 | 1,830.0 | 2,074.8 | 4,020.8 | 107.5 | 0 |
+| 07 normal, 1.85.0 | 1.8 | 1,837.2 | 0 | 1,837.2 | 1,813.1 | 2,085.6 | 4,014.2 | 110.8 | 0 |
+| 08 normal, 1.83.2 | 1.6 | 1,837.1 | 0 | 1,837.1 | 1,812.6 | 2,075.1 | 4,002.5 | 111.3 | 0 |
+
+Every run completed 997.8–999.8 cycles/s, with 0 timeouts, 0 refusals and 0
+OOM kills. `HugePages_Free` was 1,024 before and after every run.
+
+- **Hugepages do not change the memory budget.** The same 1.49 GB of DPDK
+  tables moves from anonymous memory into `hugetlb`, and the cgroup charges
+  both (`memory_hugetlb_accounting`). bessd cgroup peak is 1,830–1,832 MiB
+  with hugepages against 1,813–1,823 MiB normal (+13 to +18 MiB: the heap
+  maps whole 2 MiB pages, 1,486.0 MiB mapped for 1,481.1 MiB allocated). The
+  lane peak is 4,006–4,056 against 3,971–4,031 MiB. RSS drops from
+  1,832–1,838 to 372 MiB only because RSS does not count `hugetlb`.
+- **Hugepages lower the FAR-1K tail.** p99 is 0.4–0.6 ms in all four
+  hugepage runs. In the three normal runs without a GC cycle it is
+  1.6–1.8 ms. The ranges do not overlap. bessd CPU is 1,126–1,128 ms/s
+  against 1,131–1,134 ms/s (the worker polls one full core in both).
+  `[INFERENCE]` Fewer TLB misses on the 1.49 GB session tables is the likely
+  mechanism; no TLB counters were collected.
+- **grpc 1.85.0 / x/net 0.62.0 is neutral.** With run 01 excluded, upfd CPU is
+  107.5–113.3 ms/s and p99 differs by at most 0.2 ms between gRPC versions at
+  the same backing. upfd peak is 2,035–2,086 MiB (1.85.0) against
+  2,075–2,107 MiB (1.83.2). Run 01 (p99 16.8 ms, upfd 306 ms/s) holds the
+  only Go GC cycle in any measured window (1.97 s GC CPU). It is GC phase,
+  not the gRPC version: run 08, the same binary, shows 1.6 ms and 111 ms/s.
+
+Evidence: `.scratch/evidence/remeasure-20261117/0[1-8]-*`, `analysis-1m.txt`,
+`campaign-1m.sh`, `analyze-1m.py`.
+
+### TCP/P c1 A/A
+
+See [the A/A control](#same-binary-aa-control-closes-the-tcpp-c1-gate-2026-11-19):
+fresh daemons of one binary differ by about 2% IPC at equal
+instructions/packet, so the TCP/P c1 gate is closed.

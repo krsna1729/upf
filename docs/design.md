@@ -1424,6 +1424,15 @@ capacity 22.7% and FAR capacity 5.7%, and cut the 1K replacement p99 36%
   - **`upfd` session model & GC:** **At optimal Go tradeoff (`GOGC=25`),
     427–647 B/session above the theoretical pointer-free slab floor**
     (`1,511 B/session` live heap vs `864–1,084 B/session` packed slab budget).
+- **Re-measured 2026-11-19 (2 MiB hugepages, grpc 1.85.0):** with
+  `--mem_backing=hugepages` on 2 GiB of reserved 2 MiB pages (and bess #153 `dd22783d`,
+  which fixes a 1 GiB charge that refused the fill), 1M sessions use the
+  same budget: bessd cgroup peak 1,830–1,832 MiB against 1,813–1,823 MiB
+  normal, lane 4,006–4,056 MiB. FAR-1K p99 falls from 1.6–1.8 ms to 0.4–0.6 ms
+  (10 s windows without a GC cycle). The grpc 1.85.0 / x/net 0.62.0 upgrade
+  is neutral in CPU, memory and p99. The TCP/P c1 idle gate is closed: a
+  same-binary A/A shows the same ~2% IPC spread
+  ([performance.md](performance.md#re-measurement-2-mib-hugepages-grpc-1850-and-the-tcpp-aa-control-2026-11-19)).
 
 #### 1. Per-account memory ledger at 1,000,000 sessions (`native-exact`)
 
@@ -1469,8 +1478,8 @@ routing adds a fixed **100.3 MiB per route domain** in `bessd`).
 | Workload / Metric | Sustained Rate | Latency (p50 / p99) | CPU Requirement (`no_turbo=1`, 2.6 GHz) | Overload / Loss Behavior | Evidence |
 |---|---:|---:|---|---|---|
 | **GTP-U Packet Hotpath (UL + DL)** | **7.25 Mpps/dir** (**14.5 Mpps** total) | Batch-synchronous | **1.0 worker core** (`0` control CPU) | 0 drops up to rate; meter drops excess | `ci/bench-graph.sh`, `bess #151` ABBA |
-| **Idle 1M Control Plane (1s URR tick)** | 0 churn/s | — | **`bessd` ctl: 1.0–1.5% core** (`10.2 ms/s` P, `15.0 ms/s` E) | Dirty bitmap skips idle sessions (`0` RPCs) | `idle-isolation` (32 arms) |
-| **1,000 / s N4 FAR / PDR / QER Modify** | **1,000/s** (100% accepted) | p99 **3.24–4.29 ms** (90s: **9.8–13.8 ms**) | **`upfd`: 0.12–0.22 P-core**; **`bessd` ctl: ~0.15 P-core** | **0** timeouts, **0** refusals, **0** UDP drops | `performance.md` (`GOGC` + `sparse` sweeps) |
+| **Idle 1M Control Plane (1s URR tick)** | 0 churn/s | — | **`bessd` ctl: 1.0–1.5% core** (`10.2 ms/s` P, `15.0 ms/s` E) | Dirty bitmap skips idle sessions (`0` RPCs) | `idle-isolation` (32 arms); P-shape rate delta within same-binary A/A spread (`aa-control`, 16 arms) |
+| **1,000 / s N4 FAR / PDR / QER Modify** | **1,000/s** (100% accepted) | p99 **3.24–4.29 ms** (90s: **9.8–13.8 ms**); 2026-11-19 10 s, no GC in window: **1.6–1.8 ms** normal, **0.4–0.6 ms** 2 MiB hugepages | **`upfd`: 0.12–0.22 P-core**; **`bessd` ctl: ~0.15 P-core** | **0** timeouts, **0** refusals, **0** UDP drops | `performance.md` (`GOGC` + `sparse` sweeps; 2026-11-19 re-measurement) |
 | **1,000 / s N4 Session Replace** | **1,000/s** (`2,000` tx/s) | p99 **588 ms** (`−36%` vs unary) | **~0.85 `upfd` P-core + ~0.65 `bessd` ctl P-core** | **0** timeouts, **0** refusals | `abba2` + `#74` streams |
 | **Single-Instance Saturation (10K/s offered)** | **URR: 10,000/s**; **QER: 4,113/s**; **PDR: 3,856/s**; **FAR: 3,461/s**; **Est: 1,672/s**; **Del: 1,538/s**; **Repl: 1,007/s** | Accepted p99 **0.465–2.206 s** | **1.0 `upfd` P-core + 1.0 `bessd` ctl P-core** | **0** timeouts, **0** UDP drops; excess answered with **PFCP cause 75** | `sparse-B1` (`performance.md:2913`) |
 | **Native In-Process 8-Stage Ceiling** | **62.1K–79.9K tx/s** (`12.51–16.11 µs/tx` public; `2.00 µs/tx` typed) | `12.51–16.11 µs` | **1.0 `bessd` ctl P-core** (before IPC/Go) | Serialized by one `TransactionEngine` mutex per instance | `performance.md:808-823` |
