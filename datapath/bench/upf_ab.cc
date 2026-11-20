@@ -18,6 +18,7 @@
 //          [--layout masked|session] [--only graph|appliance] [--updates U]
 //          [--rewrite] [--mask-mix K]
 //          [--baseline-plugin DIR --baseline-layout masked|session]
+//          [--baseline-mem-backing auto|hugepages|normal]
 //          [--graph-plugin DIR]
 //
 // --graph-plugin DIR runs the graph arm from another plugin build (a parent
@@ -30,6 +31,10 @@
 // --mem-backing and --mem-hugepage-mb pass through as bessd's --mem_backing
 // and --mem_hugepage_mb; size a normal-page heap with
 // --bessd-arg --mem_limit_mb=N (heap = limit - reserve).
+//
+// --baseline-mem-backing starts the graph/baseline arm's daemon with another
+// --mem_backing than the candidate's: with --baseline-plugin naming the same
+// build and layout, the ABBA windows compare backings for one plugin.
 //
 // --layout selects the appliance's session representation: masked (default)
 // programs the owned plugin's fteids/pdr_ul/pdr_dl/meters/counters_ul/counters_dl/
@@ -116,6 +121,7 @@ struct Opt {
   int miss = 0;
   int worker_cpu = 11, control_cpu = 9;
   std::string mem_backing = "auto";  // bessd --mem_backing
+  std::string baseline_mem_backing;   // non-empty: the g arm's --mem_backing
   int mem_hugepage_mb = 0;            // > 0: bessd --mem_hugepage_mb
   std::vector<std::string> bessd_args;  // appended to bessd's command line
   int buffers = 32768;
@@ -269,7 +275,11 @@ class Study {
                                 : !o_.graph_plugin.empty()    ? o_.graph_plugin
                                                               : o_.plugin;
     cmd.insert(cmd.end(), {"taskset", "-c", cpus, o_.bessd, "-f", "-p", std::to_string(port_),
-                           "--skip_root_check", "--mem_backing=" + o_.mem_backing, "--buffers",
+                           "--skip_root_check",
+                           "--mem_backing=" + (arm_ == "g" && !o_.baseline_mem_backing.empty()
+                                                   ? o_.baseline_mem_backing
+                                                   : o_.mem_backing),
+                           "--buffers",
                            std::to_string(o_.buffers), "-i", pidfile_, "-c",
                            std::to_string(o_.worker_cpu), "--control_cpus",
                            std::to_string(o_.control_cpu), "--modules=" + plugin});
@@ -1299,6 +1309,7 @@ int main(int argc, char **argv) {
     else if (a == "--worker-cpu") o.worker_cpu = std::stoi(val());
     else if (a == "--control-cpu") o.control_cpu = std::stoi(val());
     else if (a == "--mem-backing") o.mem_backing = val();
+    else if (a == "--baseline-mem-backing") o.baseline_mem_backing = val();
     else if (a == "--mem-hugepage-mb") o.mem_hugepage_mb = std::stoi(val());
     else if (a == "--bessd-arg") o.bessd_args.push_back(val());
     else if (a == "--buffers") o.buffers = std::stoi(val());
@@ -1320,8 +1331,10 @@ int main(int argc, char **argv) {
     else if (a == "--rewrite") o.rewrite = true;
     else throw std::runtime_error("unknown flag " + a);
   }
-  if (o.mem_backing != "auto" && o.mem_backing != "hugepages" && o.mem_backing != "normal") {
-    throw std::runtime_error("--mem-backing " + o.mem_backing + ": auto, hugepages or normal");
+  for (const std::string *b : {&o.mem_backing, &o.baseline_mem_backing}) {
+    if (b->empty() && b == &o.baseline_mem_backing) continue;
+    if (*b != "auto" && *b != "hugepages" && *b != "normal")
+      throw std::runtime_error("--mem-backing " + *b + ": auto, hugepages or normal");
   }
   if (o.bessd.empty() || o.plugin.empty()) {
     std::fprintf(stderr, "usage: upf_ab --bessd B --plugin DIR --sessions N ...\n");
