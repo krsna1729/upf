@@ -45,12 +45,67 @@ func TestTheHeapGaugeReadsTheRuntimesLimit(t *testing.T) {
 	prev := debug.SetMemoryLimit(1 << 30)
 	defer debug.SetMemoryLimit(prev)
 	g := newHeapGauge()
-	if _, limit := g.read(); limit != 1<<30 {
-		t.Errorf("with a 1 GiB limit the gauge reads %d", limit)
+	if r := g.read(); r.limit != 1<<30 {
+		t.Errorf("with a 1 GiB limit the gauge reads %d", r.limit)
 	}
 	debug.SetMemoryLimit(math.MaxInt64)
-	if _, limit := g.read(); limit != 0 {
-		t.Errorf("with no limit the gauge reads %d, want 0", limit)
+	if r := g.read(); r.limit != 0 {
+		t.Errorf("with no limit the gauge reads %d, want 0", r.limit)
+	}
+}
+
+// TestHeapAdmissionCountsSessionsAdmittedSinceTheLastCollection: the live
+// reading only changes when a collection ends, so sessions admitted since
+// are counted at their bound and a fast fill stops at the share, not past it;
+// a new collection's reading replaces the count.
+func TestHeapAdmissionCountsSessionsAdmittedSinceTheLastCollection(t *testing.T) {
+	r := heapReading{live: 500, limit: 1000, cycles: 7}
+	h := newHeapAdmission(0.7, 50, func() heapReading { return r }, nil)
+	for i := range 4 { // 500 + 4*50 = 700: the fourth still fits
+		if !h.admit() {
+			t.Fatalf("session %d refused at estimate %d", i+1, 500+(i+1)*50)
+		}
+	}
+	if h.admit() {
+		t.Fatal("fifth session admitted past the share between collections")
+	}
+	r = heapReading{live: 610, limit: 1000, cycles: 8} // the collection saw the four
+	if h.admit() {
+		t.Fatal("reopened inside the hysteresis band (660 > 0.65 share)")
+	}
+	r = heapReading{live: 500, limit: 1000, cycles: 9}
+	if !h.admit() {
+		t.Fatal("estimate 550 is under the 0.65 reopen share, want admitted")
+	}
+	if h.closedGauge.Load() {
+		t.Fatal("gauge still closed after reopening")
+	}
+}
+
+// TestHeapAdmissionHysteresisHoldsTheBand: once closed at the share,
+// admission stays closed until the estimate falls the gap below it, so a node
+// at the boundary does not flip on every collection.
+func TestHeapAdmissionHysteresisHoldsTheBand(t *testing.T) {
+	var live atomic.Uint64
+	live.Store(710)
+	h := newHeapAdmission(0.7, 0, func() heapReading { return heapReading{live: live.Load(), limit: 1000} }, nil)
+	if h.admit() || !h.closedGauge.Load() {
+		t.Fatal("710 of 1000 admitted or not marked closed at a 0.7 share")
+	}
+	live.Store(690)
+	if h.admit() {
+		t.Fatal("690 reopened inside the band")
+	}
+	live.Store(640)
+	if !h.admit() || h.closedGauge.Load() {
+		t.Fatal("640 did not reopen under a 0.65 share")
+	}
+	live.Store(690)
+	if !h.admit() {
+		t.Fatal("690 refused while open (closes only past 0.7)")
+	}
+	if n := h.refusals.Load(); n != 2 {
+		t.Fatalf("%d refusals counted, want 2", n)
 	}
 }
 
@@ -116,7 +171,7 @@ func runHeapRecovery(t *testing.T, h *heapAdmissionRecovery, deleted func() uint
 func TestHeapAdmissionRecoversAfterIdleDeletion(t *testing.T) {
 	var live atomic.Uint64
 	live.Store(100)
-	h := newHeapAdmission(0.7, func() (uint64, uint64) { return live.Load(), 1000 })
+	h := newHeapAdmission(0.7, 0, func() heapReading { return heapReading{live: live.Load(), limit: 1000} }, nil)
 	clock := newHeapRecoveryClock(h)
 	cfg := reportConfig()
 	cfg.Admit = h.admit
@@ -169,7 +224,7 @@ func TestHeapAdmissionRecoversAfterIdleDeletion(t *testing.T) {
 }
 
 func TestHeapAdmissionCollectionsRequireNewDeletionsAndCooldown(t *testing.T) {
-	h := newHeapAdmission(0.7, func() (uint64, uint64) { return 800, 1000 })
+	h := newHeapAdmission(0.7, 0, func() heapReading { return heapReading{live: 800, limit: 1000} }, nil)
 	clock := newHeapRecoveryClock(h)
 	var deleted, collections atomic.Uint64
 	deleted.Store(1)
@@ -202,7 +257,7 @@ func TestHeapAdmissionCollectionsRequireNewDeletionsAndCooldown(t *testing.T) {
 func TestHeapAdmissionRecoveryRechecksSample(t *testing.T) {
 	var live, collections atomic.Uint64
 	live.Store(800)
-	h := newHeapAdmission(0.7, func() (uint64, uint64) { return live.Load(), 1000 })
+	h := newHeapAdmission(0.7, 0, func() heapReading { return heapReading{live: live.Load(), limit: 1000} }, nil)
 	h.collect = func() { collections.Add(1) }
 	observed := make(chan struct{})
 	calls := 0
@@ -232,7 +287,7 @@ func TestHeapAdmissionRecoveryCancellation(t *testing.T) {
 			name = "timer"
 		}
 		t.Run(name, func(t *testing.T) {
-			h := newHeapAdmission(0.7, func() (uint64, uint64) { return 800, 1000 })
+			h := newHeapAdmission(0.7, 0, func() heapReading { return heapReading{live: 800, limit: 1000} }, nil)
 			entered := make(chan struct{})
 			pause := h.pause
 			var once sync.Once
@@ -253,7 +308,7 @@ func TestHeapAdmissionRecoveryCancellation(t *testing.T) {
 }
 
 func TestHeapAdmissionRecoveryJoinsInFlightCollection(t *testing.T) {
-	h := newHeapAdmission(0.7, func() (uint64, uint64) { return 800, 1000 })
+	h := newHeapAdmission(0.7, 0, func() heapReading { return heapReading{live: 800, limit: 1000} }, nil)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	releaseCollection := func() { once.Do(func() { close(release) }) }

@@ -1093,22 +1093,43 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   `upf_go_heap_allocated_bytes_total` expose collection work and allocation churn;
   short stop-the-world pauses do not prove low request latency.
 - **Admission.** `upfd` answers a new establishment cause 75 (no resources
-  available) while the heap its last collection kept live is over
-  `-heap-admission` (default 0.7) of that limit; modifications, deletions, a
-  repeated establishment and the checkpoint replay are never refused for it
+  available) while its estimated live heap is over `-heap-admission`
+  (default 0.7) of that limit; modifications, deletions, a repeated
+  establishment and the checkpoint replay are never refused for it
   (`cmd/upfd/admission.go`). 0.7 is where the collector's share turns: 100K
   sessions, live heap 385 MB, modify spent 12.5%, 40.7% and 78.2% of `upfd`'s
-  CPU in GC at 0.64, 0.78 and 0.93 of the limit. Under a 380 MiB scope (limit
-  342 MiB), 100K establishments admitted 65,315 and refused 34,685 with no OOM
-  event, peak 349 MiB; the live heap read 0.76 of the limit at the end, because
-  the sessions admitted between two collections are not yet in the reading.
-  The pod figures below were measured before admission.
+  CPU in GC at 0.64, 0.78 and 0.93 of the limit.
+  The estimate is the heap the last collection kept live plus 1,600 B (the
+  per-session bound below) for every session admitted since that collection
+  ended (`/gc/cycles/total:gc-cycles` tells when it did). Reading live alone
+  overshot during a fast fill: the sessions admitted between two collections
+  are not in it. Once closed, admission reopens only when the estimate is
+  0.05 of the limit under the share, so a node at the boundary does not open
+  and close on every collection. Under a 380 MiB scope (limit 342 MiB), 250K
+  establishments (`.scratch/evidence/admission-20261120/cap380-250k-*`):
+
+  | | Admitted | Refused (cause 75) | Live / limit at the end | Peak | OOM |
+  |---|---:|---:|---:|---:|---:|
+  | live heap only (`main` `2a600a4`) | 199,741 | 50,259 | 0.738 | 359.7 MiB | 0 |
+  | estimate + hysteresis | 196,967 | 53,033 | 0.697 | 372.5 MiB | 0 |
+
+  The estimate holds the share (0.697 against 0.7) at a 1.4% smaller fill.
+  The scope peak is a single run each and moves with collection timing.
+  `upf_heap_admission_closed` (0/1) and `upf_heap_admission_refused_total`
+  report the guard apart from hard capacity, and each close and reopen is
+  logged with live, estimate and limit.
   While admission is closed, one background worker watches successful session
-  deletions. It rechecks at most once per second and requests a full Go
-  collection only after new deletion progress. Repeated refusals alone do not
-  trigger collection; an idle node can recover after a later deletion without
-  another request. Collection runs outside compiler/session locks. Shutdown
-  cancels the watcher and joins any collection already in flight.
+  deletions (`Stats().Deleted`). It rechecks at most once per second and
+  requests a full Go collection only after new deletion progress. No
+  collection runs on the request path: the session layer asks for admission
+  under its lock, and a forced collection there would stall every session
+  message. Repeated refusals or elapsed time alone do not trigger collection;
+  a closed idle node with no deletions reopens at the runtime's own periodic
+  collection (at most 2 minutes). This is the usual load-shedding shape: a
+  cheap sampled signal, an estimate between samples, a release band, a
+  retryable refusal, reclaim kept off the request path. Collection runs
+  outside compiler/session locks. Shutdown cancels the watcher and joins any
+  collection already in flight.
 - **Session-model layout.** The controller keeps small rule sets in sorted
   slices, promoting to maps after 16 entries; unused BAR/MAR/CHOOSE-ID maps
   stay nil. PDRs derive endpoint addresses and tunnel resources rather than
@@ -1490,7 +1511,7 @@ routing adds a fixed **100.3 MiB per route domain** in `bessd`).
 |---|---|---|
 | **`bessd` Hotpath (Packet Path)** | **At Floor** | Zero hotpath allocations; flat `920 B` `SessionSlot`, flat action index (`#75`), inline rule keys (`#77`), lockless worker-local `CounterChanges` bitmaps with 16-bit word masks (`#78`). Packet rate stayed within **±0.7% Mpps** across all control/memory PRs; both queued micro-optimizations (`D-204` batch head ownership, two-store `PacketRef::reset`) regressed `live_perf` and were dropped. |
 | **`bessd` Control Path & Memory Accounting** | **At Floor & Accounted** | Dormant buffer tables paged in 1,024-ID chunks (`113.1 MB → 53 KB`, `#78`); session mirrors/owners moved to flat framework arrays (`−67.7 MiB`, `#76`); duplicate cold F-TEID `std::map` removed (`−84.9 MiB`, `#77`); remaining cold F-TEID and snapshot allocations charged at exact glibc chunk size (`AdmittedGlibcAllocator`, `#78`/`#152`). Unassigned loaded glibc growth is **2.59 MB out of 302.20 MB (0.86%)**. The only remaining non-linear steps are `SharedExactIndex`'s power-of-two `rte_hash` ($204\text{ MiB}$ at $10^6$ keys) and `std::map` nodes (`112 B/node`) in `fteid_records`. Scaling accepted native-transaction churn past ~3.5–4.1K/s requires sharding sessions across multiple `bessd` instances or batching multiple session changes per transaction. |
-| **`upfd` Hotpath (N4 Read Loop, Overload & URR Tick)** | **At Optimal Tradeoff** | Full worker queues immediately return **PFCP cause 75** with zero UDP drops and live heartbeats (`#78`); 4 MiB UDP receive buffer absorbs bursts (`#73`); URR tick reads only dirty/due sessions via `get_changes` bitmaps (`0` RPCs for idle volume sessions); closed heap admission wakes one background watcher at most once/s and runs `runtime.GC()` only after `DeleteSucceeded()` advances (`#78`). |
+| **`upfd` Hotpath (N4 Read Loop, Overload & URR Tick)** | **At Optimal Tradeoff** | Full worker queues immediately return **PFCP cause 75** with zero UDP drops and live heartbeats (`#78`); 4 MiB UDP receive buffer absorbs bursts (`#73`); URR tick reads only dirty/due sessions via `get_changes` bitmaps (`0` RPCs for idle volume sessions); heap admission estimates live heap between collections and reopens 0.05 under its share (250K fill under 380 MiB: 0.697 of the limit vs 0.738 on live alone); closed admission wakes one background watcher at most once/s and runs `runtime.GC()` only after `Stats().Deleted` advances (`#78`). |
 | **`upfd` Control Path & Session Memory** | **At Optimal Go Tradeoff** | Live heap cut **40%** (`2,518 → 1,511 B/session`, `#72`), change payloads pre-encoded (`−29.5%` / `−45.9%` alloc bytes, `#78`), and persistent batched `TransactionChannel` streams cut 1K replace p99 by **36%** and raised 10K replace goodput by **22.7%** (`#74`/`#151`). Across the mapped `GOGC` curve (`10 / 25 / 50`), `GOGC=25` is the optimal point inside 6 GiB (`2,051 MiB` peak RSS), while `GOGC=50` trades `+275 MiB` for `−23%` p99 and `−42%` GC CPU. `1,511 B/session` remains **427–647 B/session above** the `864–1,084 B/session` pointer-free slab floor (`performance.md:58-88`); closing that last ~450 MiB at 1M would require replacing Go `Session`/`pdr`/`urr` structs and Go `map` buckets with pointer-free arena slabs and integer handles. |
 
 ## What proves it
