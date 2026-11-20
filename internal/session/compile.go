@@ -2384,8 +2384,8 @@ func (c *Compiler) fteidKeyNamed(s *Session, key fteidKey) bool {
 func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
 	keys := c.fteidKeysOf(p)
 	for _, key := range keys {
-		if owner, ok := c.byFTEID[key]; ok &&
-			(owner.session != s || owner.down != p.down) {
+		if owner, ok := c.byFTEID.get(key); ok &&
+			(owner.seid != s.LocalSEID || owner.down != p.down) {
 			return fmt.Errorf("%w: F-TEID endpoint key is already owned", errNoResources)
 		}
 	}
@@ -2400,10 +2400,10 @@ func (c *Compiler) claimFTEID(s *Session, p *pdr) error {
 		ctx = id
 	}
 	for _, key := range keys {
-		if _, exists := c.byFTEID[key]; exists {
+		if _, exists := c.byFTEID.get(key); exists {
 			continue
 		}
-		c.byFTEID[key] = fteidOwner{session: s, ctx: ctx, down: p.down}
+		c.byFTEID.put(key, fteidOwner{seid: s.LocalSEID, ctx: ctx, down: p.down})
 	}
 	p.fteidContext = ctx
 	c.teids.reserve(p.teid)
@@ -2433,11 +2433,11 @@ func (c *Compiler) releaseFTEIDClaim(s *Session, p *pdr, force bool) {
 		if !force && c.fteidKeyNamed(s, key) {
 			continue
 		}
-		owner, ok := c.byFTEID[key]
-		if !ok || owner.session != s {
+		owner, ok := c.byFTEID.get(key)
+		if !ok || owner.seid != s.LocalSEID {
 			continue
 		}
-		delete(c.byFTEID, key)
+		c.byFTEID.remove(key)
 		removed = true
 		if _, still := c.contextOf(s, owner.down, p.endpointID, p.teid); !still {
 			c.contexts.release(owner.ctx)

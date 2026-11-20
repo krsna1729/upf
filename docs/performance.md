@@ -2263,9 +2263,18 @@ session, heap per item 1,776 → 1,660 B; allocs/op Establish 250 → 246, Delet
 26 → 26, ChangeLifecycle graph/appliance/session-major 203/203/356 →
 194/194/347 (`-benchtime=2000x`, same machine, both arms).
 
-Not yet done: `byFTEID` remains a Go map holding `*Session` (step 3b), and
-records are still individually allocated (step 4). The 1M GC CPU/RSS effect is
-[INFERENCE] until the paired churn run.
+**Step 3b (F-TEID owners):** `byFTEID map[fteidKey]fteidOwner`, whose owner
+held a `*Session`, is a noscan open-addressing index of 40-byte slots (the
+whole key, the context shifted left over the direction bit, the owner's local
+SEID; `fteidIndex`) compared by whole key, shrinking by half below 1/8 full.
+SEIDs are never reissued, so the owner needs no session lookup; the TEID and
+context reference counts (`teidClaimed`, `contextOf`) are unchanged. Measured
+at 20,000 counted sessions, previous step → this step: live 1,395.5 →
+1,368.9 B, scanned 431.3 → 339.5 B, objects 11.03 → 11.03 per session, heap
+per item 1,660 → 1,631 B; allocs/op unchanged (246/26/194/194/347).
+
+Not yet done: records are still individually allocated (step 4). The 1M GC
+CPU/RSS effect is [INFERENCE] until the paired churn run.
 
 #### 3. Reduce native allocation and reclamation cost without hiding memory
 

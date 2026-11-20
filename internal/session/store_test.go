@@ -225,3 +225,38 @@ func TestASessionListsItsClaimsUntilItGivesThemUp(t *testing.T) {
 		t.Fatal("the session's end left a blob or a value behind")
 	}
 }
+
+// TestTheFTEIDIndexComparesWholeKeysAndShrinks: keys that differ only in
+// endpoint, family or address are distinct claims with their own owner,
+// context and direction; removed keys are gone, and an emptied index shrinks.
+func TestTheFTEIDIndexComparesWholeKeysAndShrinks(t *testing.T) {
+	var x fteidIndex
+	v4, v6 := netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")
+	key := func(i int) fteidKey {
+		return fteidKeyOf(uint32(1+i%3), []uint8{0, 4, 6}[i%3], uint32(1+i/3), v4, v6)
+	}
+	const n = 3000
+	for i := range n {
+		x.put(key(i), fteidOwner{seid: uint64(i + 1), ctx: uint32(i), down: i%2 == 1})
+	}
+	for i := range n {
+		o, ok := x.get(key(i))
+		if !ok || o != (fteidOwner{seid: uint64(i + 1), ctx: uint32(i), down: i%2 == 1}) {
+			t.Fatalf("key %d reads %+v, %v", i, o, ok)
+		}
+	}
+	for i := 0; i < n; i += 2 {
+		x.remove(key(i))
+	}
+	for i := range n {
+		if _, ok := x.get(key(i)); ok != (i%2 == 1) {
+			t.Fatalf("key %d claimed=%v after every even key went", i, ok)
+		}
+	}
+	for i := 1; i < n; i += 2 {
+		x.remove(key(i))
+	}
+	if x.live != 0 || len(x.slots) > 16 {
+		t.Fatalf("an emptied index holds %d keys in %d slots", x.live, len(x.slots))
+	}
+}

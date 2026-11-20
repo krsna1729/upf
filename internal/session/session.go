@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"hash/maphash"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -516,8 +517,10 @@ type Compiler struct {
 	// endpoint names it, a context when no key of its (session, direction,
 	// endpoint, TEID) is left (teidClaimed, contextOf). The keys a TEID can
 	// have are few -- an endpoint's address per family -- so those are probes
-	// rather than two more maps with an entry per session.
-	byFTEID  map[fteidKey]fteidOwner
+	// rather than two more maps with an entry per session. It is a flat noscan
+	// index naming the owner by local SEID (fteidIndex), not a map holding a
+	// *Session the collector would follow for every key.
+	byFTEID  fteidIndex
 	actions  *idPool
 	policies *idPool
 	meters   *idPool
@@ -541,8 +544,10 @@ type Compiler struct {
 	st store
 }
 
+// fteidOwner is who holds a claimed F-TEID key: the session, by its local
+// SEID (unique while the session lives: SEIDs are never reissued).
 type fteidOwner struct {
-	session *Session
+	seid uint64
 	// ctx is the admission context each (session, direction, endpoint, TEID)
 	// holds while one of its exact F-TEID keys is claimed: the id GtpuDecap
 	// writes as `fteid_context` and the PDR key matches. Like the TEID it
@@ -552,6 +557,73 @@ type fteidOwner struct {
 	// by it: the decap's max_fteids is what bounds live contexts.
 	ctx  uint32
 	down bool
+}
+
+// fteidSlot is one claimed key in byFTEID, 40 bytes and no pointer: the key,
+// the context shifted left with the direction in its low bit (contexts are
+// below 2^31, the pool's size), and the owner's SEID, 0 only in an empty slot
+// (SEIDs start at 1).
+type fteidSlot struct {
+	key   fteidKey
+	ctx   uint32
+	owner uint64
+}
+
+var fteidSeed = maphash.MakeSeed()
+
+func fteidHash(k fteidKey) uint32 { return uint32(maphash.Comparable(fteidSeed, k)) }
+
+func (s fteidSlot) home() uint32 { return fteidHash(s.key) }
+
+// fteidIndex is byFTEID: an open-addressing index whose slots hold the whole
+// key, compared whole on a probe, so no two keys alias.
+type fteidIndex struct {
+	slots []fteidSlot
+	live  int
+}
+
+func (x *fteidIndex) find(k fteidKey) int {
+	if len(x.slots) == 0 {
+		return -1
+	}
+	mask := uint32(len(x.slots) - 1)
+	for i := fteidHash(k) & mask; x.slots[i].owner != 0; i = (i + 1) & mask {
+		if x.slots[i].key == k {
+			return int(i)
+		}
+	}
+	return -1
+}
+
+// get is the owner of k, if it is claimed.
+func (x *fteidIndex) get(k fteidKey) (fteidOwner, bool) {
+	i := x.find(k)
+	if i < 0 {
+		return fteidOwner{}, false
+	}
+	s := &x.slots[i]
+	return fteidOwner{seid: s.owner, ctx: s.ctx >> 1, down: s.ctx&1 != 0}, true
+}
+
+// put claims k, which nobody claims, for o.
+func (x *fteidIndex) put(k fteidKey, o fteidOwner) {
+	if o.seid == 0 || o.ctx >= 1<<31 {
+		panic(fmt.Sprintf("session: F-TEID owner %d with context %d", o.seid, o.ctx))
+	}
+	ctx := o.ctx << 1
+	if o.down {
+		ctx |= 1
+	}
+	x.live++
+	x.slots = openInsert(x.slots, x.live, fteidSlot{key: k, ctx: ctx, owner: o.seid})
+}
+
+// remove ends the claim on k, if there is one.
+func (x *fteidIndex) remove(k fteidKey) {
+	if i := x.find(k); i >= 0 {
+		x.live--
+		x.slots = openDelete(x.slots, x.live, uint32(i))
+	}
 }
 
 // teidReuseDelay is how long a released F-TEID waits before the pool may hand
@@ -586,7 +658,6 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		byCP:      map[uint64]*Session{},
 		buffering: map[uint64]struct{}{},
 		measured:  map[uint64]struct{}{},
-		byFTEID:   map[fteidKey]fteidOwner{},
 		nextSEID:  1,
 		actions:   newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		policies:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
@@ -1743,7 +1814,7 @@ func (c *Compiler) teidClaimed(teid uint32) bool {
 	for i := range c.cfg.FTEIDEndpoints {
 		e := &c.cfg.FTEIDEndpoints[i]
 		endpointFTEIDKeys(e.ID, teid, e.IPv4, e.IPv6, func(k fteidKey) bool {
-			_, claimed = c.byFTEID[k]
+			_, claimed = c.byFTEID.get(k)
 			return !claimed
 		})
 		if claimed {
@@ -1758,7 +1829,7 @@ func (c *Compiler) teidClaimed(teid uint32) bool {
 func (c *Compiler) contextOf(s *Session, down bool, endpointID, teid uint32) (ctx uint32, held bool) {
 	ipv4, ipv6 := c.endpointAddrs(endpointID)
 	endpointFTEIDKeys(endpointID, teid, ipv4, ipv6, func(k fteidKey) bool {
-		if o, ok := c.byFTEID[k]; ok && o.session == s && o.down == down {
+		if o, ok := c.byFTEID.get(k); ok && o.seid == s.LocalSEID && o.down == down {
 			ctx, held = o.ctx, true
 		}
 		return !held

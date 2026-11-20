@@ -1336,7 +1336,7 @@ func TestSharedCHIDMustKeepTheSameEndpointFamilySet(t *testing.T) {
 		t.Fatal("family-set mismatch reached Apply")
 	}
 	c.mu.Lock()
-	owners := len(c.byFTEID)
+	owners := c.byFTEID.live
 	c.mu.Unlock()
 	if owners != 0 {
 		t.Fatalf("failed shared CHID left ownership behind: owners=%d", owners)
@@ -3426,7 +3426,7 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 	c.mu.Lock()
 	c.releaseSession(first)
 	remaining := c.teidClaimed(0x77)
-	_, secondStillOwned := c.byFTEID[c.fteidKeysOf(secondPDR)[0]]
+	_, secondStillOwned := c.byFTEID.get(c.fteidKeysOf(secondPDR)[0])
 	pinned := c.teids.taken[0x77]
 	c.mu.Unlock()
 	if !remaining || !secondStillOwned || !pinned {
