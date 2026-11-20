@@ -2061,12 +2061,13 @@ func TestAnUpdatePDRKeepsWhatItLeavesOut(t *testing.T) {
 		t.Fatalf("an Update PDR naming only the precedence answered cause %d", got)
 	}
 	p := sessionOf(t, c, seid).PDRs.at(1)
-	if p.srcIfc != ie.SrcInterfaceAccess || p.ueIP != netip.MustParseAddr("10.45.0.2") || p.teid != 0x11223344 {
+	if p.srcIfc != ie.SrcInterfaceAccess || p.ueIP() != netip.MustParseAddr("10.45.0.2") || p.teid != 0x11223344 {
 		t.Errorf("the PDI read as interface %d, UE %v, TEID %#x; want the stored Access, 10.45.0.2, 0x11223344",
-			p.srcIfc, p.ueIP, p.teid)
+			p.srcIfc, p.ueIP(), p.teid)
 	}
-	if p.farID != 1 || !slices.Equal(p.qerIDs, []uint32{1}) || !slices.Equal(p.urrIDs, []uint32{7}) {
-		t.Errorf("the PDR names FAR %d, QERs %v, URRs %v; want the stored 1, [1], [7]", p.farID, p.qerIDs, p.urrIDs)
+	qers, urrs := c.st.ids(&p.qerIDs), c.st.ids(&p.urrIDs)
+	if p.farID != 1 || !slices.Equal(qers, []uint32{1}) || !slices.Equal(urrs, []uint32{7}) {
+		t.Errorf("the PDR names FAR %d, QERs %v, URRs %v; want the stored 1, [1], [7]", p.farID, qers, urrs)
 	}
 	r := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
 	if want := int64(math.MaxUint32) - 50; r.priority() != want {
@@ -4736,10 +4737,11 @@ func TestAURRIsReadIntoTheSession(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	u := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
-	if u == nil {
+	held := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
+	if held == nil {
 		t.Fatal("the session holds no URR 7")
 	}
+	u := c.limits(held)
 	if !u.volume || !u.duration {
 		t.Errorf("the measurement method read as volume=%v duration=%v, want both", u.volume, u.duration)
 	}
@@ -4761,7 +4763,7 @@ func TestAURRIsReadIntoTheSession(t *testing.T) {
 	if !u.hasTimeQuota || u.timeQuota != time.Hour {
 		t.Errorf("the time quota read as %v (set %v), want 1h", u.timeQuota, u.hasTimeQuota)
 	}
-	if u.enforcing {
+	if held.enforcing {
 		t.Error("a URR that has never been evaluated is enforcing a quota")
 	}
 }
@@ -4779,7 +4781,7 @@ func TestAOneOctetReportingTriggersIsRead(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("a one-octet Reporting Triggers answered cause %d", got)
 	}
-	u := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
+	u := c.limits(sessionOf(t, c, upFSEID(t, resp)).URRs.at(7))
 	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
 		t.Errorf("the triggers read as %+v, want PERIO alone", u)
 	}
@@ -5030,8 +5032,8 @@ func TestRemovingAQERAPDRStillNamesUnlinksIt(t *testing.T) {
 	if m := meterOf(); m != 0 {
 		t.Errorf("the PDR still meters under %d after its QER was removed", m)
 	}
-	if s := sessionOf(t, c, seid); s.QERs.at(1) != nil || len(s.PDRs.at(1).qerIDs) != 0 {
-		t.Errorf("the session holds QER 1 (%v) or PDR 1 still names %v", s.QERs.at(1) != nil, s.PDRs.at(1).qerIDs)
+	if s := sessionOf(t, c, seid); s.QERs.at(1) != nil || s.PDRs.at(1).qerIDs.len() != 0 {
+		t.Errorf("the session holds QER 1 (%v) or PDR 1 still names %v", s.QERs.at(1) != nil, c.st.ids(&s.PDRs.at(1).qerIDs))
 	}
 }
 
@@ -5074,7 +5076,8 @@ func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
 	}
-	u := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
+	held := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
+	u := c.limits(held)
 	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
 		t.Errorf("the triggers read as %+v, want PERIO alone", u)
 	}
@@ -5087,7 +5090,7 @@ func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
 	if !u.volume || !u.duration {
 		t.Errorf("the measurement method read as volume=%v duration=%v, want the establishment's both", u.volume, u.duration)
 	}
-	if u.enforcing {
+	if held.enforcing {
 		t.Error("a new quota did not lift the quota exhaustion's drop")
 	}
 	if !u.hasTimeTh || u.volThreshold.total != 1<<20 {
@@ -5322,12 +5325,12 @@ func TestAFARThatAsksToDuplicateIsRefused(t *testing.T) {
 // A dual-stack F-TEID is two admission keys but one tunnel: both keys carry the
 // PDR's one context id, so its rules multiply by SDF and QFI only.
 func TestDualStackFTEIDIsOneContextNotTwoRuleSets(t *testing.T) {
-	p := &pdr{
+	var st store
+	p := withPDI(&st, &pdr{
 		teid: 0x77, fteidContext: 5,
-		endpointID: 17, wantIPv4: true, wantIPv6: true, pdrExt: &pdrExt{qfis: []uint8{1, 9}},
-		sdfs: []*sdfFilter{{proto: 17, protoOK: true}, {proto: 6, protoOK: true}},
-	}
-	keys, err := p.ruleKeys([]Field{FTEIDContext, Proto, QFI})
+		endpointID: 17, wantIPv4: true, wantIPv6: true,
+	}, pdrExt{qfis: string([]uint8{1, 9})}, sdfFilter{proto: 17, protoOK: true}, sdfFilter{proto: 6, protoOK: true})
+	keys, err := p.ruleKeys(&st, []Field{FTEIDContext, Proto, QFI})
 	if err != nil {
 		t.Fatal(err)
 	}

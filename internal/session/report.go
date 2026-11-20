@@ -665,7 +665,7 @@ func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts re
 		// quota, which the report says.
 		return reports, fmt.Errorf("the dataplane refused the enforcement: %w", err)
 	}
-	c.settle(s)
+	c.settle(s, false)
 	return reports, nil
 }
 
@@ -700,7 +700,7 @@ func readRules(ctx context.Context, reader CounterReader, ids map[string][]uint3
 // report. It is the one predicate measuredRules and measuredModules walk the
 // PDRs by, so a tick reads exactly the rules a per-session evaluation reads.
 func (c *Compiler) countedModule(p *pdr) (string, bool) {
-	if len(p.urrIDs) == 0 || p.actionID == 0 || p.drop {
+	if p.urrIDs.len() == 0 || p.actionID == 0 || p.drop {
 		return "", false
 	}
 	if c.direction(p).Counters == "" {
@@ -754,7 +754,7 @@ func (c *Compiler) appendMeasuredRules(s *Session, ids map[string][]uint32) {
 func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]bool, now time.Time) ([]Report, bool) {
 	var reports []Report
 	stopped := false
-	for _, members := range linkedGroups(s) {
+	for _, members := range c.linkedGroups(s) {
 		// One tick's reading per member, and what each owes from it.
 		type memberState struct {
 			uid            uint32
@@ -773,9 +773,10 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 		anyDue := false
 		for _, uid := range members {
 			u := s.URRs.at(uid)
+			l := c.limits(u)
 			up, down, first, last := c.countsOf(s, uid, counts)
 			st := memberState{uid: uid, rawUp: up, rawDown: down}
-			st.endMarker = endMarkerArrived(s, uid, markers)
+			st.endMarker = c.endMarkerArrived(s, uid, markers)
 			if !u.baselined {
 				// The first reading of a URR is its baseline, not its usage
 				// (report.go, "the window"). It owes nothing itself, but the
@@ -784,7 +785,7 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 				u.baselined = true
 				u.reported, u.lastUp, u.lastDown = stampOf(now), up, down
 				u.deliveredUp, u.deliveredDown, u.deliveredAt = up, down, stampOf(now)
-				if st.endMarker && !u.linkedReporting {
+				if st.endMarker && !l.linkedReporting {
 					st.trigger, st.due, anyDue = TriggerEndMarker, true, true
 				}
 				states = append(states, st)
@@ -823,19 +824,19 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 			// A limit that is reached stops the traffic whether or not it is
 			// the reason this report is going: a period that ends in the same
 			// window as a quota must not swallow the enforcement.
-			if u.quotaReached(upWindow, downWindow, windowActive) && !u.enforcing {
+			if l.quotaReached(upWindow, downWindow, windowActive) && !u.enforcing {
 				u.enforcing = true
 				stopped = true
 			}
-			trigger, due := u.due(upWindow, downWindow, window, windowActive)
-			if u.linkedReporting {
+			trigger, due := l.due(upWindow, downWindow, window, windowActive)
+			if l.linkedReporting {
 				// LIUSA (8.2.19): this URR's report is the link's, owed when a
 				// URR it is linked to is due, so its own triggers generate
 				// nothing. Its window is still what the group's report carries
 				// for it, and it is still opened by that report below.
 				trigger, due = 0, false
 			}
-			if !due && st.endMarker && !u.linkedReporting {
+			if !due && st.endMarker && !l.linkedReporting {
 				trigger, due = TriggerEndMarker, true
 			}
 			st.trigger, st.due = trigger, due
@@ -913,14 +914,14 @@ func (c *Compiler) decide(s *Session, counts readings, markers map[endMarkerKey]
 // session: with no links at all -- the usual session -- each URR is yielded
 // alone, and only a session with links has its groups built. It is one call
 // so that it inlines and a range over it keeps its body on the stack.
-func linkedGroups(s *Session) iter.Seq2[int, []uint32] {
-	return func(yield func(int, []uint32) bool) { walkLinkedGroups(s, yield) }
+func (c *Compiler) linkedGroups(s *Session) iter.Seq2[int, []uint32] {
+	return func(yield func(int, []uint32) bool) { c.walkLinkedGroups(s, yield) }
 }
 
-func walkLinkedGroups(s *Session, yield func(int, []uint32) bool) {
+func (c *Compiler) walkLinkedGroups(s *Session, yield func(int, []uint32) bool) {
 	linked := false
 	for _, u := range s.URRs.all() {
-		if len(u.linked) != 0 {
+		if c.limits(u).linked.len() != 0 {
 			linked = true
 			break
 		}
@@ -937,14 +938,14 @@ func walkLinkedGroups(s *Session, yield func(int, []uint32) bool) {
 		}
 		return
 	}
-	for i, g := range buildLinkedGroups(s) {
+	for i, g := range c.buildLinkedGroups(s) {
 		if !yield(i, g) {
 			return
 		}
 	}
 }
 
-func buildLinkedGroups(s *Session) [][]uint32 {
+func (c *Compiler) buildLinkedGroups(s *Session) [][]uint32 {
 	ids := urrIDsInOrder(s)
 	parent := make(map[uint32]uint32, len(ids))
 	for _, id := range ids {
@@ -959,7 +960,7 @@ func buildLinkedGroups(s *Session) [][]uint32 {
 		return x
 	}
 	for _, id := range ids {
-		for _, lid := range s.URRs.at(id).linked {
+		for _, lid := range c.linked(s.URRs.at(id)) {
 			if _, ok := parent[lid]; ok {
 				// resolve refuses a link the session cannot resolve, so a
 				// missing one here is a session that never compiled; the guard
@@ -998,7 +999,7 @@ func windowTimes(first, last time.Time, up, down Usage) (time.Time, time.Time) {
 // caller holds the lock.
 func (c *Compiler) countsOf(s *Session, uid uint32, counts readings) (up, down Usage, first, last time.Time) {
 	for _, p := range pdrsInOrder(s) {
-		if p.actionID == 0 || p.drop || !slices.Contains(p.urrIDs, uid) {
+		if p.actionID == 0 || p.drop || !slices.Contains(c.st.ids(&p.urrIDs), uid) {
 			continue
 		}
 		dir := c.direction(p)
@@ -1032,11 +1033,11 @@ func (c *Compiler) countsOf(s *Session, uid uint32, counts readings) (up, down U
 // enforcement is the UPF's own doing (5.2.2.2.1), so the traffic stops whether
 // or not the SMF asked for a report of it. windowActive is the time the
 // window's traffic ran (for a time quota) and the counters are the window's.
-func (u *urr) quotaReached(up, down Usage, windowActive time.Duration) bool {
-	if u.onVolQuota && u.volume && u.volQuota.reached(up.Octets, down.Octets) {
+func (l *urrLimits) quotaReached(up, down Usage, windowActive time.Duration) bool {
+	if l.onVolQuota && l.volume && l.volQuota.reached(up.Octets, down.Octets) {
 		return true
 	}
-	return u.onTimeQuota && u.duration && u.hasTimeQuota && windowActive >= u.timeQuota
+	return l.onTimeQuota && l.duration && l.hasTimeQuota && windowActive >= l.timeQuota
 }
 
 // due is the reason this URR owes a report now, if it owes one: its period has
@@ -1044,20 +1045,20 @@ func (u *urr) quotaReached(up, down Usage, windowActive time.Duration) bool {
 // the last report (what a period means) and windowActive the time the window's
 // traffic ran (what a time limit means). The triggers are tried in the URR's
 // own order, so a window that satisfies several reports the first of them.
-func (u *urr) due(up, down Usage, window, windowActive time.Duration) (Trigger, bool) {
-	if u.periodic && window >= u.period {
+func (l *urrLimits) due(up, down Usage, window, windowActive time.Duration) (Trigger, bool) {
+	if l.periodic && window >= l.period {
 		return TriggerPeriod, true
 	}
-	if u.onVolumeTh && u.volume && u.volThreshold.reached(up.Octets, down.Octets) {
+	if l.onVolumeTh && l.volume && l.volThreshold.reached(up.Octets, down.Octets) {
 		return TriggerVolumeThreshold, true
 	}
-	if u.onTimeTh && u.duration && u.hasTimeTh && windowActive >= u.timeThreshold {
+	if l.onTimeTh && l.duration && l.hasTimeTh && windowActive >= l.timeThreshold {
 		return TriggerTimeThreshold, true
 	}
-	if u.onVolQuota && u.volume && u.volQuota.reached(up.Octets, down.Octets) {
+	if l.onVolQuota && l.volume && l.volQuota.reached(up.Octets, down.Octets) {
 		return TriggerVolumeQuota, true
 	}
-	if u.onTimeQuota && u.duration && u.hasTimeQuota && windowActive >= u.timeQuota {
+	if l.onTimeQuota && l.duration && l.hasTimeQuota && windowActive >= l.timeQuota {
 		return TriggerTimeQuota, true
 	}
 	return 0, false
@@ -1126,7 +1127,7 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []urrWindow
-	for _, members := range linkedGroups(s) {
+	for _, members := range c.linkedGroups(s) {
 		seqn := s.URRs.at(members[0]).seqn
 		for _, uid := range members {
 			if uids != nil && !slices.Contains(uids, uid) {

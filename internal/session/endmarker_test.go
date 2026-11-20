@@ -310,11 +310,11 @@ func TestTunnelEndpointUsesReferencePointFamilyAndInstance(t *testing.T) {
 		local      netip.Addr
 		domain     uint32
 	}{
-		{"N3 IPv4 scoped endpoint", farWithPeer(&far{farExt: noFARExt, destIfc: ie.DstInterfaceAccess}, "10.20.30.2"),
+		{"N3 IPv4 scoped endpoint", farWithPeer(&far{destIfc: ie.DstInterfaceAccess}, "10.20.30.2"),
 			internet, 1, netip.MustParseAddr("10.90.0.1"), 1},
-		{"N9 IPv6 scoped endpoint", farWithPeer(&far{farExt: noFARExt, destIfc: ie.DstInterfaceCore}, "2001:db8:9::2"),
+		{"N9 IPv6 scoped endpoint", farWithPeer(&far{destIfc: ie.DstInterfaceCore}, "2001:db8:9::2"),
 			internet, 3, netip.MustParseAddr("2001:db8:9::1"), 2},
-		{"unscoped endpoint fallback", farWithPeer(&far{farExt: noFARExt, destIfc: ie.DstInterfaceAccess}, "10.20.30.2"),
+		{"unscoped endpoint fallback", farWithPeer(&far{destIfc: ie.DstInterfaceAccess}, "10.20.30.2"),
 			vn, 2, netip.MustParseAddr("10.93.0.1"), 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -329,7 +329,7 @@ func TestTunnelEndpointUsesReferencePointFamilyAndInstance(t *testing.T) {
 			}
 		})
 	}
-	missing := farWithPeer(&far{destIfc: ie.DstInterfaceCore, farExt: &farExt{instance: "vn"}}, "2001:db8:9::2")
+	missing := farWithPeer(&far{destIfc: ie.DstInterfaceCore, ext: c.st.farExts.acquire(farExt{instance: "vn"})}, "2001:db8:9::2")
 	if _, _, err := c.tunnelEndpoint(missing, vn); err == nil {
 		t.Fatal("a scoped N9 IPv6 endpoint was selected for a different instance")
 	}
@@ -342,37 +342,41 @@ func TestFTEIDEndpointSelectionUsesSourceAndInstance(t *testing.T) {
 		{ID: 8, ReferencePoint: "n9", SourceInterface: ie.SrcInterfaceCore, Instance: "internet", IPv4: netip.MustParseAddr("10.91.0.1")},
 	}
 	c := New(cfg, &recorder{}, quietLogger())
-	internet := &pdrExt{instance: "internet"}
-	core, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceCore, pdrExt: internet, wantIPv4: true})
+	withExt := func(p *pdr, ext pdrExt) *pdr {
+		p.ext = c.st.exts.acquire(ext)
+		return p
+	}
+	internet := pdrExt{instance: "internet"}
+	core, err := c.fteidEndpoint(withExt(&pdr{srcIfc: ie.SrcInterfaceCore, wantIPv4: true}, internet))
 	if err != nil || core.ID != 8 {
 		t.Fatalf("Core PDI selected endpoint %+v, error %v", core, err)
 	}
-	first, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, wantIPv4: true})
+	first, err := c.fteidEndpoint(withExt(&pdr{srcIfc: ie.SrcInterfaceAccess, wantIPv4: true}, internet))
 	if err != nil || first.ID != 7 {
 		t.Fatalf("IPv4 CHOOSE selected endpoint %+v, error %v", first, err)
 	}
 	for _, p := range []*pdr{
-		{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, wantIPv6: true},
-		{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, wantIPv4: true, wantIPv6: true},
+		withExt(&pdr{srcIfc: ie.SrcInterfaceAccess, wantIPv6: true}, internet),
+		withExt(&pdr{srcIfc: ie.SrcInterfaceAccess, wantIPv4: true, wantIPv6: true}, internet),
 	} {
 		ep, err := c.fteidEndpoint(p)
 		if err != nil || ep.ID != 9 {
 			t.Fatalf("family-exact CHOOSE selected endpoint %+v, error %v", ep, err)
 		}
 	}
-	pinned := &pdr{srcIfc: ie.SrcInterfaceAccess, teid: 0x77, wantIPv4: true,
-		pdrExt: &pdrExt{instance: "internet", fteidIPv4: netip.MustParseAddr("10.92.0.1")}}
+	pinned := withExt(&pdr{srcIfc: ie.SrcInterfaceAccess, teid: 0x77, wantIPv4: true},
+		pdrExt{instance: "internet", fteidIPv4: netip.MustParseAddr("10.92.0.1")})
 	if ep, err := c.fteidEndpoint(pinned); err != nil || ep.ID != 9 {
 		t.Fatalf("pinned F-TEID selected endpoint %+v, error %v", ep, err)
 	}
-	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, teid: 0x79, wantIPv4: true,
-		pdrExt: &pdrExt{instance: "internet", fteidIPv4: netip.MustParseAddr("198.51.100.77")}}); err == nil {
+	if _, err := c.fteidEndpoint(withExt(&pdr{srcIfc: ie.SrcInterfaceAccess, teid: 0x79, wantIPv4: true},
+		pdrExt{instance: "internet", fteidIPv4: netip.MustParseAddr("198.51.100.77")})); err == nil {
 		t.Fatal("pinned address absent from endpoint configuration was accepted")
 	}
-	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, teid: 0x78, wantIPv4: true}); err == nil {
+	if _, err := c.fteidEndpoint(withExt(&pdr{srcIfc: ie.SrcInterfaceAccess, teid: 0x78, wantIPv4: true}, internet)); err == nil {
 		t.Fatal("addressless pinned F-TEID was accepted despite multiple matching endpoints")
 	}
-	if _, err := c.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, pdrExt: &pdrExt{instance: "vn"}, wantIPv4: true}); err == nil {
+	if _, err := c.fteidEndpoint(withExt(&pdr{srcIfc: ie.SrcInterfaceAccess, wantIPv4: true}, pdrExt{instance: "vn"})); err == nil {
 		t.Fatal("an unmatched instance selected an endpoint")
 	}
 	onlyV4 := cfg
@@ -381,8 +385,9 @@ func TestFTEIDEndpointSelectionUsesSourceAndInstance(t *testing.T) {
 		{ID: 10, ReferencePoint: "n3", SourceInterface: ie.SrcInterfaceAccess,
 			Instance: "internet", IPv4: netip.MustParseAddr("10.93.0.1")},
 	}
-	if _, err := New(onlyV4, &recorder{}, quietLogger()).fteidEndpoint(
-		&pdr{srcIfc: ie.SrcInterfaceAccess, pdrExt: internet, wantIPv4: true, wantIPv6: true}); err == nil {
+	other := New(onlyV4, &recorder{}, quietLogger())
+	if _, err := other.fteidEndpoint(&pdr{srcIfc: ie.SrcInterfaceAccess, wantIPv4: true, wantIPv6: true,
+		ext: other.st.exts.acquire(internet)}); err == nil {
 		t.Fatal("no-partial-fallback family request selected an IPv4-only endpoint")
 	}
 }
@@ -519,12 +524,13 @@ func TestLeavingTunnelsCapturesSharedPDRAndMARRoutedEndpoints(t *testing.T) {
 	c := New(testConfig(), &recorder{}, quietLogger())
 	localN3 := netip.MustParseAddr("192.0.2.1")
 	localN9 := netip.MustParseAddr("192.0.2.9")
-	old := farWithPeer(&far{id: 2, farExt: noFARExt, hasOuter: true, teid: 0x11223344}, "10.20.30.2")
+	old := farWithPeer(&far{id: 2, hasOuter: true, teid: 0x11223344}, "10.20.30.2")
+	n3End := c.st.ends.acquire(localEnd{address: ipOf(localN3), domain: 1})
 	s := &Session{
 		FARs: idMapOf(map[uint32]*far{2: old}),
 		PDRs: idMapOf(map[uint16]*pdr{
-			1: {id: 1, farID: 2, tunnelEnd: newLocalEnd(localN3, 1)},
-			2: {id: 2, farID: 2, tunnelEnd: newLocalEnd(localN3, 1)},
+			1: {id: 1, farID: 2, tunnelEnd: n3End},
+			2: {id: 2, farID: 2, tunnelEnd: n3End},
 		}),
 		ext: &sessionExt{MARs: map[uint16]*mar{
 			1: {
@@ -560,14 +566,14 @@ func TestLeavingTunnelsDoesNotEndAnUnchangedRoutedEndpoint(t *testing.T) {
 	}
 	c := New(cfg, &recorder{}, quietLogger())
 	old := farWithPeer(&far{
-		id: 2, apply: applyForw, destIfc: ie.DstInterfaceCore, farExt: &farExt{instance: "internet"},
+		id: 2, apply: applyForw, destIfc: ie.DstInterfaceCore, ext: c.st.farExts.acquire(farExt{instance: "internet"}),
 		hasOuter: true, teid: 0x11223344,
 	}, "10.20.30.2")
 	s := &Session{
 		FARs: idMapOf(map[uint32]*far{2: old}),
 		PDRs: idMapOf(map[uint16]*pdr{
-			1: {id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, pdrExt: &pdrExt{instance: "internet"},
-				tunnelEnd: newLocalEnd(local, 2)},
+			1: {id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, ext: c.st.exts.acquire(pdrExt{instance: "internet"}),
+				tunnelEnd: c.st.ends.acquire(localEnd{address: ipOf(local), domain: 2})},
 		}),
 	}
 	for _, update := range []farReq{

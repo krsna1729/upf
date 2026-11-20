@@ -14,12 +14,14 @@ import (
 
 // requestedFTEIDFamilies is the whole family set a PDI asks this UP function
 // to allocate or admit. A zero family flag means IPv4 under the F-TEID IE.
-func requestedFTEIDFamilies(p *pdr) []uint8 {
+// It takes ext (c.ext(p)) so that it stays small enough to inline, and the
+// slice it returns stays on the caller's stack.
+func requestedFTEIDFamilies(p *pdr, ext *pdrExt) []uint8 {
 	families := make([]uint8, 0, 2)
-	if p.wantIPv4 || p.fteidIPv4.IsValid() {
+	if p.wantIPv4 || ext.fteidIPv4.IsValid() {
 		families = append(families, 4)
 	}
-	if p.wantIPv6 || p.fteidIPv6.IsValid() {
+	if p.wantIPv6 || ext.fteidIPv6.IsValid() {
 		families = append(families, 6)
 	}
 	if len(families) == 0 {
@@ -32,13 +34,14 @@ func requestedFTEIDFamilies(p *pdr) []uint8 {
 // Config order defines the CHOOSE preference; one endpoint must satisfy the
 // entire requested family set.
 func (c *Compiler) fteidEndpoint(p *pdr) (FTEIDEndpoint, error) {
-	families := requestedFTEIDFamilies(p)
-	referencePoint, ok := pdrReferencePoint(p)
+	families := requestedFTEIDFamilies(p, c.ext(p))
+	referencePoint, ok := c.pdrReferencePoint(p)
 	if !ok {
 		return FTEIDEndpoint{}, fmt.Errorf("%w: source interface %d has no supported GTP-U endpoint",
 			errNotExpressible, p.srcIfc)
 	}
-	instance := p.instance
+	ext := c.ext(p)
+	instance := ext.instance
 	if instance == "" && c.cfg.Instances != nil {
 		instance = c.cfg.Instances.Default().Instance
 	}
@@ -53,8 +56,8 @@ func (c *Compiler) fteidEndpoint(p *pdr) (FTEIDEndpoint, error) {
 			slices.Contains(families, 6) && !endpoint.IPv6.IsValid() {
 			continue
 		}
-		if p.fteidIPv4.IsValid() && endpoint.IPv4 != p.fteidIPv4 ||
-			p.fteidIPv6.IsValid() && endpoint.IPv6 != p.fteidIPv6 {
+		if ext.fteidIPv4.IsValid() && endpoint.IPv4 != ext.fteidIPv4 ||
+			ext.fteidIPv6.IsValid() && endpoint.IPv6 != ext.fteidIPv6 {
 			continue
 		}
 		candidates++
@@ -104,17 +107,18 @@ const (
 // its Source Interface Type names, else its Source Interface's own. An Access
 // PDR may name either (an uplink over N3, or one from an upstream UPF over
 // N9); a Core PDR's arrival is always from another UPF.
-func pdrReferencePoint(p *pdr) (string, bool) {
+func (c *Compiler) pdrReferencePoint(p *pdr) (string, bool) {
+	reference := c.ext(p).reference
 	def, ok := fteidReferencePoint(p.srcIfc)
 	switch {
 	case !ok:
 		return "", false
-	case p.reference == "":
+	case reference == "":
 		return def, true
-	case p.srcIfc == ie.SrcInterfaceCore && p.reference != "n9":
+	case p.srcIfc == ie.SrcInterfaceCore && reference != "n9":
 		return "", false
 	}
-	return p.reference, true
+	return reference, true
 }
 
 func fteidReferencePoint(sourceInterface uint8) (string, bool) {
@@ -144,13 +148,18 @@ func tunnelReferencePoint(destinationInterface uint8) (string, bool) {
 // other family cannot form the same tunnel. A forwarding-instance-specific
 // endpoint takes precedence over an unscoped endpoint.
 func (c *Compiler) tunnelEndpoint(far *far, ifc routing.Interface) (FTEIDEndpoint, netip.Addr, error) {
+	return c.tunnelEndpointOf(far, c.farExt(far), ifc)
+}
+
+// tunnelEndpointOf is tunnelEndpoint for a FAR whose strings are ext.
+func (c *Compiler) tunnelEndpointOf(far *far, ext *farExt, ifc routing.Interface) (FTEIDEndpoint, netip.Addr, error) {
 	referencePoint, ok := tunnelReferencePoint(far.destIfc)
-	if ok && far.reference != "" {
+	if ok && ext.reference != "" {
 		// The Destination Interface Type names the reference point: a
 		// downlink (Access) toward an upstream UPF leaves over N9, and a
 		// Core-side tunnel is always to another UPF.
-		ok = far.destIfc == ie.DstInterfaceAccess || far.reference == "n9"
-		referencePoint = far.reference
+		ok = far.destIfc == ie.DstInterfaceAccess || ext.reference == "n9"
+		referencePoint = ext.reference
 	}
 	if !ok {
 		return FTEIDEndpoint{}, netip.Addr{}, fmt.Errorf(
@@ -161,7 +170,7 @@ func (c *Compiler) tunnelEndpoint(far *far, ifc routing.Interface) (FTEIDEndpoin
 		return FTEIDEndpoint{}, netip.Addr{}, fmt.Errorf("%w: the outer GTP-U peer address is invalid",
 			errNotExpressible)
 	}
-	egress, err := c.forwardEgress(far, ifc)
+	egress, err := c.instanceEgress(ext.instance, ifc)
 	if err != nil {
 		return FTEIDEndpoint{}, netip.Addr{}, err
 	}

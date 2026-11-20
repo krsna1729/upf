@@ -11,9 +11,9 @@ import (
 )
 
 // A modification that leaves a PDR's tunnel as it was writes no tunnel
-// record, even after the local-end table has handed the tunnel's slot to
-// other ends: equal ends built at different times may be different copies.
-func TestAnUnchangedTunnelIsNotRewrittenAfterItsLocalEndWasEvicted(t *testing.T) {
+// record, even after the local-end table has handed out and freed many other
+// ends in between: an end's handle is its value's for as long as it is held.
+func TestAnUnchangedTunnelIsNotRewrittenAfterOtherLocalEndsChurned(t *testing.T) {
 	rec := &recorder{}
 	c := New(testConfig(), rec, quietLogger())
 	resp := c.Establish(establishment(0x7101, "10.45.0.71")).(*message.SessionEstablishmentResponse)
@@ -29,9 +29,12 @@ func TestAnUnchangedTunnelIsNotRewrittenAfterItsLocalEndWasEvicted(t *testing.T)
 		t.Fatal("the establishment wrote no downlink tunnel record")
 	}
 
-	for i := range 4 * internSlots {
-		newLocalEnd(netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)}), 9)
+	c.mu.Lock()
+	for i := range 4096 {
+		h := c.st.ends.acquire(localEnd{address: ipOf(netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})), domain: 9})
+		c.st.ends.release(h)
 	}
+	c.mu.Unlock()
 
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewUpdateQER(ie.NewQERID(1), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),

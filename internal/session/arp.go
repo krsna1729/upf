@@ -67,14 +67,14 @@ func (e arpEntry) erasure() bess.Change {
 // does not configure is resolved nowhere, and its write is refused before an
 // entry could exist -- so there is nothing to erase and nothing to claim.
 func (c *Compiler) arpEntryOf(p *pdr) (arpEntry, bool) {
-	if !p.down || !p.ueIP.IsValid() || !p.ueIP.Unmap().Is4() {
+	if !p.down || !p.ueIP().IsValid() || !p.ueIP().Unmap().Is4() {
 		return arpEntry{}, false
 	}
 	ifc, err := c.interfaceFor(p)
 	if err != nil || ifc.ARP == "" {
 		return arpEntry{}, false
 	}
-	return arpEntry{resource: c.target.Entries(ifc.ARP), addr: p.ueIP.Unmap(), mac: ifc.ARPMAC}, true
+	return arpEntry{resource: c.target.Entries(ifc.ARP), addr: p.ueIP().Unmap(), mac: ifc.ARPMAC}, true
 }
 
 // arpEntries is every entry a session's subscriber-side PDRs name, in the PDRs'

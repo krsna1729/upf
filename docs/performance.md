@@ -2229,6 +2229,27 @@ side-object scanning explicitly. Demonstrate the indexed fixture budget or
 explain its measured excess. Paired plain runs must improve GC CPU/service cost
 without lifecycle, accounting, refusal or hard-budget regressions.
 
+**Status (perf/session-pointer-free, step 1 of 4):** the leaf records (`pdr`,
+`far`, `qer`, `urr`) hold no Go pointers. Shared provisioning (PDI/FAR
+extensions, QER policy, URR limits, tunnel local end, SDF filters) is a uint32
+handle into a refcounted, deduplicating per-compiler table with open-addressing
+index and lock-free segmented reads (`internal/session/store.go`); ≤2 QER/URR/
+SDF ids live inline in the PDR, longer lists and each session's held-handle
+list in a noscan byte-segment pool. A session holds one reference per distinct
+handle; snapshots and stale forms take none, and handles a session stopped
+naming are given back at quiescent points (`trim`, deferred while a
+modification's snapshot is outstanding) and at session end (`drop`). Measured
+at 20,000 counted sessions (`TestASessionHoldsAtMostItsBytes`,
+`TestASessionIsFewObjectsTheCollectorBarelyScans`): live 1,511.6 → 1,403 B,
+scanned 894.5 → 567 B, objects 17.03 → 14.03 per session; heap per item
+1,894 → 1,747 B. Mass delete returns every table entry and blob, and
+re-establishment reuses them without segment growth
+(`TestDeletedSessionsGiveTheStoreBack`). Establish/Delete/ChangeLifecycle
+allocs/op are unchanged (251/27/203). Not yet done: rule identities
+(`ruleIDs`, `ruleKeys`) and `Compiler.rules`/`byFTEID` remain Go strings and
+maps (steps 1b/3), and records are still individually allocated (step 4). The
+1M GC CPU/RSS effect is [INFERENCE] until the paired churn run.
+
 #### 3. Reduce native allocation and reclamation cost without hiding memory
 
 Primary files: BESS `core/runtime/malloc_policy.*`,

@@ -16,7 +16,7 @@ func TestPDRDirectionFollowsUEAddressSide(t *testing.T) {
 		source    uint8
 		hasUEIP   bool
 		ueIPDst   bool
-		sdfs      []*sdfFilter
+		sdfs      []sdfFilter
 		wantDown  bool
 		wantError bool
 	}{
@@ -25,12 +25,14 @@ func TestPDRDirectionFollowsUEAddressSide(t *testing.T) {
 		{name: "Core destination address is downlink", source: ie.SrcInterfaceCore, hasUEIP: true, ueIPDst: true, wantDown: true},
 		{name: "5G-VN source address is uplink", source: ie.SrcInterface5GVNInternal, hasUEIP: true},
 		{name: "5G-VN destination address is downlink", source: ie.SrcInterface5GVNInternal, hasUEIP: true, ueIPDst: true, wantDown: true},
-		{name: "assigned source implies uplink", source: ie.SrcInterfaceCore, sdfs: []*sdfFilter{{srcAssigned: true}}},
-		{name: "assigned destination implies downlink", source: ie.SrcInterfaceCore, sdfs: []*sdfFilter{{dstAssigned: true}}, wantDown: true},
-		{name: "conflicting assigned sides are refused", source: ie.SrcInterfaceCore, sdfs: []*sdfFilter{{srcAssigned: true}, {dstAssigned: true}}, wantError: true},
+		{name: "assigned source implies uplink", source: ie.SrcInterfaceCore, sdfs: []sdfFilter{{srcAssigned: true}}},
+		{name: "assigned destination implies downlink", source: ie.SrcInterfaceCore, sdfs: []sdfFilter{{dstAssigned: true}}, wantDown: true},
+		{name: "conflicting assigned sides are refused", source: ie.SrcInterfaceCore, sdfs: []sdfFilter{{srcAssigned: true}, {dstAssigned: true}}, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := pdrDownlink(tc.source, tc.hasUEIP, tc.ueIPDst, tc.sdfs)
+			var st store
+			p := withPDI(&st, &pdr{}, pdrExt{}, tc.sdfs...)
+			got, err := pdrDownlink(&st, tc.source, tc.hasUEIP, tc.ueIPDst, &p.sdfs)
 			if (err != nil) != tc.wantError {
 				t.Fatalf("pdrDownlink() error = %v, wantError %v", err, tc.wantError)
 			}
@@ -46,7 +48,7 @@ func TestCoreUplinkPDRMatchesUEAsSourceAndSelectsUplinkChain(t *testing.T) {
 		srcIfc:  ie.SrcInterfaceCore,
 		down:    false,
 		hasUEIP: true,
-		ueIP:    netip.MustParseAddr("10.45.0.2"),
+		ue:      ipOf(netip.MustParseAddr("10.45.0.2")),
 	}
 	for _, tc := range []struct {
 		field Field

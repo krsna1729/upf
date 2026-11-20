@@ -123,24 +123,25 @@ func (c *Compiler) scheduleUsage(s *Session) {
 			c.queueUsage(s)
 			continue
 		}
-		if !u.linkedReporting && u.periodic {
-			add(u.reported.time().Add(u.period))
+		l := c.limits(u)
+		if !l.linkedReporting && l.periodic {
+			add(u.reported.time().Add(l.period))
 		}
-		if !u.stamped && u.duration {
-			if !u.linkedReporting && u.onTimeTh && u.hasTimeTh {
-				add(u.reported.time().Add(u.timeThreshold))
+		if !u.stamped && l.duration {
+			if !l.linkedReporting && l.onTimeTh && l.hasTimeTh {
+				add(u.reported.time().Add(l.timeThreshold))
 			}
-			if u.onTimeQuota && u.hasTimeQuota && (!u.linkedReporting || !u.enforcing) {
-				add(u.reported.time().Add(u.timeQuota))
+			if l.onTimeQuota && l.hasTimeQuota && (!l.linkedReporting || !u.enforcing) {
+				add(u.reported.time().Add(l.timeQuota))
 			}
 		}
 		// Zero limits are already reached even without new packets. Requeue
 		// once for the next poll, never repeatedly inside this poll's heap walk.
-		if (!u.enforcing && u.quotaReached(Usage{}, Usage{}, 0)) ||
-			(!u.linkedReporting && ((u.onVolumeTh && u.volume && u.volThreshold.reached(0, 0)) ||
-				(u.onVolQuota && u.volume && u.volQuota.reached(0, 0)) ||
-				(u.onTimeTh && u.duration && u.hasTimeTh && u.timeThreshold <= 0) ||
-				(u.onTimeQuota && u.duration && u.hasTimeQuota && u.timeQuota <= 0))) {
+		if (!u.enforcing && l.quotaReached(Usage{}, Usage{}, 0)) ||
+			(!l.linkedReporting && ((l.onVolumeTh && l.volume && l.volThreshold.reached(0, 0)) ||
+				(l.onVolQuota && l.volume && l.volQuota.reached(0, 0)) ||
+				(l.onTimeTh && l.duration && l.hasTimeTh && l.timeThreshold <= 0) ||
+				(l.onTimeQuota && l.duration && l.hasTimeQuota && l.timeQuota <= 0))) {
 			c.queueUsage(s)
 		}
 	}
