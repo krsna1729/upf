@@ -206,10 +206,14 @@ action`. An update writes the inactive version, then commits the rules
 make-before-break (inserts and raised priorities first, erases and lowered
 priorities last) and flips the session's active version: workers keep
 running, and every packet reads one version's FAR, QER, URR and tunnel
-together. A second rewrite of the same session within one grace period waits
-for that grace period (bounded by one worker batch). Counters and meters are
-never copied: an action keeping its `action_id` keeps its URR cells, a QER
-keeping its id and profile keeps its buckets; new ones start zeroed / full.
+together. A second rewrite of the same session within one grace period is
+answered BUSY, with nothing reserved (BESS `Reservation::busy`, D-021
+amendment 6): bessd backs off with its locks released and retries, and the
+SDK retries a BUSY record, so upfd sees it only if a worker stays in one
+batch through every retry. It never waits under the engine's lock. Counters
+and meters are never copied: an action keeping its `action_id` keeps its URR
+cells, a QER keeping its id and profile keeps its buckets; new ones start
+zeroed / full.
 A packet held by buffering is re-bound to its session's current version on
 release, or dropped as `session_gone` when the session was erased.
 

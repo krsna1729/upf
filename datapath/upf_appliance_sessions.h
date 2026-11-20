@@ -278,9 +278,9 @@ class SessionResource final : public bess::dataplane::Resource {
   static constexpr size_t kEntriesPerHold = 1024;
   static constexpr size_t kScanPerHold = 64 * kEntriesPerHold;
   // Control-side work, for tests: action-index lookups by id (Counts with
-  // ids), the most entries one hold handled, and grace-period waits in Reserve.
+  // ids) and the most entries one hold handled.
   struct Work {
-    uint64_t action_finds = 0, synchronizes = 0;
+    uint64_t action_finds = 0;
     size_t max_per_hold = 0;
   };
   Work work() const {
@@ -398,7 +398,6 @@ class SessionResource final : public bess::dataplane::Resource {
   std::map<ProfileKey, Profile> profiles_;
   std::set<uint32_t> tx_sessions_, tx_actions_;  // this transaction's
   std::set<std::string> tx_rules_;
-  bool tx_synchronized_ = false;  // Reserve waited a grace period this transaction
   mutable Work work_;
   std::atomic<size_t> live_{0}, mirror_bytes_{0};
 };

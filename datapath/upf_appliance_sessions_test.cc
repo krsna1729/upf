@@ -109,6 +109,7 @@ struct Store {
     std::optional<End> end(std::in_place, resource);
     auto r = resource.Reserve(op);
     if (!r) return {.error = r.error()};
+    if (r->busy) return {.error = "busy"};
     if (auto prepared = resource.Prepare(); !prepared) {
       r->staged->Abort();
       return {.error = prepared.error()};
@@ -143,6 +144,7 @@ struct Store {
     for (uint32_t i = 0; i < values.size(); ++i) {
       auto r = sessions->Reserve(dp::Op::Upsert(sessions->name(), dp::EncodeKey(first + i), std::any(values[i])));
       ASSERT_TRUE(r.has_value()) << r.error();
+      ASSERT_FALSE(r->busy);
       staged.push_back(std::move(r->staged));
     }
     ASSERT_TRUE(sessions->Prepare().has_value());
@@ -624,25 +626,35 @@ TEST(SessionStore, BulkReadsHoldTheLockForAChunkAndNeverReFind) {
   EXPECT_LE(s.sessions->work().max_per_hold, SessionResource::kEntriesPerHold) << "ForEachLive";
 }
 
-TEST(SessionStore, ReUpdatingManySessionsInOneTransactionWaitsOnce) {
-  constexpr uint32_t kN = 1000;
-  Store s({.capacity = kN, .max_actions = 1, .max_qers = 1, .max_action_id = kMaxActionId});
-  const auto images = [](uint32_t route_domain) {
-    std::vector<SessionValue> v;
-    for (uint32_t i = 0; i < kN; ++i) v.push_back(Counted(i, route_domain));
-    return v;
-  };
-  dp::Retirer insert, update, again;
-  s.Transaction(images(1), 1, insert);
-  s.Finish(insert);
-  // Every session updated; that transaction's grace period not started yet,
-  // so no session has a token to test.
-  s.Transaction(images(2), 1, update);
-  const uint64_t before = s.sessions->work().synchronizes;
-  s.Transaction(images(1), 1, again);
-  EXPECT_LE(s.sessions->work().synchronizes - before, 1u);
+// A re-update whose previous update's grace period has not passed answers
+// busy (Reservation::busy: the engine answers kBusy, and the caller backs off
+// with the engine and control-plane locks released) instead of waiting for
+// the grace period under them. It reserves nothing, so the same update applies
+// once the grace period has passed. (The parent called Synchronize() under
+// those locks: with a worker mid-batch, until the batch ended.)
+TEST(SessionStore, ReUpdatingWithinAGracePeriodIsBusyNotAWait) {
+  Store s;
+  ASSERT_TRUE(Applied(s.Put(Counted(0, 1))));
+  dp::Retirer update;
+  s.Transaction({Counted(0, 2)}, kSession, update);
+  // Published; its grace period has not started.
+  EXPECT_EQ(Why(s.Put(Counted(0, 3))), "busy");
+
+  // Started, and held open by a worker mid-batch.
+  constexpr bess::rcu::ReaderId kWorker = 0;
+  ASSERT_TRUE(s.domain.Register(kWorker));
+  s.domain.Online(kWorker);
+  const bess::rcu::GracePeriod token = s.domain.StartGracePeriod();
+  for (auto &fn : update.*Member(AfterTag{})) fn(token);
+  EXPECT_EQ(Why(s.Put(Counted(0, 3))), "busy");
+  EXPECT_FALSE(s.domain.IsComplete(token));
+
+  // The batch ends: the grace period has passed, and the retry applies.
+  s.domain.Quiescent(kWorker);
+  s.domain.Offline(kWorker);
+  s.domain.Unregister(kWorker);
+  EXPECT_TRUE(Applied(s.Put(Counted(0, 3))));
   s.Finish(update);
-  s.Finish(again);
 }
 
 TEST(SessionStore, RangedRuleKeysSurviveReadbackAndReplacement) {
