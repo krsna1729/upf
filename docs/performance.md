@@ -980,7 +980,7 @@ transaction partition. The plain campaign remains the performance evidence.
 | UPFD materialization | Live eight-stage adapter uses 9,660 B and 132 allocations per call; separate SDK Build blocks expose a message-versus-encoded construction gap. | Separate map-to-wire, op construction, request encoding and response resolution on one compiled corpus. Preserve required/unknown fields, numeric bounds, caller ownership, refresh/epoch invalidation and error resolution. Do not credit already-fixed warm resource lookup twice. |
 | N4/model compiler | Eight-stage lifecycle uses 22,216 B, 278 allocations and 30.300 us per two-transaction cycle without native apply. Whole-program compiler samples prominently include allocator/GC and map/byte-list work. | Compact transient representation and then retained state; measure bytes/scan/GC CPU per accepted operation at one million residents. A 100K lifecycle/s target implies 2.22 GB/s allocation at this fixture's present rate, not a universal N4 estimate. No language rewrite is justified by unlike workloads. |
 | Lifecycle correctness | One-direction QER fixture exposed a real invalid erase. The ownership fix passes real deletion, rate transitions, compiler-refusal rollback and no-residual-resource checks. | Keep the behavioral regression in the live lane. Unknown completion retains possibly live IDs; no ignored erase, fake meter, premature ID reuse or widened memory budget. |
-| Queueing, RCU and maintenance | Current small floor has no active reader. Session-major re-update can synchronize while control/resource/engine locks are held; prior allocator/GC percentages are historical, not current cost shares. | Requalify corrected-driver churn with packets/reports; isolate hot versus spread, queue/lock/grace-period wait and allocator maintenance. Preserve packet/control/report tails, no-fail publication and strict memory/refusal behavior. |
+| Queueing, RCU and maintenance | Current small floor has no active reader. Session-major re-update within a grace period now answers BUSY instead of synchronizing under the control/resource/engine locks (BESS D-021 amendment 6), and `get_changes` answers busy instead of waiting; prior allocator/GC percentages are historical, not current cost shares. | Requalify corrected-driver churn with packets/reports; isolate hot versus spread, queue/lock/grace-period wait and allocator maintenance. Preserve packet/control/report tails, no-fail publication and strict memory/refusal behavior. |
 
 At 100K acknowledged transactions/s each dedicated serial core has 10 us of
 CPU work available per transaction. Separate UPFD and BESS cores pipeline;
@@ -3382,7 +3382,7 @@ did not fill: bessd refused 813,222 of 1,000,000 establishments from session
 1436 MB in use`. The cause: under `--in-memory`, DPDK lists every page size
 the kernel offers, including 1 GiB with no pages reserved, largest first
 (`eal_hugepage_info.c`). The charge took the first list's page size, so every
-hugepage table charge rounded up to 1 GiB. Bess #153 (`dd22783d`, now the pin) charges by the page size
+hugepage table charge rounded up to 1 GiB. Bess #153 (`dd22783d`) charges by the page size
 of the lists that hold segments. The same 1M hugepage fill then completes with
 0 refusals. The discarded runs are kept in `discarded-1gib-charge-bug/`.
 

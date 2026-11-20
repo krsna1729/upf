@@ -692,14 +692,15 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
 
   // The previous update's version, and every slot only it names, must be
   // unreachable before this one writes over them: one grace period after
-  // its publish. Waiting is bounded by a worker batch; refusing would be
-  // the controller's problem for no reason. Nothing of this transaction has
-  // published yet, so one wait covers every session it re-updates.
+  // its publish. Until then the transaction is busy, never a wait here: the
+  // engine's and the control plane's locks are held (BESS D-021 amendment
+  // 6). The caller backs off with them released and retries; nothing of
+  // this transaction is reserved yet.
   if (live && m.flipped) {
-    if (!tx_synchronized_ && (m.flip == 0 || !domain_.IsComplete(m.flip))) {
-      domain_.Synchronize();
-      tx_synchronized_ = true;
-      ++work_.synchronizes;
+    if (m.flip == 0 || !domain_.IsComplete(m.flip)) {
+      Reservation busy;
+      busy.busy = true;
+      return busy;
     }
     m.flipped = false;
     m.flip = 0;
@@ -892,7 +893,6 @@ void SessionResource::EndTransaction() noexcept {
   tx_sessions_.clear();
   tx_actions_.clear();
   tx_rules_.clear();
-  tx_synchronized_ = false;
 }
 
 upf::pb::UpfSession SessionResource::Read(uint32_t session) const {
