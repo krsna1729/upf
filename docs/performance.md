@@ -2327,8 +2327,29 @@ reference) and the scanned 339.4 B to the `Session` alone; live bytes move
 little, since the records are already compact and noscan. The `Session.slot`
 of step 2 is the index such a slab would use.
 
-The 1M GC CPU/RSS effect of steps 1–3 is [INFERENCE] until the paired churn
-run.
+**1M churn, paired (2026-11-20).** `ci/bench-churn.py`, 1M resident sessions,
+10K/s offered, `GOGC=25`, normal backing, one BESS stage (`dd22783d`), order
+main `2a600a4` / branch / branch / main, AC power, turbo off, no builds
+(`.scratch/evidence/session-20261120`; the two values per arm are its two
+runs):
+
+| | main | steps 1–3 |
+|---|---:|---:|
+| live heap after the fill (MiB) | 1,503 / 1,602 | 1,370 / 1,369 |
+| `upfd` memory.peak (MiB) | 2,332 / 2,323 | 2,062 / 2,068 |
+| FAR: completed/s | 6,118 / 5,973 | 7,721 / 7,733 |
+| FAR: p99 (ms) | 280.9 / 261.2 | 140.4 / 140.2 |
+| FAR: GC CPU share of `upfd` | 46.0% / 44.6% | 36.2% / 36.4% |
+| replace: completed/s | 1,505 / 1,563 | 1,827 / 1,871 |
+| replace: p99 (ms) | 329.4 / 333.2 | 212.4 / 215.4 |
+| establish: p50 / p99 (ms) | 1.34, 1.34 / 1,468, 1,387 | 2.39, 2.25 / 312, 321 |
+| delete: completed/s, p99 (ms) | 5,414, 276 / 5,210, 287 | 6,105, 171 / 6,063, 174 |
+
+All four runs were overloaded at 10K/s (cause 75 refusals in every cell; on
+the branch fewer for FAR, replace and delete, equal for establish), so
+completed/s is the capacity a single `upfd` CPU reaches.
+The one regression is establish p50 (1.3 → 2.3 ms) while its p99 falls 78%;
+interning shared provisioning on establish is the likely cost [INFERENCE].
 
 #### 3. Reduce native allocation and reclamation cost without hiding memory
 

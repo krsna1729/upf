@@ -34,9 +34,9 @@ const defaultHeapAdmission = 0.7
 // load shedding with a release band is the usual overload-manager shape.
 const heapReopenGap = 0.05
 
-// admittedSessionBytes is the live heap one session adds, the bound
-// internal/session's TestASessionHoldsAtMostItsBytes holds (measured 1,511 B
-// at 1M, docs/design.md). The live reading only changes when a collection
+// admittedSessionBytes is the live heap one session adds, counted above the
+// 1,385 B internal/session's TestASessionHoldsAtMostItsBytes holds (measured
+// 1,319 B, docs/design.md). The live reading only changes when a collection
 // ends; sessions admitted since are counted at this size, so a fast fill
 // cannot overshoot the share between collections (live alone ended at 0.738
 // against 0.7 for 250K establishments under a 380 MiB scope; this, 0.697).
