@@ -2245,10 +2245,27 @@ scanned 894.5 → 567 B, objects 17.03 → 14.03 per session; heap per item
 1,894 → 1,747 B. Mass delete returns every table entry and blob, and
 re-establishment reuses them without segment growth
 (`TestDeletedSessionsGiveTheStoreBack`). Establish/Delete/ChangeLifecycle
-allocs/op are unchanged (251/27/203). Not yet done: rule identities
-(`ruleIDs`, `ruleKeys`) and `Compiler.rules`/`byFTEID` remain Go strings and
-maps (steps 1b/3), and records are still individually allocated (step 4). The
-1M GC CPU/RSS effect is [INFERENCE] until the paired churn run.
+allocs/op are unchanged (251/27/203).
+
+**Step 1b+3a (rule identities and their owners):** each PDR's rule keys are
+store blobs (one byte naming the table, then the key's masks, values and
+ranges) listed by handle in the PDR (`pdr.rules`, ≤2 inline), so `pdr` holds
+no pointer at all. `Compiler.rules map[string]uint64` is replaced by a noscan
+open-addressing index of 16-byte slots (fingerprint, key blob handle, owner
+SEID; `store.claims`) that confirms a fingerprint match by comparing the whole
+key, holds its own reference to the key, and shrinks by half below 1/8 full.
+ARP claims share it. The keys a session claims are listed in the tail of its
+held-handle blob (`kindClaim`), not a `[]string`. Claim, refusal, give-up-in-
+settle and release semantics are unchanged; the existing collision, ARP and
+rollback tests pass. Measured at 20,000 counted sessions, parent → this step:
+live 1,402.9 → 1,395.5 B, scanned 566.5 → 431.3 B, objects 14.03 → 11.03 per
+session, heap per item 1,776 → 1,660 B; allocs/op Establish 250 → 246, Delete
+26 → 26, ChangeLifecycle graph/appliance/session-major 203/203/356 →
+194/194/347 (`-benchtime=2000x`, same machine, both arms).
+
+Not yet done: `byFTEID` remains a Go map holding `*Session` (step 3b), and
+records are still individually allocated (step 4). The 1M GC CPU/RSS effect is
+[INFERENCE] until the paired churn run.
 
 #### 3. Reduce native allocation and reclamation cost without hiding memory
 

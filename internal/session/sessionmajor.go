@@ -206,12 +206,12 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 		if !p.drop || p.buffer || !counted[p.actionID] {
 			continue
 		}
-		ids, _, err := c.pdrRuleIDs(p)
+		keys, err := c.pdrRuleKeys(p)
 		if err != nil {
 			return SessionEntry{}, nil, fmt.Errorf("PDR %d: %w", p.id, err)
 		}
-		for id := range ruleIdentities(ids) {
-			owners[id] = p
+		for _, key := range keys {
+			owners[c.res(pdrTable(p.downlink()))+"\x00"+ruleID(key)] = p
 		}
 	}
 

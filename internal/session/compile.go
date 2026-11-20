@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
@@ -1480,7 +1481,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				return fmt.Errorf("PDR %d: %w", p.id, err)
 			}
 			if p.down != down {
-				p.ruleIDs = ""
+				p.rules = idList{}
 			}
 			p.down = down
 		}
@@ -2020,13 +2021,13 @@ func (c *Compiler) resolve(s *Session) error {
 			return fmt.Errorf("%w: PDR %d's address %s is outside the pool of the network instance %q",
 				errNotExpressible, p.id, p.ueIP(), ifc.Instance)
 		}
-		if len(p.ruleIDs) != 0 && (p.domain != oldDomain || p.ue != oldUE || p.relay != oldRelay) {
+		if p.rules.n != 0 && (p.domain != oldDomain || p.ue != oldUE || p.relay != oldRelay) {
 			// A FAR can change whether a local F-TEID relays other UEs'
 			// packets. Its old selector must be erased just like a new PDI's.
 			old := *p
 			old.domain, old.ue, old.relay = oldDomain, oldUE, oldRelay
 			s.changes().stale = append(s.changes().stale, &old)
-			p.ruleIDs = ""
+			p.rules = idList{}
 		}
 	}
 	return nil
@@ -2520,7 +2521,7 @@ func (c *Compiler) writeBufferCounter(p *pdr) []bess.Change {
 // updates need meters but not classifiers, and FAR endpoint changes need
 // tunnels but not classifiers or usage-counter upserts.
 func samePDRRule(old, p *pdr) bool {
-	return old != nil && old.ruleIDs == p.ruleIDs &&
+	return old != nil && old.rules == p.rules &&
 		old.down == p.down && old.precedence == p.precedence &&
 		old.drop == p.drop && old.buffer == p.buffer &&
 		old.actionID == p.actionID && old.ownMeterID == p.ownMeterID &&
@@ -2643,7 +2644,6 @@ func (c *Compiler) compile(s *Session) (modelWrite, []*ie.IE, error) {
 func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated bool) (modelWrite, []*ie.IE, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	identityBefore := before
 
 	// The rule keys this compile is the first to claim, and whether it got as
 	// far as writing them: a compile that returns an error wrote nothing (its
@@ -2654,19 +2654,21 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	// session take a rule that is still selecting this one's packets. A
 	// transaction the dataplane *refuses* is the caller's business, exactly as
 	// an allocated id is: what may have committed stays claimed.
-	claimed := make([]string, 0, s.PDRs.len())
+	claimed := c.st.claimBuf[:0]
 	committed := false
 	defer func() {
-		if committed {
-			return
+		if !committed {
+			// Report-triggered compiles have no rollback snapshot. A failure
+			// can leave resolved model fields changed without a corresponding
+			// write.
+			s.rewrite = true
+			for _, h := range claimed {
+				if i := c.st.claimOf(h); i >= 0 {
+					c.st.unclaim(i)
+				}
+			}
 		}
-		// Report-triggered compiles have no rollback snapshot. A failure can
-		// leave resolved model fields changed without a corresponding write.
-		s.rewrite = true
-		for _, key := range claimed {
-			delete(c.rules, key)
-			s.forgetRuleKey(key)
-		}
+		c.st.claimBuf = claimed[:0]
 	}()
 
 	// What this transaction writes follows the model as it is now: a URR's
@@ -2712,39 +2714,38 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	// deployment whose uplink table declares no qfi field, the PDI's QFI then
 	// being no part of the key -- and the session is refused with a rule
 	// failure rather than half-programmed.
-	writtenRules := map[string]bool{}
+	writtenRules := make(map[uint32]struct{}, s.PDRs.len())
 	// The rule identities the session retains in the transaction's end state.
 	// Only changed classifiers need their typed keys materialized; all
 	// identities still participate in collision and ownership validation.
 	type pdrRules struct {
 		keys  []RuleKey
-		ids   string
+		ids   []uint32 // the PDR's rule key blobs (pdr.rules), read in place
 		write bool
 		err   error
 	}
 	rulesOf := make(map[*pdr]pdrRules, s.PDRs.len())
-	live := map[string]bool{}
+	live := c.st.liveBuf[:0]
 	for _, p := range pdrsInOrder(s) {
-		ids, keys, err := c.pdrRuleIDs(p)
-		if identityBefore != nil {
-			if old := identityBefore.pdrs.at(p.id); old != nil && ids == old.ruleIDs {
-				p.ruleIDs, ids = old.ruleIDs, old.ruleIDs
-			}
-		}
+		ids, keys, err := c.pdrRuleIDs(s, p)
 		write := !samePDRRule(oldPDR(p.id), p)
 		if !whole && write && keys == nil && err == nil {
 			keys = c.materializeRuleKeys(p)
 		}
-		r := pdrRules{keys: keys, ids: ids, write: write, err: err}
-		for id := range ruleIdentities(ids) {
-			live[id] = true
-		}
-		rulesOf[p] = r
+		rulesOf[p] = pdrRules{keys: keys, ids: ids, write: write, err: err}
+		live = append(live, ids...)
 		if keepSession {
 			old := oldPDR(p.id)
 			keepSession = !write && !p.buffer && !p.hasMAR && samePDRCounter(old, p) &&
 				old.tunnel == p.tunnel && (p.tunnel == noTunnel || samePDRTunnel(before, s, p))
 		}
+	}
+	slices.Sort(live)
+	live = slices.Compact(live)
+	c.st.liveBuf = live[:0]
+	isLive := func(h uint32) bool {
+		_, found := slices.BinarySearch(live, h)
+		return found
 	}
 	if keepSession {
 		for id, q := range s.QERs.all() {
@@ -2881,16 +2882,32 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		erase(bess.Change{Resource: c.res(Flows),
 			Key: bess.Fields(IDKey{ID: p.actionID})})
 	}
-	for _, p := range s.pending.removedPDRs() {
-		// Removed forms keep their immutable selector identities.
-		keys, err := c.pdrRuleKeys(p)
+	// ruleErase takes out the rule keys of a form going away that the end
+	// state does not name: an erase of a key this transaction also writes
+	// would be refused. Removed and replaced forms keep their immutable
+	// selector identities.
+	ruleErase := func(p *pdr) error {
+		ids, keys, err := c.pdrRuleIDs(s, p)
 		if err != nil {
-			return modelWrite{}, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
+			return err
 		}
-		for _, key := range keys {
-			if !live[c.res(pdrTable(p.downlink()))+"\x00"+ruleID(key)] {
-				erase(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: bess.Fields(key)})
+		for i, h := range ids {
+			if isLive(h) {
+				continue
 			}
+			var key RuleKey
+			if keys != nil {
+				key = keys[i]
+			} else {
+				key = c.ruleKeyOf(p, h)
+			}
+			erase(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: bess.Fields(key)})
+		}
+		return nil
+	}
+	for _, p := range s.pending.removedPDRs() {
+		if err := ruleErase(p); err != nil {
+			return modelWrite{}, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
 		}
 		if e, ok := c.arpEntryOf(p); ok && !liveARP[e.claim()] {
 			// The subscriber address this PDR answered for is gone from the
@@ -2951,14 +2968,8 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		}
 	}
 	for _, old := range s.pending.stalePDRs() {
-		keys, err := c.pdrRuleKeys(old)
-		if err != nil {
+		if err := ruleErase(old); err != nil {
 			return modelWrite{}, nil, fmt.Errorf("PDR %d: %w", old.id, err)
-		}
-		for _, key := range keys {
-			if !live[c.res(pdrTable(old.downlink()))+"\x00"+ruleID(key)] {
-				erase(bess.Change{Resource: c.res(pdrTable(old.downlink())), Key: bess.Fields(key)})
-			}
 		}
 		if e, ok := c.arpEntryOf(old); ok && !liveARP[e.claim()] {
 			// A replaced form whose subscriber address moved: the entry it
@@ -3031,8 +3042,8 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 			return modelWrite{}, nil, fmt.Errorf("PDR %d: %w", p.id, r.err)
 		}
 		keys := r.keys
-		for rkey := range ruleIdentities(r.ids) {
-			if writtenRules[rkey] {
+		for _, h := range r.ids {
+			if _, twice := writtenRules[h]; twice {
 				// The rule table knows PDR ids no better than the SMF's filters do:
 				// one key is one rule, and the engine would reject the second
 				// write. Saying so is better than handing the SMF a session whose
@@ -3044,27 +3055,25 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 					"%w: two PDRs compile to one rule key (the same filter and the same QFI, or a graph whose uplink table declares no qfi field)",
 					errNotExpressible)
 			}
-			writtenRules[rkey] = true
-			if owner, taken := c.rules[rkey]; taken && owner != s.LocalSEID {
-				// Another session holds this rule. Writing it would take that
-				// session's packets -- and, when this one went, erase the rule the
-				// other still holds -- so the SMF is told the rule failed rather
-				// than served a session that quietly shares another's. A graph
-				// whose key carries the tunnel or the domain does not collide here
-				// for sessions that share a UE address; one that classifies by the
-				// tuple alone does, and this is where it says so.
-				return modelWrite{}, nil, fmt.Errorf("%w: the rule is session %d's", errNotExpressible, owner)
-			}
-			if _, held := c.rules[rkey]; !held {
-				// This compile is the first to claim the key for the session. A key
-				// the session already holds stays this session's even if a later
-				// step of this compile fails: its rule is in the dataplane.
-				claimed = append(claimed, rkey)
-				if !s.holdsRuleKey(rkey) {
-					s.ruleKeys = append(s.ruleKeys, rkey)
+			writtenRules[h] = struct{}{}
+			if i := c.st.claimOf(h); i >= 0 {
+				if owner := c.st.claims[i].owner; owner != s.LocalSEID {
+					// Another session holds this rule. Writing it would take that
+					// session's packets -- and, when this one went, erase the rule the
+					// other still holds -- so the SMF is told the rule failed rather
+					// than served a session that quietly shares another's. A graph
+					// whose key carries the tunnel or the domain does not collide here
+					// for sessions that share a UE address; one that classifies by the
+					// tuple alone does, and this is where it says so.
+					return modelWrite{}, nil, fmt.Errorf("%w: the rule is session %d's", errNotExpressible, owner)
 				}
+				continue
 			}
-			c.rules[rkey] = s.LocalSEID
+			// This compile is the first to claim the key for the session. A key
+			// the session already holds stays this session's even if a later
+			// step of this compile fails: its rule is in the dataplane.
+			c.st.claim(h, s.LocalSEID)
+			claimed = append(claimed, h)
 		}
 		if p.drop || p.buffer {
 			// A drop needs no action record: the rule's gate is the whole
@@ -3220,23 +3229,25 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	}
 	for _, e := range entries {
 		claim := e.claim()
-		if owner, taken := c.rules[claim]; taken && owner != s.LocalSEID {
-			return modelWrite{}, nil, fmt.Errorf(
-				"%w: the subscriber address %s on %s is session %d's", errNotExpressible, e.addr, e.resource, owner)
-		}
-		if _, held := c.rules[claim]; !held {
-			claimed = append(claimed, claim)
-			if !s.holdsRuleKey(claim) {
-				s.ruleKeys = append(s.ruleKeys, claim)
+		if i := c.st.claimNamed(claim); i >= 0 {
+			if owner := c.st.claims[i].owner; owner != s.LocalSEID {
+				return modelWrite{}, nil, fmt.Errorf(
+					"%w: the subscriber address %s on %s is session %d's", errNotExpressible, e.addr, e.resource, owner)
 			}
+		} else {
+			// The claim holds the entry's name; nothing else does.
+			h := c.st.blobs.acquire([]byte(claim))
+			c.st.claim(h, s.LocalSEID)
+			c.st.blobs.release(h)
+			claimed = append(claimed, h)
 		}
-		c.rules[claim] = s.LocalSEID
 		changes = append(changes, e.change())
 	}
 	if s.inflight != 0 {
 		s.overlap, s.rewrite = true, true
 	}
 	s.inflight++
+	c.st.addClaims(s, claimed)
 	committed = true
 	entry := replaceSessionEntry
 	if keepSession {
@@ -3435,112 +3446,111 @@ func (p *pdr) ruleKeys(st *store, fields []Field) ([]RuleKey, error) {
 	return keys, nil
 }
 
-// pdrRuleIDs keeps only the canonical ownership strings, not retained
-// resource changes. On the first derivation return the keys too, so the
-// caller can write them without decoding the identity it just constructed.
-func (c *Compiler) pdrRuleIDs(p *pdr) (string, []RuleKey, error) {
-	if p.ruleIDs != "" {
-		return p.ruleIDs, nil, nil
+// pdrRuleIDs is the PDR's rule key blobs (pdr.rules), read in place, derived
+// and held by s if they were not. On the first derivation it returns the keys
+// too, in the same order, so the caller can write them without decoding the
+// identities it just made. It interns, so it runs under the lock.
+//
+// A blob is the rule's table (one byte, its Table) and then its ruleID: one
+// table's keys share a width, so equal blobs are one rule. An ARP claim is
+// its resource's name and address (arpEntry.claim), whose first byte is a
+// name's, never a Table's, so the two kinds of claim never meet.
+func (c *Compiler) pdrRuleIDs(s *Session, p *pdr) ([]uint32, []RuleKey, error) {
+	if p.rules.n != 0 {
+		return c.st.ids(&p.rules), nil, nil
 	}
 	keys, err := p.ruleKeys(&c.st, c.direction(p).PDRFields)
 	if err != nil {
-		return "", nil, err
+		return nil, nil, err
 	}
-	resource := c.res(pdrTable(p.downlink()))
-	total := 0
-	var length [binary.MaxVarintLen64]byte
+	table := byte(pdrTable(p.downlink()))
+	var buf [8]uint32
+	hs := buf[:0]
 	for _, key := range keys {
-		n := len(resource) + 1 + ruleIDSize(key)
-		total += binary.PutUvarint(length[:], uint64(n)) + n
+		id := appendRuleID(append(c.st.keyBuf[:0], table), key)
+		c.st.keyBuf = id[:0]
+		hs = append(hs, c.st.ownBlob(s, id))
 	}
-	var ids strings.Builder
-	ids.Grow(total)
-	for _, key := range keys {
-		n := len(resource) + 1 + ruleIDSize(key)
-		ids.Write(length[:binary.PutUvarint(length[:], uint64(n))])
-		ids.WriteString(resource)
-		ids.WriteByte(0)
-		writeRuleID(&ids, key)
-	}
-	p.ruleIDs = ids.String()
-	return p.ruleIDs, keys, nil
+	p.rules = c.st.ownIDs(s, hs)
+	return c.st.ids(&p.rules), keys, nil
 }
 
-// Identities are substring views into one immutable, noscan byte allocation.
-// Lengths distinguish variants without retaining a slice of string headers.
-func ruleIdentities(encoded string) iter.Seq[string] {
-	return func(yield func(string) bool) {
-		for rest := encoded; len(rest) != 0; {
-			n, at := 0, 0
-			for shift := uint(0); ; shift += 7 {
-				b := rest[at]
-				at++
-				n |= int(b&0x7f) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if !yield(rest[at : at+n]) {
-				return
-			}
-			rest = rest[at+n:]
+// liveRuleKeys is the rule key blobs s's PDRs name, sorted, derived where
+// they were not. The slice is the store's, reused by the next call.
+func (c *Compiler) liveRuleKeys(s *Session) []uint32 {
+	live := c.st.liveBuf[:0]
+	for _, p := range s.PDRs.all() {
+		if ids, _, err := c.pdrRuleIDs(s, p); err == nil {
+			live = append(live, ids...)
 		}
 	}
+	slices.Sort(live)
+	live = slices.Compact(live)
+	c.st.liveBuf = live[:0]
+	return live
 }
 
-// materializeRuleKeys decodes our own canonical identity. Field widths and
-// resource are fixed by the compiler's immutable target, and each trailing
-// range is (field:uint32, low:uint64, high:uint64), as in ruleID.
-func (c *Compiler) materializeRuleKeys(p *pdr) []RuleKey {
+// ruleKeyOf decodes the PDR's rule key blob h, its own canonical identity.
+// Field widths and resource are fixed by the compiler's immutable target, and
+// each trailing range is (field:uint32, low:uint64, high:uint64), as in
+// appendRuleID. The key is a copy: the blob's bytes are reused once it goes.
+func (c *Compiler) ruleKeyOf(p *pdr, h uint32) RuleKey {
 	fields := c.direction(p).PDRFields
 	width := 0
 	for _, f := range fields {
 		width += f.width()
 	}
-	prefix := len(c.res(pdrTable(p.downlink()))) + 1
-	keys := make([]RuleKey, 0, max(p.sdfs.len(), 1)*max(len(c.ext(p).qfis), 1))
-	for id := range ruleIdentities(p.ruleIDs) {
-		mem := []byte(id[prefix:])
-		lists := make([][]byte, 2*len(fields))
-		values, masks := lists[:len(fields):len(fields)], lists[len(fields):]
-		at := 0
-		for j, f := range fields {
-			n := f.width()
-			masks[j] = mem[at : at+n : at+n]
-			values[j] = mem[width+at : width+at+n : width+at+n]
-			at += n
+	const prefix = 1 // the table (pdrRuleIDs)
+	mem := slices.Clone(c.st.blobs.bytes(h)[prefix:])
+	lists := make([][]byte, 2*len(fields))
+	values, masks := lists[:len(fields):len(fields)], lists[len(fields):]
+	at := 0
+	for j, f := range fields {
+		n := f.width()
+		masks[j] = mem[at : at+n : at+n]
+		values[j] = mem[width+at : width+at+n : width+at+n]
+		at += n
+	}
+	key := RuleKey{Values: values, Masks: masks}
+	if tail := mem[2*width:]; len(tail) != 0 {
+		ranges := make([]RuleRange, len(tail)/20)
+		for j := range ranges {
+			r := tail[20*j:]
+			ranges[j] = RuleRange{Field: binary.BigEndian.Uint32(r), Low: binary.BigEndian.Uint64(r[4:]), High: binary.BigEndian.Uint64(r[12:])}
 		}
-		key := RuleKey{Values: values, Masks: masks}
-		if tail := mem[2*width:]; len(tail) != 0 {
-			ranges := make([]RuleRange, len(tail)/20)
-			for j := range ranges {
-				r := tail[20*j:]
-				ranges[j] = RuleRange{Field: binary.BigEndian.Uint32(r), Low: binary.BigEndian.Uint64(r[4:]), High: binary.BigEndian.Uint64(r[12:])}
-			}
-			key.Ranges = ranges
-		}
-		keys = append(keys, key)
+		key.Ranges = ranges
+	}
+	return key
+}
+
+// materializeRuleKeys decodes every rule key the PDR's derived identities
+// name, in order. It reads the store without the lock.
+func (c *Compiler) materializeRuleKeys(p *pdr) []RuleKey {
+	ids := c.st.ids(&p.rules)
+	keys := make([]RuleKey, 0, len(ids))
+	for _, h := range ids {
+		keys = append(keys, c.ruleKeyOf(p, h))
 	}
 	return keys
 }
 
+// pdrRuleKeys is the PDR's rule keys: decoded from its identities, or derived
+// from its PDI where none were. It interns nothing, so a deletion, which runs
+// without the lock, may call it.
 func (c *Compiler) pdrRuleKeys(p *pdr) ([]RuleKey, error) {
-	_, keys, err := c.pdrRuleIDs(p)
-	if err == nil && keys == nil {
-		keys = c.materializeRuleKeys(p)
+	if p.rules.n != 0 {
+		return c.materializeRuleKeys(p), nil
 	}
-	return keys, err
+	return p.ruleKeys(&c.st, c.direction(p).PDRFields)
 }
 
-// ruleID is a rule key's identity, compact enough to be held per rule for the
-// life of a session: the masks, the values and then the ranges, as bytes. Every
-// field of a table has the table's fixed width, so within one table (the caller
-// prefixes the resource) two keys have one identity only if they are one key.
+// ruleID is a rule key's identity: the masks, the values and then the
+// ranges, as bytes. Every field of a table has the table's fixed width, so
+// within one table (the caller prefixes the resource) two keys have one
+// identity only if they are one key.
 func ruleID(key RuleKey) string {
-	var b strings.Builder
-	b.Grow(ruleIDSize(key)) // the one allocation: the identity's own bytes
-	writeRuleID(&b, key)
-	return b.String()
+	b := appendRuleID(make([]byte, 0, ruleIDSize(key)), key) // the one allocation
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
 func ruleIDSize(key RuleKey) int {
@@ -3554,19 +3564,18 @@ func ruleIDSize(key RuleKey) int {
 	return n + 20*len(ranges)
 }
 
-func writeRuleID(b *strings.Builder, key RuleKey) {
+func appendRuleID(b []byte, key RuleKey) []byte {
 	for _, list := range [...][][]byte{key.Masks, key.Values} {
 		for _, f := range list {
-			b.Write(f)
+			b = append(b, f...)
 		}
 	}
-	var num [8]byte
-	ranges := key.Ranges
-	for _, r := range ranges {
-		b.Write(binary.BigEndian.AppendUint32(num[:0], r.Field))
-		b.Write(binary.BigEndian.AppendUint64(num[:0], r.Low))
-		b.Write(binary.BigEndian.AppendUint64(num[:0], r.High))
+	for _, r := range key.Ranges {
+		b = binary.BigEndian.AppendUint32(b, r.Field)
+		b = binary.BigEndian.AppendUint64(b, r.Low)
+		b = binary.BigEndian.AppendUint64(b, r.High)
 	}
+	return b
 }
 
 // match is one field's constraint: the bits a PDI fixes, and the mask that says
@@ -5203,7 +5212,7 @@ func (c *Compiler) resolveSDFIDs(s *Session) error {
 			if resolved == nil {
 				// Resolved filters are immutable: the PDR gets a new list,
 				// and snapshots and stale forms keep the one they name.
-				if len(p.ruleIDs) != 0 {
+				if p.rules.n != 0 {
 					old := *p
 					s.changes().stale = append(s.changes().stale, &old)
 				}
@@ -5211,7 +5220,7 @@ func (c *Compiler) resolveSDFIDs(s *Session) error {
 				for _, h := range c.st.ids(&p.sdfs) {
 					resolved = append(resolved, *c.st.sdfs.get(h))
 				}
-				p.ruleIDs = ""
+				p.rules = idList{}
 			}
 			resolved[i] = copied
 		}

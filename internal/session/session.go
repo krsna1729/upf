@@ -532,13 +532,6 @@ type Compiler struct {
 	// pools are separate only where their resources are; the action pool
 	// supplies both action and tunnel keys.
 
-	// rules is the owner of every rule key a live session holds, by the key the
-	// engine sees (resource, then the WildcardMatch key). The PDR tables are
-	// shared by every session and one key is one rule: a second session writing
-	// a key the first holds would take its packets and, when it went, erase the
-	// rule it left behind (compile claims a key, settle and remove give it up).
-	rules map[string]uint64
-
 	// stats counts what this compiler's three entry points answered: what a
 	// management endpoint reports (Stats).
 	stats counters
@@ -593,7 +586,6 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		byCP:      map[uint64]*Session{},
 		buffering: map[uint64]struct{}{},
 		measured:  map[uint64]struct{}{},
-		rules:     map[string]uint64{},
 		byFTEID:   map[fteidKey]fteidOwner{},
 		nextSEID:  1,
 		actions:   newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
@@ -669,16 +661,15 @@ type Session struct {
 	// it only after the dataplane has accepted the change.
 	pending *sessionChanges
 
-	// ruleKeys are the rule keys this session holds in the compiler's table of
-	// owners, kept here so a release touches only them: a deletion at the
-	// million-session target would otherwise walk every live key under the
-	// lock. compile adds a key when it is the first to claim it, settle removes
-	// the ones a transaction gave up, and releaseSession frees what is left.
-	ruleKeys []string
-
 	// refs is the blob listing the store handles this session holds, one
 	// reference each, sorted (store.go: refsOf); copies counts the snapshots
 	// of its model a modification holds, during which trim gives nothing back.
+	// Its tail lists the rule keys and ARP entries the session claims in the
+	// compiler's index of owners (store.claimsOf), kept here so a release
+	// touches only them: a deletion at the million-session target would
+	// otherwise walk every claim under the lock. compile adds the keys it is
+	// the first to claim, settle removes the ones a transaction gave up, and
+	// releaseSession frees what is left.
 	refs   uint32
 	copies uint16
 
@@ -896,29 +887,6 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 	c.st.trim(s)
 }
 
-// holdsRuleKey reports whether the session already lists a rule key. The list
-// is a session's own -- a handful of rules -- so the scan is the point: it
-// costs nothing next to a map, and it keeps the entry from being added twice
-// when a key is claimed, given up and claimed again. The caller holds the lock.
-func (s *Session) holdsRuleKey(key string) bool {
-	for _, k := range s.ruleKeys {
-		if k == key {
-			return true
-		}
-	}
-	return false
-}
-
-// forgetRuleKey drops a key from the session's list. The caller holds the lock.
-func (s *Session) forgetRuleKey(key string) {
-	for i, k := range s.ruleKeys {
-		if k == key {
-			s.ruleKeys = append(s.ruleKeys[:i], s.ruleKeys[i+1:]...)
-			return
-		}
-	}
-}
-
 // forgetRemoval marks a PDR id as live again: a request may remove a PDR and
 // create it in the same message, and the removal is folded in first.
 func (s *Session) forgetRemoval(id uint16) {
@@ -932,13 +900,14 @@ func (s *Session) forgetRemoval(id uint16) {
 
 // pdr is one compiled PDR: its rule in the PDR table and what it resolved to.
 type pdr struct {
-	// Qualified selector identities, length-prefixed in one immutable string.
-	// Ownership strings are substring views of these same bytes: retained
-	// overhead is a 16 B header/PDR plus varint lengths, not a map or a
-	// pointer-bearing array per PDR. Rebuilt PDIs and changed SDF definitions
-	// discard it; resolve invalidates inherited selector changes. The target's
-	// table layout is immutable.
-	ruleIDs string
+	// rules is the PDR's rule keys as the engine sees them (its table's
+	// resource, then the WildcardMatch key), each a blob in the store: an
+	// identity two sessions' PDRs share only when they are one rule, which is
+	// how the compiler's index of owners refuses the second (store.claims).
+	// Empty until compile derives them; rebuilt PDIs and changed SDF
+	// definitions discard it, and resolve invalidates inherited selector
+	// changes. The target's table layout is immutable.
+	rules idList
 
 	// ue is the PDI's UE address (ueIP), or the session's when it names none.
 	ue ipAddr
@@ -2017,30 +1986,32 @@ func (c *Compiler) settle(s *Session, ownSnapshot bool) {
 	// -- and be erased by this session's retry. A key a PDR of the session
 	// still names remains live in the end state (compile skips its erase),
 	// and stays claimed even when its value needed no upsert.
-	live := map[string]bool{}
-	for _, p := range s.PDRs.all() {
-		if ids, _, err := c.pdrRuleIDs(p); err == nil {
-			for id := range ruleIdentities(ids) {
-				live[id] = true
-			}
-		}
-	}
+	live := c.liveRuleKeys(s)
 	// The ARP claims of the session's own subscriber addresses, held with the
 	// entries they write (arpEntry.claim).
+	var liveARP map[string]bool
 	for _, p := range s.PDRs.all() {
 		if e, ok := c.arpEntryOf(p); ok {
-			live[e.claim()] = true
+			if liveARP == nil {
+				liveARP = map[string]bool{}
+			}
+			liveARP[e.claim()] = true
 		}
 	}
+	// Every gone form's keys are derived before a claim goes: a blob interned
+	// after one went could take the freed handle a given-up key is listed by.
 	for _, p := range gones {
-		ids, _, err := c.pdrRuleIDs(p)
-		if err != nil {
-			continue
-		}
-		for rkey := range ruleIdentities(ids) {
-			if !live[rkey] && c.rules[rkey] == s.LocalSEID {
-				delete(c.rules, rkey)
-				s.forgetRuleKey(rkey)
+		c.pdrRuleIDs(s, p)
+	}
+	gone := c.st.claimBuf[:0]
+	for _, p := range gones {
+		for _, h := range c.st.ids(&p.rules) {
+			if _, held := slices.BinarySearch(live, h); held {
+				continue
+			}
+			if i := c.st.claimOf(h); i >= 0 && c.st.claims[i].owner == s.LocalSEID {
+				c.st.unclaim(i)
+				gone = append(gone, h)
 			}
 		}
 	}
@@ -2051,11 +2022,15 @@ func (c *Compiler) settle(s *Session, ownSnapshot bool) {
 		if !ok {
 			continue
 		}
-		if claim := e.claim(); !live[claim] && c.rules[claim] == s.LocalSEID {
-			delete(c.rules, claim)
-			s.forgetRuleKey(claim)
+		if claim := e.claim(); !liveARP[claim] {
+			if i := c.st.claimNamed(claim); i >= 0 && c.st.claims[i].owner == s.LocalSEID {
+				gone = append(gone, c.st.claims[i].key)
+				c.st.unclaim(i)
+			}
 		}
 	}
+	c.st.forgetClaims(s, gone)
+	c.st.claimBuf = gone[:0]
 	// A MAR the transaction removed, and a tunnel record an update retired,
 	// are gone from the dataplane now; return their ids after the commit.
 	// Keeping them until session deletion would exhaust the pools on repeated
@@ -2100,12 +2075,7 @@ func (c *Compiler) releaseSession(s *Session) {
 	// the key for good. The keys are the session's own list, so a release costs
 	// the session's own rules rather than a walk of every live key under the
 	// lock -- which is what a million sessions make unaffordable.
-	for _, key := range s.ruleKeys {
-		if c.rules[key] == s.LocalSEID {
-			delete(c.rules, key)
-		}
-	}
-	s.ruleKeys = nil
+	c.st.dropClaims(s)
 	// Each id once per pool: a session says its ids once per PDR, and two
 	// uplink PDRs sharing a pinned F-TEID would otherwise release it twice --
 	// the second release finds the reservation gone and queues an SMF's value

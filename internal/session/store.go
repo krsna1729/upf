@@ -94,6 +94,9 @@ const (
 	kindEnd               // localEnd
 	kindSDF               // sdfFilter
 	kindBlob              // a byte string: an id list, a rule identity
+	// kindClaim marks a key the session claims (store.claims) and lists to
+	// give it up. It sorts last and holds no reference: the claim holds one.
+	kindClaim
 
 	kindShift  = 28
 	handleMask = 1<<kindShift - 1
@@ -258,12 +261,76 @@ func indexDelete(index []uint32, h, hash uint32, hashOf func(uint32) uint32) {
 	index[i] = 0
 }
 
+// openSlot is a slot of a flat open-addressing index whose slots hold their
+// whole entry, not a handle: the zero value is an empty slot, and home is the
+// entry's hash. A slot holds no pointer, so the index is one noscan array.
+type openSlot interface {
+	comparable
+	home() uint32
+}
+
+// openInsert puts v, which is not there, into slots holding live entries
+// counting v, growing them past 3/4.
+func openInsert[S openSlot](slots []S, live int, v S) []S {
+	if live*4 > len(slots)*3 {
+		slots = openResize(slots, max(16, 2*len(slots)))
+	}
+	var empty S
+	mask := uint32(len(slots) - 1)
+	i := v.home() & mask
+	for slots[i] != empty {
+		i = (i + 1) & mask
+	}
+	slots[i] = v
+	return slots
+}
+
+// openDelete empties slot i by backward shift, then shrinks slots by half
+// once live, the entries left, fill less than an eighth: a mass teardown
+// gives the index back, as a Go map would not.
+func openDelete[S openSlot](slots []S, live int, i uint32) []S {
+	var empty S
+	mask := uint32(len(slots) - 1)
+	for j := (i + 1) & mask; slots[j] != empty; j = (j + 1) & mask {
+		home := slots[j].home() & mask
+		// Move j's entry back to i unless its home lies cyclically in (i, j].
+		if (j > i && (home <= i || home > j)) || (j < i && home <= i && home > j) {
+			slots[i] = slots[j]
+			i = j
+		}
+	}
+	slots[i] = empty
+	if len(slots) > 16 && live*8 < len(slots) {
+		return openResize(slots, len(slots)/2)
+	}
+	return slots
+}
+
+func openResize[S openSlot](slots []S, n int) []S {
+	var empty S
+	grown := make([]S, n)
+	mask := uint32(n - 1)
+	for _, v := range slots {
+		if v == empty {
+			continue
+		}
+		i := v.home() & mask
+		for grown[i] != empty {
+			i = (i + 1) & mask
+		}
+		grown[i] = v
+	}
+	return grown
+}
+
 // blobSeg is the size of a byte segment; a longer blob gets a segment of its
 // own.
 const blobSeg = 64 << 10
 
+// blobEntry is where a blob's bytes are; its hash and references are its
+// tableEntry's.
 type blobEntry struct {
-	seg, off, n, hash, refs uint32
+	seg, off, n uint32
 }
 
 // blobs is a refcounted set of byte strings in segmented noscan storage, each
@@ -291,6 +358,15 @@ func (b *blobs) bytes(h uint32) []byte {
 	return seg[e.off : e.off+e.n : e.off+e.n]
 }
 
+// str is the blob h read in place as a string, valid while h is held.
+func (b *blobs) str(h uint32) string {
+	v := b.bytes(h)
+	if len(v) == 0 {
+		return ""
+	}
+	return unsafe.String(&v[0], len(v))
+}
+
 // words is the blob h read in place as uint32s in native byte order. A blob
 // starts on an 8-byte boundary of its segment (blobClass), so the view is
 // aligned.
@@ -316,7 +392,7 @@ func (b *blobs) acquire(v []byte) uint32 {
 	if len(b.index) != 0 {
 		mask := uint32(len(b.index) - 1)
 		for i := hash & mask; b.index[i] != 0; i = (i + 1) & mask {
-			if e := b.entries.entry(b.index[i]); e.v.hash == hash && string(b.bytes(b.index[i])) == string(v) {
+			if e := b.entries.entry(b.index[i]); e.hash == hash && string(b.bytes(b.index[i])) == string(v) {
 				e.refs++
 				return b.index[i]
 			}
@@ -325,9 +401,9 @@ func (b *blobs) acquire(v []byte) uint32 {
 	seg, off := b.place(uint32(len(v)))
 	copy((*b.segs.Load())[seg][off:], v)
 	h := b.entries.alloc()
-	*b.entries.entry(h) = tableEntry[blobEntry]{v: blobEntry{seg: seg, off: off, n: uint32(len(v)), hash: hash}, refs: 1}
+	*b.entries.entry(h) = tableEntry[blobEntry]{v: blobEntry{seg: seg, off: off, n: uint32(len(v))}, hash: hash, refs: 1}
 	b.live++
-	b.index = indexInsert(b.index, h, hash, b.live, func(h uint32) uint32 { return b.entries.entry(h).v.hash })
+	b.index = indexInsert(b.index, h, hash, b.live, func(h uint32) uint32 { return b.entries.entry(h).hash })
 	return h
 }
 
@@ -379,7 +455,7 @@ func (b *blobs) release(h uint32) {
 	if e.refs--; e.refs != 0 {
 		return
 	}
-	indexDelete(b.index, h, e.v.hash, func(h uint32) uint32 { return b.entries.entry(h).v.hash })
+	indexDelete(b.index, h, e.hash, func(h uint32) uint32 { return b.entries.entry(h).hash })
 	b.live--
 	if class := blobClass(e.v.n); class > blobSeg/4 {
 		segs := slices.Clone(*b.segs.Load())
@@ -414,8 +490,20 @@ type store struct {
 	sdfs     table[sdfFilter]
 	blobs    blobs
 
-	scratch []uint32 // trim's handle list, reused
-	refBuf  []uint32 // own's new handle list, reused
+	// claims is the owner of every rule key, by the key the engine sees, and
+	// of every ARP entry a live session holds (claimSlot). The PDR tables are
+	// shared by every session and one key is one rule: a second session
+	// writing a key the first holds would take its packets and, when it went,
+	// erase the rule it left behind (compile claims a key, settle and
+	// releaseSession give it up). claimed is its entry count.
+	claims  []claimSlot
+	claimed int
+
+	scratch  []uint32 // trim's handle list, reused
+	refBuf   []uint32 // own's new handle list, reused
+	claimBuf []uint32 // a compile's new claims, then a settle's given-up ones
+	liveBuf  []uint32 // the rule keys a session's PDRs name, sorted
+	keyBuf   []byte   // a rule key's bytes, built before they are interned
 }
 
 func (st *store) release(typed uint32) {
@@ -465,15 +553,21 @@ func (st *store) refsOf(s *Session) []uint32 {
 	return st.blobs.words(s.refs)
 }
 
-// setRefs makes list the handles s holds. The new blob is taken before the
-// old one goes back, so list may be read from it.
+// setRefs makes list the handles s holds.
 func (st *store) setRefs(s *Session, list []uint32) {
+	st.setWords(&s.refs, list)
+}
+
+// setWords makes *field the blob of list, giving back the one it named. The
+// new blob is taken before the old one goes back, so list may be read from
+// it.
+func (st *store) setWords(field *uint32, list []uint32) {
 	var h uint32
 	if len(list) != 0 {
 		h = st.blobs.acquire(unsafe.Slice((*byte)(unsafe.Pointer(&list[0])), 4*len(list)))
 	}
-	st.blobs.release(s.refs)
-	s.refs = h
+	st.blobs.release(*field)
+	*field = h
 }
 
 func (st *store) ownExt(s *Session, v pdrExt) uint32 {
@@ -561,6 +655,7 @@ func (st *store) handles(s *Session, out []uint32) []uint32 {
 		addList(&p.sdfs, kindSDF)
 		addList(&p.qerIDs, 0)
 		addList(&p.urrIDs, 0)
+		addList(&p.rules, kindBlob)
 	}
 	for _, p := range s.PDRs.all() {
 		addPDR(p)
@@ -600,7 +695,8 @@ func (st *store) handles(s *Session, out []uint32) []uint32 {
 
 // trim gives back the handles s holds and no record of s names any more. It
 // does nothing while a snapshot of s is outstanding (s.copies): the snapshot's
-// records may name them, and a rollback would restore those.
+// records may name them, and a rollback would restore those. The session's
+// claims stay listed: they end in settle and releaseSession, not here.
 func (st *store) trim(s *Session) {
 	if s.copies != 0 {
 		return
@@ -608,9 +704,10 @@ func (st *store) trim(s *Session) {
 	live := st.handles(s, st.scratch[:0])
 	slices.Sort(live)
 	live = slices.Compact(live)
-	st.scratch = live[:0]
 	j := 0
 	held := st.refsOf(s)
+	claims := st.claimsOf(s)
+	held = held[:len(held)-len(claims)]
 	for _, typed := range held {
 		for j < len(live) && live[j] < typed {
 			panic(fmt.Sprintf("session: session %d names handle %#x it does not hold", s.LocalSEID, live[j]))
@@ -625,8 +722,10 @@ func (st *store) trim(s *Session) {
 		panic(fmt.Sprintf("session: session %d names handle %#x it does not hold", s.LocalSEID, live[j]))
 	}
 	if len(live) != len(held) {
+		live = append(live, claims...)
 		st.setRefs(s, live)
 	}
+	st.scratch = live[:0]
 }
 
 // drop gives back every handle s holds: the session is gone.
@@ -635,4 +734,118 @@ func (st *store) drop(s *Session) {
 		st.release(typed)
 	}
 	st.setRefs(s, nil)
+}
+
+// claimSlot is one claimed key in store.claims: the key's blob hash (a
+// fingerprint compared before the bytes), the blob, which the slot holds a
+// reference to, and the local SEID of the session holding the claim. No
+// pointer: a million sessions' claims are one array the collector never
+// reads, where the map of strings they replace was scanned whole.
+type claimSlot struct {
+	hash  uint32
+	key   uint32 // 0 for an empty slot
+	owner uint64
+}
+
+func (c claimSlot) home() uint32 { return c.hash }
+
+// findClaim is the slot of the claimed key spelt key, whose blob hash is
+// hash, -1 for none. The fingerprint picks the candidates and a compare of
+// the whole key confirms one.
+func (st *store) findClaim(key string, hash uint32) int {
+	if len(st.claims) == 0 {
+		return -1
+	}
+	mask := uint32(len(st.claims) - 1)
+	for i := hash & mask; st.claims[i].key != 0; i = (i + 1) & mask {
+		if c := &st.claims[i]; c.hash == hash && st.blobs.str(c.key) == key {
+			return int(i)
+		}
+	}
+	return -1
+}
+
+// claimOf is the slot of the claimed key the blob h spells, -1 for none.
+func (st *store) claimOf(h uint32) int {
+	return st.findClaim(st.blobs.str(h), st.blobs.entries.entry(h).hash)
+}
+
+// claimNamed is the slot of the claimed key spelt key, which need not be a
+// blob, -1 for none.
+func (st *store) claimNamed(key string) int {
+	if st.blobs.segs.Load() == nil {
+		return -1
+	}
+	return st.findClaim(key, uint32(maphash.String(st.blobs.seed, key)))
+}
+
+// claim makes the key the blob h spells, which nobody claims, the claim of
+// the session whose local SEID is owner. The claim takes a reference to h of
+// its own.
+func (st *store) claim(h uint32, owner uint64) {
+	st.blobs.entries.retain(h)
+	st.claimed++
+	st.claims = openInsert(st.claims, st.claimed, claimSlot{hash: st.blobs.entries.entry(h).hash, key: h, owner: owner})
+}
+
+// unclaim ends the claim in slot i and gives back its reference.
+func (st *store) unclaim(i int) {
+	h := st.claims[i].key
+	st.claimed--
+	st.claims = openDelete(st.claims, st.claimed, uint32(i))
+	st.blobs.release(h)
+}
+
+// claimsOf is the claims s lists, typed kindClaim: the tail of its sorted
+// handle list (s.refs), read in place. They are markers, not references: each
+// claim holds its own.
+func (st *store) claimsOf(s *Session) []uint32 {
+	held := st.refsOf(s)
+	i, _ := slices.BinarySearch(held, kindClaim<<kindShift)
+	return held[i:]
+}
+
+// addClaims lists the keys a compile claimed for s, none of which s listed.
+func (st *store) addClaims(s *Session, hs []uint32) {
+	if len(hs) == 0 {
+		return
+	}
+	list := append(st.refBuf[:0], st.refsOf(s)...)
+	for _, h := range hs {
+		list = append(list, kindClaim<<kindShift|h)
+	}
+	slices.Sort(list)
+	st.setRefs(s, list)
+	st.refBuf = list[:0]
+}
+
+// forgetClaims takes gone, keys whose claims s gave up, off its list.
+func (st *store) forgetClaims(s *Session, gone []uint32) {
+	if len(gone) == 0 {
+		return
+	}
+	list := st.refBuf[:0]
+	for _, typed := range st.refsOf(s) {
+		if typed>>kindShift != kindClaim || !slices.Contains(gone, typed&handleMask) {
+			list = append(list, typed)
+		}
+	}
+	st.setRefs(s, list)
+	st.refBuf = list[:0]
+}
+
+// dropClaims ends every claim s holds: the session is gone. The list is the
+// session's own, so this costs its keys, not a walk of every claim.
+func (st *store) dropClaims(s *Session) {
+	claims := st.claimsOf(s)
+	if len(claims) == 0 {
+		return
+	}
+	for _, typed := range claims {
+		if i := st.claimOf(typed & handleMask); i >= 0 && st.claims[i].owner == s.LocalSEID {
+			st.unclaim(i)
+		}
+	}
+	held := st.refsOf(s)
+	st.setRefs(s, held[:len(held)-len(claims)])
 }
