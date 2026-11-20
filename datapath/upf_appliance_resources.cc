@@ -731,8 +731,11 @@ CommandResponse UpfAppliance::CommandGetChanges(const upf::pb::UrrCountCommandGe
   if (changes == nullptr)
     return CommandFailure(EINVAL, "table must be counters_ul or counters_dl");
   upf::pb::UrrCountCommandGetChangesResponse response;
-  if (auto read = changes->Read(arg, &response); !read)
-    return CommandFailure(EINVAL, "%s", read.error().c_str());
+  const auto read = changes->Read(arg, &response);
+  if (!read) return CommandFailure(EINVAL, "%s", read.error().c_str());
+  // The snapshot's grace period has not passed yet: ask again (upfd backs off).
+  if (*read == upf::datapath::CounterChanges::Answer::kPending)
+    return CommandFailure(EBUSY, "counter snapshot is waiting for its grace period; retry");
   if (session_layout_) sessions_->ChangedActions(arg.table() == "counters_dl", &response);
   return CommandSuccess(response);
 }

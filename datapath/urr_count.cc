@@ -315,8 +315,11 @@ CommandResponse UrrCount::CommandGetChanges(
     const upf::pb::UrrCountCommandGetChangesArg &arg) {
   if (!arg.table().empty()) return CommandFailure(EINVAL, "UrrCount has one counter table");
   upf::pb::UrrCountCommandGetChangesResponse response;
-  if (auto read = changes_->Read(arg, &response); !read)
-    return CommandFailure(EINVAL, "%s", read.error().c_str());
+  const auto read = changes_->Read(arg, &response);
+  if (!read) return CommandFailure(EINVAL, "%s", read.error().c_str());
+  // The snapshot's grace period has not passed yet: ask again (upfd backs off).
+  if (*read == upf::datapath::CounterChanges::Answer::kPending)
+    return CommandFailure(EBUSY, "counter snapshot is waiting for its grace period; retry");
   return CommandSuccess(response);
 }
 

@@ -323,6 +323,8 @@ message UrrCountCommandGetCountsResponse {
 // One controller consumes a counter bank's traffic notifications. Replies are
 // replayable until acknowledged; acknowledgements are sent only after every
 // page's ids have been queued for evaluation. Counter reads are independent.
+// A new snapshot is answered EBUSY until every worker has passed a batch
+// boundary since its flip: send the same arguments again after a backoff.
 message UrrCountCommandGetChangesArg {
   string table = 1;
   uint64 acknowledge = 2;

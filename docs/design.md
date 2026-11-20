@@ -890,7 +890,9 @@ following paths now select or clear work without that population walk:
    - **Traffic selects a session.** Each counting batch sets one bit per rule
      in a worker-local bitmap (`datapath/counter_changes.h`: no atomic RMW, no
      allocation, one bank per worker per generation). `get_changes` flips the
-     generation, waits for the batch-boundary RCU grace period, and pages the
+     generation and answers busy until the batch-boundary RCU grace period
+     has passed (it never waits under bessd's control lock; upfd backs off
+     from 200 µs and asks again), then pages the
      frozen bank (65,536 ids per reply). A reply can be replayed until the
      controller acknowledges its sequence. The controller acknowledges only
      after every page has entered its pending set. A lost reply, a failed page
@@ -913,7 +915,8 @@ following paths now select or clear work without that population walk:
    call. Readings land in the RPC buffer, indexed by a noscan per-ActionId
    table allocated for issued ids only. An idle volume-only session costs no
    model walk and no counter read. The tick's cost is the dirty and due
-   sessions plus one `get_changes` round trip per counter table.
+   sessions plus one `get_changes` round trip per counter table, and the
+   busy answers before its snapshot's grace period has passed (usually one).
    `get_counts` remains the only read that carries counts: the counter
    *resource* (`<module>/counters`) has an empty value, because a resource
    value is copied on every publish and would be zeroed by a handover.
