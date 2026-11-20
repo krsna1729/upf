@@ -20,10 +20,13 @@ namespace upf::datapath {
 // Activity, not counter values. Each worker owns two bitmap banks and a list
 // of touched 16-word blocks with a mask of their nonzero words. Mark allocates
 // nothing and uses no atomic RMW. The
-// controller publishes the other bank, waits for the runtime's batch-boundary
-// grace period, then pages the frozen bank. A lost reply replays that same
-// snapshot: only a subsequent acknowledgement releases it. The other bank can
-// accumulate indefinitely without a queue overflowing or a capacity-sized scan.
+// controller publishes the other bank and starts a grace period; once every
+// worker has passed a batch boundary since, it pages the frozen bank. Until
+// then Read answers kPending: it never waits, because its caller holds the
+// control-plane lock (BESS engineering guide §11). A lost reply replays that
+// same snapshot: only a subsequent acknowledgement releases it. The other bank
+// can accumulate indefinitely without a queue overflowing or a capacity-sized
+// scan.
 class CounterChanges {
  public:
   static size_t Bytes(size_t capacity, size_t workers,
@@ -79,7 +82,12 @@ class CounterChanges {
                   &masks_[plane * Blocks(capacity_)], &planes_[plane].size);
   }
 
-  std::expected<void, std::string> Read(
+  // kPending: the snapshot's grace period is still running; nothing was
+  // written to `out`, and the same request asks again (CommandGetChanges
+  // answers EBUSY).
+  enum class Answer : uint8_t { kPage, kPending };
+
+  std::expected<Answer, std::string> Read(
       const upf::pb::UrrCountCommandGetChangesArg &arg,
       upf::pb::UrrCountCommandGetChangesResponse *out) {
     std::lock_guard lock(mu_);
@@ -88,7 +96,10 @@ class CounterChanges {
     if (arg.sequence() != 0 && (!frozen_ || arg.sequence() != sequence_))
       return std::unexpected("snapshot sequence is not current");
     if (arg.acknowledge() != acknowledged_) {
-      if (!frozen_ || arg.acknowledge() != sequence_ || arg.sequence() || arg.after())
+      // Only a snapshot that was answered: until its grace period passes, a
+      // worker may still be writing the frozen bank Clear() would zero.
+      if (!frozen_ || pending_ != 0 || arg.acknowledge() != sequence_ || arg.sequence() ||
+          arg.after())
         return std::unexpected("only a completed current snapshot can be acknowledged");
       Clear();
       acknowledged_ = sequence_;
@@ -96,9 +107,15 @@ class CounterChanges {
     }
     if (!frozen_) {
       frozen_bank_ = active_.fetch_xor(1, std::memory_order_release);
-      domain_.Synchronize();
+      // After the flip is published: a worker that loaded the old bank keeps
+      // writing it until its batch returns to the scheduler.
+      pending_ = domain_.StartGracePeriod();
       ++sequence_;
       frozen_ = true;
+    }
+    if (pending_ != 0) {
+      if (!domain_.IsComplete(pending_)) return Answer::kPending;
+      pending_ = 0;
     }
     out->set_sequence(sequence_);
     const uint64_t start = arg.after();
@@ -140,14 +157,14 @@ class CounterChanges {
             const unsigned bit = std::countr_zero(bits);
             if (out->action_ids_size() == kPage) {
               out->set_next_after((worker * words_ + at * kBlockWords + within) * 64 + bit);
-              return {};
+              return Answer::kPage;
             }
             out->add_action_ids(static_cast<uint32_t>(uint64_t{word} * 64 + bit));
           }
         }
       }
     }
-    return {};
+    return Answer::kPage;
   }
 
  private:
@@ -183,6 +200,8 @@ class CounterChanges {
   alignas(64) std::atomic<unsigned> active_{0};
   std::mutex mu_;
   uint64_t sequence_ = 0, acknowledged_ = 0;
+  // The frozen snapshot's grace period until it has passed, then 0.
+  bess::rcu::GracePeriod pending_ = 0;
   unsigned frozen_bank_ = 0;
   bool frozen_ = false;
 };
