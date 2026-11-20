@@ -532,8 +532,9 @@ the arrival signal the Downlink Data Report is decided from on the BUFF branch.
   (`upf.pb.UrrCountCommandGetChangesArg` → `…Response`; `UrrCount`, and
   `UpfAppliance`/`UpfSessionAppliance` with `table=counters_ul|counters_dl`).
   Each counting batch sets one bit per counted rule in its worker's current
-  bitmap bank (`datapath/counter_changes.h`); a command flips the bank, waits
-  for the RCU grace period at the workers' batch boundary, and pages the frozen
+  bitmap bank (`datapath/counter_changes.h`); a command flips the bank and
+  starts an RCU grace period, answers EBUSY (nothing else) until the workers
+  have all passed a batch boundary since, and then pages the frozen
   bank (at most 65,536 ids; `next_after` is opaque, `sequence` names the
   snapshot). The same snapshot is replayed until a later call sends its
   `sequence` as `acknowledge`; one consumer (upfd's report loop) acknowledges

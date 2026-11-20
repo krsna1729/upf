@@ -131,7 +131,12 @@ TEST(CounterChanges, BatchGracePeriodsNeverLoseTheLastPacketOfARule) {
     arg.set_acknowledge(acknowledge);
     for (;;) {
       Reply page;
-      ASSERT_TRUE(changes.Read(arg, &page));
+      const auto read = changes.Read(arg, &page);
+      ASSERT_TRUE(read);
+      if (*read == CounterChanges::Answer::kPending) {
+        std::this_thread::yield(); // A producer is mid-batch: ask again.
+        continue;
+      }
       for (uint32_t id : page.action_ids()) {
         ASSERT_GT(id, 0u);
         ASSERT_LE(id, kRules);
@@ -151,5 +156,58 @@ TEST(CounterChanges, BatchGracePeriodsNeverLoseTheLastPacketOfARule) {
   drain();
   drain(); // Flush either bank after both producers became quiescent.
   for (uint32_t id = 1; id <= kRules; ++id) ASSERT_TRUE(seen[id]) << id;
+}
+
+// The flipped bank is paged only once every online worker has passed a batch
+// boundary since the flip. Until then Read answers kPending at once instead of
+// waiting with its caller's control lock held, and refuses an acknowledgement
+// of the unanswered snapshot. The batch that loaded the old bank before the
+// flip lands in this snapshot; the next batch lands in the next one. Each id
+// is answered exactly once. (The parent waited in Synchronize() for a worker
+// that never quiesces: this test hung.)
+TEST(CounterChanges, AWorkerMidBatchMakesTheSnapshotPendingNotAWait) {
+  bess::rcu::RcuDomain domain(1);
+  CounterChanges changes(256, 1, domain);
+  ASSERT_TRUE(domain.Register(0));
+  domain.Online(0); // Quiescent only where the test says.
+  const auto batch = changes.ForWorker(0);
+  batch.Mark(5);
+  Arg arg;
+  Reply reply;
+  auto read = changes.Read(arg, &reply);
+  ASSERT_TRUE(read);
+  EXPECT_EQ(*read, CounterChanges::Answer::kPending);
+  EXPECT_EQ(reply.sequence(), 0u) << "a pending read answers nothing";
+  batch.Mark(6); // The same batch: still the bank it loaded before the flip.
+  read = changes.Read(arg, &reply);
+  ASSERT_TRUE(read);
+  EXPECT_EQ(*read, CounterChanges::Answer::kPending);
+  Arg early;
+  early.set_acknowledge(1);
+  EXPECT_FALSE(changes.Read(early, &reply)) << "acknowledged a snapshot never answered";
+
+  domain.Quiescent(0);
+  changes.ForWorker(0).Mark(7); // The next batch loads the other bank.
+  read = changes.Read(arg, &reply);
+  ASSERT_TRUE(read);
+  ASSERT_EQ(*read, CounterChanges::Answer::kPage);
+  EXPECT_EQ(std::vector<uint32_t>(reply.action_ids().begin(), reply.action_ids().end()),
+            (std::vector<uint32_t>{5, 6}));
+  EXPECT_EQ(reply.next_after(), 0u);
+
+  arg.set_acknowledge(reply.sequence());
+  Reply next;
+  read = changes.Read(arg, &next);
+  ASSERT_TRUE(read);
+  EXPECT_EQ(*read, CounterChanges::Answer::kPending) << "a new flip, no batch boundary since";
+  domain.Quiescent(0);
+  read = changes.Read(arg, &next);
+  ASSERT_TRUE(read);
+  ASSERT_EQ(*read, CounterChanges::Answer::kPage);
+  EXPECT_EQ(std::vector<uint32_t>(next.action_ids().begin(), next.action_ids().end()),
+            (std::vector<uint32_t>{7}));
+  EXPECT_GT(next.sequence(), reply.sequence());
+  domain.Offline(0);
+  domain.Unregister(0);
 }
 }  // namespace

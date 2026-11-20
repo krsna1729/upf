@@ -3,10 +3,13 @@ package bess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // RuleChangePage is one replayable page of traffic notifications. ActionIDs may
@@ -16,6 +19,42 @@ import (
 type RuleChangePage struct {
 	Sequence, NextAfter uint64
 	ActionIDs           []uint32
+}
+
+// A snapshot's reads answer busy until every worker has passed a batch boundary
+// since the plugin flipped its bank (datapath/counter_changes.h): the plugin
+// never waits for the grace period, as it runs under the daemon's control lock.
+// A grace period is about 11 µs or one task invocation, so the backoff starts
+// where the daemon's own for a BUSY transaction does (kBusyFirstBackoff,
+// 200 µs) and doubles. After changesBusyAttempts the error goes to the caller;
+// its next tick asks again, and the snapshot stays frozen, so nothing is lost.
+const (
+	changesBusyFirstBackoff = 200 * time.Microsecond
+	changesBusyAttempts     = 8
+)
+
+// retryBusy calls invoke until it answers something other than *BusyError,
+// at most changesBusyAttempts times, sleeping between attempts.
+func retryBusy(ctx context.Context, invoke func() (*anypb.Any, error)) (*anypb.Any, error) {
+	backoff := changesBusyFirstBackoff
+	for attempt := 1; ; attempt++ {
+		result, err := invoke()
+		var busy *BusyError
+		if !errors.As(err, &busy) || attempt == changesBusyAttempts {
+			return result, err
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
+	}
 }
 
 // AppendRuleChanges appends one page to dst. acknowledge is the last snapshot
@@ -31,7 +70,9 @@ func (c *Client) AppendRuleChanges(ctx context.Context, dst []uint32, counters s
 	if err != nil {
 		return RuleChangePage{}, err
 	}
-	result, err := c.sdk.InvokeAction(ctx, module, "get_changes", arg)
+	result, err := retryBusy(ctx, func() (*anypb.Any, error) {
+		return c.sdk.InvokeAction(ctx, module, "get_changes", arg)
+	})
 	if err != nil {
 		return RuleChangePage{}, fmt.Errorf("bess: %s get_changes: %w", counters, err)
 	}
