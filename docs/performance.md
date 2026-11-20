@@ -3382,7 +3382,7 @@ did not fill: bessd refused 813,222 of 1,000,000 establishments from session
 1436 MB in use`. The cause: under `--in-memory`, DPDK lists every page size
 the kernel offers, including 1 GiB with no pages reserved, largest first
 (`eal_hugepage_info.c`). The charge took the first list's page size, so every
-hugepage table charge rounded up to 1 GiB. Bess #153 (`dd22783d`, now the pin) charges by the page size
+hugepage table charge rounded up to 1 GiB. Bess #153 (`dd22783d`) charges by the page size
 of the lists that hold segments. The same 1M hugepage fill then completes with
 0 refusals. The discarded runs are kept in `discarded-1gib-charge-bug/`.
 
