@@ -137,7 +137,7 @@ func measuredRules(t *testing.T, c *Compiler, seids []uint64) []bess.RuleCount {
 			t.Fatalf("session %d is not in the compiler: the two compilers did not allocate the same ids", seid)
 		}
 		for _, p := range pdrsInOrder(s) {
-			if len(p.urrIDs) == 0 || p.actionID == 0 || p.drop {
+			if p.urrIDs.len() == 0 || p.actionID == 0 || p.drop {
 				continue
 			}
 			// The quota is 100 octets and the reading is 120: every session's
@@ -207,6 +207,7 @@ func boundedTick(t *testing.T, sessions, perSession int) (*Compiler, *boundedRea
 	for i := range sessions {
 		s := *model
 		s.LocalSEID = seid + 1 + uint64(i)
+		s.slot = 0 // a copy is another session: it takes a slot of its own
 		s.PDRs = idMap[uint16, *pdr]{}
 		pdrs := make([]pdr, perSession)
 		for j := range pdrs {
@@ -287,7 +288,7 @@ func TestAReportTakenBackIsDecidedAgain(t *testing.T) {
 	// 2 MiB crosses the URR's 1 MiB volume threshold.
 	var counts []bess.RuleCount
 	for _, p := range pdrsInOrder(sessionOf(t, c, seid)) {
-		if len(p.urrIDs) > 0 && p.actionID != 0 {
+		if p.urrIDs.len() > 0 && p.actionID != 0 {
 			counts = append(counts, bess.RuleCount{ActionID: p.actionID, Packets: 2, Octets: 2 << 20})
 		}
 	}

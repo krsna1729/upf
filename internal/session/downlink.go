@@ -87,13 +87,21 @@ func (c *Compiler) EvaluateDownlinks(ctx context.Context) []Downlink {
 	if !c.BufferingConfigured() || c.counters == nil {
 		return nil
 	}
+	type member struct {
+		seid uint64
+		slot uint32
+	}
 	c.mu.Lock()
-	seids := make([]uint64, 0, len(c.buffering))
-	for seid := range c.buffering {
-		seids = append(seids, seid)
+	// scale: the buffering sessions (BUFF with NOCP), pruned below as they
+	// stop, found by a walk of the bitset's words up to the highest buffering
+	// slot: one word per 64 slots, 15,625 at a million sessions.
+	slots, _ := c.buffering.page(nil, 0, c.buffering.len())
+	members := make([]member, len(slots))
+	for i, slot := range slots {
+		members[i] = member{seid: c.slots.seids[slot], slot: slot}
 	}
 	c.mu.Unlock()
-	slices.Sort(seids)
+	slices.SortFunc(members, func(a, b member) int { return cmp.Compare(a.seid, b.seid) })
 
 	// The flows to read: the buffering PDRs whose report has not been sent
 	// yet, and whose they are. A flow already reported is left out -- its
@@ -101,22 +109,24 @@ func (c *Compiler) EvaluateDownlinks(ctx context.Context) []Downlink {
 	// leaves the set.
 	var ids []uint32
 	owners := map[uint32]downlinkFlow{}
-	for start := 0; start < len(seids); start += tickHold {
+	for start := 0; start < len(members); start += tickHold {
 		c.mu.Lock()
-		for _, seid := range seids[start:min(start+tickHold, len(seids))] {
+		for _, m := range members[start:min(start+tickHold, len(members))] {
 			buffering := false
-			for _, p := range pdrsInOrder(c.sessions[seid]) {
+			for _, p := range pdrsInOrder(c.sessions[m.seid]) {
 				if !p.buffer || !p.notify {
 					continue
 				}
 				buffering = true
 				if p.actionID != 0 && !p.ddnSent {
 					ids = append(ids, p.actionID)
-					owners[p.actionID] = downlinkFlow{seid: seid, pdr: p.id, action: p.actionID}
+					owners[p.actionID] = downlinkFlow{seid: m.seid, pdr: p.id, action: p.actionID}
 				}
 			}
-			if !buffering {
-				delete(c.buffering, seid)
+			// A slot released since the snapshot has left the set already,
+			// and may be another session's now.
+			if !buffering && c.slots.seids[m.slot] == m.seid {
+				c.buffering.remove(m.slot)
 			}
 		}
 		c.mu.Unlock()

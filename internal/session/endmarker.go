@@ -272,16 +272,16 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 		}
 		tunnelChanged := f.hasOuter && (f.teid != old.teid || f.peer != old.peer())
 		egressChanged := (f.hasDestIfc && f.destIfc != old.destIfc) ||
-			(f.hasInstance && f.instance != old.instance)
+			(f.hasInstance && f.instance != c.farExt(old).instance)
 		if !tunnelChanged && !egressChanged {
 			continue
 		}
-		updated := *old
+		updated, updatedExt := *old, *c.farExt(old)
 		if f.hasDestIfc {
 			updated.destIfc = f.destIfc
 		}
 		if f.hasInstance {
-			updated.setInstance(f.instance)
+			updatedExt.instance = f.instance
 		}
 		start := len(out)
 		add := func(local netip.Addr, domain uint32, ifc routing.Interface) {
@@ -289,7 +289,7 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 				return
 			}
 			if !tunnelChanged {
-				endpoint, nextLocal, err := c.tunnelEndpoint(&updated, ifc)
+				endpoint, nextLocal, err := c.tunnelEndpointOf(&updated, &updatedExt, ifc)
 				if err == nil && nextLocal == local && endpoint.TransportRouteDomain == domain {
 					return
 				}
@@ -304,12 +304,12 @@ func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 			})
 		}
 		for _, p := range pdrsInOrder(s) {
-			if p.hasMAR || p.farID != old.id || !p.tunnelLocalAddress().IsValid() {
+			if p.hasMAR || p.farID != old.id || !c.tunnelLocalAddress(p).IsValid() {
 				continue
 			}
 			ifc, err := c.interfaceFor(p)
 			if err == nil {
-				add(p.tunnelLocalAddress(), p.transportRouteDomain(), ifc)
+				add(c.tunnelLocalAddress(p), c.transportRouteDomain(p), ifc)
 			}
 		}
 		for _, m := range s.rare().MARs {

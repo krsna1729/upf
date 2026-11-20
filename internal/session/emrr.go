@@ -26,12 +26,12 @@ type endMarkerKey struct {
 // endMarkerArrived says an End Marker arrived since the last tick on the local
 // F-TEID of a PDR that URR uid measures, when that URR asks for REEMR. The
 // caller holds the lock.
-func endMarkerArrived(s *Session, uid uint32, markers map[endMarkerKey]bool) bool {
-	if len(markers) == 0 || !s.URRs.at(uid).onEndMarker {
+func (c *Compiler) endMarkerArrived(s *Session, uid uint32, markers map[endMarkerKey]bool) bool {
+	if len(markers) == 0 || !c.limits(s.URRs.at(uid)).onEndMarker {
 		return false
 	}
 	for _, p := range pdrsInOrder(s) {
-		if p.teid == 0 || p.endpointID == 0 || !slices.Contains(p.urrIDs, uid) {
+		if p.teid == 0 || p.endpointID == 0 || !slices.Contains(c.st.ids(&p.urrIDs), uid) {
 			continue
 		}
 		if markers[endMarkerKey{endpoint: p.endpointID, teid: p.teid}] {
@@ -55,7 +55,7 @@ func endMarkerArrived(s *Session, uid uint32, markers map[endMarkerKey]bool) boo
 // the received one arrived in, behind the G-PDUs that preceded it. A PDR whose
 // FAR adds no outer header (N6, 5G VN Internal), drops, buffers or names a MAR
 // relays nothing; the arrival is still reported. The caller holds the lock.
-func endMarkerRelays(s *Session, endpoint, teid uint32) []RelayTunnel {
+func (c *Compiler) endMarkerRelays(s *Session, endpoint, teid uint32) []RelayTunnel {
 	type tunnel struct {
 		teid        uint32
 		local, peer netip.Addr
@@ -67,14 +67,14 @@ func endMarkerRelays(s *Session, endpoint, teid uint32) []RelayTunnel {
 		// The tunnel's local end is resolved only for a PDR whose FAR
 		// forwards with an Outer Header Creation (resolve).
 		if p.endpointID != endpoint || p.teid != teid || p.hasMAR ||
-			!p.tunnelLocalAddress().IsValid() || p.transportRouteDomain() == 0 {
+			!c.tunnelLocalAddress(p).IsValid() || c.transportRouteDomain(p) == 0 {
 			continue
 		}
 		f := s.FARs.at(p.farID)
 		if f == nil || !f.hasOuter || f.teid == 0 {
 			continue
 		}
-		t := tunnel{teid: f.teid, local: p.tunnelLocalAddress(), peer: f.peer(), domain: p.transportRouteDomain()}
+		t := tunnel{teid: f.teid, local: c.tunnelLocalAddress(p), peer: f.peer(), domain: c.transportRouteDomain(p)}
 		if slices.Contains(seen, t) {
 			continue
 		}

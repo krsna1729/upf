@@ -294,8 +294,8 @@ func TestRemovingAURRAPDRStillNamesReportsAndUnlinksIt(t *testing.T) {
 	if n := len(rules(rec.last())); n != 0 {
 		t.Errorf("removing usage measurement changed %d classifier records", n)
 	}
-	if p := sessionOf(t, c, seid).PDRs.at(1); p.drop || len(p.urrIDs) != 0 {
-		t.Errorf("PDR drop=%v URRs=%v, want forwarding without measurement", p.drop, p.urrIDs)
+	if p := sessionOf(t, c, seid).PDRs.at(1); p.drop || p.urrIDs.len() != 0 {
+		t.Errorf("PDR drop=%v URRs=%v, want forwarding without measurement", p.drop, c.st.ids(&p.urrIDs))
 	}
 	if n := len(rec.entries); n != 0 {
 		t.Errorf("%d counter entries outlived the removed URR", n)

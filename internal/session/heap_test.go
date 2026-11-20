@@ -5,6 +5,8 @@ package session
 import (
 	"fmt"
 	"runtime"
+	"runtime/debug"
+	"runtime/metrics"
 	"testing"
 
 	"github.com/krsna1729/upf/internal/scaletest"
@@ -51,15 +53,173 @@ func TestASessionHoldsAtMostItsBytes(t *testing.T) {
 	t.Logf("%.1f B of live objects per session", live)
 	// 2,550 B before the session-memory series (perf/upfd-session-memory):
 	// rare fields behind pointers, interned shared provisioning, walked
-	// caches. 1,511 B after it.
-	if live > 1600 {
-		t.Errorf("a session retains %.0f B of live objects, want at most 1600", live)
+	// caches. 1,511 B after it; 1,403 B with pointer-free records
+	// (store.go); 1,395 B with rule identities as store blobs; 1,369 B
+	// with F-TEID owners in a flat index; 1,319 B with the session sets as
+	// bitsets over slots.
+	if live > 1385 {
+		t.Errorf("a session retains %.0f B of live objects, want at most 1385", live)
 	}
 	// Before the layout changes: 4,543-4,665 B. After rule maps, PDR
 	// derived fields, pending state and URR padding: 3,050-3,224 B. After
-	// the session-memory series: 2,022-2,109 B.
-	if per > 2300 {
-		t.Errorf("a session holds %.0f B of heap, want at most 2300", per)
+	// the session-memory series: 2,022-2,109 B. Pointer-free records:
+	// 1,739 B. Rule identities as store blobs: 1,660 B. F-TEID owners in a
+	// flat index: 1,631 B. Session sets as bitsets: 1,567 B.
+	if per > 1645 {
+		t.Errorf("a session holds %.0f B of heap, want at most 1645", per)
 	}
 	runtime.KeepAlive(c)
+}
+
+// footprint is what build leaves live, per item, after a GC: heap bytes in
+// live objects, heap bytes the collector must scan for pointers
+// (/gc/scan/heap:bytes) and heap objects (/gc/heap/objects:objects).
+type footprint struct{ live, scan, objects float64 }
+
+func measureFootprint(n int, build func()) footprint {
+	samples := []metrics.Sample{{Name: "/gc/scan/heap:bytes"}, {Name: "/gc/heap/objects:objects"}}
+	read := func() (uint64, uint64, uint64) {
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		metrics.Read(samples)
+		return m.HeapAlloc, samples[0].Value.Uint64(), samples[1].Value.Uint64()
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(100))
+	a0, s0, o0 := read()
+	build()
+	a1, s1, o1 := read()
+	per := func(a, b uint64) float64 { return float64(int64(b)-int64(a)) / float64(n) }
+	return footprint{live: per(a0, a1), scan: per(s0, s1), objects: per(o0, o1)}
+}
+
+// establishCounted establishes n counted sessions on c and returns their SEIDs.
+func establishCounted(t *testing.T, c *Compiler, n int) []uint64 {
+	seids := make([]uint64, 0, n)
+	for i := range n {
+		ue := fmt.Sprintf("10.%d.%d.%d", 1+i>>16, i>>8&0xff, i&0xff)
+		resp, ok := c.Establish(countedEstablishment(uint64(0x10000+i), ue)).(*message.SessionEstablishmentResponse)
+		if !ok || cause(t, resp) != ie.CauseRequestAccepted {
+			t.Fatalf("establishment %d was not accepted", i)
+		}
+		seids = append(seids, upFSEID(t, resp))
+	}
+	return seids
+}
+
+// TestASessionIsFewObjectsTheCollectorBarelyScans: the collector's work is
+// the bytes it scans and the objects it marks, so a million sessions cost what
+// their pointer-holding objects cost. 894.5 B scanned and 17.03 objects per
+// session before the records held handles instead of pointers (store.go);
+// 566.7 B and 14.03 after; 431.3 B and 11.03 once rule identities and their
+// owners left Go strings and maps for store blobs and a noscan index; 339.5 B
+// once the F-TEID owners did too.
+func TestASessionIsFewObjectsTheCollectorBarelyScans(t *testing.T) {
+	const n = 20000
+	var c *Compiler
+	f := measureFootprint(n, func() {
+		c = New(testConfig(), &discardApplier{}, quietLogger())
+		establishCounted(t, c, n)
+	})
+	t.Logf("live %.1f B, scanned %.1f B, %.2f objects per session", f.live, f.scan, f.objects)
+	if f.scan > 356 {
+		t.Errorf("the collector scans %.0f B per session, want at most 356", f.scan)
+	}
+	if f.objects > 11.6 {
+		t.Errorf("a session is %.2f heap objects, want at most 11.6", f.objects)
+	}
+	runtime.KeepAlive(c)
+}
+
+// TestDeletedSessionsGiveTheStoreBack: deleting every session returns every
+// table entry and blob it held, and establishing them again costs what it
+// cost the first time -- the tables reuse what was freed rather than grow.
+func TestDeletedSessionsGiveTheStoreBack(t *testing.T) {
+	const n = 5000
+	c := New(testConfig(), &discardApplier{}, quietLogger())
+	live := func() [7]int {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		st := &c.st
+		return [7]int{st.exts.live, st.farExts.live, st.policies.live, st.limits.live, st.ends.live, st.sdfs.live, st.blobs.live}
+	}
+	segments := func() int {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if p := c.st.blobs.segs.Load(); p != nil {
+			return len(*p)
+		}
+		return 0
+	}
+	var first [7]int
+	var firstSegs int
+	for round := range 3 {
+		seids := establishCounted(t, c, n)
+		if round == 0 {
+			first, firstSegs = live(), segments()
+		} else if got := live(); got != first || segments() != firstSegs {
+			t.Errorf("round %d holds %v entries in %d segments, the first held %v in %d", round, got, segments(), first, firstSegs)
+		}
+		for i, seid := range seids {
+			if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, uint32(i+2), 0))); got != ie.CauseRequestAccepted {
+				t.Fatalf("deleting session %d answered cause %d", i, got)
+			}
+		}
+		if got := live(); got != [7]int{} || c.st.claimed != 0 {
+			t.Fatalf("round %d: deleted sessions left %v entries (ext, farExt, policy, limits, end, sdf, blob) and %d claims", round, got, c.st.claimed)
+		}
+	}
+}
+
+// TestTheSessionSetsAreBitsOverReusedSlots: the usage tick's sets hold a bit
+// per session over dense slots, not a map entry per SEID (27 B each at 20,000
+// entries, 38 B at a million, the two maps a counted session was in); a
+// deleted session leaves every set and its slot is the next one taken, so
+// re-establishing as many sessions grows nothing.
+func TestTheSessionSetsAreBitsOverReusedSlots(t *testing.T) {
+	const n = 5000
+	c := New(testConfig(), &discardApplier{}, quietLogger())
+	bytes := func() int {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		b := 8*cap(c.slots.seids) + 4*cap(c.slots.free)
+		for _, set := range []*sessionSet{&c.measured, &c.buffering, &c.usage.pending, &c.usage.spare, &c.usage.enforce} {
+			b += 8 * cap(set.words)
+		}
+		return b
+	}
+	var steady int
+	for round := range 3 {
+		seids := establishCounted(t, c, n)
+		c.mu.Lock()
+		measured, slots := c.measured.len(), len(c.slots.seids)
+		c.mu.Unlock()
+		if measured != n || slots != n+1 {
+			t.Fatalf("round %d: %d measured sessions over %d slots, want %d over %d", round, measured, slots, n, n+1)
+		}
+		switch got := bytes(); round {
+		case 0:
+			if per := float64(got) / n; per > 24 {
+				t.Errorf("the session sets cost %.1f B per session, want at most 24", per)
+			}
+		case 1:
+			steady = got // the free list has held every slot once
+		default:
+			if got != steady {
+				t.Errorf("round %d: the session sets hold %d B, round 1 held %d", round, got, steady)
+			}
+		}
+		for i, seid := range seids {
+			if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, uint32(i+2), 0))); got != ie.CauseRequestAccepted {
+				t.Fatalf("deleting session %d answered cause %d", i, got)
+			}
+		}
+		c.mu.Lock()
+		left := c.measured.len() + c.buffering.len() + c.usage.pending.len() + c.usage.enforce.len()
+		free := len(c.slots.free)
+		c.mu.Unlock()
+		if left != 0 || free != n {
+			t.Fatalf("round %d: deleted sessions left %d set members and %d of %d slots free", round, left, free, n)
+		}
+	}
 }

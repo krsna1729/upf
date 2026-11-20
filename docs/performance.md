@@ -95,6 +95,25 @@ Use pointer-free slabs and flat handle indexes if implementing this layout.
 Go can keep their contents outside its pointer scan; a million heap objects
 and a million pointers are not required merely because the control plane is Go.
 
+**Measured on perf/session-pointer-free (2026-11-20, after plan #2 steps 1,
+1b+3a, 3b and 2; 20,000 counted sessions of this fixture,
+`TestASessionHoldsAtMostItsBytes`,
+`TestASessionIsFewObjectsTheCollectorBarelyScans`):** 1,318.9 B of live heap
+per session (1,567 B heap per item), of which the collector scans 339.4 B, in
+11.02 heap objects. Before the series: 1,511.6 B live, 894.5 B scanned, 17.03
+objects. The records are still Go objects: `Session` 224 B, `pdr` 172 B × 2,
+`far` 40 B × 2, `qer` 16 B, `urr` 112 B (`unsafe.Sizeof`), 776 B against the
+640 B core above, plus 96 B of the four per-kind `idMap` slices that point at
+them. Every record is pointer-free and noscan; the `Session` and those slices
+account for 320 of the 339.4 scanned bytes [INFERENCE: from their sizes, the
+rest being the session maps' groups]. The other ~447 B/session is the
+store (rule key blobs, held-handle list, blob entries and index), the claim
+and F-TEID indexes, the session maps and slot table [INFERENCE: split by
+difference, not measured per structure]. At a million sessions this is about
+1.32 GB of live control state [INFERENCE: index load factors differ at that
+scale], against the 1–1.25 KiB/session target; the remaining structural gap is
+the per-record objects and their pointers (plan #2 step 4).
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
@@ -2228,6 +2247,109 @@ delete/re-establish. Canonical backing must be non-scannable; report descriptor/
 side-object scanning explicitly. Demonstrate the indexed fixture budget or
 explain its measured excess. Paired plain runs must improve GC CPU/service cost
 without lifecycle, accounting, refusal or hard-budget regressions.
+
+**Status (perf/session-pointer-free, steps 1, 1b+3a, 3b and 2 done; step 4
+not started, see below):** the leaf records (`pdr`,
+`far`, `qer`, `urr`) hold no Go pointers. Shared provisioning (PDI/FAR
+extensions, QER policy, URR limits, tunnel local end, SDF filters) is a uint32
+handle into a refcounted, deduplicating per-compiler table with open-addressing
+index and lock-free segmented reads (`internal/session/store.go`); ≤2 QER/URR/
+SDF ids live inline in the PDR, longer lists and each session's held-handle
+list in a noscan byte-segment pool. A session holds one reference per distinct
+handle; snapshots and stale forms take none, and handles a session stopped
+naming are given back at quiescent points (`trim`, deferred while a
+modification's snapshot is outstanding) and at session end (`drop`). Measured
+at 20,000 counted sessions (`TestASessionHoldsAtMostItsBytes`,
+`TestASessionIsFewObjectsTheCollectorBarelyScans`): live 1,511.6 → 1,403 B,
+scanned 894.5 → 567 B, objects 17.03 → 14.03 per session; heap per item
+1,894 → 1,747 B. Mass delete returns every table entry and blob, and
+re-establishment reuses them without segment growth
+(`TestDeletedSessionsGiveTheStoreBack`). Establish/Delete/ChangeLifecycle
+allocs/op are unchanged (251/27/203).
+
+**Step 1b+3a (rule identities and their owners):** each PDR's rule keys are
+store blobs (one byte naming the table, then the key's masks, values and
+ranges) listed by handle in the PDR (`pdr.rules`, ≤2 inline), so `pdr` holds
+no pointer at all. `Compiler.rules map[string]uint64` is replaced by a noscan
+open-addressing index of 16-byte slots (fingerprint, key blob handle, owner
+SEID; `store.claims`) that confirms a fingerprint match by comparing the whole
+key, holds its own reference to the key, and shrinks by half below 1/8 full.
+ARP claims share it. The keys a session claims are listed in the tail of its
+held-handle blob (`kindClaim`), not a `[]string`. Claim, refusal, give-up-in-
+settle and release semantics are unchanged; the existing collision, ARP and
+rollback tests pass. Measured at 20,000 counted sessions, parent → this step:
+live 1,402.9 → 1,395.5 B, scanned 566.5 → 431.3 B, objects 14.03 → 11.03 per
+session, heap per item 1,776 → 1,660 B; allocs/op Establish 250 → 246, Delete
+26 → 26, ChangeLifecycle graph/appliance/session-major 203/203/356 →
+194/194/347 (`-benchtime=2000x`, same machine, both arms).
+
+**Step 3b (F-TEID owners):** `byFTEID map[fteidKey]fteidOwner`, whose owner
+held a `*Session`, is a noscan open-addressing index of 40-byte slots (the
+whole key, the context shifted left over the direction bit, the owner's local
+SEID; `fteidIndex`) compared by whole key, shrinking by half below 1/8 full.
+SEIDs are never reissued, so the owner needs no session lookup; the TEID and
+context reference counts (`teidClaimed`, `contextOf`) are unchanged. Measured
+at 20,000 counted sessions, previous step → this step: live 1,395.5 →
+1,368.9 B, scanned 431.3 → 339.5 B, objects 11.03 → 11.03 per session, heap
+per item 1,660 → 1,631 B; allocs/op unchanged (246/26/194/194/347).
+
+**Step 2 (per-session work sets):** `measured`, `buffering` and the usage
+tick's `pending`/`spare`/`enforce` sets were `map[uint64]struct{}` by SEID:
+noscan, but 27.3 B per entry at 20,000 entries and 37.7 B at a million
+(`HeapAlloc` delta of such a map, 2026-11-20), and a counted session sits in
+two of them. Each session now takes a dense slot (`sessionSlots`: slot →
+SEID array and a free list, slot taken on first joining a set, freed in
+`releaseSession`), and the sets are bitsets over slots (`sessionSet`). The
+usage tick pages its private work set and resolves slots to SEIDs a page
+(`tickHold`) per lock hold; a slot released after the take selects at most one
+unnecessary evaluation of its next holder, and a gone session's bits are
+cleared only while the slot is still its own. This did not need step 4: the
+slot is the index step 4's session slab would use. Measured at 20,000
+counted sessions, previous step → this step: live 1,368.9 → 1,318.9 B,
+scanned 339.5 → 339.4 B, objects 11.03 → 11.02 per session, heap per item
+1,631 → 1,567 B; allocs/op unchanged (246/26/194/194/347).
+
+**Step 4 (records into segmented slabs) stops here.** A record's lifetime is
+the collector's today, and four owners copy or hold records past the model:
+a modification's snapshot (`cloneIDMap` copies that rollback publishes), a
+replaced PDR's stale form and the removed lists (`sessionChanges`, kept until
+`settle`), and readers that walk `s.PDRs` without `c.mu` (`removal`,
+`foldSession` in `apply`). A slab slot freed and reused under any of them
+reads another session's record silently, where a Go object stays alive. A
+correct step 4 therefore needs an explicit free at settle, rollback,
+modification success and session end, plus a generation/epoch check for the
+out-of-lock readers, and it changes every `*pdr`/`*far`/`*qer`/`*urr` user (89
+lines name those types outside tests) in one cut, since keeping both object models is
+ruled out above. That is a change of its own, reviewed for rollback, not a
+tail of this series. What it would buy at this fixture [INFERENCE]: the 11.02
+objects per session fall to about two (the `Session` and one slab
+reference) and the scanned 339.4 B to the `Session` alone; live bytes move
+little, since the records are already compact and noscan. The `Session.slot`
+of step 2 is the index such a slab would use.
+
+**1M churn, paired (2026-11-20).** `ci/bench-churn.py`, 1M resident sessions,
+10K/s offered, `GOGC=25`, normal backing, one BESS stage (`dd22783d`), order
+main `2a600a4` / branch / branch / main, AC power, turbo off, no builds
+(`.scratch/evidence/session-20261120`; the two values per arm are its two
+runs):
+
+| | main | steps 1–3 |
+|---|---:|---:|
+| live heap after the fill (MiB) | 1,503 / 1,602 | 1,370 / 1,369 |
+| `upfd` memory.peak (MiB) | 2,332 / 2,323 | 2,062 / 2,068 |
+| FAR: completed/s | 6,118 / 5,973 | 7,721 / 7,733 |
+| FAR: p99 (ms) | 280.9 / 261.2 | 140.4 / 140.2 |
+| FAR: GC CPU share of `upfd` | 46.0% / 44.6% | 36.2% / 36.4% |
+| replace: completed/s | 1,505 / 1,563 | 1,827 / 1,871 |
+| replace: p99 (ms) | 329.4 / 333.2 | 212.4 / 215.4 |
+| establish: p50 / p99 (ms) | 1.34, 1.34 / 1,468, 1,387 | 2.39, 2.25 / 312, 321 |
+| delete: completed/s, p99 (ms) | 5,414, 276 / 5,210, 287 | 6,105, 171 / 6,063, 174 |
+
+All four runs were overloaded at 10K/s (cause 75 refusals in every cell; on
+the branch fewer for FAR, replace and delete, equal for establish), so
+completed/s is the capacity a single `upfd` CPU reaches.
+The one regression is establish p50 (1.3 → 2.3 ms) while its p99 falls 78%;
+interning shared provisioning on establish is the likely cost [INFERENCE].
 
 #### 3. Reduce native allocation and reclamation cost without hiding memory
 
