@@ -507,9 +507,11 @@ type Compiler struct {
 	reservedSessions uint32              // preparing or unanswered establishments; protected by mu
 	// measured tracks URR membership for activity polling and rare End Marker
 	// events, not an ordinary per-tick walk. buffering is the BUFF+NOCP set
-	// EvaluateDownlinks walks and prunes.
-	measured  map[uint64]struct{}
-	buffering map[uint64]struct{}
+	// EvaluateDownlinks walks and prunes. Both are bitsets over the sessions'
+	// slots (slots).
+	measured  sessionSet
+	buffering sessionSet
+	slots     sessionSlots
 	nextSEID  uint64
 	// byFTEID is the owner of every claimed exact F-TEID admission key, and
 	// the admission context the key writes. It is also the TEIDs' and the
@@ -650,19 +652,17 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		}
 	}
 	c := &Compiler{
-		cfg:       cfg,
-		target:    newTarget(cfg),
-		ap:        ap,
-		log:       log,
-		sessions:  map[uint64]*Session{},
-		byCP:      map[uint64]*Session{},
-		buffering: map[uint64]struct{}{},
-		measured:  map[uint64]struct{}{},
-		nextSEID:  1,
-		actions:   newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
-		policies:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
-		meters:    newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
-		teids:     newIDPool(cfg.MaxTEIDs, teidReuseDelay),
+		cfg:      cfg,
+		target:   newTarget(cfg),
+		ap:       ap,
+		log:      log,
+		sessions: map[uint64]*Session{},
+		byCP:     map[uint64]*Session{},
+		nextSEID: 1,
+		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		policies: newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
+		meters:   newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
+		teids:    newIDPool(cfg.MaxTEIDs, teidReuseDelay),
 		// A context never reaches the wire (GtpuDecap writes it, the PDR key
 		// matches it), so it may be reused at once -- and over a 2^31 space a
 		// grace would hold every release until a walk that never ends.
@@ -750,6 +750,10 @@ type Session struct {
 	// erases it.
 	sessionID   uint32
 	sessionLive bool
+
+	// slot is the session's place in the compiler's session sets (slotOf),
+	// 0 before it joins one.
+	slot uint32
 
 	// A failed or overlapping write can leave the dataplane at another model.
 	// The next isolated write must restate all records before deltas are safe.
@@ -1861,10 +1865,6 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 func (c *Compiler) forget(s *Session) {
 	c.mu.Lock()
 	delete(c.sessions, s.LocalSEID)
-	delete(c.measured, s.LocalSEID)
-	delete(c.buffering, s.LocalSEID)
-	delete(c.usage.pending, s.LocalSEID)
-	delete(c.usage.enforce, s.LocalSEID)
 	c.usage.timers.set(s.LocalSEID, time.Time{})
 	if c.byCP[s.CPSEID] == s {
 		delete(c.byCP, s.CPSEID)
@@ -1877,16 +1877,16 @@ func (c *Compiler) forget(s *Session) {
 // The caller holds the lock. Counter ownership is registered at the first read.
 func (c *Compiler) track(s *Session) {
 	if s.URRs.len() > 0 {
-		c.measured[s.LocalSEID] = struct{}{}
+		c.measured.add(c.slotOf(s))
 		c.queueUsage(s)
-	} else {
-		delete(c.measured, s.LocalSEID)
-		delete(c.usage.pending, s.LocalSEID)
+	} else if s.slot != 0 {
+		c.measured.remove(s.slot)
+		c.usage.pending.remove(s.slot)
 	}
 	c.scheduleUsage(s)
 	for _, p := range s.PDRs.all() {
 		if p.notify {
-			c.buffering[s.LocalSEID] = struct{}{}
+			c.buffering.add(c.slotOf(s))
 			return
 		}
 	}
@@ -2147,6 +2147,17 @@ func (c *Compiler) releaseSession(s *Session) {
 	// the session's own rules rather than a walk of every live key under the
 	// lock -- which is what a million sessions make unaffordable.
 	c.st.dropClaims(s)
+	// It leaves every session set, and its slot is free for the next session.
+	// A tick that took its work set before this keeps the bit; the slot then
+	// selects at most one unnecessary evaluation of whoever holds it next.
+	if s.slot != 0 {
+		c.measured.remove(s.slot)
+		c.buffering.remove(s.slot)
+		c.usage.pending.remove(s.slot)
+		c.usage.enforce.remove(s.slot)
+		c.slots.release(s.slot)
+		s.slot = 0
+	}
 	// Each id once per pool: a session says its ids once per PDR, and two
 	// uplink PDRs sharing a pinned F-TEID would otherwise release it twice --
 	// the second release finds the reservation gone and queues an SMF's value

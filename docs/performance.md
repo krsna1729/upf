@@ -2273,6 +2273,22 @@ at 20,000 counted sessions, previous step → this step: live 1,395.5 →
 1,368.9 B, scanned 431.3 → 339.5 B, objects 11.03 → 11.03 per session, heap
 per item 1,660 → 1,631 B; allocs/op unchanged (246/26/194/194/347).
 
+**Step 2 (per-session work sets):** `measured`, `buffering` and the usage
+tick's `pending`/`spare`/`enforce` sets were `map[uint64]struct{}` by SEID:
+noscan, but 27.3 B per entry at 20,000 entries and 37.7 B at a million
+(`HeapAlloc` delta of such a map, 2026-11-20), and a counted session sits in
+two of them. Each session now takes a dense slot (`sessionSlots`: slot →
+SEID array and a free list, slot taken on first joining a set, freed in
+`releaseSession`), and the sets are bitsets over slots (`sessionSet`). The
+usage tick pages its private work set and resolves slots to SEIDs a page
+(`tickHold`) per lock hold; a slot released after the take selects at most one
+unnecessary evaluation of its next holder, and a gone session's bits are
+cleared only while the slot is still its own. This did not need step 4: the
+slot is the index step 4's session slab would use. Measured at 20,000
+counted sessions, previous step → this step: live 1,368.9 → 1,318.9 B,
+scanned 339.5 → 339.4 B, objects 11.03 → 11.02 per session, heap per item
+1,631 → 1,567 B; allocs/op unchanged (246/26/194/194/347).
+
 Not yet done: records are still individually allocated (step 4). The 1M GC
 CPU/RSS effect is [INFERENCE] until the paired churn run.
 

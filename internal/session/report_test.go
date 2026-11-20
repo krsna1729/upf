@@ -207,6 +207,7 @@ func boundedTick(t *testing.T, sessions, perSession int) (*Compiler, *boundedRea
 	for i := range sessions {
 		s := *model
 		s.LocalSEID = seid + 1 + uint64(i)
+		s.slot = 0 // a copy is another session: it takes a slot of its own
 		s.PDRs = idMap[uint16, *pdr]{}
 		pdrs := make([]pdr, perSession)
 		for j := range pdrs {

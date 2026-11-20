@@ -4,6 +4,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"math/bits"
 	"slices"
 	"time"
 
@@ -23,27 +24,138 @@ type counterOwnerBlock struct {
 }
 
 type usageWork struct {
-	owners  []*counterOwnerBlock
-	pending map[uint64]struct{}
-	spare   map[uint64]struct{}
+	owners []*counterOwnerBlock
+	// pending is the sessions the next usage tick reads; spare is the set
+	// the previous tick took, emptied, waiting to be pending again.
+	pending sessionSet
+	spare   sessionSet
 	acks    map[string]uint64
 	changes []uint32
 	seids   []uint64
+	slots   []uint32 // seids' slots, in step
 	ids     map[string][]uint32
 	read    []bess.RuleCount
-	enforce map[uint64]struct{}
+	enforce sessionSet
 	timers  usageDeadlines
 	clock   time.Time
+}
+
+// sessionSlots numbers live sessions densely from 1 (Session.slot), so a set
+// of sessions is a bitset over slots (sessionSet) rather than a map of SEIDs:
+// a bit per session where a map[uint64]struct{} entry cost 27 B at 20,000
+// entries and 38 B at a million. seids[slot] is the slot's session, 0 while
+// the slot is free; a freed slot is the next one taken. A session takes its
+// slot when it first joins a set (slotOf) and gives it back in
+// releaseSession, so both arrays are bounded by the most sessions live at
+// once. An establishment whose transaction went unanswered is never released
+// (its ids stay allocated, the safe failure) and keeps its slot too.
+type sessionSlots struct {
+	seids []uint64
+	free  []uint32
+}
+
+func (x *sessionSlots) take(seid uint64) uint32 {
+	if n := len(x.free); n != 0 {
+		slot := x.free[n-1]
+		x.free = x.free[:n-1]
+		x.seids[slot] = seid
+		return slot
+	}
+	if len(x.seids) == 0 {
+		x.seids = append(x.seids, 0) // slot 0 is no slot
+	}
+	x.seids = append(x.seids, seid)
+	return uint32(len(x.seids) - 1)
+}
+
+func (x *sessionSlots) release(slot uint32) {
+	x.seids[slot] = 0
+	x.free = append(x.free, slot)
+}
+
+// slotOf is s's slot, taken if it has none. The caller holds the lock.
+func (c *Compiler) slotOf(s *Session) uint32 {
+	if s.slot == 0 {
+		s.slot = c.slots.take(s.LocalSEID)
+	}
+	return s.slot
+}
+
+// sessionSet is a set of sessions by slot: a bitset, noscan, with its
+// member count. It grows to the highest slot added and is cleared in place.
+type sessionSet struct {
+	words []uint64
+	n     int
+}
+
+func (b *sessionSet) add(slot uint32) {
+	w := int(slot / 64)
+	if w >= len(b.words) {
+		b.words = append(b.words, make([]uint64, w+1-len(b.words))...)
+	}
+	if bit := uint64(1) << (slot % 64); b.words[w]&bit == 0 {
+		b.words[w] |= bit
+		b.n++
+	}
+}
+
+func (b *sessionSet) remove(slot uint32) {
+	if w := int(slot / 64); w < len(b.words) {
+		if bit := uint64(1) << (slot % 64); b.words[w]&bit != 0 {
+			b.words[w] &^= bit
+			b.n--
+		}
+	}
+}
+
+func (b *sessionSet) has(slot uint32) bool {
+	w := int(slot / 64)
+	return w < len(b.words) && b.words[w]&(uint64(1)<<(slot%64)) != 0
+}
+
+func (b *sessionSet) len() int { return b.n }
+
+func (b *sessionSet) clear() {
+	clear(b.words)
+	b.n = 0
+}
+
+// union adds every member of o.
+func (b *sessionSet) union(o *sessionSet) {
+	for w, word := range o.words {
+		for ; word != 0; word &= word - 1 {
+			b.add(uint32(w*64 + bits.TrailingZeros64(word)))
+		}
+	}
+}
+
+// page appends to slots up to limit members at or after slot from, in slot
+// order, and returns where the next page starts: 0 once none is left (slot 0
+// is never a member). A tick takes a set in pages so that no hold of the lock
+// walks it whole.
+func (b *sessionSet) page(slots []uint32, from uint32, limit int) ([]uint32, uint32) {
+	for w := int(from / 64); w < len(b.words); w++ {
+		word := b.words[w]
+		if w == int(from/64) {
+			word &^= uint64(1)<<(from%64) - 1
+		}
+		for ; word != 0; word &= word - 1 {
+			slot := uint32(w*64 + bits.TrailingZeros64(word))
+			if limit == 0 {
+				return slots, slot
+			}
+			slots = append(slots, slot)
+			limit--
+		}
+	}
+	return slots, 0
 }
 
 func (c *Compiler) queueUsage(s *Session) {
 	if s.URRs.len() == 0 {
 		return
 	}
-	if c.usage.pending == nil {
-		c.usage.pending = make(map[uint64]struct{})
-	}
-	c.usage.pending[s.LocalSEID] = struct{}{}
+	c.usage.pending.add(c.slotOf(s))
 }
 
 func (c *Compiler) ownUsage(s *Session) {
@@ -154,7 +266,7 @@ func (c *Compiler) scheduleUsage(s *Session) {
 
 func (c *Compiler) collectUsageChanges(ctx context.Context) {
 	c.mu.Lock()
-	active := len(c.measured) != 0
+	active := c.measured.len() != 0
 	c.mu.Unlock()
 	if !active || c.counters == nil {
 		return
@@ -217,7 +329,7 @@ func (c *Compiler) collectUsageChanges(ctx context.Context) {
 	}
 }
 
-func (c *Compiler) takeUsageWork(now time.Time) map[uint64]struct{} {
+func (c *Compiler) takeUsageWork(now time.Time) sessionSet {
 	c.mu.Lock()
 	// Concurrent changes enqueue already-due timers directly. They cannot
 	// consume this bounded heap walk's budget and delay an older quota.
@@ -247,7 +359,7 @@ func (c *Compiler) takeUsageWork(now time.Time) map[uint64]struct{} {
 	}
 	c.mu.Lock()
 	work := c.usage.pending
-	c.usage.pending, c.usage.spare = c.usage.spare, nil
+	c.usage.pending, c.usage.spare = c.usage.spare, sessionSet{}
 	c.mu.Unlock()
 	return work
 }

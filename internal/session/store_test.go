@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/maphash"
 	"net/netip"
+	"slices"
 	"testing"
 )
 
@@ -258,5 +259,42 @@ func TestTheFTEIDIndexComparesWholeKeysAndShrinks(t *testing.T) {
 	}
 	if x.live != 0 || len(x.slots) > 16 {
 		t.Fatalf("an emptied index holds %d keys in %d slots", x.live, len(x.slots))
+	}
+}
+
+// TestASessionSetPagesItsMembersInOrder: a set counts its members once, pages
+// them in slot order across word boundaries, resumes where a page stopped,
+// and a union adds only what is missing.
+func TestASessionSetPagesItsMembersInOrder(t *testing.T) {
+	var a, b sessionSet
+	want := []uint32{1, 63, 64, 65, 127, 128, 1000}
+	for _, slot := range want {
+		a.add(slot)
+		a.add(slot)
+	}
+	if a.len() != len(want) || !a.has(64) || a.has(2) || a.has(5000) {
+		t.Fatalf("a set of %d holds %d", len(want), a.len())
+	}
+	var got []uint32
+	for from := uint32(0); ; {
+		got, from = a.page(got, from, 3)
+		if from == 0 {
+			break
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("pages gave %v, want %v", got, want)
+	}
+	b.add(64)
+	b.add(7)
+	b.union(&a)
+	a.remove(64)
+	a.remove(64)
+	if b.len() != len(want)+1 || a.len() != len(want)-1 || a.has(64) {
+		t.Fatalf("union holds %d, want %d; removal left %d", b.len(), len(want)+1, a.len())
+	}
+	b.clear()
+	if b.len() != 0 || b.has(7) {
+		t.Fatal("a cleared set kept a member")
 	}
 }
