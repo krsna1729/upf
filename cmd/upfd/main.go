@@ -283,6 +283,7 @@ func run() error {
 	// The session layer, when there is one: the metrics endpoint reports what
 	// it holds whatever the run, and the reporting loop needs it to exist.
 	var compiler *session.Compiler
+	var admission *heapAdmissionRecovery
 	if *bessAddr != "" {
 		client, err := bess.Dial(ctx, *bessAddr)
 		if err != nil {
@@ -332,9 +333,8 @@ func run() error {
 				graph.N4Addr = a
 			}
 		}
-		var admission *heapAdmissionRecovery
 		if fraction := *heapAdmission; fraction > 0 {
-			admission = newHeapAdmission(fraction, heap.read)
+			admission = newHeapAdmission(fraction, admittedSessionBytes, heap.read, log)
 			graph.Admit = admission.admit
 		}
 		cfg.Sessions = session.New(graph, client, log)
@@ -473,7 +473,7 @@ func run() error {
 	// The management endpoint: this node's own numbers, so an operator reads
 	// them from the same place a scraper does. It is off unless asked for.
 	if *metricsAddr != "" {
-		mux, ln, err := metricsServer(*metricsAddr, metricsHandler(compiler, srv, reports, heap))
+		mux, ln, err := metricsServer(*metricsAddr, metricsHandler(compiler, srv, reports, heap, admission))
 		if err != nil {
 			return err
 		}
