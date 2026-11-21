@@ -233,7 +233,13 @@ func encodeStruct(b []byte, md protoreflect.MessageDescriptor, v reflect.Value) 
 		return b, layout.err
 	}
 	fds := md.Fields()
-	// Validate names before encoding, even when their value is JSON null.
+	// Bind present fields in one pass, then emit in descriptor order.
+	// Zero means absent; a negative index records a duplicate alias.
+	var inline [16]int
+	bound := inline[:]
+	if fds.Len() > len(bound) {
+		bound = make([]int, fds.Len())
+	}
 	for _, f := range layout.fields {
 		if !fieldPresent(f, v.Field(f.index)) {
 			continue
@@ -245,28 +251,30 @@ func encodeStruct(b []byte, md protoreflect.MessageDescriptor, v reflect.Value) 
 		if fd == nil {
 			return b, fmt.Errorf("unknown field %q", f.name)
 		}
+		i := fd.Index()
+		switch {
+		case bound[i] == 0:
+			bound[i] = f.index + 1
+		case bound[i] > 0:
+			bound[i] = -bound[i]
+		}
 	}
 	var room [4]protoreflect.OneofDescriptor
 	oneofs := room[:0]
 	for i := range fds.Len() {
 		fd := fds.Get(i)
 		value := reflect.Value{}
-		found := false
-		for _, f := range layout.fields {
-			fv := v.Field(f.index)
-			if !fieldPresent(f, fv) {
-				continue
+		if index := bound[i]; index != 0 {
+			field := index
+			if field < 0 {
+				field = -field
 			}
-			if f.name != fd.JSONName() && (f.name != fd.TextName() || fds.ByJSONName(f.name) != nil) {
-				continue
-			}
-			if found {
-				return b, fmt.Errorf("field %q named twice", fd.Name())
-			}
-			found = true
-			value = indirectField(fv)
+			value = indirectField(v.Field(field - 1))
 			if value.IsValid() && value.Type().PkgPath() != "" && customPayloadType(value.Type()) {
 				return b, fmt.Errorf("field %q custom marshaler requires an explicit JSON payload", fd.FullName())
+			}
+			if index < 0 {
+				return b, fmt.Errorf("field %q named twice", fd.Name())
 			}
 		}
 		// Nil pointers and nil slices are JSON null, which leaves a field unset.
