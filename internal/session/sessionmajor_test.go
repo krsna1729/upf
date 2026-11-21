@@ -233,7 +233,7 @@ func TestSessionMajorQuotaOnlyUpdatePreservesForwarding(t *testing.T) {
 	if len(rec.txns) != before {
 		t.Fatalf("a controller-only quota update wrote the dataplane")
 	}
-	if got := c.limits(sessionOf(t, c, seid).URRs.at(7)).volQuota.total; got != 2<<30 {
+	if got := c.limits(urrCopy(t, c, seid, 7)).volQuota.total; got != 2<<30 {
 		t.Fatalf("quota is %d, want %d", got, uint64(2<<30))
 	}
 	if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, 3, 0,
@@ -265,9 +265,8 @@ func TestSessionMajorEarlierNoopDoesNotOverwriteLaterForwarding(t *testing.T) {
 	}
 	seid := upFSEID(t, resp)
 	s := sessionOf(t, c, seid)
-	c.mu.Lock()
-	before := s.snapshot()
-	c.mu.Unlock()
+	before := mustSnapshot(t, c, s)
+	defer releaseSnapshot(c, &before)
 	older, _, err := c.compileModel(s, &before, false)
 	if err != nil {
 		t.Fatal(err)

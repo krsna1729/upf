@@ -294,7 +294,7 @@ func TestRemovingAURRAPDRStillNamesReportsAndUnlinksIt(t *testing.T) {
 	if n := len(rules(rec.last())); n != 0 {
 		t.Errorf("removing usage measurement changed %d classifier records", n)
 	}
-	if p := sessionOf(t, c, seid).PDRs.at(1); p.drop || p.urrIDs.len() != 0 {
+	if p := pdrCopy(t, c, seid, 1); p.drop || p.urrIDs.len() != 0 {
 		t.Errorf("PDR drop=%v URRs=%v, want forwarding without measurement", p.drop, c.st.ids(&p.urrIDs))
 	}
 	if n := len(rec.entries); n != 0 {
@@ -351,7 +351,7 @@ func TestRateAndQuotaModificationsPreserveTheUsageWindow(t *testing.T) {
 	if got := cause(t, c.Modify(attach)); got != ie.CauseRequestAccepted {
 		t.Fatalf("attaching QER cause %d", got)
 	}
-	q := sessionOf(t, c, seid).QERs.at(9)
+	q := qerCopy(t, c, seid, 9)
 	ul, dl := q.meterUL, q.meterDL
 	if got := cause(t, c.Modify(query(seid, 3,
 		ie.NewUpdateQER(ie.NewQERID(9), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),

@@ -114,6 +114,17 @@ difference, not measured per structure]. At a million sessions this is about
 scale], against the 1–1.25 KiB/session target; the remaining structural gap is
 the per-record objects and their pointers (plan #2 step 4).
 
+**Measured on perf/session-slabs (2026-11-21, plan #2 step 4; same fixture
+and tests):** 1,194.8 B of live heap per session (1,279 B heap per item), of
+which the collector scans 94.1 B, in 2.03 heap objects: the `Session`
+(144 B, pointers in its first 64) and its noscan record index (six 8-byte
+(id, handle) pairs). The records live in per-kind segmented noscan slabs
+(`internal/session/slab.go`) addressed by uint32 handles carrying a
+generation; a slab costs its record size plus a byte of generation per slot
+and grows by 1024-record segments that are never given back. At a million
+sessions this is about 1.19 GB of live control state [INFERENCE: index load
+factors differ at that scale].
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
@@ -2248,8 +2259,8 @@ side-object scanning explicitly. Demonstrate the indexed fixture budget or
 explain its measured excess. Paired plain runs must improve GC CPU/service cost
 without lifecycle, accounting, refusal or hard-budget regressions.
 
-**Status (perf/session-pointer-free, steps 1, 1b+3a, 3b and 2 done; step 4
-not started, see below):** the leaf records (`pdr`,
+**Status (perf/session-pointer-free, steps 1, 1b+3a, 3b and 2 done;
+perf/session-slabs, step 4 done, see below):** the leaf records (`pdr`,
 `far`, `qer`, `urr`) hold no Go pointers. Shared provisioning (PDI/FAR
 extensions, QER policy, URR limits, tunnel local end, SDF filters) is a uint32
 handle into a refcounted, deduplicating per-compiler table with open-addressing
@@ -2309,23 +2320,82 @@ counted sessions, previous step → this step: live 1,368.9 → 1,318.9 B,
 scanned 339.5 → 339.4 B, objects 11.03 → 11.02 per session, heap per item
 1,631 → 1,567 B; allocs/op unchanged (246/26/194/194/347).
 
-**Step 4 (records into segmented slabs) stops here.** A record's lifetime is
-the collector's today, and four owners copy or hold records past the model:
-a modification's snapshot (`cloneIDMap` copies that rollback publishes), a
-replaced PDR's stale form and the removed lists (`sessionChanges`, kept until
-`settle`), and readers that walk `s.PDRs` without `c.mu` (`removal`,
-`foldSession` in `apply`). A slab slot freed and reused under any of them
-reads another session's record silently, where a Go object stays alive. A
-correct step 4 therefore needs an explicit free at settle, rollback,
-modification success and session end, plus a generation/epoch check for the
-out-of-lock readers, and it changes every `*pdr`/`*far`/`*qer`/`*urr` user (89
-lines name those types outside tests) in one cut, since keeping both object models is
-ruled out above. That is a change of its own, reviewed for rollback, not a
-tail of this series. What it would buy at this fixture [INFERENCE]: the 11.02
-objects per session fall to about two (the `Session` and one slab
-reference) and the scanned 339.4 B to the `Session` alone; live bytes move
-little, since the records are already compact and noscan. The `Session.slot`
-of step 2 is the index such a slab would use.
+**Step 4 (records into segmented slabs): design.** A record's lifetime was
+the collector's, and four owners copy or hold records past the model: a
+modification's snapshot (copies rollback publishes), a replaced PDR's stale
+form and the removed lists (`sessionChanges`, kept until `settle`), and
+`removal`, which walked `s.PDRs` without `c.mu` (the deletion and the
+association end; `foldSession` takes the lock itself). A slab slot freed and
+reused under any of them reads another session's record silently, where a Go
+object stays alive. The design (`internal/session/slab.go`):
+
+- *Layout.* One slab per kind (`records`: `slab[pdr]`, `slab[far]`,
+  `slab[qer]`, `slab[urr]`) of 1024-record segments, each a noscan array that
+  never moves, with a parallel one-byte generation array. Segments are kept
+  for reuse, never given back, like the store's tables.
+- *Handle.* uint32: the slot index in the low 24 bits (index 0 unused, so 0
+  names nothing; 2^24−1 records of a kind per compiler, past which an
+  allocation is refused with cause 75, not a panic) and the slot's
+  generation in the top byte. A free zeroes the record and moves the
+  generation on; a read or free through a handle whose generation no longer
+  matches panics.
+- *Session index.* A session lists its records in one noscan slice
+  (`recIndex`): the PDRs', FARs', QERs' and URRs' (id, handle) pairs in turn,
+  each run sorted, copy-on-write like the `idMap`s it replaces, moving to a
+  map per kind past 16 records of one kind. `s.PDRs()` and its kin are views
+  that resolve a handle to a `*pdr` borrowed for the current lock hold.
+- *Owners and free points.* Every handle has one owner, which frees it. The
+  model (index, `pending.removed`/`stale`, removed QERs): `merge` frees a FAR
+  or URR it removes and a removed PDR a create of the same id makes live
+  again (`forgetRemoval`); `settle` frees the removals and stale forms once
+  the dataplane took the transaction; `releaseSession` frees everything and
+  empties the index (so a late compile of a released session reads none).
+  A snapshot copies every record the model names into slots of its own:
+  `rollback` frees the failed model's and hands the snapshot's to the model
+  (or frees them, when the session was released meanwhile); a modification
+  that stands (`settle`, or an unknown outcome) frees the snapshot's.
+- *Readers.* Every record read and every free holds `c.mu`, and a record
+  pointer is never kept across an unlock, so no reader can hold a slot while
+  it is freed. `removal` now walks the records under the lock (it costs the
+  session's own records per hold, and the association end takes one hold per
+  session). The generation is the check on this rule, not its mechanism: it
+  catches a stale read for 255 reuses of a slot and wraps after; tests also
+  run with every record read checking that the lock is held
+  (`slabLockCheck`, a `TryLock` that must fail). The lock moved over three
+  other unlocked reads: a modification's queried and removed URRs
+  (`requestedURRs`), the PDRs it reports created, and the counts the
+  deletion and the log lines read. A merge or compile of a released session
+  is refused (`errSessionGone`, cause 65): a modification the association
+  end overtook would otherwise add records nobody frees.
+- *The `Session`.* It stays a Go object: it is what the lock-gap holders
+  keep (a modification, a tick's `judge`, the association end's batch) and
+  what their `c.sessions[seid] == s` checks compare, so a slab slot would make
+  every such holder a reuse hazard. Step 4c puts its pointer fields first, so
+  the collector scans only that prefix, and makes `byCP` map a CP SEID to
+  the local SEID, a noscan map, instead of holding a second `*Session`.
+
+**Step 4b measured (records in slabs, all users migrated).** 20,000 counted
+sessions, main → this step: live 1,318.9 → 1,194.6 B, scanned 339.4 →
+163.6 B, objects 11.02 → 2.03 per session, heap per item 1,567 → 1,276 B;
+allocs/op Establish 246 → 241, Delete 26 → 26, ChangeLifecycle
+graph/appliance/session-major 194/194/347 → 178/178/331. A refused
+modification restores every record and leaves the slabs as they were
+(`TestARefusedModificationRestoresItsRecords`); three rounds of
+establish/modify/delete return every slot and reuse it without new segments
+(`TestSessionChurnGivesBackEverySlabSlot`); a freed handle is refused before
+and after its slot is reused (`TestAFreedRecordHandleIsRefused`); and
+deletions racing a tick's enforcement, which frees the forms an
+unknown-outcome modification left pending, never name another session's
+rules (`TestARemovalNeverReadsAnotherSessionsRecord`, also under `-race`;
+with `removal`'s lock taken out it panics on the lock check).
+
+**Step 4c measured (pointer-first `Session`, noscan `byCP`).** The
+`Session` (144 B) now ends its pointer prefix at byte 64 instead of 104, and
+`byCP` is `map[uint64]uint64`. 20,000 counted sessions, step 4b → 4c:
+scanned 163.6 → 94.1 B per session; live 1,194.6 → 1,194.8 B, objects 2.03,
+heap per item 1,276 → 1,279 B and allocs/op (241/26/178/178/331) unchanged.
+The ~30 B scanned beyond the `Session`'s 64 is the `sessions` map's groups
+[INFERENCE: by difference].
 
 **1M churn, paired (2026-11-20).** `ci/bench-churn.py`, 1M resident sessions,
 10K/s offered, `GOGC=25`, normal backing, one BESS stage (`dd22783d`), order
@@ -2350,6 +2420,31 @@ the branch fewer for FAR, replace and delete, equal for establish), so
 completed/s is the capacity a single `upfd` CPU reaches.
 The one regression is establish p50 (1.3 → 2.3 ms) while its p99 falls 78%;
 interning shared provisioning on establish is the likely cost [INFERENCE].
+
+**Step 4 at 1M, paired (2026-11-21).** `ci/bench-churn.py`, one upfd CPU,
+10K/s offered, `GOGC=25`, normal backing, BESS `767725a6`, and order
+`342eed6` / `978c9ac` / `978c9ac` / `342eed6`. All four power guards
+passed (AC on, turbo off); no concurrent builds. Raw runs:
+`.scratch/evidence/slabs-20261121/churn-*`. Ranges cover both runs per arm.
+
+| Metric | Steps 1–3 | With slabs |
+|---|---:|---:|
+| Live heap after fill (MiB) | 1,412–1,413 | 1,233–1,252 |
+| upfd cgroup peak (MiB) | 2,062–2,090 | 1,786–1,791 |
+| FAR completions/s | 6,339–7,296 | 9,262–9,316 |
+| FAR p99 (ms) | 161–244 | 101 |
+| FAR GC share of upfd CPU | 38.3–42.0% | 18.2% |
+| Replace completions/s | 1,306–1,744 | 2,351–2,385 |
+| Replace p99 (ms) | 233–331 | 164–166 |
+| Establish completions/s | 5,021–5,317 | 8,438–8,494 |
+| Establish p99 (ms) | 416–610 | 137–149 |
+| Delete completions/s | 5,216–5,953 | 7,384–7,386 |
+| Delete p99 (ms) | 178–188 | 150–154 |
+
+Every cell reconciled to 1M sessions with zero timeouts and no pending or
+uncertain requests. All modes still had refusals. Establish median latency
+rose from 3.48 to 5.24 ms in the first pair and fell from 9.11 to 4.58 ms in
+the second; there is no consistent median change in this run.
 
 #### 3. Reduce native allocation and reclamation cost without hiding memory
 

@@ -76,6 +76,12 @@ var errNoResources = errors.New("no resources available")
 // send it again whole.
 var errMandatoryIE = errors.New("a mandatory IE is missing")
 
+// errSessionGone marks a merge or compile of a session releaseSession already
+// let go of (a deletion or the association end overtook it): its records are
+// freed, and new ones would belong to nobody. The SMF is told cause 65
+// ("session context not found").
+var errSessionGone = errors.New("the session is gone")
+
 // idsOf returns a table's keys in order. Every transaction this compiler
 // writes is built from these: a map's iteration order must never decide what
 // the dataplane is told, or which id an object gets.
@@ -95,7 +101,7 @@ func idsOf[K ~uint16 | ~uint32, V any](m map[K]V) []K {
 // caller holds the lock.
 func heldFlows(s *Session) []uint32 {
 	var out []uint32
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if p.buffer && p.actionID != 0 {
 			out = append(out, p.actionID)
 		}
@@ -113,18 +119,18 @@ func heldFlows(s *Session) []uint32 {
 func pdrsInOrder(s *Session) iter.Seq2[uint16, *pdr] {
 	return func(yield func(uint16, *pdr) bool) {
 		if s != nil {
-			s.PDRs.walkOrdered(yield)
+			s.PDRs().walkOrdered(yield)
 		}
 	}
 }
 
 func qersInOrder(s *Session) iter.Seq2[uint32, *qer] {
-	return func(yield func(uint32, *qer) bool) { s.QERs.walkOrdered(yield) }
+	return func(yield func(uint32, *qer) bool) { s.QERs().walkOrdered(yield) }
 }
 
-func pdrList(s *Session) []*pdr { return s.PDRs.list() }
+func pdrList(s *Session) []*pdr { return s.PDRs().list() }
 
-func qerList(s *Session) []*qer { return s.QERs.list() }
+func qerList(s *Session) []*qer { return s.QERs().list() }
 
 func marsInOrder(s *Session) []*mar {
 	if s == nil || len(s.rare().MARs) == 0 {
@@ -158,7 +164,7 @@ func (c *Compiler) sharedRateQER(s *Session) (uint32, bool) {
 	// One association per (PDR, QER): a PDR that names the same QER twice names
 	// one rule, and counting it twice would let a duplication decide which
 	// QER polices the session.
-	refs := make(map[uint32]int, s.QERs.len())
+	refs := make(map[uint32]int, s.QERs().len())
 	for _, p := range pdrsInOrder(s) {
 		seen := make(map[uint32]bool, p.qerIDs.len())
 		for _, qid := range c.st.ids(&p.qerIDs) {
@@ -573,6 +579,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 	s := &Session{
 		LocalSEID: local,
 		CPSEID:    cpSEID,
+		rs:        &c.recs,
 	}
 	if err := c.merge(s, pdrs, fars, bars, qers, urrs, mars, removals{}); err != nil {
 		c.log.Warn("session: cannot carry the establishment request",
@@ -626,15 +633,16 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 	// resolve listed it for the ticks before it was a session, and a tick in
 	// between may have dropped it again.
 	c.track(s)
-	c.byCP[cpSEID] = s
+	c.byCP[cpSEID] = local
 	// What the merge named and then replaced goes back to the store.
 	c.st.trim(s)
+	pdrCount := s.PDRs().len()
 	c.mu.Unlock()
 	c.stats.established.Add(1)
 	c.checkpoint(kindEstablish, local, req)
 
 	c.log.Info("session: established", "cp_seid", cpSEID, "seid", local,
-		"ue_ip", s.UEIP.String(), "pdrs", s.PDRs.len(), "changes", len(changes.resources))
+		"ue_ip", s.UEIP.String(), "pdrs", pdrCount, "changes", len(changes.resources))
 	return c.establishResponse(req, cpSEID, local, ie.CauseRequestAccepted, created)
 }
 
@@ -711,7 +719,9 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	// before this request is answered.
 	var leaving []tunnelEndMarker
 	if c.endMarkersConfigured() && sndem(modificationFlags(req)) {
+		c.mu.Lock()
 		leaving = c.leavingTunnels(s, fars)
+		c.mu.Unlock()
 	}
 
 	// TS 29.244 8.2.31: DROBU asks this UPF to discard every packet the
@@ -739,9 +749,15 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	// s.copies keeps trim from giving them back until rollback or settle
 	// has decided which model stands.
 	c.mu.Lock()
-	before := s.snapshot()
-	s.copies++
+	before, err := s.snapshot()
+	if err == nil {
+		s.copies++
+	}
 	c.mu.Unlock()
+	if err != nil {
+		c.log.Warn("session: no room to stage the modification", "seid", seid, "error", err)
+		return modifyResponse(req, hdr, compileCause(err), nil)
+	}
 	if err := c.merge(s, pdrs, fars, bars, qers, urrs, mars, rm); err != nil {
 		c.mu.Lock()
 		c.rollback(s, before)
@@ -758,13 +774,17 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		c.log.Warn("session: cannot compile the modification request", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, compileCause(err), nil)
 	}
+	c.mu.Lock()
 	created := s.createdPDRsFor(c.cfg, asked)
+	pdrCount := s.PDRs().len()
+	c.mu.Unlock()
 	if err := c.apply(context.Background(), s, changes); err != nil {
 		c.mu.Lock()
 		if definiteRefusal(err) {
 			c.rollback(s, before)
 		} else {
 			// The outcome is unknown: the merged model stands, as its ids do.
+			before.release()
 			s.copies--
 			c.st.trim(s)
 		}
@@ -783,7 +803,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		discarded = removedFlows(s)
 		c.mu.Unlock()
 	}
-	c.settle(s, true)
+	c.settle(s, &before)
 
 	// The switch has landed: the last G-PDU on each old tunnel preceded this
 	// point in the graph's own order, so the marker is what 7.3.2.2 asks for.
@@ -826,7 +846,7 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		}
 	}
 
-	c.log.Info("session: modified", "seid", seid, "pdrs", s.PDRs.len(), "changes", len(changes.resources))
+	c.log.Info("session: modified", "seid", seid, "pdrs", pdrCount, "changes", len(changes.resources))
 	c.checkpoint(kindModify, s.LocalSEID, req)
 	// The queried URRs' next window opens now that the SMF has what this one
 	// held; a request that failed above leaves it open, so the usage is
@@ -872,11 +892,12 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	// them over. Read before remove erases the model.
 	c.mu.Lock()
 	held := heldFlows(s)
+	counted := s.URRs().len() != 0
 	c.mu.Unlock()
 	// What each URR measured since its last report goes in the answer
 	// (5.2.2.3.1): read now, while the rules that count it still exist.
 	var usage []*ie.IE
-	if !c.restoring {
+	if !c.restoring && counted {
 		usage = c.terminationReports(context.Background(), s, time.Now())
 	}
 	if err := c.remove(context.Background(), s); err != nil {
@@ -929,8 +950,11 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	urrs []urrReq, mars []marReq, rm removals) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if s.released {
+		return errSessionGone
+	}
 	for _, q := range qers {
-		entry := s.QERs.at(q.id)
+		entry := s.QERs().at(q.id)
 		// A GBR above the MBR is not a policy this side can hold: the committed
 		// rate of a two-rate meter may not exceed its peak, and the SMF would
 		// have asked for a guarantee above the ceiling (8.2.7, 8.2.8). The
@@ -952,8 +976,10 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				errNotExpressible, q.id)
 		}
 		if entry == nil {
-			entry = &qer{id: q.id}
-			s.QERs.set(q.id, entry)
+			var err error
+			if entry, err = s.QERs().add(q.id, qer{id: q.id}); err != nil {
+				return err
+			}
 		}
 		// An Update QER carries what changed; every field it names replaces
 		// the one before it. The provisioning is shared, so the change is made
@@ -1000,13 +1026,15 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 	}
 	for _, f := range fars {
-		entry := s.FARs.at(f.id)
+		entry := s.FARs().at(f.id)
 		var ext farExt
 		if entry == nil {
 			// A Create FAR: every field the message carries is the record's.
-			entry = &far{id: f.id, apply: f.apply, destIfc: f.destIfc}
+			var err error
+			if entry, err = s.FARs().add(f.id, far{id: f.id, apply: f.apply, destIfc: f.destIfc}); err != nil {
+				return err
+			}
 			ext.instance = f.instance
-			s.FARs.set(f.id, entry)
 		} else {
 			// An Update FAR carries what changes (7.5.4.3): a field the message
 			// leaves out keeps the value the session has. The zero values are
@@ -1066,7 +1094,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	// forward is not checked -- there is no forward for the parameters to
 	// describe, and a dropping FAR is how this UP is told to stop.
 	for _, f := range fars {
-		entry := s.FARs.at(f.id)
+		entry := s.FARs().at(f.id)
 		if entry == nil || entry.apply&applyForw == 0 {
 			continue
 		}
@@ -1162,7 +1190,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	}
 	mergeBars(s, bars)
 	for _, u := range urrs {
-		entry := s.URRs.at(u.id)
+		entry := s.URRs().at(u.id)
 		if entry == nil {
 			if !u.create {
 				// An Update URR for a URR the session does not hold: the SMF
@@ -1170,8 +1198,10 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 				// make a URR out of half a request.
 				return fmt.Errorf("%w: the URR %d is not in the session", errNotExpressible, u.id)
 			}
-			entry = &urr{id: u.id, reported: stampOf(time.Now())}
-			s.URRs.set(u.id, entry)
+			var err error
+			if entry, err = s.URRs().add(u.id, urr{id: u.id, reported: stampOf(time.Now())}); err != nil {
+				return err
+			}
 		}
 		// An Update URR carries what changed (7.5.4.4); the fields it names
 		// replace the ones before, and the ones it leaves out stay. The
@@ -1218,19 +1248,20 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 	}
 	for _, id := range rm.pdrs {
-		if old := s.PDRs.at(id); old != nil {
-			// The records stay in the dataplane until the next compile erases
-			// them: it is the transaction that carries the removal out, so a
-			// refused modification leaves both the PDR and its records.
-			s.changes().removed = append(s.changes().removed, old)
+		// The records stay in the dataplane until the next compile erases
+		// them: it is the transaction that carries the removal out, so a
+		// refused modification leaves both the PDR and its records. The
+		// record moves to the removals, which own it until settle.
+		if h := s.PDRs().take(id); h != 0 {
+			s.changes().removed = append(s.changes().removed, h)
 		}
-		s.PDRs.del(id)
 	}
 	for _, id := range rm.fars {
-		s.FARs.del(id)
+		// Nothing names a removed FAR's record (a snapshot holds a copy).
+		s.FARs().drop(id)
 	}
 	for _, id := range rm.bars {
-		for _, f := range s.FARs.all() {
+		for _, f := range s.FARs().all() {
 			if f.hasBAR && f.barID == id {
 				// The FAR still asks to buffer under a BAR the SMF has taken
 				// away: the instruction is gone, so the association is dropped
@@ -1244,7 +1275,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		delete(s.rare().BARs, id)
 	}
 	for _, p := range pdrs {
-		old := s.PDRs.at(p.id)
+		old := s.PDRs().at(p.id)
 		if !p.create {
 			if old == nil {
 				return fmt.Errorf("%w: Update PDR names PDR %d, which the session does not hold",
@@ -1406,13 +1437,17 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		if p.ueIP.IsValid() && (p.srcIfc != ie.SrcInterfaceAccess || !p.ueIPDst) {
 			s.UEIP = p.ueIP
 		}
-		if old != nil {
-			// The form being replaced: its rule key, and the TEID it held, are
-			// erased unless the transaction that carries this update writes them
-			// (compile).
-			s.changes().stale = append(s.changes().stale, old)
+		// The form being replaced: its rule key, and the TEID it held, are
+		// erased unless the transaction that carries this update writes them
+		// (compile). It moves to the stale forms, which own it until settle;
+		// the new form takes a slot of its own.
+		oldH := s.PDRs().handle(p.id)
+		if pdr, err = s.PDRs().add(p.id, *pdr); err != nil {
+			return err
 		}
-		s.PDRs.set(p.id, pdr)
+		if oldH != 0 {
+			s.changes().stale = append(s.changes().stale, oldH)
+		}
 		if pdr.teid != 0 {
 			if err := c.claimFTEID(s, pdr); err != nil {
 				return err
@@ -1424,7 +1459,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	// could see. This is read after the PDRs are folded in, so a message that
 	// removes the PDR and its MAR together is accepted.
 	for _, id := range rm.mars {
-		for _, p := range s.PDRs.all() {
+		for _, p := range s.PDRs().all() {
 			if p.hasMAR && p.marID == id {
 				return fmt.Errorf(
 					"%w: MAR %d is still named by PDR %d", errNotExpressible, id, p.id)
@@ -1446,16 +1481,17 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			// removed and created again is not a removal (forgetRemoval).
 			continue
 		}
-		c.unlinkFromPDRs(s, id, func(p *pdr) *idList { return &p.qerIDs })
-		if entry := s.QERs.at(id); entry != nil {
+		if err := c.unlinkFromPDRs(s, id, func(p *pdr) *idList { return &p.qerIDs }); err != nil {
+			return err
+		}
+		if h := s.QERs().take(id); h != 0 {
 			// The QER goes, and its meters go with the session's other ids at
 			// teardown (releaseSession): releasing them here would hand an id
 			// back to the pool that a refused modification restores the QER
 			// to -- and that another session would then police with while this
-			// one still names it.
+			// one still names it. Its record moves to the removed QERs.
 			r := s.rareMut()
-			r.removedQERs = append(r.removedQERs, entry)
-			s.QERs.del(id)
+			r.removedQERs = append(r.removedQERs, h)
 		}
 	}
 	for _, id := range rm.urrs {
@@ -1466,8 +1502,10 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			return fmt.Errorf("%w: the URR %d is still linked by another URR of the session",
 				errNotExpressible, id)
 		}
-		c.unlinkFromPDRs(s, id, func(p *pdr) *idList { return &p.urrIDs })
-		s.URRs.del(id)
+		if err := c.unlinkFromPDRs(s, id, func(p *pdr) *idList { return &p.urrIDs }); err != nil {
+			return err
+		}
+		s.URRs().drop(id)
 	}
 	// Only PDR membership/PDIs can change SDF definitions or packet direction.
 	// FAR, QER, URR, BAR and MAR changes still go through resolve below.
@@ -1475,7 +1513,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		if err := c.resolveSDFIDs(s); err != nil {
 			return err
 		}
-		for _, p := range s.PDRs.all() {
+		for _, p := range s.PDRs().all() {
 			down, err := pdrDownlink(&c.st, p.srcIfc, p.hasUEIP, p.ueIPDst, &p.sdfs)
 			if err != nil {
 				return fmt.Errorf("PDR %d: %w", p.id, err)
@@ -1487,7 +1525,7 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		}
 	}
 	tunnelDirections := map[uint32]bool{}
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if p.teid == 0 {
 			continue
 		}
@@ -1596,7 +1634,7 @@ func (c *Compiler) resolveMAR(s *Session, m *mar) error {
 			m.tunnelIDs[which] = 0
 			continue
 		}
-		far := s.FARs.at(access.farID)
+		far := s.FARs().at(access.farID)
 		if far == nil {
 			return fmt.Errorf("%w: MAR %d's %s access names FAR %d, which the session does not hold",
 				errNotExpressible, m.id, []string{"3GPP", "non-3GPP"}[which], access.farID)
@@ -1717,10 +1755,10 @@ func (c *Compiler) resolve(s *Session) error {
 	// rate-bearing QERs is policed by one of them -- sharedRateQER says which
 	// and why).
 	shared, hasShared := c.sharedRateQER(s)
-	linkedTo := make(map[uint32]bool, s.URRs.len())
+	linkedTo := make(map[uint32]bool, s.URRs().len())
 	for _, uid := range urrIDsInOrder(s) {
-		for _, lid := range c.linked(s.URRs.at(uid)) {
-			if s.URRs.at(lid) == nil {
+		for _, lid := range c.linked(s.URRs().at(uid)) {
+			if s.URRs().at(lid) == nil {
 				// The link names a URR the session does not hold (the SMF
 				// created or updated the URR with a Linked URR ID for something
 				// it did not provision, or removed the target in the same
@@ -1743,14 +1781,14 @@ func (c *Compiler) resolve(s *Session) error {
 		// Reporting has no report of its own -- the group's is owed when a URR
 		// it is linked to is due -- so a LIUSA URR with no link in either
 		// direction is a URR the SMF asked to hear about and never would.
-		if l := c.limits(s.URRs.at(uid)); l.linkedReporting && l.linked.len() == 0 && !linkedTo[uid] {
+		if l := c.limits(s.URRs().at(uid)); l.linkedReporting && l.linked.len() == 0 && !linkedTo[uid] {
 			return fmt.Errorf(
 				"%w: URR %d asks for Linked Usage Reporting (LIUSA), and no URR of the session is linked to it",
 				errNotExpressible, uid)
 		}
 		// REEMR asks to hear of an End Marker, which only a drained End Marker
 		// log sees: accepted without one, the report could never be sent.
-		if c.limits(s.URRs.at(uid)).onEndMarker && c.cfg.GTPUEndMarkers == "" {
+		if c.limits(s.URRs().at(uid)).onEndMarker && c.cfg.GTPUEndMarkers == "" {
 			return fmt.Errorf(
 				"%w: URR %d asks for End Marker reception reports (REEMR), and this deployment tracks no End Markers",
 				errNotExpressible, uid)
@@ -1758,7 +1796,7 @@ func (c *Compiler) resolve(s *Session) error {
 	}
 	for _, p := range pdrsInOrder(s) {
 		oldDomain, oldUE, oldRelay := p.domain, p.ue, p.relay
-		far := s.FARs.at(p.farID)
+		far := s.FARs().at(p.farID)
 		dir := c.direction(p)
 		ifc, err := c.interfaceFor(p)
 		if err != nil {
@@ -1853,7 +1891,7 @@ func (c *Compiler) resolve(s *Session) error {
 		p.hasEncapQFI = false
 		var sharedUL, ownUL, sharedDL, ownDL uint32
 		for _, qid := range c.st.ids(&p.qerIDs) {
-			q := s.QERs.at(qid)
+			q := s.QERs().at(qid)
 			if q == nil {
 				// A PDR naming a QER the session does not hold: the SMF named
 				// something that is not there, and carrying the rule on without
@@ -1963,7 +2001,7 @@ func (c *Compiler) resolve(s *Session) error {
 			p.tunnel = tunnelSideOf(p.downlink())
 		}
 		for _, uid := range c.st.ids(&p.urrIDs) {
-			if s.URRs.at(uid) == nil {
+			if s.URRs().at(uid) == nil {
 				// A PDR the SMF associated with a URR it did not provision (or
 				// removed in the same message): the traffic would be counted by
 				// nobody, and the report the SMF expects for that URR would
@@ -1982,7 +2020,7 @@ func (c *Compiler) resolve(s *Session) error {
 					"%w: PDR %d names the URR %d, and this graph has no usage counters in that direction",
 					errNotExpressible, p.id, uid)
 			}
-			if s.URRs.at(uid).enforcing {
+			if s.URRs().at(uid).enforcing {
 				// The URR's quota is used up (5.2.2.2.1): the traffic of every
 				// PDR that names it stops, by compiling to the drop gate. A
 				// modification that provisions a new quota or threshold clears
@@ -2026,7 +2064,9 @@ func (c *Compiler) resolve(s *Session) error {
 			// packets. Its old selector must be erased just like a new PDI's.
 			old := *p
 			old.domain, old.ue, old.relay = oldDomain, oldUE, oldRelay
-			s.changes().stale = append(s.changes().stale, &old)
+			if err := c.keepStale(s, old); err != nil {
+				return err
+			}
 			p.rules = idList{}
 		}
 	}
@@ -2327,17 +2367,19 @@ func egressName(ifc routing.Interface, d *routing.Domains) string {
 // the PDRs that referenced it (TS 29.244 5.2.2.3.1, 5.4.5). Each changed
 // PDR's previous form joins the replaced ones, so compile erases the records
 // (its counter entry, for one) that the new form no longer writes.
-func (c *Compiler) unlinkFromPDRs(s *Session, id uint32, ids func(*pdr) *idList) {
-	for _, pid := range s.PDRs.ids() {
-		p := s.PDRs.at(pid)
+func (c *Compiler) unlinkFromPDRs(s *Session, id uint32, ids func(*pdr) *idList) error {
+	for _, pid := range s.PDRs().ids() {
+		p := s.PDRs().at(pid)
 		list := ids(p)
 		if !slices.Contains(c.st.ids(list), id) {
 			continue
 		}
-		old := *p
-		s.changes().stale = append(s.changes().stale, &old)
+		if err := c.keepStale(s, *p); err != nil {
+			return err
+		}
 		*list = c.st.ownIDs(s, slices.DeleteFunc(slices.Clone(c.st.ids(list)), func(v uint32) bool { return v == id }))
 	}
+	return nil
 }
 
 // urrLinkedByAnotherURR reports whether another URR of the session links to
@@ -2345,7 +2387,7 @@ func (c *Compiler) unlinkFromPDRs(s *Session, id uint32, ids func(*pdr) *idList)
 // link dangling, and the group's report would be missing the URR the SMF asked
 // to hear about with it.
 func (c *Compiler) urrLinkedByAnotherURR(s *Session, id uint32) bool {
-	for uid, u := range s.URRs.all() {
+	for uid, u := range s.URRs().all() {
 		if uid == id {
 			continue
 		}
@@ -2357,7 +2399,7 @@ func (c *Compiler) urrLinkedByAnotherURR(s *Session, id uint32) bool {
 }
 
 func (c *Compiler) chosenNamed(s *Session, chosen chosenFTEID) bool {
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if p.hasCHID && p.teid == chosen.TEID && p.endpointID == chosen.EndpointID &&
 			p.srcIfc == chosen.SourceInterface && c.ext(p).instance == chosen.Instance &&
 			slices.Equal(p.fteidFamilies(), chosen.Families) {
@@ -2370,7 +2412,7 @@ func (c *Compiler) chosenNamed(s *Session, chosen chosenFTEID) bool {
 // fteidKeyNamed reports whether any live PDR in the session still references an
 // exact family/address/endpoint/TEID admission key.
 func (c *Compiler) fteidKeyNamed(s *Session, key fteidKey) bool {
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if p.teid == 0 {
 			continue
 		}
@@ -2539,7 +2581,7 @@ func samePDRTunnel(before *modelSnapshot, s *Session, p *pdr) bool {
 	if before == nil {
 		return false
 	}
-	old := before.pdrs.at(p.id)
+	old := before.pdrs().at(p.id)
 	// Drop/buffer compiles can resolve a FAR without publishing its tunnel.
 	// Their model is not a written baseline when forwarding resumes.
 	if old == nil || old.drop || old.buffer || old.tunnel != p.tunnel || old.writtenTunnel != p.tunnel ||
@@ -2547,7 +2589,7 @@ func samePDRTunnel(before *modelSnapshot, s *Session, p *pdr) bool {
 		old.hasEncapQFI != p.hasEncapQFI || old.encapQFI != p.encapQFI {
 		return false
 	}
-	a, b := before.fars.at(old.farID), s.FARs.at(p.farID)
+	a, b := before.fars().at(old.farID), s.FARs().at(p.farID)
 	return a != nil && b != nil && a.teid == b.teid && a.peer() == b.peer() &&
 		a.hasMarking == b.hasMarking && a.marking == b.marking
 }
@@ -2556,7 +2598,7 @@ func (c *Compiler) sameQERMeter(before *modelSnapshot, q *qer, down bool) bool {
 	if before == nil {
 		return false
 	}
-	oldQ := before.qers.at(q.id)
+	oldQ := before.qers().at(q.id)
 	if oldQ == nil {
 		return false
 	}
@@ -2577,18 +2619,18 @@ func (c *Compiler) sameAdmissions(before *modelSnapshot, s *Session) bool {
 	if before == nil {
 		return false
 	}
-	for id, old := range before.pdrs.all() {
+	for id, old := range before.pdrs().all() {
 		if old.teid != 0 {
-			if p := s.PDRs.at(id); p == nil || p.teid == 0 {
+			if p := s.PDRs().at(id); p == nil || p.teid == 0 {
 				return false
 			}
 		}
 	}
-	for id, p := range s.PDRs.all() {
+	for id, p := range s.PDRs().all() {
 		if p.teid == 0 {
 			continue
 		}
-		old := before.pdrs.at(id)
+		old := before.pdrs().at(id)
 		if old == nil || old.teid != p.teid || old.endpointID != p.endpointID ||
 			old.wantIPv4 != p.wantIPv4 || old.wantIPv6 != p.wantIPv6 ||
 			old.endpointFamily != p.endpointFamily || old.down != p.down ||
@@ -2599,7 +2641,7 @@ func (c *Compiler) sameAdmissions(before *modelSnapshot, s *Session) bool {
 		if p.hasMAR || !c.tunnelLocalAddress(p).IsValid() || c.transportRouteDomain(p) == 0 {
 			continue
 		}
-		a, b := before.fars.at(old.farID), s.FARs.at(p.farID)
+		a, b := before.fars().at(old.farID), s.FARs().at(p.farID)
 		if a == nil || b == nil {
 			if a != b {
 				return false
@@ -2615,7 +2657,7 @@ func (c *Compiler) sameAdmissions(before *modelSnapshot, s *Session) bool {
 // removal's erase of a PDR's meters is guarded by it, so a meter another PDR's
 // QER still polices stays.
 func qerHoldsMeter(s *Session, id uint32) bool {
-	for _, q := range s.QERs.all() {
+	for _, q := range s.QERs().all() {
 		if q.meterUL == id || q.meterDL == id {
 			return true
 		}
@@ -2644,6 +2686,9 @@ func (c *Compiler) compile(s *Session) (modelWrite, []*ie.IE, error) {
 func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated bool) (modelWrite, []*ie.IE, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if s.released {
+		return modelWrite{}, nil, errSessionGone
+	}
 
 	// The rule keys this compile is the first to claim, and whether it got as
 	// far as writing them: a compile that returns an error wrote nothing (its
@@ -2683,18 +2728,18 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	s.writes++
 	admissionUnchanged := c.sameAdmissions(before, s)
 	keepSession := whole && before != nil && s.sessionLive && admissionUnchanged &&
-		before.pdrs.len() == s.PDRs.len() && before.qers.len() == s.QERs.len() &&
+		before.pdrs().len() == s.PDRs().len() && before.qers().len() == s.QERs().len() &&
 		len(before.mars) == 0 && len(s.rare().MARs) == 0
 	oldPDR := func(id uint16) *pdr {
 		if before == nil {
 			return nil
 		}
-		return before.pdrs.at(id)
+		return before.pdrs().at(id)
 	}
 
 	var created []*ie.IE
 	if wantCreated {
-		created = make([]*ie.IE, 0, s.PDRs.len())
+		created = make([]*ie.IE, 0, s.PDRs().len())
 	}
 
 	// Admission is keyed by the complete endpoint/family/local-address/TEID
@@ -2714,7 +2759,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	// deployment whose uplink table declares no qfi field, the PDI's QFI then
 	// being no part of the key -- and the session is refused with a rule
 	// failure rather than half-programmed.
-	writtenRules := make(map[uint32]struct{}, s.PDRs.len())
+	writtenRules := make(map[uint32]struct{}, s.PDRs().len())
 	// The rule identities the session retains in the transaction's end state.
 	// Only changed classifiers need their typed keys materialized; all
 	// identities still participate in collision and ownership validation.
@@ -2724,7 +2769,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		write bool
 		err   error
 	}
-	rulesOf := make(map[*pdr]pdrRules, s.PDRs.len())
+	rulesOf := make(map[*pdr]pdrRules, s.PDRs().len())
 	live := c.st.liveBuf[:0]
 	for _, p := range pdrsInOrder(s) {
 		ids, keys, err := c.pdrRuleIDs(s, p)
@@ -2748,8 +2793,8 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		return found
 	}
 	if keepSession {
-		for id, q := range s.QERs.all() {
-			old := before.qers.at(id)
+		for id, q := range s.QERs().all() {
+			old := before.qers().at(id)
 			hasRate := c.policy(q).hasRate
 			if old == nil || c.policy(old).hasRate != hasRate ||
 				(hasRate && (!c.sameQERMeter(before, q, false) || !c.sameQERMeter(before, q, true))) {
@@ -2773,14 +2818,14 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	}
 	var changes []bess.Change
 	if !keepSession {
-		changes = make([]bess.Change, 0, 4*s.PDRs.len()+s.QERs.len())
+		changes = make([]bess.Change, 0, 4*s.PDRs().len()+s.QERs().len())
 	}
 	// The ARP entries the session still holds: one per subscriber address its
 	// subscriber-side PDRs name, where the interface declares a responder. A
 	// replaced form whose address is in this set is not erased -- the entry is
 	// the same entry, written again.
 	liveARP := map[string]bool{}
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if e, ok := c.arpEntryOf(p); ok {
 			liveARP[e.claim()] = true
 		}
@@ -2789,7 +2834,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	// A removed/replaced form must not erase an entry the end state retains,
 	// whether it needs an upsert or already has the correct value.
 	liveCounters := map[string]bool{}
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		dir := c.direction(p)
 		// A dropped rule keeps its entry: the entry's existence follows the
 		// PDR (a URR still measures it, and the id is still its own), not the
@@ -2847,7 +2892,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	// not be erased in the transaction that writes it.
 	liveBuffering := map[uint32]bool{}
 	if c.cfg.Buffering != nil {
-		for _, p := range s.PDRs.all() {
+		for _, p := range s.PDRs().all() {
 			if p.buffer && p.actionID != 0 {
 				liveBuffering[p.actionID] = true
 			}
@@ -2905,7 +2950,8 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		}
 		return nil
 	}
-	for _, p := range s.pending.removedPDRs() {
+	for _, h := range s.pending.removedPDRs() {
+		p := c.recs.pdrs.at(h)
 		if err := ruleErase(p); err != nil {
 			return modelWrite{}, nil, fmt.Errorf("removed PDR %d: %w", p.id, err)
 		}
@@ -2967,7 +3013,8 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 				Key: bess.Fields(IDKey{ID: id})})
 		}
 	}
-	for _, old := range s.pending.stalePDRs() {
+	for _, h := range s.pending.stalePDRs() {
+		old := c.recs.pdrs.at(h)
 		if err := ruleErase(old); err != nil {
 			return modelWrite{}, nil, fmt.Errorf("PDR %d: %w", old.id, err)
 		}
@@ -3135,7 +3182,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 			}
 			if p.buffer {
 				changes = append(changes, c.writeBufferCounter(p)...)
-				changes = append(changes, c.writeFlowEntry(barOf(s, s.FARs.at(p.farID)), p)...)
+				changes = append(changes, c.writeFlowEntry(barOf(s, s.FARs().at(p.farID)), p)...)
 			}
 			continue
 		}
@@ -3166,7 +3213,7 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		p.writtenTunnel = p.tunnel
 		if p.tunnel != noTunnel && !samePDRTunnel(before, s, p) {
 			resource := c.tunnelRes(p.tunnel)
-			far := s.FARs.at(p.farID)
+			far := s.FARs().at(p.farID)
 			value := TunnelEntry{TEID: far.teid, LocalAddress: c.tunnelLocalAddress(p).AsSlice(), PeerAddress: far.peer().AsSlice(), TransportRouteDomain: c.transportRouteDomain(p)}
 			if p.hasEncapQFI {
 				// QFI 0 is valid; qfi_present distinguishes it from no QFI.
@@ -3299,7 +3346,7 @@ func (c *Compiler) marChanges(s *Session) ([]bess.Change, error) {
 			if m.tunnelIDs[which] == 0 {
 				continue
 			}
-			far := s.FARs.at(access.farID)
+			far := s.FARs().at(access.farID)
 			if far == nil {
 				return nil, fmt.Errorf("MAR %d's %s access names FAR %d, which the session does not hold",
 					m.id, []string{"3GPP", "non-3GPP"}[which], access.farID)
@@ -3479,7 +3526,7 @@ func (c *Compiler) pdrRuleIDs(s *Session, p *pdr) ([]uint32, []RuleKey, error) {
 // they were not. The slice is the store's, reused by the next call.
 func (c *Compiler) liveRuleKeys(s *Session) []uint32 {
 	live := c.st.liveBuf[:0]
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if ids, _, err := c.pdrRuleIDs(s, p); err == nil {
 			live = append(live, ids...)
 		}
@@ -3863,7 +3910,7 @@ func (s *Session) createdPDRsFor(cfg Config, asked map[uint16]bool) []*ie.IE {
 // createdPDRs is what the response re-states on a retransmission.
 func (s *Session) createdPDRs(cfg Config) []*ie.IE {
 	c := &Compiler{cfg: cfg}
-	out := make([]*ie.IE, 0, s.PDRs.len())
+	out := make([]*ie.IE, 0, s.PDRs().len())
 	for _, p := range pdrsInOrder(s) {
 		if p.teid != 0 {
 			out = append(out, ie.NewCreatedPDR(ie.NewPDRID(p.id), c.createdFTEID(p)))
@@ -4000,7 +4047,32 @@ func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []barReq, []qerReq, []urrReq
 // once, as removed.
 func (c *Compiler) requestedWindows(ctx context.Context, req *message.SessionModificationRequest, s *Session,
 	removeURRs []uint32, now time.Time) (queried, removed []urrWindow, err error) {
-	var ask []uint32
+	c.mu.Lock()
+	ask, held, err := c.requestedURRs(req, s, removeURRs)
+	c.mu.Unlock()
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(ask) > 0 {
+		if queried, err = c.windowsOf(ctx, s, ask, now, sinceReport); err != nil {
+			return nil, nil, err
+		}
+	}
+	if len(held) > 0 {
+		// The removal goes ahead whatever the counters say: the URR is going,
+		// and an unreadable one leaves the response without its report.
+		if removed, err = c.windowsOf(ctx, s, held, now, sinceReport); err != nil {
+			c.log.Warn("session: no termination usage report for a removed URR", "seid", s.LocalSEID, "error", err)
+			removed, err = nil, nil
+		}
+	}
+	return queried, removed, nil
+}
+
+// requestedURRs is the URRs requestedWindows reports: the ones queried and
+// not removed, and the removed ones the session holds. The caller holds the
+// lock.
+func (c *Compiler) requestedURRs(req *message.SessionModificationRequest, s *Session, removeURRs []uint32) (ask, held []uint32, err error) {
 	for _, f := range modificationFlags(req) {
 		if f != nil && f.HasQAURR() {
 			ask = urrIDsInOrder(s)
@@ -4021,7 +4093,7 @@ func (c *Compiler) requestedWindows(ctx context.Context, req *message.SessionMod
 				if err != nil {
 					return nil, nil, fmt.Errorf("%w: Query URR: %v", errNotExpressible, err)
 				}
-				if s.URRs.at(id) == nil {
+				if s.URRs().at(id) == nil {
 					return nil, nil, fmt.Errorf("%w: Query URR names URR %d, which the session does not hold", errNotExpressible, id)
 				}
 				ask = append(ask, id)
@@ -4029,26 +4101,13 @@ func (c *Compiler) requestedWindows(ctx context.Context, req *message.SessionMod
 		}
 	}
 	ask = slices.DeleteFunc(ask, func(id uint32) bool { return slices.Contains(removeURRs, id) })
-	if len(ask) > 0 {
-		if queried, err = c.windowsOf(ctx, s, ask, now, sinceReport); err != nil {
-			return nil, nil, err
-		}
-	}
-	held := make([]uint32, 0, len(removeURRs))
+	held = make([]uint32, 0, len(removeURRs))
 	for _, id := range removeURRs {
-		if s.URRs.at(id) != nil {
+		if s.URRs().at(id) != nil {
 			held = append(held, id)
 		}
 	}
-	if len(held) > 0 {
-		// The removal goes ahead whatever the counters say: the URR is going,
-		// and an unreadable one leaves the response without its report.
-		if removed, err = c.windowsOf(ctx, s, held, now, sinceReport); err != nil {
-			c.log.Warn("session: no termination usage report for a removed URR", "seid", s.LocalSEID, "error", err)
-			removed, err = nil, nil
-		}
-	}
-	return queried, removed, nil
+	return ask, held, nil
 }
 
 // removals is the objects a Session Modification Request removes: the four
@@ -5213,8 +5272,9 @@ func (c *Compiler) resolveSDFIDs(s *Session) error {
 				// Resolved filters are immutable: the PDR gets a new list,
 				// and snapshots and stale forms keep the one they name.
 				if p.rules.n != 0 {
-					old := *p
-					s.changes().stale = append(s.changes().stale, &old)
+					if err := c.keepStale(s, *p); err != nil {
+						return err
+					}
 				}
 				resolved = make([]sdfFilter, 0, p.sdfs.len())
 				for _, h := range c.st.ids(&p.sdfs) {
@@ -5476,6 +5536,9 @@ func parseCause(err error) uint8 {
 func compileCause(err error) uint8 {
 	if errors.Is(err, errMandatoryIE) {
 		return ie.CauseMandatoryIEMissing
+	}
+	if errors.Is(err, errSessionGone) {
+		return ie.CauseSessionContextNotFound
 	}
 	if errors.Is(err, errNoResources) {
 		return ie.CauseNoResourcesAvailable

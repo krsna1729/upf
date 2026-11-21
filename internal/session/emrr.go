@@ -27,7 +27,7 @@ type endMarkerKey struct {
 // F-TEID of a PDR that URR uid measures, when that URR asks for REEMR. The
 // caller holds the lock.
 func (c *Compiler) endMarkerArrived(s *Session, uid uint32, markers map[endMarkerKey]bool) bool {
-	if len(markers) == 0 || !c.limits(s.URRs.at(uid)).onEndMarker {
+	if len(markers) == 0 || !c.limits(s.URRs().at(uid)).onEndMarker {
 		return false
 	}
 	for _, p := range pdrsInOrder(s) {
@@ -70,7 +70,7 @@ func (c *Compiler) endMarkerRelays(s *Session, endpoint, teid uint32) []RelayTun
 			!c.tunnelLocalAddress(p).IsValid() || c.transportRouteDomain(p) == 0 {
 			continue
 		}
-		f := s.FARs.at(p.farID)
+		f := s.FARs().at(p.farID)
 		if f == nil || !f.hasOuter || f.teid == 0 {
 			continue
 		}

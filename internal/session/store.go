@@ -657,16 +657,16 @@ func (st *store) handles(s *Session, out []uint32) []uint32 {
 		addList(&p.urrIDs, 0)
 		addList(&p.rules, kindBlob)
 	}
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		addPDR(p)
 	}
-	for _, p := range s.pending.removedPDRs() {
-		addPDR(p)
+	for _, h := range s.pending.removedPDRs() {
+		addPDR(s.rs.pdrs.at(h))
 	}
-	for _, p := range s.pending.stalePDRs() {
-		addPDR(p)
+	for _, h := range s.pending.stalePDRs() {
+		addPDR(s.rs.pdrs.at(h))
 	}
-	for _, f := range s.FARs.all() {
+	for _, f := range s.FARs().all() {
 		if f.ext != 0 {
 			out = append(out, kindFarExt<<kindShift|f.ext)
 		}
@@ -676,13 +676,13 @@ func (st *store) handles(s *Session, out []uint32) []uint32 {
 			out = append(out, kindPolicy<<kindShift|q.policy)
 		}
 	}
-	for _, q := range s.QERs.all() {
+	for _, q := range s.QERs().all() {
 		addQER(q)
 	}
-	for _, q := range s.rare().removedQERs {
-		addQER(q)
+	for _, h := range s.rare().removedQERs {
+		addQER(s.rs.qers.at(h))
 	}
-	for _, u := range s.URRs.all() {
+	for _, u := range s.URRs().all() {
 		if u.limits != 0 {
 			out = append(out, kindLimits<<kindShift|u.limits)
 			if l := st.limits.get(u.limits); l.linked.n > uint16(len(l.linked.ids)) {

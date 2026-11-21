@@ -503,8 +503,8 @@ type Compiler struct {
 
 	mu               sync.Mutex
 	sessions         map[uint64]*Session
-	byCP             map[uint64]*Session // sessions by CP F-SEID: an establishment's retransmission, found without a walk
-	reservedSessions uint32              // preparing or unanswered establishments; protected by mu
+	byCP             map[uint64]uint64 // local SEIDs by CP F-SEID: an establishment's retransmission, found without a walk (noscan)
+	reservedSessions uint32            // preparing or unanswered establishments; protected by mu
 	// measured tracks URR membership for activity polling and rare End Marker
 	// events, not an ordinary per-tick walk. buffering is the BUFF+NOCP set
 	// EvaluateDownlinks walks and prunes. Both are bitsets over the sessions'
@@ -544,6 +544,9 @@ type Compiler struct {
 	// st holds what the session records name by handle (store.go). Written
 	// under mu.
 	st store
+	// recs holds the session records themselves (slab.go), read and written
+	// under mu.
+	recs records
 }
 
 // fteidOwner is who holds a claimed F-TEID key: the session, by its local
@@ -657,7 +660,7 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		ap:       ap,
 		log:      log,
 		sessions: map[uint64]*Session{},
-		byCP:     map[uint64]*Session{},
+		byCP:     map[uint64]uint64{},
 		nextSEID: 1,
 		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		policies: newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
@@ -683,12 +686,16 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	if peek, ok := ap.(WindowReader); ok {
 		c.peek = peek
 	}
+	c.recs.attach(&c.mu)
 	return c
 }
 
 // findByCP is the session the SMF's F-SEID names; the caller holds the lock.
 func (c *Compiler) findByCP(cpSEID uint64) *Session {
-	return c.byCP[cpSEID]
+	if seid, ok := c.byCP[cpSEID]; ok {
+		return c.sessions[seid]
+	}
+	return nil
 }
 
 // ResponseSEID reads the peer's header identity from metadata without doing I/O.
@@ -710,19 +717,14 @@ type chosenFTEID struct {
 	Instance        string
 }
 
-// Session is what the SMF asked for, as compiled.
+// Session is what the SMF asked for, as compiled. Its pointer fields come
+// first and its index's slice last among them: the collector scans a
+// session only up to its last pointer word, and a million sessions make
+// every word of that prefix count (TestASessionIsFewObjectsTheCollectorBarelyScans).
 type Session struct {
-	LocalSEID uint64
-	CPSEID    uint64 // the CP function's F-SEID, for events and reports
-	UEIP      netip.Addr
+	UEIP netip.Addr // its pointer word is the struct's third
 
-	// The session's rules by id: sorted slices for the handful a session
-	// names, a map past idMapSmall (idmap.go). A Go map per kind cost 192 B of
-	// header and first group to hold one or two pointers.
-	PDRs idMap[uint16, *pdr]
-	FARs idMap[uint32, *far]
-	QERs idMap[uint32, *qer]
-	URRs idMap[uint32, *urr]
+	rs *records
 	// ext holds the parts of a session a usual one leaves empty; nil until
 	// one is set. Read them through rare, write them through rareMut.
 	ext *sessionExt
@@ -731,6 +733,14 @@ type Session struct {
 	// to release. Refused transactions keep it for their retry; settle drops
 	// it only after the dataplane has accepted the change.
 	pending *sessionChanges
+
+	// The session's records by kind and id: handles into the compiler's
+	// slabs (rs), listed in one noscan slice (slab.go). Read them through
+	// PDRs, FARs, QERs and URRs, under the compiler's lock.
+	ix recIndex
+
+	LocalSEID uint64
+	CPSEID    uint64 // the CP function's F-SEID, for events and reports
 
 	// refs is the blob listing the store handles this session holds, one
 	// reference each, sorted (store.go: refsOf); copies counts the snapshots
@@ -759,6 +769,9 @@ type Session struct {
 	// The next isolated write must restate all records before deltas are safe.
 	rewrite bool
 	overlap bool
+	// released says releaseSession freed the session's records and ids: a
+	// modification's snapshot is then freed rather than restored.
+	released bool
 	// Successful compiles awaiting apply's result, including zero-change ones.
 	inflight uint32
 
@@ -791,13 +804,14 @@ type sessionExt struct {
 	// that selection, which remains reserved for a retry until no PDR names it.
 	chids map[uint8]chosenFTEID
 
-	// removedQERs holds the QERs a modification took out of the model. Their
-	// meters were allocated with the QER (one per policed direction) and are
-	// released with the session's other ids (releaseSession) rather than at the
-	// removal: a refused modification puts the QER back, and a meter already
-	// returned to the pool would be one another session may police with while
-	// this one still names it.
-	removedQERs []*qer
+	// removedQERs holds the QERs a modification took out of the model, by
+	// handle (the session's model owns them). Their meters were allocated
+	// with the QER (one per policed direction) and are released with the
+	// session's other ids (releaseSession) rather than at the removal: a
+	// refused modification puts the QER back, and a meter already returned
+	// to the pool would be one another session may police with while this
+	// one still names it.
+	removedQERs []uint32
 }
 
 // noSessionExt is what rare reads for a session without an extension. Its maps
@@ -821,24 +835,67 @@ func (s *Session) rareMut() *sessionExt {
 	return s.ext
 }
 
+// PDRs, FARs, QERs and URRs are the session's records of each kind, by rule
+// id. The caller holds the compiler's lock, and a record they return is
+// valid until it lets go of it.
+func (s *Session) PDRs() recs[uint16, pdr] { return recs[uint16, pdr]{&s.ix, &s.rs.pdrs, pdrRecs} }
+func (s *Session) FARs() recs[uint32, far] { return recs[uint32, far]{&s.ix, &s.rs.fars, farRecs} }
+func (s *Session) QERs() recs[uint32, qer] { return recs[uint32, qer]{&s.ix, &s.rs.qers, qerRecs} }
+func (s *Session) URRs() recs[uint32, urr] { return recs[uint32, urr]{&s.ix, &s.rs.urrs, urrRecs} }
+
+// removedQERList is the QERs a modification took out of the model.
+func (s *Session) removedQERList(out []*qer) []*qer {
+	return s.rs.qers.resolve(out, s.rare().removedQERs)
+}
+
+// freeModel frees every record a model names -- its index, its pending
+// removals and replaced forms, its removed QERs -- and empties the lists:
+// the model's owner gives them up (slab.go).
+func (rs *records) freeModel(ix *recIndex, pending *sessionChanges, removedQERs []uint32) {
+	ix.releaseInto(rs)
+	if pending != nil {
+		rs.pdrs.releaseAll(pending.removed)
+		rs.pdrs.releaseAll(pending.stale)
+		pending.removed, pending.stale = nil, nil
+	}
+	rs.qers.releaseAll(removedQERs)
+}
+
 // modelSnapshot is a session's model as it stood before a modification was
-// merged: the maps by copy of each entry (merge updates a FAR, a QER, a URR or
-// a BAR in place), and the lists the merge appends to. It is what a merge that
-// fails validation goes back to, so that a refused modification leaves the
-// session as the SMF last saw it rather than half-changed -- a half-changed
-// model fails every later message the same way, the SMF's retry included.
+// merged: a copy of every record (merge updates a FAR, a QER, a URR or a BAR
+// in place), each in a slab slot the snapshot owns, and the lists the merge
+// appends to. It is what a merge that fails validation goes back to, so that
+// a refused modification leaves the session as the SMF last saw it rather
+// than half-changed -- a half-changed model fails every later message the
+// same way, the SMF's retry included. rollback hands its records to the
+// model; release frees them when the modification stands.
 type modelSnapshot struct {
 	ueIP   netip.Addr
 	writes uint64
-	pdrs   idMap[uint16, *pdr]
-	fars   idMap[uint32, *far]
-	qers   idMap[uint32, *qer]
-	urrs   idMap[uint32, *urr]
+	ix     recIndex
+	rs     *records
 	bars   map[uint8]*bar
 	mars   map[uint16]*mar
 
 	pending     *sessionChanges
-	removedQERs []*qer
+	removedQERs []uint32
+}
+
+func (m *modelSnapshot) pdrs() recs[uint16, pdr] {
+	return recs[uint16, pdr]{&m.ix, &m.rs.pdrs, pdrRecs}
+}
+func (m *modelSnapshot) fars() recs[uint32, far] {
+	return recs[uint32, far]{&m.ix, &m.rs.fars, farRecs}
+}
+func (m *modelSnapshot) qers() recs[uint32, qer] {
+	return recs[uint32, qer]{&m.ix, &m.rs.qers, qerRecs}
+}
+
+// release frees the snapshot's records: the modification stands, or the
+// session went while it was in flight. The caller holds the lock.
+func (m *modelSnapshot) release() {
+	m.rs.freeModel(&m.ix, m.pending, m.removedQERs)
+	m.removedQERs = nil
 }
 
 // cloneEntries copies m and each entry it points at; an empty m stays nil, as
@@ -848,7 +905,7 @@ func cloneEntries[K comparable, V any](m map[K]*V) map[K]*V {
 		return nil
 	}
 	out := make(map[K]*V, len(m))
-	if len(m) > idMapSmall {
+	if len(m) > recIndexSmall {
 		// Snapshots may become the model after rollback. Bound shared backing
 		// so shrinking a large rule set can release the removed values.
 		for k, v := range m {
@@ -867,34 +924,64 @@ func cloneEntries[K comparable, V any](m map[K]*V) map[K]*V {
 	return out
 }
 
-// snapshot copies the model. The caller holds the lock.
-func (s *Session) snapshot() modelSnapshot {
-	return modelSnapshot{
-		ueIP:   s.UEIP,
-		writes: s.writes,
-		pdrs:   cloneIDMap(s.PDRs), fars: cloneIDMap(s.FARs), qers: cloneIDMap(s.QERs),
-		urrs: cloneIDMap(s.URRs), bars: cloneEntries(s.rare().BARs),
-		mars:        cloneEntries(s.rare().MARs),
-		pending:     s.pending.clone(),
-		removedQERs: slices.Clone(s.rare().removedQERs),
+// snapshot copies the model, every record into a slot of its own. The caller
+// holds the lock. A slab with no slot left refuses it (errRecordsExhausted),
+// having freed what it copied.
+func (s *Session) snapshot() (modelSnapshot, error) {
+	snap := modelSnapshot{
+		ueIP: s.UEIP, writes: s.writes, rs: s.rs,
+		bars: cloneEntries(s.rare().BARs), mars: cloneEntries(s.rare().MARs),
 	}
+	var err error
+	if snap.ix, err = s.ix.copyInto(s.rs); err != nil {
+		return modelSnapshot{}, err
+	}
+	if p := s.pending; p != nil {
+		snap.pending = &sessionChanges{
+			removedMARs:    slices.Clone(p.removedMARs),
+			retiredTunnels: slices.Clone(p.retiredTunnels), ending: slices.Clone(p.ending),
+		}
+		if snap.pending.removed, err = s.rs.pdrs.copyAll(p.removed); err == nil {
+			snap.pending.stale, err = s.rs.pdrs.copyAll(p.stale)
+		}
+	}
+	if err == nil {
+		snap.removedQERs, err = s.rs.qers.copyAll(s.rare().removedQERs)
+	}
+	if err != nil {
+		snap.release()
+		return modelSnapshot{}, err
+	}
+	return snap, nil
 }
 
 // rollback puts the model back and gives back the ids the failed merge took:
 // the F-TEIDs of PDRs that exist only in the failed state, and the meters of
 // QERs that do. An F-TEID the session allocated per CHOOSE ID stays (the map
 // is not restored): it is what a retry of the same request is handed again,
-// and settle drops it once no PDR names it. The caller holds the lock.
+// and settle drops it once no PDR names it. The failed model's records are
+// freed and the snapshot's become the model's. The caller holds the lock.
 func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
+	s.copies--
+	if s.released {
+		// The session went while the modification was in flight: its ids
+		// and records are given back, and so are the snapshot's.
+		snap.release()
+		return
+	}
+	// The failed model's records stay readable until the end, where they
+	// are freed: the ids below are released from them against the restored
+	// model.
+	failedIx, failedPending, failedRemovedQERs := s.ix, s.pending, s.rare().removedQERs
 	failedPDRs := pdrList(s)
-	failedPDRs = append(failedPDRs, s.pending.removedPDRs()...)
-	failedPDRs = append(failedPDRs, s.pending.stalePDRs()...)
+	failedPDRs = s.rs.pdrs.resolve(failedPDRs, s.pending.removedPDRs())
+	failedPDRs = s.rs.pdrs.resolve(failedPDRs, s.pending.stalePDRs())
 	failedQERs := qerList(s)
 	failedMARs := append(marsInOrder(s), s.pending.removedPolicies()...)
 	failedRetired := slices.Clone(s.pending.retiredIDs())
 
 	s.UEIP = snap.ueIP
-	s.PDRs, s.FARs, s.QERs, s.URRs = snap.pdrs, snap.fars, snap.qers, snap.urrs
+	s.ix = snap.ix
 	s.pending = snap.pending
 	if s.ext != nil || snap.bars != nil || snap.mars != nil || snap.removedQERs != nil {
 		r := s.rareMut()
@@ -956,18 +1043,20 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 			}
 		}
 	}
+	s.rs.freeModel(&failedIx, failedPending, failedRemovedQERs)
 	// The modification's snapshot is the model again; what only the failed
 	// merge named goes back to the store.
-	s.copies--
 	c.st.trim(s)
 }
 
 // forgetRemoval marks a PDR id as live again: a request may remove a PDR and
-// create it in the same message, and the removal is folded in first.
+// create it in the same message, and the removal is folded in first. The
+// removed record is freed: nothing names it any more.
 func (s *Session) forgetRemoval(id uint16) {
-	for i, p := range s.pending.removedPDRs() {
-		if p.id == id {
+	for i, h := range s.pending.removedPDRs() {
+		if s.rs.pdrs.at(h).id == id {
 			s.pending.removed = append(s.pending.removed[:i], s.pending.removed[i+1:]...)
+			s.rs.pdrs.release(h)
 			return
 		}
 	}
@@ -1866,7 +1955,7 @@ func (c *Compiler) forget(s *Session) {
 	c.mu.Lock()
 	delete(c.sessions, s.LocalSEID)
 	c.usage.timers.set(s.LocalSEID, time.Time{})
-	if c.byCP[s.CPSEID] == s {
+	if c.byCP[s.CPSEID] == s.LocalSEID {
 		delete(c.byCP, s.CPSEID)
 	}
 	c.releaseSession(s)
@@ -1876,7 +1965,7 @@ func (c *Compiler) forget(s *Session) {
 // track registers the session's reporting work and buffering membership.
 // The caller holds the lock. Counter ownership is registered at the first read.
 func (c *Compiler) track(s *Session) {
-	if s.URRs.len() > 0 {
+	if s.URRs().len() > 0 {
 		c.measured.add(c.slotOf(s))
 		c.queueUsage(s)
 	} else if s.slot != 0 {
@@ -1884,7 +1973,7 @@ func (c *Compiler) track(s *Session) {
 		c.usage.pending.remove(s.slot)
 	}
 	c.scheduleUsage(s)
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if p.notify {
 			c.buffering.add(c.slotOf(s))
 			return
@@ -1892,9 +1981,14 @@ func (c *Compiler) track(s *Session) {
 	}
 }
 
-// removal is the transaction that erases a session's records (remove).
+// removal is the transaction that erases a session's records (remove). It
+// reads them under the lock: a tick's enforcement may settle (and free) a
+// replaced form while the deletion is in flight. It costs the session's own
+// records.
 func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
-	changes := make([]bess.Change, 0, 4*s.PDRs.len()+2)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	changes := make([]bess.Change, 0, 4*s.PDRs().len()+2)
 	// One erase per (resource, key): a session's PDRs name the same records --
 	// the meter of a QER in each direction, and one F-TEID when two uplink PDRs
 	// carry it -- so erasing per PDR would name the same record several times
@@ -1916,9 +2010,8 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// The dedupe above is what lets both lists name the same records as the
 	// PDRs that stayed.
 	var buf [8]*pdr // the usual session's PDRs, on the stack
-	all := s.PDRs.appendTo(buf[:0])
-	all = append(all, s.pending.removedPDRs()...)
-	all = append(all, s.pending.stalePDRs()...)
+	all := s.PDRs().appendTo(buf[:0])
+	all = s.gonePDRs(all)
 	for _, p := range all {
 		keys, err := c.pdrRuleKeys(p)
 		if err != nil {
@@ -2004,7 +2097,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// is in the daemon, and a record nobody names goes on holding the rate it
 	// was written with until another session reuses the id.
 	var qbuf [4]*qer // the usual session's QERs, on the stack
-	for _, q := range append(s.QERs.appendTo(qbuf[:0]), s.rare().removedQERs...) {
+	for _, q := range s.removedQERList(s.QERs().appendTo(qbuf[:0])) {
 		if !c.policy(q).hasRate {
 			continue
 		}
@@ -2019,7 +2112,7 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	// removal erases it (foldSession), wherever the changes are applied --
 	// remove, or AssociationEnded's batches.
 	if _, ok := c.target.(sessionTarget); ok {
-		return c.foldSession(s, changes, eraseSessionEntry)
+		return c.foldSessionLocked(s, changes, eraseSessionEntry)
 	}
 	return changes, nil
 }
@@ -2030,12 +2123,14 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 // records rather than leaving them behind. A TEID that no PDR of the session
 // names any more also loses its mapping and its reservation here: nothing else
 // would clear them before the session ends, and every later pin of that value
-// would be refused as this session's. ownSnapshot says the caller is the
-// modification that holds a snapshot of s (s.copies), which it gives up here.
-func (c *Compiler) settle(s *Session, ownSnapshot bool) {
+// would be refused as this session's. snap is the snapshot of s the caller
+// (a modification) holds, if any (s.copies): the modification stands, so it
+// is freed here. The removed and replaced forms are freed too: the
+// transaction that erased them has landed.
+func (c *Compiler) settle(s *Session, snap *modelSnapshot) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	gones := append(append([]*pdr(nil), s.pending.removedPDRs()...), s.pending.stalePDRs()...)
+	gones := s.gonePDRs(nil)
 	for _, p := range gones {
 		c.releaseFTEIDClaim(s, p, false)
 	}
@@ -2061,7 +2156,7 @@ func (c *Compiler) settle(s *Session, ownSnapshot bool) {
 	// The ARP claims of the session's own subscriber addresses, held with the
 	// entries they write (arpEntry.claim).
 	var liveARP map[string]bool
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if e, ok := c.arpEntryOf(p); ok {
 			if liveARP == nil {
 				liveARP = map[string]bool{}
@@ -2126,9 +2221,14 @@ func (c *Compiler) settle(s *Session, ownSnapshot bool) {
 			c.actions.release(id)
 		}
 	}
-	s.pending = nil
+	if p := s.pending; p != nil {
+		c.recs.pdrs.releaseAll(p.removed)
+		c.recs.pdrs.releaseAll(p.stale)
+		s.pending = nil
+	}
 	c.track(s)
-	if ownSnapshot {
+	if snap != nil {
+		snap.release()
 		s.copies--
 	}
 	c.st.trim(s)
@@ -2166,12 +2266,11 @@ func (c *Compiler) releaseSession(s *Session) {
 	policies := map[uint32]bool{}
 	meters := map[uint32]bool{}
 	var buf [8]*pdr // the usual session's PDRs, on the stack
-	all := s.PDRs.appendTo(buf[:0])
+	all := s.PDRs().appendTo(buf[:0])
 	// A PDR a modification removed still holds ids, and a replaced PDR's old
 	// form holds the TEID it used to have: the records are erased by the
 	// deletion above, and the ids are freed here with the rest.
-	all = append(all, s.pending.removedPDRs()...)
-	all = append(all, s.pending.stalePDRs()...)
+	all = s.gonePDRs(all)
 	for _, p := range all {
 		c.releaseFTEIDClaim(s, p, true)
 		if p.actionID != 0 && !actions[p.actionID] {
@@ -2212,7 +2311,7 @@ func (c *Compiler) releaseSession(s *Session) {
 		}
 	}
 	var qbuf [4]*qer // the usual session's QERs, on the stack
-	for _, q := range append(s.QERs.appendTo(qbuf[:0]), s.rare().removedQERs...) {
+	for _, q := range s.removedQERList(s.QERs().appendTo(qbuf[:0])) {
 		if q.meterUL != 0 && !meters[q.meterUL] {
 			meters[q.meterUL] = true
 			c.meters.release(q.meterUL)
@@ -2222,6 +2321,13 @@ func (c *Compiler) releaseSession(s *Session) {
 			c.meters.release(q.meterDL)
 		}
 	}
-	// And the store handles its records name: the session is gone.
+	// And the store handles its records name, and the records themselves:
+	// the session is gone. Its index is emptied, so a compile that took the
+	// session before this (a tick's enforcement) finds no record to read.
 	c.st.drop(s)
+	c.recs.freeModel(&s.ix, s.pending, s.rare().removedQERs)
+	if s.ext != nil {
+		s.ext.removedQERs = nil
+	}
+	s.released = true
 }

@@ -1046,17 +1046,19 @@ results, `analysis.json`, perf data, Go profiles and `hotspots/`);
 with the meter set as a transactional resource (BESS D-199). Each PDR table
 holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
 
-- **Live heap: 1.3-1.4 KB per session.** The controller model holds 1,319 B
-  per session (`TestASessionHoldsAtMostItsBytes`), down from 3.0-3.1 KB and
-  then 1,511 B: leaf records hold uint32 handles into one refcounted,
+- **Live heap: 1.2-1.3 KB per session.** The controller model holds 1,195 B
+  per session (`TestASessionHoldsAtMostItsBytes`), down from 3.0-3.1 KB,
+  1,511 B and 1,319 B: leaf records hold uint32 handles into one refcounted,
   deduplicated store per compiler (SDF filters, PDR/FAR extensions, URR
   limits, QER policy, tunnel local ends, rule keys); rule claims and F-TEID
   owners are open-addressing indexes the collector does not scan; per-session
-  work sets are bitsets over dense session slots (`docs/performance.md` plan
-  #2). The collector scans 339 B per session, down from 895 B. At 1M under
-  `GOGC=25` (`.scratch/evidence/session-20261120`, ABBA) live heap after the
-  fill was 1,369-1,370 MiB against 1,503-1,602 MiB, peak `upfd` memory
-  2,062-2,068 MiB against 2,323-2,332 MiB.
+  work sets are bitsets over dense session slots; and the records themselves
+  live in segmented noscan slabs addressed by generation-checked handles
+  (`docs/performance.md` plan #2). The collector scans 94 B in 2.03 objects
+  per session, down from 895 B in 17 and 339 B in 11. In the step-4 1M
+  `GOGC=25` ABBA (`.scratch/evidence/slabs-20261121`), live heap after the
+  fill was 1,233–1,252 MiB against 1,412–1,413 MiB, and peak `upfd` cgroup
+  memory was 1,786–1,791 MiB against 2,062–2,090 MiB.
 - **Garbage: ~28 KB per establishment before typed payloads; −29.5% to −45.9%
   lifecycle construction bytes after (`#78`).** The earlier 1M lane run
   allocated 30.6 GB over ~1M establishments; reading grouped IEs' children
@@ -1144,10 +1146,10 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   8-byte stamps on a monotonic base: durations stay monotonic, and after a
   wall-clock step a stamp's wall time does not follow the step.
   `TestASessionHoldsAtMostItsBytes` bounds the whole retained model at
-  1,385 B of live objects and 1,645 B of heap spans per session for 20K
-  sessions with 2 PDRs, 2 FARs, 1 QER and 1 URR (measured 1,319 B and
-  1,567 B); `TestASessionIsFewObjectsTheCollectorBarelyScans` bounds the
-  scanned bytes at 356 B and the objects at 11.6 per session.
+  1,255 B of live objects and 1,340 B of heap spans per session for 20K
+  sessions with 2 PDRs, 2 FARs, 1 QER and 1 URR (measured 1,195 B and
+  1,279 B); `TestASessionIsFewObjectsTheCollectorBarelyScans` bounds the
+  scanned bytes at 99 B and the objects at 2.15 per session.
   A disposable runtime-metrics probe at that count measured live bytes
   74,097,904 → 50,097,568 and scannable heap 59,354,496 → 39,994,496
   (`.scratch/evidence/go-garbage/dsa-layout/{before,after}.json`).
@@ -1519,7 +1521,7 @@ routing adds a fixed **100.3 MiB per route domain** in `bessd`).
 | **`bessd` Hotpath (Packet Path)** | **At Floor** | Zero hotpath allocations; flat `920 B` `SessionSlot`, flat action index (`#75`), inline rule keys (`#77`), lockless worker-local `CounterChanges` bitmaps with 16-bit word masks (`#78`). Packet rate stayed within **±0.7% Mpps** across all control/memory PRs; both queued micro-optimizations (`D-204` batch head ownership, two-store `PacketRef::reset`) regressed `live_perf` and were dropped. |
 | **`bessd` Control Path & Memory Accounting** | **At Floor & Accounted** | Dormant buffer tables paged in 1,024-ID chunks (`113.1 MB → 53 KB`, `#78`); session mirrors/owners moved to flat framework arrays (`−67.7 MiB`, `#76`); duplicate cold F-TEID `std::map` removed (`−84.9 MiB`, `#77`); remaining cold F-TEID and snapshot allocations charged at exact glibc chunk size (`AdmittedGlibcAllocator`, `#78`/`#152`). Unassigned loaded glibc growth is **2.59 MB out of 302.20 MB (0.86%)**. The only remaining non-linear steps are `SharedExactIndex`'s power-of-two `rte_hash` ($204\text{ MiB}$ at $10^6$ keys) and `std::map` nodes (`112 B/node`) in `fteid_records`. Scaling accepted native-transaction churn past ~3.5–4.1K/s requires sharding sessions across multiple `bessd` instances or batching multiple session changes per transaction. |
 | **`upfd` Hotpath (N4 Read Loop, Overload & URR Tick)** | **At Optimal Tradeoff** | Full worker queues immediately return **PFCP cause 75** with zero UDP drops and live heartbeats (`#78`); 4 MiB UDP receive buffer absorbs bursts (`#73`); URR tick reads only dirty/due sessions via `get_changes` bitmaps (`0` RPCs for idle volume sessions); heap admission estimates live heap between collections and reopens 0.05 under its share (250K fill under 380 MiB: 0.697 of the limit vs 0.738 on live alone); closed admission wakes one background watcher at most once/s and runs `runtime.GC()` only after `Stats().Deleted` advances (`#78`). |
-| **`upfd` Control Path & Session Memory** | **At Optimal Go Tradeoff** | Live heap cut **40%** (`2,518 → 1,511 B/session`, `#72`), then to `1,319 B/session` with **62% less scanned heap** (`895 → 339 B/session`, objects `17.0 → 11.0`) by pointer-free records, noscan indexes and slot bitsets (`#81`); at 1M, `GOGC=25`, ABBA: peak `upfd` `2,323–2,332 → 2,062–2,068 MiB`, FAR modify goodput `+28%` with p99 `261–281 → 140 ms`, replace p99 `329–333 → 212–215 ms`, establish p99 `1,387–1,468 → 312–321 ms` (establish p50 `1.3 → 2.3 ms`). Change payloads pre-encoded (`−29.5%` / `−45.9%` alloc bytes, `#78`), and persistent batched `TransactionChannel` streams cut 1K replace p99 by **36%** and raised 10K replace goodput by **22.7%** (`#74`/`#151`). `1,319 B/session` remains **235–455 B/session above** the `864–1,084 B/session` pointer-free slab floor (`performance.md:58-88`); the rest is the ~11 Go objects per session (`Session`/`pdr`/`far`/`qer`/`urr` records) that slabs would replace, deferred until a measurement shows they still matter (`performance.md` plan #2 step 4). |
+| **`upfd` Control Path & Session Memory** | **Within the fixture's memory target; churn still saturates** | Live heap `1,512 → 1,319 → 1,195 B/session` after #81 and #88. Slabs cut the scanned heap `339 → 94 B/session` and objects `11.02 → 2.03`. At 1M with `GOGC=25`, the paired slab run cut peak `upfd` cgroup memory `2,062–2,090 → 1,786–1,791 MiB` and FAR GC share `38–42% → 18%`. FAR reached `9.26–9.32K/s` at `10K/s` offered; replace reached `2.35–2.39K` complete cycles/s. See `performance.md` plan #2 for the paired runs and the `1–1.25 KiB/session` engineering target, not a lower bound. |
 
 ## What proves it
 

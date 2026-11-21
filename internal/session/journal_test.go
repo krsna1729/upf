@@ -373,7 +373,11 @@ func TestACompactedCheckpointKeepsWhatTheModificationsMade(t *testing.T) {
 	if now == nil {
 		t.Fatalf("the replay holds no session at SEID %d", seid)
 	}
-	nowFAR, wasFAR := *now.FARs.at(2), *was.FARs.at(2)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c2.mu.Lock()
+	defer c2.mu.Unlock()
+	nowFAR, wasFAR := *now.FARs().at(2), *was.FARs().at(2)
 	if *c2.farExt(&nowFAR) != *c.farExt(&wasFAR) {
 		t.Errorf("the replayed FAR 2 names %+v, want %+v", *c2.farExt(&nowFAR), *c.farExt(&wasFAR))
 	}
@@ -381,13 +385,13 @@ func TestACompactedCheckpointKeepsWhatTheModificationsMade(t *testing.T) {
 	if nowFAR != wasFAR {
 		t.Errorf("the replayed FAR 2 is %+v, want %+v", nowFAR, wasFAR)
 	}
-	q, want := c2.policy(now.QERs.at(1)), c.policy(was.QERs.at(1))
+	q, want := c2.policy(now.QERs().at(1)), c.policy(was.QERs().at(1))
 	if q.gateUL != want.gateUL || q.gateDL != want.gateDL || q.mbUL != want.mbUL || q.mbDL != want.mbDL {
 		t.Errorf("the replayed QER 1 gates %d/%d at %d/%d, want %d/%d at %d/%d",
 			q.gateUL, q.gateDL, q.mbUL, q.mbDL, want.gateUL, want.gateDL, want.mbUL, want.mbDL)
 	}
-	if now.PDRs.len() != was.PDRs.len() {
-		t.Errorf("the replay holds %d PDRs, want %d", now.PDRs.len(), was.PDRs.len())
+	if now.PDRs().len() != was.PDRs().len() {
+		t.Errorf("the replay holds %d PDRs, want %d", now.PDRs().len(), was.PDRs().len())
 	}
 }
 
