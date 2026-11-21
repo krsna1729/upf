@@ -156,6 +156,28 @@ overlapped the desktop collector described in
 It biases the replace 1K/s p99 median toward the candidate. The establish
 and delete results come from cells without an overlap.
 
+**Bound payload fields (2026-11-22):** `bess.encodeStruct` used to search
+the Go struct for each descriptor field. It now binds the present Go fields
+to descriptor indices in one pass, then emits them in descriptor order.
+Both clean rounds (ABBA, then BAAB) used the collector-avoiding schedule;
+the scorer found no overlapped cells. Combined medians of the eight runs,
+against `0ea2b8f`:
+
+| Mode | 10K/s goodput | 10K/s upfd µs/accepted | 1K/s p99 |
+|---|---:|---:|---:|
+| FAR | +2.7% | −12.3% | +4.3% |
+| Establish | +3.2% | −8.5% | +8.0% |
+| Replace | +5.4% | −4.3% | +4.5% |
+| Delete | +8.4% | −14.4% | −2.1% |
+
+Establish, replace and delete met both the goodput and CPU gates. Median
+`upfd` cgroup peak was 1,775.1 → 1,772.4 MiB. All cells reconciled with
+zero timeouts, pending or uncertain outcomes. The ABBA round alone failed
+the FAR 1K/s p99 gate (+17.4%, one run at host load 7.7) and the peak gate
+(+1.2 MiB); the combined score is the predeclared verdict. Evidence:
+`.scratch/evidence/payload-field-binding-clean/` and
+`payload-field-binding-clean-r2/combined-score.txt`.
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
