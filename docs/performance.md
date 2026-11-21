@@ -226,6 +226,24 @@ FAR CPU fell less here than in the per-change rounds. Evidence:
 `.scratch/evidence/combined-main/` and
 `combined-main-r2/combined-score.txt`.
 
+Two more clean rounds (ABBA, then BAAB) took the record to 16 runs. All
+gates pass on the combined medians. CPU per accepted message fell in all
+eight cells:
+
+| Mode | 10K/s goodput | 10K/s upfd µs/accepted | 1K/s p99 |
+|---|---:|---:|---:|
+| FAR | +0.4% | −9.6% | +9.3% |
+| Establish | +2.2% | −7.7% | −1.5% |
+| Replace | +5.1% | −7.5% | −6.5% |
+| Delete | +0.8% | −6.8% | +2.1% |
+
+The median `upfd` cgroup peak was 1,783.0 → 1,775.3 MiB. The earlier
++4.7 MiB median did not hold. The compiler's retained heap is identical on
+both commits (1,194.6–1,195.3 B live and 94.1 B scanned per session). Within
+the baseline arm, the cgroup file charge varies 44–69 MiB at the delete phase
+edges. Evidence: `combined-main-r4/combined16-score.txt` and
+`combined-main-r2/peak-composition.md`.
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
