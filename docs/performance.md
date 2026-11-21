@@ -3532,3 +3532,32 @@ Evidence: `.scratch/evidence/remeasure-20261117/0[1-8]-*`, `analysis-1m.txt`,
 See [the A/A control](#same-binary-aa-control-closes-the-tcpp-c1-gate-2026-11-19):
 fresh daemons of one binary differ by about 2% IPC at equal
 instructions/packet, so the TCP/P c1 gate is closed.
+
+## Backlog-only session-write grouping: rejected (2026-11-21)
+
+Fixed-lane batching ([#89](https://github.com/krsna1729/upf/pull/89))
+improved FAR goodput but regressed light-load p99 and delete goodput.
+The follow-up used no timer and grouped only upserts under N4 backlog.
+The final control used one `upfd` binary with grouping off/on, in two
+power-guarded ABBA rounds: 1M sessions, `GOGC=25`, BESS `767725a6`,
+plugin from `342eed6`. Each cell reconciled to 1M with no pending or
+uncertain outcomes and no timeouts. With grouping off, applied BESS
+transactions equaled accepted PFCP messages in every cell.
+
+| Mode | Goodput at 10K/s offered, off → on | p99 at 1K/s offered, off → on |
+|---|---:|---:|
+| FAR | 8,996 → 9,114/s (+1.3%) | 5.32 → 8.13 ms |
+| Replace | 1,728 → 1,898/s (+9.9%) | 7.98 → 12.25 ms |
+| Establish | 7,796 → 8,281/s (+6.2%) | 7.81 → 8.85 ms |
+| Delete | 6,082 → 6,506/s (+7.0%) | 10.06 → 15.09 ms |
+
+Each value is the median of four runs. At 10K/s, FAR used 0.824 applied
+BESS transactions per accepted message with grouping on, below the 0.9
+gate. Its goodput gain missed the +3% gate, and all four light-load p99s
+exceeded the +10% limit. One grouping-on replace run reached 408.46 ms
+p99 with 818 refused messages. Deletes were never grouped and recorded
+no commit-queue waits in the 1K/s delete cells; the delete tail's cause
+was not isolated. Do not ship either batching design.
+
+Evidence: `.scratch/evidence/grouping-paired/results.txt`, `harness.sh`
+and `churn-*/run/campaign.json`.
