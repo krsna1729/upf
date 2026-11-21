@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/krsna1729/upf/internal/bess"
 	"github.com/krsna1729/upf/internal/session"
 )
 
@@ -55,11 +56,14 @@ type peerState interface {
 //	upf_usage_reports_total{outcome}   sent, refused, held (no answer yet), dropped, cancelled (the session ended first)
 //	upf_pfcp_associated                a CP function is associated (1) or not (0)
 //	upf_pfcp_peer_info{node_id,address}  the associated CP function, if any
+//	upf_bess_channel_frames_total      transaction channel frames bessd acknowledged (with -bess)
+//	upf_bess_channel_transactions_total  transaction results those frames carried (with -bess)
 //
 // A session is a cache of what the SMF asked for, so these are the SMF's own
 // view of this node rather than the dataplane's; the usage a report carries is
 // the graph's, and `ci/bench-n4.sh` measures the wire.
-func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportStats, heap *heapGauge, admission *heapAdmissionRecovery) http.Handler {
+func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportStats, heap *heapGauge,
+	admission *heapAdmissionRecovery, bessFrames func() bess.FrameStats) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var b strings.Builder
 		stats := sessions.Stats()
@@ -148,6 +152,17 @@ func metricsHandler(sessions *session.Compiler, pfcp peerState, reports *reportS
 		fmt.Fprintf(&b, "# TYPE upf_downlink_reports_total counter\n")
 		fmt.Fprintf(&b, "upf_downlink_reports_total{outcome=\"sent\"} %d\n", reports.ddnSent.Load())
 		fmt.Fprintf(&b, "upf_downlink_reports_total{outcome=\"failed\"} %d\n", reports.ddnFailed.Load())
+		if bessFrames != nil {
+			// Transactions per frame is how many commits shared one gRPC
+			// message to bessd, and so one per-message cost.
+			frames := bessFrames()
+			fmt.Fprintf(&b, "# HELP upf_bess_channel_frames_total Transaction channel frames bessd acknowledged.\n")
+			fmt.Fprintf(&b, "# TYPE upf_bess_channel_frames_total counter\n")
+			fmt.Fprintf(&b, "upf_bess_channel_frames_total %d\n", frames.Frames)
+			fmt.Fprintf(&b, "# HELP upf_bess_channel_transactions_total Transaction results carried by acknowledged transaction channel frames.\n")
+			fmt.Fprintf(&b, "# TYPE upf_bess_channel_transactions_total counter\n")
+			fmt.Fprintf(&b, "upf_bess_channel_transactions_total %d\n", frames.Transactions)
+		}
 
 		node, addr, associated := pfcp.Peer()
 		fmt.Fprintf(&b, "# HELP upf_pfcp_associated A CP function is associated with this node.\n")

@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -46,11 +47,26 @@ import (
 // graph answered 8 and then stalled for 30 s at a time).
 const kMaxInFlight = 32
 
+// kTransactionStreams is how many TransactionChannel streams carry those
+// transactions. The SDK sends a commit at once on an idle stream, together
+// with every commit already queued (up to 64 in one frame), and never waits to
+// fill a frame; with no idle stream a commit queues for the next one. One
+// stream per in-flight transaction left an idle stream for every session
+// worker, so each frame carried one transaction and paid gRPC's per-message
+// cost alone (about 23-35 us per frame, docs/performance.md "Pipelining alone
+// does not remove the per-frame cost"). With two, a lone caller still sends at
+// once, concurrent callers share the next frame, and one frame can be on the
+// wire while bessd answers the other; BESS's bench at 64 callers measured two
+// streams no slower than eight. Each transaction keeps its own result,
+// deadline and retry; kMaxInFlight still bounds how many are outstanding.
+const kTransactionStreams = 2
+
 // Client is one bessd's control endpoint plus its schema.
 type Client struct {
 	sdk *sdk.Client
 
 	inFlight chan struct{}
+	frames   frameCounter
 
 	mu      sync.Mutex
 	files   *protoregistry.Files
@@ -60,15 +76,16 @@ type Client struct {
 }
 
 // Dial connects to bessd's gRPC endpoint and reads its schema. Transactions
-// go over persistent streams, one per transaction the client lets in flight:
-// each stream carries one outstanding attempt with its own receipt, so the
-// bound and the stream count are the same number.
+// go over kTransactionStreams persistent streams, which concurrent commits
+// share frame by frame.
 func Dial(ctx context.Context, target string) (*Client, error) {
-	conn, err := sdk.DialTransactionStreams(target, kMaxInFlight)
+	c := &Client{inFlight: make(chan struct{}, kMaxInFlight)}
+	conn, err := sdk.DialTransactionStreams(target, kTransactionStreams,
+		grpc.WithChainStreamInterceptor(c.frames.intercept))
 	if err != nil {
 		return nil, fmt.Errorf("bess: dial %s: %w", target, err)
 	}
-	c := &Client{sdk: conn, inFlight: make(chan struct{}, kMaxInFlight)}
+	c.sdk = conn
 	if err := c.Refresh(ctx); err != nil {
 		conn.Close()
 		return nil, err
@@ -78,6 +95,9 @@ func Dial(ctx context.Context, target string) (*Client, error) {
 
 // Close closes the connection.
 func (c *Client) Close() error { return c.sdk.Close() }
+
+// FrameStats is what the transaction channel has carried since Dial.
+func (c *Client) FrameStats() FrameStats { return c.frames.stats() }
 
 // SDK is the underlying client, for the calls this package does not wrap
 // (metrics, events, the pipeline).

@@ -1196,8 +1196,10 @@ turbo state uncertain) reported +22% for FAR 10K; the gated campaign does not
 reproduce that, and replaces it. Streams raise capacity but do not reach 10K:
 loss-free operation above capacity still needs the overload-refusal design.
 BESS #151 merged (develop 733ddb19, tree-identical to the measured SDK), and
-upfd now dials `DialTransactionStreams(target, kMaxInFlight)`, the measured
-arm.
+upfd then dialled `DialTransactionStreams(target, kMaxInFlight)`, the measured
+arm. Since 2026-11-21 it dials `kTransactionStreams` (2), so concurrent commits
+share frames (design.md, "The envelope, measured"); that arm is not measured
+here.
 
 **Session action index (2026-11-14).**
 Replace the session-major plugin's glibc action-id tree with a DPDK array,

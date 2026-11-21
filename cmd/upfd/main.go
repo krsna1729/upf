@@ -284,12 +284,14 @@ func run() error {
 	// it holds whatever the run, and the reporting loop needs it to exist.
 	var compiler *session.Compiler
 	var admission *heapAdmissionRecovery
+	var bessFrames func() bess.FrameStats
 	if *bessAddr != "" {
 		client, err := bess.Dial(ctx, *bessAddr)
 		if err != nil {
 			return err
 		}
 		defer client.Close()
+		bessFrames = client.FrameStats
 		graph, err := graphConfig(graphArgs{
 			target:    *target,
 			appliance: *applianceModule,
@@ -473,7 +475,7 @@ func run() error {
 	// The management endpoint: this node's own numbers, so an operator reads
 	// them from the same place a scraper does. It is off unless asked for.
 	if *metricsAddr != "" {
-		mux, ln, err := metricsServer(*metricsAddr, metricsHandler(compiler, srv, reports, heap, admission))
+		mux, ln, err := metricsServer(*metricsAddr, metricsHandler(compiler, srv, reports, heap, admission, bessFrames))
 		if err != nil {
 			return err
 		}

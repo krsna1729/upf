@@ -1404,13 +1404,21 @@ own SEID bug ruled out), while one worker doing the same 16 sessions never
 missed a reply. And the run that measures this must fail when answers are
 missing, or a starved box and a slow UPF look alike.
 
-The bound is `kMaxInFlight` (32), and each transaction it admits rides one of as
-many persistent transaction streams (`sdk.DialTransactionStreams`): one
-outstanding attempt per stream, with its own receipt, the unary error and
-deadline semantics, and no merging of independent transactions. Against unary
-calls at 1M loaded sessions (gated ABBA, 4 pairs), streams raise replacement
-capacity 22.7% and FAR capacity 5.7%, and cut the 1K replacement p99 36%
-(`docs/performance.md`, "Loaded UPFD at 1M").
+The bound is `kMaxInFlight` (32). The transactions it admits share
+`kTransactionStreams` (2) persistent transaction streams
+(`sdk.DialTransactionStreams`): a commit that finds a stream idle goes out at
+once, with every commit already queued behind the busy ones, up to 64 in one
+frame and with no timer. Each transaction in a frame is still applied on its own,
+with its own receipt, the unary error and deadline semantics, and no merging of
+independent transactions; sharing a frame shares only gRPC's per-message cost.
+With one stream per admitted transaction, eight session workers each found an
+idle stream and every frame carried one transaction; on two streams eight
+callers average 2.2-2.8 per frame (`TestConcurrentCommitsShareFrames`, against
+an in-process peer), and `upf_bess_channel_{frames,transactions}_total` count
+it on a live node. Against unary calls at 1M loaded sessions (gated ABBA, 4
+pairs), 32 streams raised replacement capacity 22.7% and FAR capacity 5.7%, and
+cut the 1K replacement p99 36% (`docs/performance.md`, "Loaded UPFD at 1M");
+two shared streams are not yet measured at 1M.
 
 ### Final product dimensioning and floor vs tradeoff verdict (2026-11-16)
 
