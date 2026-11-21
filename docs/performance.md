@@ -205,6 +205,27 @@ its 10K/s change. Evidence: `.scratch/evidence/native-write-cost-clean/`,
 `native-write-cost-clean-r2/combined-score.txt` and
 `ship-checks/allocs.txt`.
 
+**Combined confirmation (2026-11-22):** `b8b8b23` (#93 and #94) against
+`0ea2b8f`, from two clean rounds (ABBA, then BAAB) with matched builds
+(go1.27.2, `-trimpath`, CGO on, GOAMD64=v1). Combined medians of eight runs:
+
+| Mode | 10K/s goodput | 10K/s upfd µs/accepted | 1K/s p99 |
+|---|---:|---:|---:|
+| FAR | −2.5% | −2.8% | −0.3% |
+| Establish | −0.3% | −4.2% | −5.6% |
+| Replace | +13.9% | −12.0% | −6.6% |
+| Delete | +6.4% | −9.8% | −10.4% |
+
+Replace and delete met both the goodput and CPU gates; no 1K/s p99 rose.
+The median `upfd` cgroup peak was 1,779.6 → 1,784.3 MiB (+4.7 MiB). The
+per-run peaks overlap: 1,767–1,783 MiB on `0ea2b8f` and 1,763–1,791 MiB on
+`b8b8b23`. The ABBA round's +19 MiB did not repeat in BAAB (1,783.0 →
+1,770.4 MiB), and each change lowered the peak on its own. This record does
+not establish a peak regression, and it does not rule one out. Establish and
+FAR CPU fell less here than in the per-change rounds. Evidence:
+`.scratch/evidence/combined-main/` and
+`combined-main-r2/combined-score.txt`.
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
