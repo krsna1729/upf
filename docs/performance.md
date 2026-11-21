@@ -244,6 +244,33 @@ the baseline arm, the cgroup file charge varies 44–69 MiB at the delete phase
 edges. Evidence: `combined-main-r4/combined16-score.txt` and
 `combined-main-r2/peak-composition.md`.
 
+**Shared session counter readings (2026-11-22):** A deletion reads its last
+usage window with its own `get_counts` round trip. In the profile of
+`b8b8b23`, that unary call was 20.6% of upfd CPU in the 10K/s delete window
+and 9.6% in replace (`AppendRuleCounts`, inclusive). `windowsOf` now sends
+a reading at once when no reading of that module is in flight. Readings that
+arrive while one is in flight join one next round, which goes out when the
+in-flight reading returns; the usage tick and `Evaluate` read as before.
+Clean ABBA and BAAB against `b8b8b23`, combined medians of eight runs:
+
+| Mode | 10K/s goodput | 10K/s upfd µs/accepted | 1K/s p99 |
+|---|---:|---:|---:|
+| FAR | −0.2% | +1.7% | −0.1% |
+| Establish | +0.3% | +0.1% | +2.0% |
+| Replace | +17.6% | −7.7% | −0.6% |
+| Delete | +16.4% | −20.2% | −7.7% |
+
+Delete and replace met both the goodput and CPU gates. Median `upfd` cgroup
+peak was 1,773.8 → 1,770.0 MiB, and all cells reconciled. Each round alone
+failed one tail gate:
+
+- ABBA: FAR 1K/s +27.1%, from one candidate run at 4.74 ms (the others were 3.02–3.10 ms). FAR changes do not read counters.
+- BAAB: replace 1K/s +10.5%.
+
+The combined score is the predeclared verdict. Evidence:
+`.scratch/evidence/coalesce-counter-reads/` and
+`coalesce-counter-reads-r2/combined-score.txt`.
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
