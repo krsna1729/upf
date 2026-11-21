@@ -56,17 +56,19 @@ func TestASessionHoldsAtMostItsBytes(t *testing.T) {
 	// caches. 1,511 B after it; 1,403 B with pointer-free records
 	// (store.go); 1,395 B with rule identities as store blobs; 1,369 B
 	// with F-TEID owners in a flat index; 1,319 B with the session sets as
-	// bitsets over slots.
-	if live > 1385 {
-		t.Errorf("a session retains %.0f B of live objects, want at most 1385", live)
+	// bitsets over slots; 1,195 B with the records in segmented slabs
+	// (slab.go).
+	if live > 1255 {
+		t.Errorf("a session retains %.0f B of live objects, want at most 1255", live)
 	}
 	// Before the layout changes: 4,543-4,665 B. After rule maps, PDR
 	// derived fields, pending state and URR padding: 3,050-3,224 B. After
 	// the session-memory series: 2,022-2,109 B. Pointer-free records:
 	// 1,739 B. Rule identities as store blobs: 1,660 B. F-TEID owners in a
-	// flat index: 1,631 B. Session sets as bitsets: 1,567 B.
-	if per > 1645 {
-		t.Errorf("a session holds %.0f B of heap, want at most 1645", per)
+	// flat index: 1,631 B. Session sets as bitsets: 1,567 B. Records in
+	// slabs: 1,276 B.
+	if per > 1340 {
+		t.Errorf("a session holds %.0f B of heap, want at most 1340", per)
 	}
 	runtime.KeepAlive(c)
 }
@@ -113,7 +115,9 @@ func establishCounted(t *testing.T, c *Compiler, n int) []uint64 {
 // session before the records held handles instead of pointers (store.go);
 // 566.7 B and 14.03 after; 431.3 B and 11.03 once rule identities and their
 // owners left Go strings and maps for store blobs and a noscan index; 339.5 B
-// once the F-TEID owners did too.
+// once the F-TEID owners did too; 163.6 B and 2.03 once the records and their
+// per-session index went into noscan slabs (slab.go): the Session and its
+// sessionExt are what remains.
 func TestASessionIsFewObjectsTheCollectorBarelyScans(t *testing.T) {
 	const n = 20000
 	var c *Compiler
@@ -122,11 +126,11 @@ func TestASessionIsFewObjectsTheCollectorBarelyScans(t *testing.T) {
 		establishCounted(t, c, n)
 	})
 	t.Logf("live %.1f B, scanned %.1f B, %.2f objects per session", f.live, f.scan, f.objects)
-	if f.scan > 356 {
-		t.Errorf("the collector scans %.0f B per session, want at most 356", f.scan)
+	if f.scan > 172 {
+		t.Errorf("the collector scans %.0f B per session, want at most 172", f.scan)
 	}
-	if f.objects > 11.6 {
-		t.Errorf("a session is %.2f heap objects, want at most 11.6", f.objects)
+	if f.objects > 2.15 {
+		t.Errorf("a session is %.2f heap objects, want at most 2.15", f.objects)
 	}
 	runtime.KeepAlive(c)
 }

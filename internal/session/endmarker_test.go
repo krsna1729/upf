@@ -526,26 +526,25 @@ func TestLeavingTunnelsCapturesSharedPDRAndMARRoutedEndpoints(t *testing.T) {
 	localN9 := netip.MustParseAddr("192.0.2.9")
 	old := farWithPeer(&far{id: 2, hasOuter: true, teid: 0x11223344}, "10.20.30.2")
 	n3End := c.st.ends.acquire(localEnd{address: ipOf(localN3), domain: 1})
-	s := &Session{
-		FARs: idMapOf(map[uint32]*far{2: old}),
-		PDRs: idMapOf(map[uint16]*pdr{
-			1: {id: 1, farID: 2, tunnelEnd: n3End},
-			2: {id: 2, farID: 2, tunnelEnd: n3End},
-		}),
-		ext: &sessionExt{MARs: map[uint16]*mar{
-			1: {
-				accesses:              [2]marAccess{{hasFarID: true, farID: 2}},
-				tunnelIDs:             [2]uint32{7},
-				tunnelLocalAddresses:  [2]netip.Addr{localN9},
-				transportRouteDomains: [2]uint32{2},
-			},
-		}},
-	}
+	s := testSession(c, []far{*old}, []pdr{
+		{id: 1, farID: 2, tunnelEnd: n3End},
+		{id: 2, farID: 2, tunnelEnd: n3End},
+	})
+	s.ext = &sessionExt{MARs: map[uint16]*mar{
+		1: {
+			accesses:              [2]marAccess{{hasFarID: true, farID: 2}},
+			tunnelIDs:             [2]uint32{7},
+			tunnelLocalAddresses:  [2]netip.Addr{localN9},
+			transportRouteDomains: [2]uint32{2},
+		},
+	}}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	markers := c.leavingTunnels(s, []farReq{{id: 2, hasOuter: true, teid: 0xaabbccdd, peer: old.peer()}})
 	if len(markers) != 2 {
 		t.Fatalf("captured %d markers, want one per distinct routed endpoint", len(markers))
 	}
-	old.teid = 0xaabbccdd
+	s.FARs().at(2).teid = 0xaabbccdd
 	if markers[0].teid != 0x11223344 || markers[1].teid != 0x11223344 {
 		t.Error("old TEID changed with the live FAR")
 	}
@@ -553,6 +552,25 @@ func TestLeavingTunnelsCapturesSharedPDRAndMARRoutedEndpoints(t *testing.T) {
 		markers[1].localAddress != localN9 || markers[1].transportRouteDomain != 2 {
 		t.Errorf("old routed endpoints changed with live references: %+v", markers)
 	}
+}
+
+// testSession is a session of c holding these records, as a test spells it
+// out.
+func testSession(c *Compiler, fars []far, pdrs []pdr) *Session {
+	s := &Session{rs: &c.recs}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, f := range fars {
+		if _, err := s.FARs().add(f.id, f); err != nil {
+			panic(err)
+		}
+	}
+	for _, p := range pdrs {
+		if _, err := s.PDRs().add(p.id, p); err != nil {
+			panic(err)
+		}
+	}
+	return s
 }
 
 func TestLeavingTunnelsDoesNotEndAnUnchangedRoutedEndpoint(t *testing.T) {
@@ -569,13 +587,12 @@ func TestLeavingTunnelsDoesNotEndAnUnchangedRoutedEndpoint(t *testing.T) {
 		id: 2, apply: applyForw, destIfc: ie.DstInterfaceCore, ext: c.st.farExts.acquire(farExt{instance: "internet"}),
 		hasOuter: true, teid: 0x11223344,
 	}, "10.20.30.2")
-	s := &Session{
-		FARs: idMapOf(map[uint32]*far{2: old}),
-		PDRs: idMapOf(map[uint16]*pdr{
-			1: {id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, ext: c.st.exts.acquire(pdrExt{instance: "internet"}),
-				tunnelEnd: c.st.ends.acquire(localEnd{address: ipOf(local), domain: 2})},
-		}),
-	}
+	s := testSession(c, []far{*old}, []pdr{
+		{id: 1, farID: 2, srcIfc: ie.SrcInterfaceCore, ext: c.st.exts.acquire(pdrExt{instance: "internet"}),
+			tunnelEnd: c.st.ends.acquire(localEnd{address: ipOf(local), domain: 2})},
+	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, update := range []farReq{
 		{id: 2, hasFwd: true},
 		{id: 2, hasDestIfc: true, destIfc: ie.DstInterfaceCore},

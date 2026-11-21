@@ -108,6 +108,14 @@ func (c *Compiler) foldSession(s *Session, changes []bess.Change, mode sessionEn
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.foldSessionLocked(s, changes, mode)
+}
+
+// foldSessionLocked is foldSession for a caller holding the lock.
+func (c *Compiler) foldSessionLocked(s *Session, changes []bess.Change, mode sessionEntryWrite) ([]bess.Change, error) {
+	if mode == keepSessionEntry && len(changes) == 0 {
+		return nil, nil
+	}
 	mine := map[string]Table{}
 	for _, t := range sessionTables {
 		mine[c.res(t)] = t
@@ -202,7 +210,7 @@ func (c *Compiler) sessionValue(s *Session, writes []bess.Change, mine map[strin
 	// and a measured one keeps that action (and so its URR cells) in the
 	// entry, as the masked layout keeps its counter entry.
 	owners := map[string]*pdr{}
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if !p.drop || p.buffer || !counted[p.actionID] {
 			continue
 		}

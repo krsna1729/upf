@@ -225,3 +225,49 @@ func TestARecordIndexIsCopyOnWrite(t *testing.T) {
 		t.Errorf("released indexes left %v records", rs.live())
 	}
 }
+
+// TestARecordIndexFindsEveryEntryEitherSideOfItsMove: up to recIndexSmall
+// records of a kind are a sorted run and the next moves every kind to maps;
+// every record is found, replaced and removed the same way in both forms,
+// and ids are in order.
+func TestARecordIndexFindsEveryEntryEitherSideOfItsMove(t *testing.T) {
+	for _, n := range []int{recIndexSmall, recIndexSmall + 1} {
+		var rs records
+		var ix recIndex
+		urrs := recs[uint32, urr]{&ix, &rs.urrs, urrRecs}
+		qers := recs[uint32, qer]{&ix, &rs.qers, qerRecs}
+		qers.add(9, qer{id: 9})
+		for i := n; i >= 1; i-- { // reverse: every insert lands at the front of its run
+			urrs.add(uint32(i), urr{id: uint32(i)})
+		}
+		if got, want := ix.big != nil, n > recIndexSmall; got != want {
+			t.Errorf("%d records: map form %v, want %v", n, got, want)
+		}
+		want := make([]uint32, n)
+		for i := range want {
+			want[i] = uint32(i + 1)
+		}
+		if ids := urrs.ids(); !slices.Equal(ids, want) {
+			t.Errorf("%d records: ids %v, want %v", n, ids, want)
+		}
+		h, _, _ := rs.urrs.alloc(urr{id: 300})
+		old := urrs.handle(3)
+		urrs.put(3, h)
+		rs.urrs.release(old)
+		for i := 1; i <= n; i++ {
+			wantID := map[bool]uint32{true: 300, false: uint32(i)}[i == 3]
+			if u := urrs.at(uint32(i)); u == nil || u.id != wantID {
+				t.Errorf("%d records: at(%d) = %v, want record %d", n, i, u, wantID)
+			}
+		}
+		urrs.drop(1)
+		urrs.drop(uint32(n + 5)) // absent: no change
+		if urrs.has(1) || urrs.len() != n-1 || qers.at(9).id != 9 {
+			t.Errorf("%d records: after removing 1, has(1) %v and %d records, want false and %d", n, urrs.has(1), urrs.len(), n-1)
+		}
+		ix.releaseInto(&rs)
+		if rs.live() != [recKinds]int{} {
+			t.Errorf("%d records: releasing the index left %v", n, rs.live())
+		}
+	}
+}

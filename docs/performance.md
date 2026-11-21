@@ -2248,8 +2248,8 @@ side-object scanning explicitly. Demonstrate the indexed fixture budget or
 explain its measured excess. Paired plain runs must improve GC CPU/service cost
 without lifecycle, accounting, refusal or hard-budget regressions.
 
-**Status (perf/session-pointer-free, steps 1, 1b+3a, 3b and 2 done; step 4
-not started, see below):** the leaf records (`pdr`,
+**Status (perf/session-pointer-free, steps 1, 1b+3a, 3b and 2 done;
+perf/session-slabs, step 4 done, see below):** the leaf records (`pdr`,
 `far`, `qer`, `urr`) hold no Go pointers. Shared provisioning (PDI/FAR
 extensions, QER policy, URR limits, tunnel local end, SDF filters) is a uint32
 handle into a refcounted, deduplicating per-compiler table with open-addressing
@@ -2350,13 +2350,33 @@ object stays alive. The design (`internal/session/slab.go`):
   session). The generation is the check on this rule, not its mechanism: it
   catches a stale read for 255 reuses of a slot and wraps after; tests also
   run with every record read checking that the lock is held
-  (`slabLockCheck`, a `TryLock` that must fail).
+  (`slabLockCheck`, a `TryLock` that must fail). The lock moved over three
+  other unlocked reads: a modification's queried and removed URRs
+  (`requestedURRs`), the PDRs it reports created, and the counts the
+  deletion and the log lines read. A merge or compile of a released session
+  is refused (`errSessionGone`, cause 65): a modification the association
+  end overtook would otherwise add records nobody frees.
 - *The `Session`.* It stays a Go object: it is what the lock-gap holders
   keep (a modification, a tick's `judge`, the association end's batch) and
   what their `c.sessions[seid] == s` checks compare, so a slab slot would make
-  every such holder a reuse hazard. Its pointer fields come first, so the
-  collector scans only that prefix, and `byCP` maps a CP SEID to the local
-  SEID, a noscan map, instead of holding a second `*Session`.
+  every such holder a reuse hazard. Step 4c puts its pointer fields first, so
+  the collector scans only that prefix, and makes `byCP` map a CP SEID to
+  the local SEID, a noscan map, instead of holding a second `*Session`.
+
+**Step 4b measured (records in slabs, all users migrated).** 20,000 counted
+sessions, main → this step: live 1,318.9 → 1,194.6 B, scanned 339.4 →
+163.6 B, objects 11.02 → 2.03 per session, heap per item 1,567 → 1,276 B;
+allocs/op Establish 246 → 241, Delete 26 → 26, ChangeLifecycle
+graph/appliance/session-major 194/194/347 → 178/178/331. A refused
+modification restores every record and leaves the slabs as they were
+(`TestARefusedModificationRestoresItsRecords`); three rounds of
+establish/modify/delete return every slot and reuse it without new segments
+(`TestSessionChurnGivesBackEverySlabSlot`); a freed handle is refused before
+and after its slot is reused (`TestAFreedRecordHandleIsRefused`); and
+deletions racing a tick's enforcement, which frees the forms an
+unknown-outcome modification left pending, never name another session's
+rules (`TestARemovalNeverReadsAnotherSessionsRecord`, also under `-race`;
+with `removal`'s lock taken out it panics on the lock check).
 
 **1M churn, paired (2026-11-20).** `ci/bench-churn.py`, 1M resident sessions,
 10K/s offered, `GOGC=25`, normal backing, one BESS stage (`dd22783d`), order

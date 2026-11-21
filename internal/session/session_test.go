@@ -2027,7 +2027,7 @@ func TestAnUpdatePDRWithoutPrecedenceKeepsTheMatchingOrder(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the update answered cause %d", got)
 	}
-	if got := sessionOf(t, c, upFSEID(t, resp)).PDRs.at(3).precedence; got != 20 {
+	if got := pdrCopy(t, c, upFSEID(t, resp), 3).precedence; got != 20 {
 		t.Errorf("the updated PDR's precedence is %d, want the stored 20", got)
 	}
 	if len(rec.txns) != completed {
@@ -2060,7 +2060,7 @@ func TestAnUpdatePDRKeepsWhatItLeavesOut(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("an Update PDR naming only the precedence answered cause %d", got)
 	}
-	p := sessionOf(t, c, seid).PDRs.at(1)
+	p := pdrCopy(t, c, seid, 1)
 	if p.srcIfc != ie.SrcInterfaceAccess || p.ueIP() != netip.MustParseAddr("10.45.0.2") || p.teid != 0x11223344 {
 		t.Errorf("the PDI read as interface %d, UE %v, TEID %#x; want the stored Access, 10.45.0.2, 0x11223344",
 			p.srcIfc, p.ueIP(), p.teid)
@@ -2426,7 +2426,7 @@ func TestAQuotaExhaustedURRDropsItsPDRs(t *testing.T) {
 	// there because only the counter reading says a quota is used up; see
 	// docs/design.md, "Usage".)
 	c.mu.Lock()
-	c.findByCP(0x3021).URRs.at(7).enforcing = true
+	c.findByCP(0x3021).URRs().at(7).enforcing = true
 	c.mu.Unlock()
 
 	// An update that changes nothing about the PDR: whatever the SMF sends, the
@@ -2456,7 +2456,7 @@ func TestAQuotaExhaustedURRDropsItsPDRs(t *testing.T) {
 		t.Fatalf("the modification that provisions a new quota answered cause %d", got)
 	}
 	c.mu.Lock()
-	enforcing := c.findByCP(0x3021).URRs.at(7).enforcing
+	enforcing := c.findByCP(0x3021).URRs().at(7).enforcing
 	c.mu.Unlock()
 	if enforcing {
 		t.Error("a new quota left the URR enforcing: the traffic would never come back")
@@ -3390,18 +3390,18 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 	second.ID, second.IPv4 = 2, secondAddr
 	cfg.FTEIDEndpoints = append(cfg.FTEIDEndpoints, second)
 	c := New(cfg, &recorder{}, quietLogger())
-	makePDR := func(id uint16, endpoint uint32) *pdr {
-		return &pdr{id: id, srcIfc: ie.SrcInterfaceAccess, teid: 0x77,
+	makePDR := func(id uint16, endpoint uint32) pdr {
+		return pdr{id: id, srcIfc: ie.SrcInterfaceAccess, teid: 0x77,
 			endpointID: endpoint, endpointFamily: 4, wantIPv4: true}
 	}
-	first := &Session{LocalSEID: 1}
-	firstPDR := makePDR(1, 1)
-	first.PDRs.set(1, firstPDR)
-	secondSession := &Session{LocalSEID: 2}
-	secondPDR := makePDR(1, 2)
-	secondSession.PDRs.set(1, secondPDR)
+	first := testSession(c, nil, []pdr{makePDR(1, 1)})
+	first.LocalSEID = 1
+	secondSession := testSession(c, nil, []pdr{makePDR(1, 2)})
+	secondSession.LocalSEID = 2
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	firstPDR, secondPDR := first.PDRs().at(1), secondSession.PDRs().at(1)
 	if err := c.claimFTEID(first, firstPDR); err != nil {
 		t.Fatal(err)
 	}
@@ -3410,10 +3410,9 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 	}
 	conflict := makePDR(2, 2)
 	conflict.down = true
-	if err := c.claimFTEID(&Session{LocalSEID: 3}, conflict); err == nil {
+	if err := c.claimFTEID(&Session{LocalSEID: 3, rs: &c.recs}, &conflict); err == nil {
 		t.Fatal("the same exact endpoint key was claimed for the opposite direction")
 	}
-	c.mu.Unlock()
 	if firstPDR.fteidContext == 0 || firstPDR.fteidContext == secondPDR.fteidContext {
 		t.Fatalf("TEID 0x77 on two endpoints shares context %d/%d: their PDR rules would cross-match",
 			firstPDR.fteidContext, secondPDR.fteidContext)
@@ -3423,20 +3422,19 @@ func TestFTEIDOwnershipIsEndpointScopedAndRefcounted(t *testing.T) {
 		c.fteidKeysOf(firstPDR)[0] == c.fteidKeysOf(secondPDR)[0] {
 		t.Fatal("distinct endpoint keys collapsed despite sharing TEID 0x77")
 	}
-	c.mu.Lock()
+	// The records go with their sessions: read what is checked after first.
+	firstContext, secondContext := firstPDR.fteidContext, secondPDR.fteidContext
+	secondKey := c.fteidKeysOf(secondPDR)[0]
 	c.releaseSession(first)
 	remaining := c.teidClaimed(0x77)
-	_, secondStillOwned := c.byFTEID.get(c.fteidKeysOf(secondPDR)[0])
+	_, secondStillOwned := c.byFTEID.get(secondKey)
 	pinned := c.teids.taken[0x77]
-	c.mu.Unlock()
 	if !remaining || !secondStillOwned || !pinned {
 		t.Fatalf("releasing one endpoint prematurely freed the shared TEID: claimed=%v owner=%v pinned=%v", remaining, secondStillOwned, pinned)
 	}
-	c.mu.Lock()
 	c.releaseSession(secondSession)
 	remaining, pinned = c.teidClaimed(0x77), c.teids.taken[0x77]
-	contexts := c.contexts.taken[firstPDR.fteidContext] || c.contexts.taken[secondPDR.fteidContext]
-	c.mu.Unlock()
+	contexts := c.contexts.taken[firstContext] || c.contexts.taken[secondContext]
 	if remaining || pinned || contexts {
 		t.Fatalf("last endpoint did not release the TEID: claimed=%v pinned=%v contexts=%v", remaining, pinned, contexts)
 	}
@@ -3626,13 +3624,13 @@ func TestQuotaGrantPublishesTunnelChangedWhileDropping(t *testing.T) {
 				t.Fatalf("establishment cause %d", got)
 			}
 			seid := upFSEID(t, resp)
-			p := sessionOf(t, c, seid).PDRs.at(2)
+			p := pdrCopy(t, c, seid, 2)
 			counter := c.target.Counts(CountersDownlink)
 			rec.counts = map[string][]bess.RuleCount{counter: {{ActionID: p.actionID, Packets: 10, Octets: 1000}}}
 			evaluate(t, c, seid)
 			rec.counts[counter] = []bess.RuleCount{{ActionID: p.actionID, Packets: 20, Octets: 2000}}
 			evaluate(t, c, seid)
-			if !p.drop {
+			if !pdrCopy(t, c, seid, 2).drop {
 				t.Fatal("spent quota did not stop the downlink")
 			}
 			if got := cause(t, c.Modify(message.NewSessionModificationRequest(0, 0, seid, 2, 0,
@@ -4465,7 +4463,7 @@ func TestEvaluateTakesTheFirstReadingAsItsBaseline(t *testing.T) {
 		t.Fatalf("the first reading reported %+v: the inherited totals are not this URR's usage", reports)
 	}
 	c.mu.Lock()
-	enforcing := c.findByCP(0x3041).URRs.at(7).enforcing
+	enforcing := c.findByCP(0x3041).URRs().at(7).enforcing
 	c.mu.Unlock()
 	if enforcing {
 		t.Error("the inherited totals exhausted the quota: the window must start at the first reading")
@@ -4588,10 +4586,10 @@ func TestEvaluateAllWalksEverySession(t *testing.T) {
 	if reports := c.EvaluateAll(context.Background(), time.Now()); len(reports) != 0 {
 		t.Fatalf("the baseline tick returned %+v, want none", reports)
 	}
-	var measured *pdr
+	var measured pdr
 	c.mu.Lock()
-	for _, p := range c.findByCP(0x3050).PDRs.all() {
-		measured = p
+	for _, p := range c.findByCP(0x3050).PDRs().all() {
+		measured = *p
 	}
 	c.mu.Unlock()
 	rec.counts = map[string][]bess.RuleCount{
@@ -4727,6 +4725,43 @@ func sessionOf(t *testing.T, c *Compiler, seid uint64) *Session {
 	return s
 }
 
+// locked is f's result, computed holding c's lock: how a test reads (or
+// sets) a session's records, which live in the compiler's slabs.
+func locked[T any](c *Compiler, f func() T) T {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return f()
+}
+
+// copyOf is a copy of *p, nil for nil.
+func copyOf[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	return &cp
+}
+
+// pdrCopy, qerCopy and urrCopy are copies of a session's record taken under
+// the lock, nil for none: what a test reads after the call that wrote it.
+func pdrCopy(t *testing.T, c *Compiler, seid uint64, id uint16) *pdr {
+	t.Helper()
+	s := sessionOf(t, c, seid)
+	return locked(c, func() *pdr { return copyOf(s.PDRs().at(id)) })
+}
+
+func qerCopy(t *testing.T, c *Compiler, seid uint64, id uint32) *qer {
+	t.Helper()
+	s := sessionOf(t, c, seid)
+	return locked(c, func() *qer { return copyOf(s.QERs().at(id)) })
+}
+
+func urrCopy(t *testing.T, c *Compiler, seid uint64, id uint32) *urr {
+	t.Helper()
+	s := sessionOf(t, c, seid)
+	return locked(c, func() *urr { return copyOf(s.URRs().at(id)) })
+}
+
 func TestAURRIsReadIntoTheSession(t *testing.T) {
 	// Every IE of the URR the milestone covers is read: the measurement method,
 	// the triggers, the period, both thresholds and both quotas, with the
@@ -4737,7 +4772,7 @@ func TestAURRIsReadIntoTheSession(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
-	held := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
+	held := urrCopy(t, c, upFSEID(t, resp), 7)
 	if held == nil {
 		t.Fatal("the session holds no URR 7")
 	}
@@ -4781,7 +4816,7 @@ func TestAOneOctetReportingTriggersIsRead(t *testing.T) {
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("a one-octet Reporting Triggers answered cause %d", got)
 	}
-	u := c.limits(sessionOf(t, c, upFSEID(t, resp)).URRs.at(7))
+	u := c.limits(urrCopy(t, c, upFSEID(t, resp), 7))
 	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
 		t.Errorf("the triggers read as %+v, want PERIO alone", u)
 	}
@@ -4894,17 +4929,17 @@ func TestZeroIsALegalRuleID(t *testing.T) {
 		t.Fatalf("a session whose rules are numbered 0 answered cause %d", got)
 	}
 	seid := upFSEID(t, resp)
-	s := c.sessions[seid]
-	if s.PDRs.at(0) == nil {
+	p0, q0 := pdrCopy(t, c, seid, 0), qerCopy(t, c, seid, 0)
+	if p0 == nil {
 		t.Fatal("the session holds no PDR 0")
 	}
 	// The uplink PDR's FAR is FAR 0's, and its QER is QER 0's: the ids are the
 	// SMF's references, and a wrong one would be a rule the SMF did not send.
-	if s.PDRs.at(0).farID != 0 || s.PDRs.at(0).meterID != s.QERs.at(0).meterUL {
+	if p0.farID != 0 || p0.meterID != q0.meterUL {
 		t.Errorf("PDR 0 resolved to FAR %d and meter %d, want FAR 0 and QER 0's meter %d",
-			s.PDRs.at(0).farID, s.PDRs.at(0).meterID, s.QERs.at(0).meterUL)
+			p0.farID, p0.meterID, q0.meterUL)
 	}
-	if s.PDRs.at(0).drop {
+	if p0.drop {
 		t.Error("the PDR drops although its FAR 0 forwards")
 	}
 
@@ -4943,7 +4978,7 @@ func TestARemovedQERsMeterReturnsAtTeardown(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	seid := upFSEID(t, resp)
-	meter := c.sessions[seid].QERs.at(1).meterUL
+	meter := qerCopy(t, c, seid, 1).meterUL
 	if meter == 0 {
 		t.Fatal("the QER of the establishment has no uplink meter")
 	}
@@ -4968,12 +5003,11 @@ func TestARemovedQERsMeterReturnsAtTeardown(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification that re-pointed the PDR answered cause %d", got)
 	}
-	s := c.sessions[seid]
-	if s.QERs.at(1) != nil {
+	if qerCopy(t, c, seid, 1) != nil {
 		t.Error("the removed QER is still in the session")
 	}
-	if s.PDRs.at(1).meterID != 0 {
-		t.Errorf("the PDR still meters under %d, and the QER that owned it is gone", s.PDRs.at(1).meterID)
+	if m := pdrCopy(t, c, seid, 1).meterID; m != 0 {
+		t.Errorf("the PDR still meters under %d, and the QER that owned it is gone", m)
 	}
 
 	// A removal of a QER the session never held says nothing and changes
@@ -5032,8 +5066,8 @@ func TestRemovingAQERAPDRStillNamesUnlinksIt(t *testing.T) {
 	if m := meterOf(); m != 0 {
 		t.Errorf("the PDR still meters under %d after its QER was removed", m)
 	}
-	if s := sessionOf(t, c, seid); s.QERs.at(1) != nil || s.PDRs.at(1).qerIDs.len() != 0 {
-		t.Errorf("the session holds QER 1 (%v) or PDR 1 still names %v", s.QERs.at(1) != nil, c.st.ids(&s.PDRs.at(1).qerIDs))
+	if q, p := qerCopy(t, c, seid, 1), pdrCopy(t, c, seid, 1); q != nil || p.qerIDs.len() != 0 {
+		t.Errorf("the session holds QER 1 (%v) or PDR 1 still names %v", q != nil, c.st.ids(&p.qerIDs))
 	}
 }
 
@@ -5064,7 +5098,7 @@ func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
 	s := sessionOf(t, c, upFSEID(t, resp))
-	s.URRs.at(7).enforcing = true // as the reporter leaves it after a quota exhaustion
+	locked(c, func() bool { s.URRs().at(7).enforcing = true; return true }) // as the reporter leaves it after a quota exhaustion
 
 	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
 		ie.NewUpdateURR(
@@ -5076,7 +5110,7 @@ func TestAnUpdateURRReplacesOnlyWhatItNames(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification answered cause %d", got)
 	}
-	held := sessionOf(t, c, upFSEID(t, resp)).URRs.at(7)
+	held := urrCopy(t, c, upFSEID(t, resp), 7)
 	u := c.limits(held)
 	if !u.periodic || u.onVolumeTh || u.onTimeTh || u.onVolQuota || u.onTimeQuota {
 		t.Errorf("the triggers read as %+v, want PERIO alone", u)
@@ -5126,7 +5160,7 @@ func TestRemoveURRAfterAnUpdatePDRDropsIt(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the removal answered cause %d", got)
 	}
-	if s := sessionOf(t, c, upFSEID(t, resp)); s.URRs.at(7) != nil {
+	if urrCopy(t, c, upFSEID(t, resp), 7) != nil {
 		t.Error("the session still holds the removed URR")
 	}
 }
@@ -5169,7 +5203,7 @@ func TestARemoveURROfALinkedToURRIsRefused(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRuleCreationModificationFailure {
 		t.Errorf("removing a URR another URR links to answered cause %d, want a rule failure", got)
 	}
-	if s := sessionOf(t, c, upFSEID(t, resp)); s.URRs.at(7) == nil {
+	if urrCopy(t, c, upFSEID(t, resp), 7) == nil {
 		t.Fatal("the refused removal took the linked-to URR out of the model")
 	}
 }

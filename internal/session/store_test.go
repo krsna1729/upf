@@ -114,9 +114,8 @@ func TestBlobsShareBytesAndReuseFreedSpace(t *testing.T) {
 // a snapshot holds trim off, and drop gives back everything.
 func TestASessionHoldsEachHandleOnceAndTrimGivesBackTheRest(t *testing.T) {
 	var st store
-	s := &Session{}
-	q := &qer{id: 1}
-	s.QERs.set(1, q)
+	s := &Session{rs: &records{}}
+	q, _ := s.QERs().add(1, qer{id: 1})
 	q.policy = st.ownPolicy(s, qerPolicy{mbUL: 10})
 	if h := st.ownPolicy(s, qerPolicy{mbUL: 10}); h != q.policy || st.policies.entry(h).refs != 1 {
 		t.Fatalf("a second own of one value took another reference (%d)", st.policies.entry(h).refs)
@@ -196,9 +195,8 @@ func TestAClaimIsFoundByItsWholeKeyAndTheIndexShrinks(t *testing.T) {
 // given up, and dropClaims ends the rest and empties the list.
 func TestASessionListsItsClaimsUntilItGivesThemUp(t *testing.T) {
 	var st store
-	s := &Session{LocalSEID: 7}
-	q := &qer{id: 1}
-	s.QERs.set(1, q)
+	s := &Session{LocalSEID: 7, rs: &records{}}
+	q, _ := s.QERs().add(1, qer{id: 1})
 	q.policy = st.ownPolicy(s, qerPolicy{mbUL: 10})
 	var hs []uint32
 	for _, k := range []string{"\x01a", "\x01b", "\x02c"} {

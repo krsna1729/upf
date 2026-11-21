@@ -152,14 +152,14 @@ func (b *sessionSet) page(slots []uint32, from uint32, limit int) ([]uint32, uin
 }
 
 func (c *Compiler) queueUsage(s *Session) {
-	if s.URRs.len() == 0 {
+	if s.URRs().len() == 0 {
 		return
 	}
 	c.usage.pending.add(c.slotOf(s))
 }
 
 func (c *Compiler) ownUsage(s *Session) {
-	for _, p := range s.PDRs.all() {
+	for _, p := range s.PDRs().all() {
 		if _, ok := c.countedModule(p); !ok {
 			continue
 		}
@@ -230,7 +230,7 @@ func (c *Compiler) scheduleUsage(s *Session) {
 			earliest = at
 		}
 	}
-	for _, u := range s.URRs.all() {
+	for _, u := range s.URRs().all() {
 		if !u.baselined {
 			c.queueUsage(s)
 			continue

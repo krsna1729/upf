@@ -5,6 +5,7 @@ package session
 import (
 	"context"
 	"net"
+	"slices"
 	"testing"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -38,7 +39,8 @@ func TestARefusedModificationLeavesTheSessionAsItWas(t *testing.T) {
 	if got := cause(t, c.Modify(namesUnknownURR(2, seid))); got != ie.CauseRuleCreationModificationFailure {
 		t.Fatalf("a PDR naming URR 55 answered cause %d, want a rule failure", got)
 	}
-	if ids := c.st.ids(&sessionOf(t, c, seid).PDRs.at(1).urrIDs); len(ids) != 1 || ids[0] != 7 {
+	s := sessionOf(t, c, seid)
+	if ids := locked(c, func() []uint32 { return slices.Clone(c.st.ids(&s.PDRs().at(1).urrIDs)) }); len(ids) != 1 || ids[0] != 7 {
 		t.Errorf("the refused update left PDR 1 naming URRs %v, want its own 7", ids)
 	}
 	benign := message.NewSessionModificationRequest(0, 0, seid, 3, 0,
@@ -83,7 +85,7 @@ func TestARefusedModificationGivesBackTheMetersAndTEIDsItTook(t *testing.T) {
 	if got := len(c.meters.freed) - metersBefore; got != 2 {
 		t.Errorf("%d meters were given back, want the refused QER's uplink and downlink pair", got)
 	}
-	if s := c.sessions[seid]; s.QERs.at(9) != nil || s.PDRs.at(5) != nil {
+	if s := c.sessions[seid]; s.QERs().at(9) != nil || s.PDRs().at(5) != nil {
 		t.Error("the refused request's QER or PDR is in the model")
 	}
 }
@@ -139,9 +141,7 @@ func TestUnansweredModificationRestatesResourcesUntilAWriteCompletes(t *testing.
 func TestQuotaGrantAfterInterleavedEnforcementReopensTheClassifier(t *testing.T) {
 	c, rec, seid, set := measured(t, 0xa104, 0, 0)
 	s := sessionOf(t, c, seid)
-	c.mu.Lock()
-	before := s.snapshot()
-	c.mu.Unlock()
+	before := mustSnapshot(t, c, s)
 	set(10000+(1<<30), 200)
 	if reports := evaluate(t, c, seid); len(reports) != 1 {
 		t.Fatalf("quota enforcement produced %d reports, want one", len(reports))
@@ -166,7 +166,8 @@ func TestQuotaGrantAfterInterleavedEnforcementReopensTheClassifier(t *testing.T)
 	if err := c.apply(context.Background(), s, changes); err != nil {
 		t.Fatal(err)
 	}
-	c.settle(s, false)
+	c.settle(s, nil)
+	releaseSnapshot(c, &before)
 	forwarding := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
 	if forwarding.change.Value == nil || forwarding.gate() == dropGate {
 		t.Fatal("the granted quota left the dataplane classifier dropping")
@@ -178,9 +179,8 @@ func TestQuotaGrantAfterInterleavedEnforcementReopensTheClassifier(t *testing.T)
 func TestAnOlderDeltaCannotClearOverlappingUnknownCompletion(t *testing.T) {
 	c, rec, seid, _ := measured(t, 0xa105, 0, 0)
 	s := sessionOf(t, c, seid)
-	c.mu.Lock()
-	before := s.snapshot()
-	c.mu.Unlock()
+	before := mustSnapshot(t, c, s)
+	defer releaseSnapshot(c, &before)
 	older, _, err := c.compileModel(s, &before, false)
 	if err != nil {
 		t.Fatal(err)
@@ -209,4 +209,23 @@ func TestAnOlderDeltaCannotClearOverlappingUnknownCompletion(t *testing.T) {
 	if got := len(changesFor(rec.last(), c.res(PDRUplink))); got != 1 {
 		t.Fatalf("reconciliation wrote %d classifiers, want the complete model", got)
 	}
+}
+
+// mustSnapshot is a snapshot of s's model, as a modification takes one.
+func mustSnapshot(t *testing.T, c *Compiler, s *Session) modelSnapshot {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snap, err := s.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
+// releaseSnapshot frees a snapshot a test took and did not restore.
+func releaseSnapshot(c *Compiler, snap *modelSnapshot) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snap.release()
 }

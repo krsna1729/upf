@@ -208,19 +208,20 @@ func boundedTick(t *testing.T, sessions, perSession int) (*Compiler, *boundedRea
 		s := *model
 		s.LocalSEID = seid + 1 + uint64(i)
 		s.slot = 0 // a copy is another session: it takes a slot of its own
-		s.PDRs = idMap[uint16, *pdr]{}
-		pdrs := make([]pdr, perSession)
-		for j := range pdrs {
-			pdrs[j] = *measured
-			pdrs[j].id = uint16(j + 1)
-			pdrs[j].actionID = uint32(len(reader.held) + 1)
-			reader.held = append(reader.held, pdrs[j].actionID)
-			s.PDRs.set(pdrs[j].id, &pdrs[j])
+		s.ix = recIndex{}
+		for j := range perSession {
+			p := *measured
+			p.id = uint16(j + 1)
+			p.actionID = uint32(len(reader.held) + 1)
+			reader.held = append(reader.held, p.actionID)
+			if _, err := s.PDRs().add(p.id, p); err != nil {
+				t.Fatal(err)
+			}
 		}
-		s.URRs = idMap[uint32, *urr]{}
-		for id, u := range model.URRs.all() {
-			own := *u
-			s.URRs.set(id, &own)
+		for id, u := range model.URRs().all() {
+			if _, err := s.URRs().add(id, *u); err != nil {
+				t.Fatal(err)
+			}
 		}
 		c.sessions[s.LocalSEID] = &s
 		c.track(&s)
@@ -260,11 +261,13 @@ func TestATickReadsEveryRuleUnderTheMessageBound(t *testing.T) {
 		t.Errorf("%d of %d rules were not named exactly once", unread, len(reader.named)-1)
 	}
 	baselined := 0
+	c.mu.Lock()
 	for _, s := range c.sessions {
-		if s.URRs.at(7).baselined {
+		if s.URRs().at(7).baselined {
 			baselined++
 		}
 	}
+	c.mu.Unlock()
 	if baselined != sessions {
 		t.Errorf("%d of %d sessions took their first reading", baselined, sessions)
 	}
@@ -287,11 +290,14 @@ func TestAReportTakenBackIsDecidedAgain(t *testing.T) {
 	}
 	// 2 MiB crosses the URR's 1 MiB volume threshold.
 	var counts []bess.RuleCount
-	for _, p := range pdrsInOrder(sessionOf(t, c, seid)) {
+	s := sessionOf(t, c, seid)
+	c.mu.Lock()
+	for _, p := range pdrsInOrder(s) {
 		if p.urrIDs.len() > 0 && p.actionID != 0 {
 			counts = append(counts, bess.RuleCount{ActionID: p.actionID, Packets: 2, Octets: 2 << 20})
 		}
 	}
+	c.mu.Unlock()
 	rec.counts = map[string][]bess.RuleCount{testConfig().Up.Counters: counts}
 	first := c.EvaluateAll(ctx, at.Add(time.Second))
 	if len(first) != 1 || first[0].Up.Octets != 2<<20 {

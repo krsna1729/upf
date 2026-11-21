@@ -269,7 +269,7 @@ func (x *recIndex) count(k recKind) int {
 
 func (x *recIndex) set(k recKind, id, h uint32) {
 	if x.big != nil {
-		x.big[k][id] = h
+		x.bigSet(k, id, h)
 		return
 	}
 	i, ok := x.find(k, id)
@@ -279,7 +279,7 @@ func (x *recIndex) set(k recKind, id, h uint32) {
 	}
 	if x.n[k] == recIndexSmall {
 		x.grow()
-		x.big[k][id] = h
+		x.bigSet(k, id, h)
 		return
 	}
 	next := make([]recRef, len(x.small)+1)
@@ -290,12 +290,23 @@ func (x *recIndex) set(k recKind, id, h uint32) {
 	x.n[k]++
 }
 
+// bigSet sets id in kind k's map, made on its first entry: a kind the
+// session names none of costs no map.
+func (x *recIndex) bigSet(k recKind, id, h uint32) {
+	if x.big[k] == nil {
+		x.big[k] = map[uint32]uint32{}
+	}
+	x.big[k][id] = h
+}
+
 // grow moves every kind to its map.
 func (x *recIndex) grow() {
 	big := &[recKinds]map[uint32]uint32{}
 	lo := 0
 	for k := range recKinds {
-		big[k] = make(map[uint32]uint32, max(int(x.n[k]), recIndexSmall*2))
+		if x.n[k] != 0 {
+			big[k] = make(map[uint32]uint32, max(int(x.n[k]), recIndexSmall*2))
+		}
 		for _, r := range x.small[lo : lo+int(x.n[k])] {
 			big[k][r.id] = r.h
 		}
@@ -369,7 +380,9 @@ func (x *recIndex) copyInto(rs *records) (recIndex, error) {
 	if x.big != nil {
 		out.big = &[recKinds]map[uint32]uint32{}
 		for k := range recKinds {
-			out.big[k] = make(map[uint32]uint32, len(x.big[k]))
+			if len(x.big[k]) != 0 {
+				out.big[k] = make(map[uint32]uint32, len(x.big[k]))
+			}
 			for id, h := range x.big[k] {
 				if n := copyOne(k, h); err == nil {
 					out.big[k][id] = n

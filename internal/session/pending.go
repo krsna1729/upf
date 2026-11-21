@@ -2,12 +2,12 @@
 
 package session
 
-import "slices"
-
 // sessionChanges retains records replaced or removed by a transaction until
-// its outcome is known. Idle sessions need none of these slice headers.
+// its outcome is known. Idle sessions need none of these slice headers. The
+// PDRs are slab handles the session's model owns (slab.go): settle frees
+// them once the dataplane took the transaction.
 type sessionChanges struct {
-	removed, stale         []*pdr
+	removed, stale         []uint32
 	removedMARs            []*mar
 	retiredTunnels, ending []uint32
 }
@@ -19,14 +19,14 @@ func (s *Session) changes() *sessionChanges {
 	return s.pending
 }
 
-func (p *sessionChanges) removedPDRs() []*pdr {
+func (p *sessionChanges) removedPDRs() []uint32 {
 	if p == nil {
 		return nil
 	}
 	return p.removed
 }
 
-func (p *sessionChanges) stalePDRs() []*pdr {
+func (p *sessionChanges) stalePDRs() []uint32 {
 	if p == nil {
 		return nil
 	}
@@ -54,13 +54,19 @@ func (p *sessionChanges) endingFlows() []uint32 {
 	return p.ending
 }
 
-func (p *sessionChanges) clone() *sessionChanges {
-	if p == nil {
-		return nil
+// keepStale makes old, a PDR's form before an in-place change, one of the
+// replaced forms the next transaction erases, in a slot of its own.
+func (c *Compiler) keepStale(s *Session, old pdr) error {
+	h, _, err := c.recs.pdrs.alloc(old)
+	if err != nil {
+		return err
 	}
-	return &sessionChanges{
-		removed: slices.Clone(p.removed), stale: slices.Clone(p.stale),
-		removedMARs:    slices.Clone(p.removedMARs),
-		retiredTunnels: slices.Clone(p.retiredTunnels), ending: slices.Clone(p.ending),
-	}
+	s.changes().stale = append(s.changes().stale, h)
+	return nil
+}
+
+// gonePDRs appends the removed and replaced PDRs of s to out.
+func (s *Session) gonePDRs(out []*pdr) []*pdr {
+	out = s.rs.pdrs.resolve(out, s.pending.removedPDRs())
+	return s.rs.pdrs.resolve(out, s.pending.stalePDRs())
 }

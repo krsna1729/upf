@@ -266,7 +266,7 @@ func (c *Compiler) sendTunnelEndMarker(tunnel tunnelEndMarker) error {
 func (c *Compiler) leavingTunnels(s *Session, fars []farReq) []tunnelEndMarker {
 	var out []tunnelEndMarker
 	for _, f := range fars {
-		old := s.FARs.at(f.id)
+		old := s.FARs().at(f.id)
 		if old == nil || !old.hasOuter || old.teid == 0 {
 			continue
 		}
