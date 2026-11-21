@@ -125,6 +125,32 @@ and grows by 1024-record segments that are never given back. At a million
 sessions this is about 1.19 GB of live control state [INFERENCE: index load
 factors differ at that scale].
 
+**PFCP rule-list scratch (2026-11-21):** The common Create/Update rule lists
+use caller-local storage; larger lists still grow through `append`. At 20K
+benchmark iterations, `BenchmarkEstablish` went from 242 to 237 allocs/op
+and the native `BenchmarkChangeLifecycle` from 331 to 324 allocs/cycle,
+with four transactions per cycle before and after.
+
+At 1M sessions, two power-guarded rounds (ABBA and BAAB, `GOGC=25`, BESS
+`767725a6`, plugin `342eed6`) gave these combined medians at 10K/s offered:
+
+| Mode | Goodput, baseline → scratch | `upfd` CPU µs per accepted PFCP message |
+|---|---:|---:|
+| FAR | 8,955 → 8,977/s (+0.2%) | 75.3 → 73.7 (−2.0%) |
+| Replace | 1,927 → 2,085/s (+8.2%) | 124.6 → 117.3 (−5.9%) |
+| Establish | 7,627 → 8,198/s (+7.5%) | 107.3 → 97.3 (−9.3%) |
+| Delete | 6,317 → 6,767/s (+7.1%) | 95.4 → 86.0 (−9.9%) |
+
+Establish met both the goodput and CPU gates in each round. Delete goodput
+was −1.3% in ABBA and +12.4% in BAAB, so the combined result does not
+establish a repeatable delete speedup. Median 1K/s p99 changes were between
+−9.7% and +2.0%; median `upfd` cgroup peak was 1,780 → 1,769 MiB. After-fill
+whole-process live heap was 1,311–1,330 B/session on the baseline and
+1,300–1,320 B/session with scratch. All 64 cells reconciled with zero
+timeouts, pending or uncertain outcomes, and one applied BESS transaction
+per accepted PFCP message. Evidence: `.scratch/evidence/pfcp-create-scratch/`
+and `.scratch/evidence/pfcp-create-scratch-r2/combined-score.txt`.
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
