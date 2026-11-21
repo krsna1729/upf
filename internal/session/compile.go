@@ -535,7 +535,8 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 		// the SEID field, and 0 names no session).
 		return c.establishResponse(req, 0, 0, ie.CauseMandatoryIEMissing, nil)
 	}
-	pdrs, fars, bars, qers, urrs, mars, err := parseCreate(ies)
+	var buf createScratch
+	pdrs, fars, bars, qers, urrs, mars, err := parseCreate(ies, &buf)
 	if err != nil {
 		c.log.Warn("session: cannot read the establishment request", "error", err)
 		return c.establishResponse(req, cpSEID, 0, parseCause(err), nil)
@@ -676,7 +677,8 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	}
 
 	ies := modificationIEs(req)
-	pdrs, fars, bars, qers, urrs, mars, err := parseCreate(ies)
+	var buf createScratch
+	pdrs, fars, bars, qers, urrs, mars, err := parseCreate(ies, &buf)
 	if err != nil {
 		c.log.Warn("session: cannot read the modification request", "seid", seid, "error", err)
 		return modifyResponse(req, hdr, parseCause(err), nil)
@@ -3985,13 +3987,19 @@ func cpFSEID(ies []*ie.IE) (uint64, error) {
 	return 0, errors.New("no CP F-SEID")
 }
 
+// createScratch holds the common rule counts in the caller's stack frame.
+// Larger requests use the same append path and grow their slices as needed.
+type createScratch struct {
+	pdrs [2]pdrReq
+	fars [2]farReq
+	qers [1]qerReq
+	urrs [1]urrReq
+}
+
 // parseCreate reads the Create/Update lists a session message carries.
-func parseCreate(ies []*ie.IE) ([]pdrReq, []farReq, []barReq, []qerReq, []urrReq, []marReq, error) {
-	var pdrs []pdrReq
-	var fars []farReq
+func parseCreate(ies []*ie.IE, buf *createScratch) ([]pdrReq, []farReq, []barReq, []qerReq, []urrReq, []marReq, error) {
+	pdrs, fars, qers, urrs := buf.pdrs[:0], buf.fars[:0], buf.qers[:0], buf.urrs[:0]
 	var bars []barReq
-	var qers []qerReq
-	var urrs []urrReq
 	var mars []marReq
 	for _, i := range ies {
 		switch i.Type {

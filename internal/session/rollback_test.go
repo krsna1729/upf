@@ -150,9 +150,10 @@ func TestQuotaGrantAfterInterleavedEnforcementReopensTheClassifier(t *testing.T)
 	if dropped.gate() != dropGate {
 		t.Fatal("the interleaved quota enforcement did not stop traffic")
 	}
+	var buf createScratch
 	_, _, _, _, urrs, _, err := parseCreate([]*ie.IE{
 		ie.NewUpdateURR(ie.NewURRID(7), ie.NewVolumeQuota(0x01, 2<<30, 0, 0)),
-	})
+	}, &buf)
 	if err != nil {
 		t.Fatal(err)
 	}
