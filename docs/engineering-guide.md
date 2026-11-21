@@ -375,6 +375,11 @@ the BESS
    its overhead. Sampling disabled is not instrumentation removed. Keep source,
    workload, population and resource policy matched; see
    [the observer-overhead gate](performance.md#mandatory-observer-overhead-corroboration).
+6. **Schedule around periodic host jobs.** On this workstation, the desktop
+   agent-usage collector fires every 900 s and stalls `upfd` for seconds.
+   Every overlapped churn cell was its campaign's extreme outlier. Start
+   arms in the gap between firings and refuse any cell that overlaps one
+   ([performance.md](performance.md#host-confounder-the-desktop-agent-usage-collector-2026-11-21)).
 
 ## 7. Pull requests
 
