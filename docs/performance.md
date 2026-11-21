@@ -149,7 +149,12 @@ whole-process live heap was 1,311–1,330 B/session on the baseline and
 1,300–1,320 B/session with scratch. All 64 cells reconciled with zero
 timeouts, pending or uncertain outcomes, and one applied BESS transaction
 per accepted PFCP message. Evidence: `.scratch/evidence/pfcp-create-scratch/`
-and `.scratch/evidence/pfcp-create-scratch-r2/combined-score.txt`.
+and `.scratch/evidence/pfcp-create-scratch-r2/combined-score.txt`. One
+control cell, BAAB run 3 replace at 1K/s (613.95 ms p99, 1,984 refusals),
+overlapped the desktop collector described in
+[Host confounder](#host-confounder-the-desktop-agent-usage-collector-2026-11-21).
+It biases the replace 1K/s p99 median toward the candidate. The establish
+and delete results come from cells without an overlap.
 
 ### Per-change staging and CPU budget
 
@@ -3581,9 +3586,48 @@ Each value is the median of four runs. At 10K/s, FAR used 0.824 applied
 BESS transactions per accepted message with grouping on, below the 0.9
 gate. Its goodput gain missed the +3% gate, and all four light-load p99s
 exceeded the +10% limit. One grouping-on replace run reached 408.46 ms
-p99 with 818 refused messages. Deletes were never grouped and recorded
+p99 with 818 refused messages; that cell overlapped the desktop collector
+(see the next section), so it is not evidence against grouping. The FAR,
+establish and delete tail failures come from cells without an overlap.
+Deletes were never grouped and recorded
 no commit-queue waits in the 1K/s delete cells; the delete tail's cause
 was not isolated. Do not ship either batching design.
 
 Evidence: `.scratch/evidence/grouping-paired/results.txt`, `harness.sh`
 and `churn-*/run/campaign.json`.
+
+## Host confounder: the desktop agent-usage collector (2026-11-21)
+
+The desktop shell (`quickshell -n -p /usr/share/omarchy/shell`) runs its
+agent-usage collectors every 900 s, at :12:37, :27:37, :42:37 and :57:37
+on this host (journal: `qml: agent-collectors`). On the cells it overlaps,
+`upfd` refuses work with "session worker queue full" for about 4–5 s. The
+refusals start about 1 s after the firing. The effect reaches the next cell.
+
+Every churn cell in this session that overlapped a firing (in
+[start − 2 s, end]) was the extreme outlier of its campaign:
+
+| Campaign | Run | Cell | p99 | Refused |
+|---|---|---|---:|---:|
+| backlog-batch | 3-B | replace 1K/s | 414.56 ms | 935 |
+| dispatcher-only | 1-A | FAR 1K/s | 65.42 ms | 0 |
+| grouping-paired | 2-B | replace 1K/s | 408.46 ms | 818 |
+| establish-allocs | 2-B | FAR 10K/s | 680.54 ms | 180,542 |
+| pfcp-create-scratch-r2 | 3-A | replace 1K/s | 613.95 ms | 1,984 |
+| native-write-cost-r2 | 1-B | replace 10K/s | 889.65 ms | 279,237 |
+| native-write-cost-r2 | 3-A | delete 10K/s | 1,246.68 ms | 43,572 |
+| fteid-key-allocs | 4-A | replace 10K/s | 863.02 ms | 258,608 |
+| payload-field-binding | 1-A | replace 1K/s | 521.93 ms | 1,646 |
+| payload-field-binding-r2 | 1-B | replace 1K/s | 465.11 ms | 808 |
+
+A firing hits one or two cells per 25-minute campaign, in either arm, so
+it can flip a four-run median of the 1K/s p99 gate. The ABBA harness now
+starts each pair of arms 15 s after a firing. The scorer refuses a campaign
+with any cell within [start − 15 s, end] of a firing; that window also
+covers the spill into the next cell. Evidence:
+`.scratch/evidence/collector_overlap.py`, `collector-instants.txt`,
+`backlog-batch/churn-abba.sh` (`wait_for_gap`) and
+`establish-allocs/score.py`.
+
+[INFERENCE] The mechanism is CPU or memory-bandwidth contention from the
+collector on the shared cores. No scheduler trace was taken.
