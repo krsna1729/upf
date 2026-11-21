@@ -178,6 +178,33 @@ the FAR 1K/s p99 gate (+17.4%, one run at host load 7.7) and the peak gate
 `.scratch/evidence/payload-field-binding-clean/` and
 `payload-field-binding-clean-r2/combined-score.txt`.
 
+**Direct native deletion (2026-11-22):** The native session entry owns its
+classifier, F-TEID, meter, counter and tunnel records. Removal now erases
+the independent records (ARP, buffering counter and flow, ATSSS policy),
+then the session entry. It no longer builds the per-record erases that
+folding discarded. Native `BenchmarkChangeLifecycle/session-major` fell
+from 324 to 303 allocs and from 21,279 to 18,758 B per cycle;
+`BenchmarkEstablish` stayed at 237 allocs and 9,864 B. The first,
+unscheduled rounds had collector-overlapped cells
+([Host confounder](#host-confounder-the-desktop-agent-usage-collector-2026-11-21)),
+so the verdict comes from two clean rounds (ABBA, then BAAB) against
+`0ea2b8f`, with combined medians of eight runs:
+
+| Mode | 10K/s goodput | 10K/s upfd µs/accepted | 1K/s p99 |
+|---|---:|---:|---:|
+| FAR | +0.3% | −0.1% | −15.2% |
+| Establish | −3.0% | +6.4% | −6.3% |
+| Replace | +7.7% | −8.0% | −13.8% |
+| Delete | +2.7% | −9.6% | +4.8% |
+
+Replace met both the goodput and CPU gates; delete goodput rose. Median
+`upfd` cgroup peak was 1,783.4 → 1,772.6 MiB. All cells reconciled with
+zero timeouts, pending or uncertain outcomes. Establish does not call
+removal and its allocations did not change; no mechanism was found for
+its 10K/s change. Evidence: `.scratch/evidence/native-write-cost-clean/`,
+`native-write-cost-clean-r2/combined-score.txt` and
+`ship-checks/allocs.txt`.
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
