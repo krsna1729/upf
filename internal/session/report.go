@@ -619,7 +619,9 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 		// session's URRs would report nothing: an error, not zero forever.
 		return nil, errNoCounters
 	}
-	counts, err := readRules(ctx, reader, ids)
+	counts, err := readRules(ctx, func(ctx context.Context, module string, rules []uint32) ([]bess.RuleCount, error) {
+		return reader.AppendRuleCounts(ctx, nil, module, rules...)
+	}, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -685,15 +687,19 @@ func readingOf(rule bess.RuleCount) reading {
 }
 
 // readRules reads the rules one session measures (measuredRules), one call
-// per module: the single-session reading Evaluate and windowsOf make.
-func readRules(ctx context.Context, reader CounterReader, ids map[string][]uint32) (readings, error) {
+// per module: the single-session reading Evaluate and windowsOf make. read
+// is the reader's AppendRuleCounts, or windowsOf's batched reading, whose
+// reply may hold other sessions' rules as well.
+func readRules(ctx context.Context, read func(ctx context.Context, module string, ids []uint32) ([]bess.RuleCount, error),
+	ids map[string][]uint32) (readings, error) {
 	cells := map[uint32]reading{}
 	for module, rules := range ids {
-		read, err := reader.AppendRuleCounts(ctx, nil, module, rules...)
+		got, err := read(ctx, module, rules)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", module, err)
 		}
-		for _, rule := range read {
+		// scale: a batched reply is one round, at most countChunk rules.
+		for _, rule := range got {
 			cells[rule.ActionID] = readingOf(rule)
 		}
 	}
@@ -1126,7 +1132,10 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 	if len(ids) > 0 && c.counters == nil {
 		return nil, errNoCounters
 	}
-	counts, err := readRules(ctx, c.counters, ids)
+	reader := c.counters
+	counts, err := readRules(ctx, func(ctx context.Context, module string, rules []uint32) ([]bess.RuleCount, error) {
+		return c.reads.read(ctx, reader, module, rules)
+	}, ids)
 	if err != nil {
 		return nil, err
 	}

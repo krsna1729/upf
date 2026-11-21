@@ -470,6 +470,9 @@ type Compiler struct {
 	// and a graph without counting modules is a graph a URR cannot report from
 	// (Evaluate says so rather than reporting zero forever).
 	counters CounterReader
+	// reads coalesces windowsOf's concurrent single-session readings
+	// (readbatch.go).
+	reads readBatch
 
 	// markersDropped and errorsDropped are the End Marker and Error
 	// Indication logs' lost counts the report loop last logged: each drain
