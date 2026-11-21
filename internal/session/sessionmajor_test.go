@@ -131,6 +131,59 @@ func TestSessionMajorWritesOneEntryPerSession(t *testing.T) {
 	}
 }
 
+func TestSessionMajorDeleteErasesIndependentRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		req  *message.SessionEstablishmentRequest
+		want []string
+	}{
+		{"ARP", arpConfig(t), arpEstablishment(0x7510, "10.45.0.4", 0x73,
+			"permit out udp from any to assigned 53"), []string{"upf/entries"}},
+		{"buffering", bufferingConfig(), buffEstablishment(0x7101, "10.45.0.7"),
+			[]string{"upf/buffer_counters", "upf/flows"}},
+		{"steering", marConfig(), marEstablishment(0x9303, "10.45.0.8"),
+			[]string{"upf/policies"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cfg.Appliance = "upf"
+			tc.cfg.Sessions = &SessionLayout{MaxSessions: 8, Actions: 8, QERs: 4}
+			rec := &recorder{}
+			c := New(tc.cfg, rec, quietLogger())
+			resp := c.Establish(tc.req).(*message.SessionEstablishmentResponse)
+			if got := cause(t, resp); got != ie.CauseRequestAccepted {
+				t.Fatalf("establishment cause %d", got)
+			}
+			writes := rec.last()
+			upsert := sessionEntry(t, writes)
+			if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, upFSEID(t, resp), 2, 0))); got != ie.CauseRequestAccepted {
+				t.Fatalf("deletion cause %d", got)
+			}
+			erases := rec.last()
+			entry := sessionEntry(t, erases)
+			if changeID(entry.Resource, entry.Key) != changeID(upsert.Resource, upsert.Key) ||
+				entry.Value != nil || erases[len(erases)-1].Resource != entry.Resource {
+				t.Fatalf("want the session erased after its independent records, got %v", erases)
+			}
+			pending := make(map[string]bool)
+			for _, resource := range tc.want {
+				upsert := changeWithResource(t, writes, resource)
+				pending[changeID(resource, upsert.Key)] = true
+			}
+			for _, ch := range erases[:len(erases)-1] {
+				id := changeID(ch.Resource, ch.Key)
+				if ch.Value != nil || !pending[id] {
+					t.Errorf("unexpected or duplicate change to %s: %v", ch.Resource, ch)
+				}
+				delete(pending, id)
+			}
+			if len(pending) != 0 {
+				t.Errorf("%d independent records were not erased", len(pending))
+			}
+		})
+	}
+}
+
 // onePDREstablishment is a session of one uplink PDR: one action.
 func onePDREstablishment(cpSEID uint64, ueIP string) *message.SessionEstablishmentRequest {
 	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0,

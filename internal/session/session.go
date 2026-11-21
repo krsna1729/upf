@@ -1988,7 +1988,12 @@ func (c *Compiler) track(s *Session) {
 func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	changes := make([]bess.Change, 0, 4*s.PDRs().len()+2)
+	_, native := c.target.(sessionTarget)
+	capacity := 1
+	if !native {
+		capacity = 4*s.PDRs().len() + 2
+	}
+	changes := make([]bess.Change, 0, capacity)
 	// One erase per (resource, key): a session's PDRs name the same records --
 	// the meter of a QER in each direction, and one F-TEID when two uplink PDRs
 	// carry it -- so erasing per PDR would name the same record several times
@@ -2012,16 +2017,19 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	var buf [8]*pdr // the usual session's PDRs, on the stack
 	all := s.PDRs().appendTo(buf[:0])
 	all = s.gonePDRs(all)
-	for _, p := range all {
-		keys, err := c.pdrRuleKeys(p)
-		if err != nil {
-			// The session's rules were written with these keys, so this is a
-			// PDI that changed under a live session: fail the deletion rather
-			// than leave the rule behind.
-			return nil, fmt.Errorf("PDR %d: %w", p.id, err)
-		}
-		for _, key := range keys {
-			add(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: bess.Fields(key)})
+	// The native entry owns these records. Build individual erases only for
+	// the other targets; the work is bounded by this session's rules.
+	if !native {
+		for _, p := range all {
+			keys, err := c.pdrRuleKeys(p)
+			if err != nil {
+				// A rule written with a key we cannot reconstruct must not be
+				// left behind by a successful deletion.
+				return nil, fmt.Errorf("PDR %d: %w", p.id, err)
+			}
+			for _, key := range keys {
+				add(bess.Change{Resource: c.res(pdrTable(p.downlink())), Key: bess.Fields(key)})
+			}
 		}
 	}
 	// And the ARP entries the session's subscriber addresses hold: the address
@@ -2035,17 +2043,18 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 		}
 	}
 	for _, p := range all {
-		dir := c.direction(p)
-		if p.tunnel != noTunnel {
-			add(bess.Change{Resource: c.tunnelRes(p.tunnel), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
-		}
-		if p.teid != 0 {
-			for _, key := range c.fteidKeysOf(p) {
-				add(bess.Change{Resource: c.teidRes(), Key: key.entry()})
+		if !native {
+			if p.tunnel != noTunnel {
+				add(bess.Change{Resource: c.tunnelRes(p.tunnel), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
 			}
-		}
-		if dir.Counters != "" && p.urrIDs.len() > 0 && p.actionID != 0 {
-			add(bess.Change{Resource: c.res(counterTable(p.downlink())), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
+			if p.teid != 0 {
+				for _, key := range c.fteidKeysOf(p) {
+					add(bess.Change{Resource: c.teidRes(), Key: key.entry()})
+				}
+			}
+			if c.direction(p).Counters != "" && p.urrIDs.len() > 0 && p.actionID != 0 {
+				add(bess.Change{Resource: c.res(counterTable(p.downlink())), Key: bess.Fields(ActionKey{ActionID: p.actionID})})
+			}
 		}
 		// A PDR that buffers is counted by a *second* module, in front of the
 		// store, and compile writes its entry too (writeBufferCounter). The
@@ -2077,42 +2086,43 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 				add(bess.Change{Resource: c.res(Policies),
 					Key: bess.Fields(PolicyKey{PolicyID: m.policyID})})
 			}
-			for _, id := range m.tunnelIDs {
-				if id != 0 {
-					add(bess.Change{Resource: c.res(TunnelsDownlink),
-						Key: bess.Fields(ActionKey{ActionID: id})})
+			if !native {
+				for _, id := range m.tunnelIDs {
+					if id != 0 {
+						add(bess.Change{Resource: c.res(TunnelsDownlink),
+							Key: bess.Fields(ActionKey{ActionID: id})})
+					}
 				}
 			}
 		}
-		for _, id := range s.pending.retiredIDs() {
-			add(bess.Change{Resource: c.res(TunnelsDownlink),
-				Key: bess.Fields(ActionKey{ActionID: id})})
+		if !native {
+			for _, id := range s.pending.retiredIDs() {
+				add(bess.Change{Resource: c.res(TunnelsDownlink),
+					Key: bess.Fields(ActionKey{ActionID: id})})
+			}
 		}
 	}
-	// Meters belong to QERs, not to PDRs: compile writes one per policed
-	// direction whether or not a PDR names it, so a deletion erases them from
-	// the same list. Erasing them per PDR instead would miss the meter of a
-	// direction no PDR of this session uses, and would name the QER's meter
-	// once per PDR. A QER a modification removed is on the list too: its record
-	// is in the daemon, and a record nobody names goes on holding the rate it
-	// was written with until another session reuses the id.
-	var qbuf [4]*qer // the usual session's QERs, on the stack
-	for _, q := range s.removedQERList(s.QERs().appendTo(qbuf[:0])) {
-		if !c.policy(q).hasRate {
-			continue
+	if native {
+		// Erase the entry after the independent records that can reference it.
+		if s.sessionLive {
+			changes = append(changes, bess.Change{Resource: c.cfg.Appliance + "/sessions",
+				Key: bess.Fields(SessionKey{SessionID: s.sessionID})})
 		}
-		if q.meterUL != 0 {
-			add(bess.Change{Resource: c.res(MetersUplink), Key: bess.Fields(IDKey{ID: q.meterUL})})
+	} else {
+		// Meters belong to QERs, not to PDRs. Include removed QERs whose
+		// meters can still exist after a refused modification.
+		var qbuf [4]*qer
+		for _, q := range s.removedQERList(s.QERs().appendTo(qbuf[:0])) {
+			if !c.policy(q).hasRate {
+				continue
+			}
+			if q.meterUL != 0 {
+				add(bess.Change{Resource: c.res(MetersUplink), Key: bess.Fields(IDKey{ID: q.meterUL})})
+			}
+			if q.meterDL != 0 {
+				add(bess.Change{Resource: c.res(MetersDownlink), Key: bess.Fields(IDKey{ID: q.meterDL})})
+			}
 		}
-		if q.meterDL != 0 {
-			add(bess.Change{Resource: c.res(MetersDownlink), Key: bess.Fields(IDKey{ID: q.meterDL})})
-		}
-	}
-	// Under -target session-major the session's records are one entry: the
-	// removal erases it (foldSession), wherever the changes are applied --
-	// remove, or AssociationEnded's batches.
-	if _, ok := c.target.(sessionTarget); ok {
-		return c.foldSessionLocked(s, changes, eraseSessionEntry)
 	}
 	return changes, nil
 }
