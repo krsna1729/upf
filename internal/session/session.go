@@ -459,8 +459,9 @@ type Compiler struct {
 	cfg Config
 	// target names every table and command module the compilation uses
 	// (target.go): the graph's, or the appliance's.
-	target Target
-	ap     Applier
+	target  Target
+	ap      Applier
+	commits sessionCommits
 	// contents is the same dataplane as a reader, when it can be read back at
 	// all: a restarted controller sweeps an earlier run's sessions out of it
 	// (sweep.go), and a test's applier may not offer the reading.
@@ -1941,7 +1942,7 @@ func (c *Compiler) remove(ctx context.Context, s *Session) error {
 		return err
 	}
 	if len(changes) != 0 {
-		if err := c.ap.Apply(ctx, changes...); err != nil {
+		if err := c.commitSession(ctx, changes); err != nil {
 			return err
 		}
 	}

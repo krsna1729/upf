@@ -86,7 +86,7 @@ func (c *Compiler) apply(ctx context.Context, s *Session, write modelWrite) (res
 	if len(changes) == 0 {
 		return nil
 	}
-	err := c.ap.Apply(ctx, changes...)
+	err := c.commitSession(ctx, changes)
 	if _, ok := c.target.(sessionTarget); ok && (err == nil || !definiteRefusal(err)) {
 		// What may now be in the dataplane: an unanswered write may have
 		// committed, so the deletion erases the entry (and a refusal of that
