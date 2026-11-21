@@ -2421,6 +2421,31 @@ completed/s is the capacity a single `upfd` CPU reaches.
 The one regression is establish p50 (1.3 → 2.3 ms) while its p99 falls 78%;
 interning shared provisioning on establish is the likely cost [INFERENCE].
 
+**Step 4 at 1M, paired (2026-11-21).** `ci/bench-churn.py`, one upfd CPU,
+10K/s offered, `GOGC=25`, normal backing, BESS `767725a6`, and order
+`342eed6` / `978c9ac` / `978c9ac` / `342eed6`. All four power guards
+passed (AC on, turbo off); no concurrent builds. Raw runs:
+`.scratch/evidence/slabs-20261121/churn-*`. Ranges cover both runs per arm.
+
+| Metric | Steps 1–3 | With slabs |
+|---|---:|---:|
+| Live heap after fill (MiB) | 1,412–1,413 | 1,233–1,252 |
+| upfd cgroup peak (MiB) | 2,062–2,090 | 1,786–1,791 |
+| FAR completions/s | 6,339–7,296 | 9,262–9,316 |
+| FAR p99 (ms) | 161–244 | 101 |
+| FAR GC share of upfd CPU | 38.3–42.0% | 18.2% |
+| Replace completions/s | 1,306–1,744 | 2,351–2,385 |
+| Replace p99 (ms) | 233–331 | 164–166 |
+| Establish completions/s | 5,021–5,317 | 8,438–8,494 |
+| Establish p99 (ms) | 416–610 | 137–149 |
+| Delete completions/s | 5,216–5,953 | 7,384–7,386 |
+| Delete p99 (ms) | 178–188 | 150–154 |
+
+Every cell reconciled to 1M sessions with zero timeouts and no pending or
+uncertain requests. All modes still had refusals. Establish median latency
+rose from 3.48 to 5.24 ms in the first pair and fell from 9.11 to 4.58 ms in
+the second; there is no consistent median change in this run.
+
 #### 3. Reduce native allocation and reclamation cost without hiding memory
 
 Primary files: BESS `core/runtime/malloc_policy.*`,
