@@ -2309,23 +2309,54 @@ counted sessions, previous step → this step: live 1,368.9 → 1,318.9 B,
 scanned 339.5 → 339.4 B, objects 11.03 → 11.02 per session, heap per item
 1,631 → 1,567 B; allocs/op unchanged (246/26/194/194/347).
 
-**Step 4 (records into segmented slabs) stops here.** A record's lifetime is
-the collector's today, and four owners copy or hold records past the model:
-a modification's snapshot (`cloneIDMap` copies that rollback publishes), a
-replaced PDR's stale form and the removed lists (`sessionChanges`, kept until
-`settle`), and readers that walk `s.PDRs` without `c.mu` (`removal`,
-`foldSession` in `apply`). A slab slot freed and reused under any of them
-reads another session's record silently, where a Go object stays alive. A
-correct step 4 therefore needs an explicit free at settle, rollback,
-modification success and session end, plus a generation/epoch check for the
-out-of-lock readers, and it changes every `*pdr`/`*far`/`*qer`/`*urr` user (89
-lines name those types outside tests) in one cut, since keeping both object models is
-ruled out above. That is a change of its own, reviewed for rollback, not a
-tail of this series. What it would buy at this fixture [INFERENCE]: the 11.02
-objects per session fall to about two (the `Session` and one slab
-reference) and the scanned 339.4 B to the `Session` alone; live bytes move
-little, since the records are already compact and noscan. The `Session.slot`
-of step 2 is the index such a slab would use.
+**Step 4 (records into segmented slabs): design.** A record's lifetime was
+the collector's, and four owners copy or hold records past the model: a
+modification's snapshot (copies rollback publishes), a replaced PDR's stale
+form and the removed lists (`sessionChanges`, kept until `settle`), and
+`removal`, which walked `s.PDRs` without `c.mu` (the deletion and the
+association end; `foldSession` takes the lock itself). A slab slot freed and
+reused under any of them reads another session's record silently, where a Go
+object stays alive. The design (`internal/session/slab.go`):
+
+- *Layout.* One slab per kind (`records`: `slab[pdr]`, `slab[far]`,
+  `slab[qer]`, `slab[urr]`) of 1024-record segments, each a noscan array that
+  never moves, with a parallel one-byte generation array. Segments are kept
+  for reuse, never given back, like the store's tables.
+- *Handle.* uint32: the slot index in the low 24 bits (index 0 unused, so 0
+  names nothing; 2^24−1 records of a kind per compiler, past which an
+  allocation is refused with cause 75, not a panic) and the slot's
+  generation in the top byte. A free zeroes the record and moves the
+  generation on; a read or free through a handle whose generation no longer
+  matches panics.
+- *Session index.* A session lists its records in one noscan slice
+  (`recIndex`): the PDRs', FARs', QERs' and URRs' (id, handle) pairs in turn,
+  each run sorted, copy-on-write like the `idMap`s it replaces, moving to a
+  map per kind past 16 records of one kind. `s.PDRs()` and its kin are views
+  that resolve a handle to a `*pdr` borrowed for the current lock hold.
+- *Owners and free points.* Every handle has one owner, which frees it. The
+  model (index, `pending.removed`/`stale`, removed QERs): `merge` frees a FAR
+  or URR it removes and a removed PDR a create of the same id makes live
+  again (`forgetRemoval`); `settle` frees the removals and stale forms once
+  the dataplane took the transaction; `releaseSession` frees everything and
+  empties the index (so a late compile of a released session reads none).
+  A snapshot copies every record the model names into slots of its own:
+  `rollback` frees the failed model's and hands the snapshot's to the model
+  (or frees them, when the session was released meanwhile); a modification
+  that stands (`settle`, or an unknown outcome) frees the snapshot's.
+- *Readers.* Every record read and every free holds `c.mu`, and a record
+  pointer is never kept across an unlock, so no reader can hold a slot while
+  it is freed. `removal` now walks the records under the lock (it costs the
+  session's own records per hold, and the association end takes one hold per
+  session). The generation is the check on this rule, not its mechanism: it
+  catches a stale read for 255 reuses of a slot and wraps after; tests also
+  run with every record read checking that the lock is held
+  (`slabLockCheck`, a `TryLock` that must fail).
+- *The `Session`.* It stays a Go object: it is what the lock-gap holders
+  keep (a modification, a tick's `judge`, the association end's batch) and
+  what their `c.sessions[seid] == s` checks compare, so a slab slot would make
+  every such holder a reuse hazard. Its pointer fields come first, so the
+  collector scans only that prefix, and `byCP` maps a CP SEID to the local
+  SEID, a noscan map, instead of holding a second `*Session`.
 
 **1M churn, paired (2026-11-20).** `ci/bench-churn.py`, 1M resident sessions,
 10K/s offered, `GOGC=25`, normal backing, one BESS stage (`dd22783d`), order
