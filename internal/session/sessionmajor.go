@@ -53,7 +53,6 @@ type sessionEntryWrite uint8
 const (
 	replaceSessionEntry sessionEntryWrite = iota
 	keepSessionEntry
-	eraseSessionEntry
 )
 
 // apply writes a compiled model, including its immutable entry decision.
@@ -129,12 +128,8 @@ func (c *Compiler) foldSessionLocked(s *Session, changes []bess.Change, mode ses
 		}
 		out = append(out, ch)
 	}
-	if mode != replaceSessionEntry {
-		out = out[1:]
-		if mode == eraseSessionEntry && s.sessionLive {
-			out = append(out, bess.Change{Resource: sessionsRes, Key: bess.Fields(SessionKey{SessionID: s.sessionID})})
-		}
-		return out, nil
+	if mode == keepSessionEntry {
+		return out[1:], nil
 	}
 	value, positions, err := c.sessionValue(s, changes, mine)
 	if err != nil {
