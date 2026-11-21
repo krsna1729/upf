@@ -114,6 +114,17 @@ difference, not measured per structure]. At a million sessions this is about
 scale], against the 1–1.25 KiB/session target; the remaining structural gap is
 the per-record objects and their pointers (plan #2 step 4).
 
+**Measured on perf/session-slabs (2026-11-21, plan #2 step 4; same fixture
+and tests):** 1,194.8 B of live heap per session (1,279 B heap per item), of
+which the collector scans 94.1 B, in 2.03 heap objects: the `Session`
+(144 B, pointers in its first 64) and its noscan record index (six 8-byte
+(id, handle) pairs). The records live in per-kind segmented noscan slabs
+(`internal/session/slab.go`) addressed by uint32 handles carrying a
+generation; a slab costs its record size plus a byte of generation per slot
+and grows by 1024-record segments that are never given back. At a million
+sessions this is about 1.19 GB of live control state [INFERENCE: index load
+factors differ at that scale].
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
@@ -2377,6 +2388,14 @@ deletions racing a tick's enforcement, which frees the forms an
 unknown-outcome modification left pending, never name another session's
 rules (`TestARemovalNeverReadsAnotherSessionsRecord`, also under `-race`;
 with `removal`'s lock taken out it panics on the lock check).
+
+**Step 4c measured (pointer-first `Session`, noscan `byCP`).** The
+`Session` (144 B) now ends its pointer prefix at byte 64 instead of 104, and
+`byCP` is `map[uint64]uint64`. 20,000 counted sessions, step 4b → 4c:
+scanned 163.6 → 94.1 B per session; live 1,194.6 → 1,194.8 B, objects 2.03,
+heap per item 1,276 → 1,279 B and allocs/op (241/26/178/178/331) unchanged.
+The ~30 B scanned beyond the `Session`'s 64 is the `sessions` map's groups
+[INFERENCE: by difference].
 
 **1M churn, paired (2026-11-20).** `ci/bench-churn.py`, 1M resident sessions,
 10K/s offered, `GOGC=25`, normal backing, one BESS stage (`dd22783d`), order

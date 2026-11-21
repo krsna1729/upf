@@ -115,9 +115,10 @@ func establishCounted(t *testing.T, c *Compiler, n int) []uint64 {
 // session before the records held handles instead of pointers (store.go);
 // 566.7 B and 14.03 after; 431.3 B and 11.03 once rule identities and their
 // owners left Go strings and maps for store blobs and a noscan index; 339.5 B
-// once the F-TEID owners did too; 163.6 B and 2.03 once the records and their
-// per-session index went into noscan slabs (slab.go): the Session and its
-// sessionExt are what remains.
+// once the F-TEID owners did too; 163.6 B and 2.03 once the records went into
+// noscan slabs (slab.go), leaving the Session and its noscan record index;
+// 94.1 B once the Session's pointers came first and byCP stopped holding a
+// second pointer to it.
 func TestASessionIsFewObjectsTheCollectorBarelyScans(t *testing.T) {
 	const n = 20000
 	var c *Compiler
@@ -126,8 +127,8 @@ func TestASessionIsFewObjectsTheCollectorBarelyScans(t *testing.T) {
 		establishCounted(t, c, n)
 	})
 	t.Logf("live %.1f B, scanned %.1f B, %.2f objects per session", f.live, f.scan, f.objects)
-	if f.scan > 172 {
-		t.Errorf("the collector scans %.0f B per session, want at most 172", f.scan)
+	if f.scan > 99 {
+		t.Errorf("the collector scans %.0f B per session, want at most 99", f.scan)
 	}
 	if f.objects > 2.15 {
 		t.Errorf("a session is %.2f heap objects, want at most 2.15", f.objects)

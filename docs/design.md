@@ -1046,14 +1046,16 @@ results, `analysis.json`, perf data, Go profiles and `hotspots/`);
 with the meter set as a transactional resource (BESS D-199). Each PDR table
 holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
 
-- **Live heap: 1.3-1.4 KB per session.** The controller model holds 1,319 B
-  per session (`TestASessionHoldsAtMostItsBytes`), down from 3.0-3.1 KB and
-  then 1,511 B: leaf records hold uint32 handles into one refcounted,
+- **Live heap: 1.2-1.3 KB per session.** The controller model holds 1,195 B
+  per session (`TestASessionHoldsAtMostItsBytes`), down from 3.0-3.1 KB,
+  1,511 B and 1,319 B: leaf records hold uint32 handles into one refcounted,
   deduplicated store per compiler (SDF filters, PDR/FAR extensions, URR
   limits, QER policy, tunnel local ends, rule keys); rule claims and F-TEID
   owners are open-addressing indexes the collector does not scan; per-session
-  work sets are bitsets over dense session slots (`docs/performance.md` plan
-  #2). The collector scans 339 B per session, down from 895 B. At 1M under
+  work sets are bitsets over dense session slots; and the records themselves
+  live in segmented noscan slabs addressed by generation-checked handles
+  (`docs/performance.md` plan #2). The collector scans 94 B in 2.03 objects
+  per session, down from 895 B in 17 and 339 B in 11. At 1M under
   `GOGC=25` (`.scratch/evidence/session-20261120`, ABBA) live heap after the
   fill was 1,369-1,370 MiB against 1,503-1,602 MiB, peak `upfd` memory
   2,062-2,068 MiB against 2,323-2,332 MiB.
@@ -1144,10 +1146,10 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   8-byte stamps on a monotonic base: durations stay monotonic, and after a
   wall-clock step a stamp's wall time does not follow the step.
   `TestASessionHoldsAtMostItsBytes` bounds the whole retained model at
-  1,385 B of live objects and 1,645 B of heap spans per session for 20K
-  sessions with 2 PDRs, 2 FARs, 1 QER and 1 URR (measured 1,319 B and
-  1,567 B); `TestASessionIsFewObjectsTheCollectorBarelyScans` bounds the
-  scanned bytes at 356 B and the objects at 11.6 per session.
+  1,255 B of live objects and 1,340 B of heap spans per session for 20K
+  sessions with 2 PDRs, 2 FARs, 1 QER and 1 URR (measured 1,195 B and
+  1,279 B); `TestASessionIsFewObjectsTheCollectorBarelyScans` bounds the
+  scanned bytes at 99 B and the objects at 2.15 per session.
   A disposable runtime-metrics probe at that count measured live bytes
   74,097,904 → 50,097,568 and scannable heap 59,354,496 → 39,994,496
   (`.scratch/evidence/go-garbage/dsa-layout/{before,after}.json`).

@@ -503,8 +503,8 @@ type Compiler struct {
 
 	mu               sync.Mutex
 	sessions         map[uint64]*Session
-	byCP             map[uint64]*Session // sessions by CP F-SEID: an establishment's retransmission, found without a walk
-	reservedSessions uint32              // preparing or unanswered establishments; protected by mu
+	byCP             map[uint64]uint64 // local SEIDs by CP F-SEID: an establishment's retransmission, found without a walk (noscan)
+	reservedSessions uint32            // preparing or unanswered establishments; protected by mu
 	// measured tracks URR membership for activity polling and rare End Marker
 	// events, not an ordinary per-tick walk. buffering is the BUFF+NOCP set
 	// EvaluateDownlinks walks and prunes. Both are bitsets over the sessions'
@@ -660,7 +660,7 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		ap:       ap,
 		log:      log,
 		sessions: map[uint64]*Session{},
-		byCP:     map[uint64]*Session{},
+		byCP:     map[uint64]uint64{},
 		nextSEID: 1,
 		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		policies: newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
@@ -692,7 +692,10 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 
 // findByCP is the session the SMF's F-SEID names; the caller holds the lock.
 func (c *Compiler) findByCP(cpSEID uint64) *Session {
-	return c.byCP[cpSEID]
+	if seid, ok := c.byCP[cpSEID]; ok {
+		return c.sessions[seid]
+	}
+	return nil
 }
 
 // ResponseSEID reads the peer's header identity from metadata without doing I/O.
@@ -714,16 +717,13 @@ type chosenFTEID struct {
 	Instance        string
 }
 
-// Session is what the SMF asked for, as compiled.
+// Session is what the SMF asked for, as compiled. Its pointer fields come
+// first and its index's slice last among them: the collector scans a
+// session only up to its last pointer word, and a million sessions make
+// every word of that prefix count (TestASessionIsFewObjectsTheCollectorBarelyScans).
 type Session struct {
-	LocalSEID uint64
-	CPSEID    uint64 // the CP function's F-SEID, for events and reports
-	UEIP      netip.Addr
+	UEIP netip.Addr // its pointer word is the struct's third
 
-	// The session's records by kind and id: handles into the compiler's
-	// slabs (rs), listed in one noscan slice (slab.go). Read them through
-	// PDRs, FARs, QERs and URRs, under the compiler's lock.
-	ix recIndex
 	rs *records
 	// ext holds the parts of a session a usual one leaves empty; nil until
 	// one is set. Read them through rare, write them through rareMut.
@@ -733,6 +733,14 @@ type Session struct {
 	// to release. Refused transactions keep it for their retry; settle drops
 	// it only after the dataplane has accepted the change.
 	pending *sessionChanges
+
+	// The session's records by kind and id: handles into the compiler's
+	// slabs (rs), listed in one noscan slice (slab.go). Read them through
+	// PDRs, FARs, QERs and URRs, under the compiler's lock.
+	ix recIndex
+
+	LocalSEID uint64
+	CPSEID    uint64 // the CP function's F-SEID, for events and reports
 
 	// refs is the blob listing the store handles this session holds, one
 	// reference each, sorted (store.go: refsOf); copies counts the snapshots
@@ -1947,7 +1955,7 @@ func (c *Compiler) forget(s *Session) {
 	c.mu.Lock()
 	delete(c.sessions, s.LocalSEID)
 	c.usage.timers.set(s.LocalSEID, time.Time{})
-	if c.byCP[s.CPSEID] == s {
+	if c.byCP[s.CPSEID] == s.LocalSEID {
 		delete(c.byCP, s.CPSEID)
 	}
 	c.releaseSession(s)

@@ -633,7 +633,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 	// resolve listed it for the ticks before it was a session, and a tick in
 	// between may have dropped it again.
 	c.track(s)
-	c.byCP[cpSEID] = s
+	c.byCP[cpSEID] = local
 	// What the merge named and then replaced goes back to the store.
 	c.st.trim(s)
 	pdrCount := s.PDRs().len()
