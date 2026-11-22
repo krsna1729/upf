@@ -37,6 +37,7 @@ import (
 
 	sdk "github.com/krsna1729/bess/sdk/go/bess"
 	pb "github.com/krsna1729/bess/sdk/go/controlv2"
+	"github.com/krsna1729/upf/internal/txtrace"
 )
 
 // kMaxInFlight bounds concurrent transactions to one daemon. The engine has a
@@ -379,7 +380,9 @@ func (c *Client) ruleCounts(ctx context.Context, dst []RuleCount, counters strin
 	if err != nil {
 		return dst, err
 	}
+	txtrace.Mark(ctx, "bess.counts_enter", "")
 	result, err := c.sdk.InvokeAction(ctx, module, "get_counts", arg)
+	txtrace.Mark(ctx, "bess.counts_leave", "")
 	if err != nil {
 		return dst, fmt.Errorf("bess: %s get_counts: %w", counters, err)
 	}
@@ -608,6 +611,7 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 	defer func() { <-c.inFlight }()
 
 	tx := c.sdk.Transaction()
+	txtrace.Mark(ctx, "bess.encode_enter", tx.RequestID)
 	// Payload bytes belong to this transaction. Struct payloads retain only
 	// their actual fields; every field is read without an interface box.
 	buf := make([]byte, 0, 64*len(changes))
@@ -669,6 +673,7 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 			return fmt.Errorf("change %d (%s): %w", i, ch.Resource, err)
 		}
 	}
+	txtrace.Mark(ctx, "bess.encode_leave", tx.RequestID)
 	if _, err := tx.Commit(ctx); err != nil {
 		return err
 	}

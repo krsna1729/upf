@@ -222,6 +222,8 @@ def main():
     p.add_argument('--instrumented', action='store_true', help='Measurement-overlay runtime/heap snapshots; not an uninstrumented product run')
     p.add_argument('--perf', action='store_true', help='Child-inherited user-mode sampling of BESS and UPF; corroborate with a plain product run')
     p.add_argument('--perf-event', default='cycles:u')
+    p.add_argument('--transaction-trace', metavar='MODE-RATE',
+                   help='diagnostic: capture one cell using trace-enabled upfd and bessd')
     args = p.parse_args()
     if args.sessions <= 0 or args.cohort <= 0 or not 1 <= args.probes <= min(32, args.sessions):
         p.error('positive populations and 1..32 traffic probes are required')
@@ -233,6 +235,12 @@ def main():
         p.error('rates must be 1..1000000 and duration 1..300 seconds')
     if not set(modes) <= {'establish', 'delete', 'replace', 'far', 'pdr', 'qer', 'urr'}:
         p.error('unknown churn mode')
+    if args.transaction_trace:
+        if args.perf or args.instrumented or args.seconds < 10:
+            p.error('--transaction-trace needs a standalone diagnostic cell of at least 10 seconds')
+        cells = [f'{mode}-{rate}' for mode in modes for rate in rates]
+        if cells.count(args.transaction_trace) != 1:
+            p.error('--transaction-trace must identify exactly one configured cell')
     args.evidence.mkdir(parents=True, exist_ok=False)
     out = args.evidence.resolve()
     runner_source = Path(__file__).read_bytes()
@@ -253,6 +261,7 @@ def main():
     summary['arguments'] = {k: str(v) if isinstance(v, Path) else v for k, v in summary['arguments'].items()}
     summary['observers'] = {'runtime_heap_overlay': args.instrumented, 'perf': args.perf,
                             'go_cpu_sampling': False}
+    summary['observers']['transaction_trace'] = args.transaction_trace
     summary['sha256'] = {'runner': hashlib.sha256(runner_source).hexdigest()}
     lane_group = None
     thread = None
@@ -390,6 +399,8 @@ def main():
              '-session-actions', 2, '-session-qers', 2, '-gtpu-decap', 'decap0',
              '-fteid-address', 'endpoint=1,reference=n3,transport-domain=1,source=access,ipv4=192.0.2.1',
              '-metrics', f'127.0.0.1:{mp}']
+        if args.transaction_trace:
+            upf_command += ['-transaction-trace', str(out / 'transactions.go.trace')]
         if args.perf:
             upf_command = wrap_perf('upfd', upf_command)
         scope('upfd', upf_command, args.upfd_mib, str(args.upfd_cpu), extra)
@@ -445,20 +456,44 @@ def main():
                 prepared = None
                 if mode in ('establish', 'delete'):
                     prepared = request(f'http://127.0.0.1:{dp}/prepare?mode={mode}', {}, timeout=1800)
-                label = f'{mode}-{rate}-' + ('profile' if profiled else 'baseline')
+                traced = args.transaction_trace == f'{mode}-{rate}'
+                suffix = 'transaction-trace' if traced else 'profile' if profiled else 'baseline'
+                label = f'{mode}-{rate}-{suffix}'
                 phase = label
                 before = snapshot(label + '-before')
                 start = time.monotonic()
-                result = request(f'http://127.0.0.1:{dp}/run',
-                    {'Mode': mode, 'Rate': rate, 'Seconds': args.seconds},
-                    timeout=args.seconds + 90)
-                end = time.monotonic()
+                recorder = None
+                if traced:
+                    from concurrent.futures import ThreadPoolExecutor
+                    from txtrace_capture import capture
+
+                    def record():
+                        if not stop.wait(2):
+                            pids = [json.loads((out / f'{name}.process.json').read_text())['pid']
+                                    for name in ('upfd', 'bessd')]
+                            return capture(out / 'transactions', *pids, daemon,
+                                           {args.upfd_cpu, args.bess_control_cpu, args.worker_cpu},
+                                           upfd_binary=args.upfd.resolve())
+
+                    recorder = ThreadPoolExecutor(max_workers=1)
+                    recording = recorder.submit(record)
+                try:
+                    result = request(f'http://127.0.0.1:{dp}/run',
+                        {'Mode': mode, 'Rate': rate, 'Seconds': args.seconds},
+                        timeout=args.seconds + 90)
+                    end = time.monotonic()
+                finally:
+                    if recorder is not None:
+                        recorder.shutdown()
+                if recorder is not None:
+                    if recording.result() / 1e9 + 1 > end:
+                        raise RuntimeError('trace window did not fit in the measured cell')
                 if result['state']['pending']:
                     raise RuntimeError('measured cell returned with pending requests')
                 after = snapshot(label + '-after')
                 if profiled:
                     summary.setdefault('perf_windows', {})[label] = [start, end]
-                row = {'phase': label, 'profiled': profiled, 'start': start, 'end': end,
+                row = {'phase': label, 'profiled': profiled or traced, 'start': start, 'end': end,
                        'result': result, 'before': before, 'after': after, 'prepare': prepared}
                 summary['rows'].append(row)
                 save(out / 'campaign.json', summary)
