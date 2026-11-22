@@ -61,11 +61,12 @@ def read_perf(lines, meta):
     names = {}
     stack = None
     for line in lines:
-        lost = re.search(r'(?:LOST|lost)\s+(\d+)', line)
-        if lost:
-            losses['samples'] += int(lost[1])
-        elif 'PERF_RECORD_LOST' in line:
-            losses['records_without_count'] += 1
+        if re.search(r'\bPERF_RECORD_LOST(?:_SAMPLES)?\b', line):
+            lost = re.search(r'\blost\s+(\d+)', line)
+            if lost and int(lost[1]) > 0:
+                losses['samples'] += int(lost[1])
+            else:
+                losses['records_without_count'] += 1
         if line.startswith('\t'):
             if stack is not None:
                 stack.append(line.strip())
@@ -113,7 +114,12 @@ def intervals(transitions):
     return result
 
 
-def kernel_intervals(switches, wakes, names):
+def kernel_intervals(switches, wakes, names, loss):
+    # A loss record does not identify the missing transitions or when the
+    # gap started. A thread can also migrate across CPUs. Leave the OS state
+    # lanes blank rather than extending a state through a possible gap.
+    if loss:
+        return {}
     events = []
     for t, prev, nxt, state, stack in switches:
         if prev in names:
@@ -212,7 +218,7 @@ def render(evidence, go_binary, template):
     rows, skipped, frame_count, server_count = join(go, bess, lo, hi)
     if not rows:
         raise ValueError(f'no complete attempts joined: {dict(skipped)}')
-    ks = kernel_intervals(switches, wakes, names)
+    ks = kernel_intervals(switches, wakes, names, loss)
     gs = intervals((t, g, state.lower().replace('waiting', 'blocked'), why)
                    for t, _, _, g, _, state, why in states
                    if state in ('Running', 'Waiting', 'Runnable', 'Syscall', 'NotExist'))
@@ -285,6 +291,7 @@ def render(evidence, go_binary, template):
                 joined_requests=len(rows), skipped=dict(skipped), clock_drift_ns=drift,
                 client_attempt_slots=len(rows) + sum(skipped.values()), clock_anchors=anchor_count,
                 perf_loss=dict(loss), perf_out_of_order=int(reordered[1]) if reordered else 0,
+                kernel_intervals_omitted=bool(loss),
                 commit_returns_per_s=round(returned * 1e9/(hi-lo)),
                 counts_rpc_returns=counts, encode_samples=len(encoding),
                 pfcp_samples=sum('pfcp_enter' in r for r in rows),
