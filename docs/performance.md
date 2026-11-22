@@ -308,6 +308,42 @@ The combined score is the predeclared verdict. Evidence:
 `.scratch/evidence/coalesce-counter-reads/` and
 `coalesce-counter-reads-r2/combined-score.txt`.
 
+### Review with the transaction timeline (2026-11-22)
+
+Historical builds use the same diagnostic overlay, plugin and trace-enabled
+BESS. Each comparison is one approximately one-second trace at 1M live
+sessions and 10K/s offered. All five cells reconciled. These runs locate
+work; the uninstrumented campaigns above still decide whether to ship.
+
+| Change | What the trace showed | Decision |
+|---|---|---|
+| #93: bind typed fields before encoding | FAR median encode wall time 19.26 → 11.39 µs (`0ea2b8f` → `26dc848`). | **Keep.** The trace supports the mechanism; the matched plain runs supply the gate verdict. |
+| #94: skip discarded native-delete erases | Delete dispatch-to-encode median 666.50 → 599.42 µs (`26dc848` → `b8b8b23`). This interval includes counter reads, and the second capture lost 227 perf samples. | **Keep.** The trace does not isolate the savings. The allocation count and the 16-run combined plain confirmation are the stronger evidence. |
+| #97: share concurrent counter readings | Delete recorded 6,377 `get_counts` returns per 6,375 joined commits before, 2,328 per 6,399 after. Median dispatch-to-encode did not fall (599.42 → 611.58 µs). | **Keep.** Fewer RPCs, not a proven reduction in each delete's pre-commit wait. Do not add a batching delay. |
+
+These capture windows are not matched goodput samples: the observer perturbs
+the scheduler, and commit joins and counter returns use independent window
+edges. Evidence: `.scratch/evidence/transaction-timeline/<rev>/<mode>/`
+(`campaign.json`, `transactions/quality.json`, `transactions/timeline.html`).
+The earlier PFCP rule-list scratch (#91) and noscan slabs (#88) stay: their
+allocation and retained-state fixtures measure effects that the transaction
+timeline cannot establish. A revert needs evidence on those criteria.
+
+### Transport-only comparison (2026-11-22)
+
+Loopback TCP versus Unix-domain gRPC, same `358706b` binary, plugin, population
+and CPU policy. Combined ABBA and BAAB; all 64 cells reconciled. At 10K/s,
+Unix replace goodput rose 8.3%, but UPF CPU per accepted change fell only 1.8%.
+Delete goodput rose 2.6% and CPU fell 2.1%. The 1K/s tail and peak gates held;
+no mode met both win thresholds. Keep Unix sockets as a supported deployment
+choice, not a new default. Evidence: `.scratch/evidence/txuds/score.txt`.
+
+The four-stream experiment (delete −3.9%, worse low-rate tails) and the
+extra binding cache (FAR +0.8% goodput / −5.4% CPU, delete −0.2% goodput)
+also failed the full gates. Do not replace the shipped binding or stream
+policy with either alone. Evidence: `.scratch/evidence/four-streams/` and
+`.scratch/evidence/payload-binding-plan/`.
+
 ### Per-change staging and CPU budget
 
 A 32-byte delta header can identify the session, expected version, request and
