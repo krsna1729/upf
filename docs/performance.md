@@ -40,9 +40,12 @@ monotonic clock. `send` and `reply` mark the SDK's frame boundaries, not socket
 operations. Scheduler arrows show observed wakes, which can carry more than
 one frame. A BUSY retry can release the control lock inside the apply interval.
 Blank or unmatched intervals remain unknown; duplicate frame keys are not
-paired. Re-run userspace timing without the diagnostic build and without the
-recorder; only matching plain runs qualify a change. Keep raw traces local:
-they contain request IDs, processes, thread names and stacks.
+paired. If perf reports loss, both viewers omit inferred OS state bars
+because a missing switch can invalidate a whole interval. Observed wake
+events and Go runtime state remain visible. Re-run userspace timing without
+the diagnostic build or recorder; only matching plain runs qualify a change.
+Keep raw traces local: they contain request IDs, processes, thread names
+and stacks.
 
 ## Power qualification correction — 2026-11-06
 

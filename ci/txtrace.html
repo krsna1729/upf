@@ -45,6 +45,7 @@ $('quality').textContent = `${info.joined_requests}/${info.client_attempt_slots}
   `${info.sender_frames} client / ${info.server_frames} server frame keys; ` +
   `${info.commit_returns_per_s} observed Commit returns/s. ` +
   `Reported perf loss: ${JSON.stringify(info.perf_loss)}; reordered: ${info.perf_out_of_order}. ` +
+  (info.kernel_intervals_omitted ? 'OS state bars omitted: perf lost events. ' : '') +
   `Skipped: ${JSON.stringify(info.skipped)}. This is a diagnostic run, not a goodput result.`;
 
 function element(parent, tag, attrs, text) {

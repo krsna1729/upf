@@ -9,6 +9,19 @@ spec.loader.exec_module(txtrace)
 
 
 class TraceJoinTest(unittest.TestCase):
+    def test_missing_switch_does_not_extend_reported_thread_state(self):
+        switch_in = 'bessd 20/21 [006] 1.000000001: sched:sched_switch: prev_pid=0 prev_state=R next_pid=21'
+        switch_out = 'bessd 20/21 [006] 1.000000004: sched:sched_switch: prev_pid=21 prev_state=S next_pid=0'
+        lost_record = 'bessd 20/21 [006] 1.000000003: PERF_RECORD_LOST lost 2'
+        meta = dict(upfd=10, bessd=20, group='markers')
+        for lines, want in (
+            ([switch_in, switch_out], [(1000000001, 1000000004, 'running', '')]),
+            ([switch_in, lost_record, switch_out], []),
+        ):
+            _, switches, wakes, names, lost = txtrace.read_perf(lines, meta)
+            states = txtrace.kernel_intervals(switches, wakes, names, lost)
+            self.assertEqual(states.get(21, []), want)
+
     def test_final_sync_without_clock_measurement_ends_window(self):
         offset, drift, anchors, _, _, bounds = txtrace.read_go([
             'M=-1 P=-1 G=-1 Sync Time=100 N=1 Trace=110 Mono=127 Wall=ignored',
