@@ -24,6 +24,8 @@ import (
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
+
+	"github.com/krsna1729/upf/internal/txtrace"
 )
 
 // Version is the PFCP version this node implements.
@@ -725,7 +727,9 @@ func (s *Server) onSession(msg message.Message, from net.Addr) {
 // answerSession hands a session message to the session layer and sends its
 // answer.
 func (s *Server) answerSession(msg message.Message, from net.Addr) {
+	txtrace.Mark(context.Background(), "bess.pfcp_enter", "")
 	resp := s.dispatchSession(msg)
+	txtrace.Mark(context.Background(), "bess.pfcp_leave", "")
 	if resp == nil {
 		s.log.Warn("n4: session message produced no response",
 			"from", from, "type", msg.MessageTypeName(), "seq", msg.Sequence())

@@ -7,6 +7,43 @@ The deployment and capacity record — including the
 — remains in [design.md](design.md#final-1m-session-churn-measurement-2026-11-05).
 Follow the [measurement rules](engineering-guide.md#6-measurement).
 
+## Cross-process transaction timeline
+
+Use this diagnostic to see which `upfd` goroutine and `bessd` thread did work
+for the same transaction. It joins requests by full ID, frame attempt and slot,
+not by the order in which replies arrive.
+
+1. Build `bessd` from a BESS checkout with the
+   [transaction markers](https://github.com/krsna1729/bess/pull/157).
+   Set `-Dtransaction_trace=true` (Meson; requires `sys/sdt.h`, from
+   `systemtap-sdt-dev` on Ubuntu). Use its
+   matching stage and UPF plugin. Use that checkout's Go SDK in an isolated
+   workspace: `go work init /path/to/upf /path/to/bess/sdk/go` in a scratch
+   directory, then set `GOWORK` to that absolute `go.work` path.
+2. In UPF, build `upfd` with `go build -tags transactiontrace -o <upfd> ./cmd/upfd`.
+   Build the normal churn driver. Run `ci/bench-churn.py` with its usual stage,
+   binary, plugin and CPU flags, plus `--transaction-trace far-10000`. Set
+   `--modes far --rates 10000` for one cell. The recorder needs GNU `readelf`,
+   Linux `perf`, tracefs, and non-interactive `sudo` for `perf`, `tee` and
+   `chown`. Use a local diagnostic machine and an evidence path without spaces.
+   The harness arms one capture after fill, runs it for about one second, and
+   removes only its own temporary probes. Do not combine this with `--perf`
+   or `--instrumented`.
+3. Run `python3 ci/trace-transactions.py <evidence-dir>` with the same Go tool
+   available on PATH (or `--go /path/to/go`). Open `transactions/timeline.html`
+   and select a request. Open `transactions/perfetto.json` in Perfetto for
+   all scheduler tracks and wake edges. `transactions/quality.json` records
+   join coverage, trace loss, clock agreement and observed commit rate.
+
+Only diagnostic builds have the markers. The timeline uses one host's
+monotonic clock. `send` and `reply` mark the SDK's frame boundaries, not socket
+operations. Scheduler arrows show observed wakes, which can carry more than
+one frame. A BUSY retry can release the control lock inside the apply interval.
+Blank or unmatched intervals remain unknown; duplicate frame keys are not
+paired. Re-run userspace timing without the diagnostic build and without the
+recorder; only matching plain runs qualify a change. Keep raw traces local:
+they contain request IDs, processes, thread names and stacks.
+
 ## Power qualification correction — 2026-11-06
 
 The laptop's power source changed during earlier work. The journal does not

@@ -1,0 +1,139 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>UPF ↔ BESS transaction timeline</title>
+<style>
+:root { color-scheme: light dark; --run:#4789df; --ready:#c89032; --block:#8c94a3; --boundary:#9275d5; }
+body { font:15px system-ui; max-width:1050px; margin:1.5rem auto; padding:0 1rem; }
+label, button { margin-right:.6rem; } input { width:min(25em,100%); }
+#viewport { overflow:auto; } svg { min-width:810px; width:100%; font:12px system-ui; }
+text { fill:currentColor; } line { stroke:currentColor; }
+.running { fill:var(--run); } .runnable { fill:var(--ready); } .blocked,.syscall { fill:var(--block); }
+.tick { opacity:.3; stroke-dasharray:2 3; } .phase { fill:var(--boundary); }
+summary { cursor:pointer; } table { border-spacing:1em .25em; } th { text-align:left; }
+</style>
+<h1>UPF ↔ BESS transaction timeline</h1>
+<p id="quality"></p>
+<p><a href="perfetto.json">Perfetto trace</a> · <a href="quality.json">Capture quality</a></p>
+<p><label>Request ID <input id="query" type="search" placeholder="filter by prefix"></label>
+<label>Transaction <select id="choice"></select></label><button id="slowest" type="button">Slowest match</button></p>
+<p>Blue: running. Amber: runnable. Grey: blocked or syscall. Purple: marked application interval.
+Blank means unknown. Arrows are recorded scheduler wakeups, not inferred socket ownership.</p>
+<p id="identity"></p><div id="viewport"><svg id="timeline" role="img" aria-label="Go and Linux scheduler timeline"></svg></div>
+<details open><summary>Measured boundaries</summary><table id="phases"></table></details>
+<script>
+'use strict';
+const data = /* TRACE_PAYLOAD */ null;
+const $ = id => document.getElementById(id);
+const us = n => (n/1000).toFixed(1) + ' µs';
+const phases = [
+  ['pfcp_enter', 'encode_enter', 'PFCP dispatch before encoding (can include counter reads)'],
+  ['encode_enter', 'encode_leave', 'UPF resource payload encoding'],
+  ['commit', 'send', 'UPF SDK before send'],
+  ['send', 'frame_read', 'Send entry → BESS decoded frame (transport not split)'],
+  ['frame_read', 'lock_request', 'BESS before lock request'],
+  ['lock_request', 'lock_acquired', 'BESS acquisition wait'],
+  ['lock_acquired', 'apply_enter', 'Frame order before this slot'],
+  ['apply_enter', 'apply_leave', 'This slot: BESS apply'],
+  ['apply_leave', 'lock_release', 'Other slots / before final unlock'],
+  ['lock_release', 'write_enter', 'Before BESS Write'],
+  ['write_enter', 'reply', 'BESS Write entry → UPF decoded reply (may overlap BESS Write)'],
+  ['reply', 'leave', 'UPF acknowledgement → Commit return'],
+];
+const {info, rows, tracks, edges} = data;
+$('quality').textContent = `${info.joined_requests}/${info.client_attempt_slots} joined attempt slots across ${info.overlap_ms.toFixed(0)} ms; ` +
+  `${info.sender_frames} client / ${info.server_frames} server frame keys; ` +
+  `${info.commit_returns_per_s} observed Commit returns/s. ` +
+  `Reported perf loss: ${JSON.stringify(info.perf_loss)}; reordered: ${info.perf_out_of_order}. ` +
+  `Skipped: ${JSON.stringify(info.skipped)}. This is a diagnostic run, not a goodput result.`;
+
+function element(parent, tag, attrs, text) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k,v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (text !== undefined) el.textContent = text;
+  parent.append(el);
+  return el;
+}
+
+function draw() {
+  const r = rows[Number($('choice').value)];
+  const svg = $('timeline');
+  svg.replaceChildren();
+  $('phases').replaceChildren();
+  if (!r || $('choice').value === '') {
+    $('identity').textContent = 'No matching request.';
+    return;
+  }
+  const t = {...r, ...r.points};
+  const start = r.pfcp_enter ?? r.encode_enter ?? r.commit ?? r.send;
+  const end = Math.max(r.leave ?? r.reply, t.write_leave ?? 0);
+  const x = ts => 245 + 750 * (ts-start) / Math.max(1, end-start);
+  const selected = new Set(r.tracks.filter(Boolean));
+  const showEdges = edges.filter(([a,s,d]) => a >= start && a <= end &&
+    (selected.has(s) || selected.has(d)));
+  const neighbours = new Set(showEdges.flatMap(([,s,d]) => [s,d]));
+  const ys = new Map();
+  [...selected, ...[...neighbours].filter(id => !selected.has(id))].forEach((id,i) => ys.set(id,60+24*i));
+  svg.setAttribute('viewBox', `0 0 1030 ${112+24*ys.size}`);
+  $('identity').textContent = `Request ${r.request} · frame ${r.lead}/${r.attempt} · slot ${r.slot} · send → reply ${us(r.reply-r.send)}`;
+  const layer = element(svg, 'g', {});
+  function bar(a,b,y,label,cls) {
+    a = Math.max(a,start); b = Math.min(b,end);
+    if (b <= a) return;
+    const rect = element(layer,'rect',{x:x(a),y,width:Math.max(.45,x(b)-x(a)),height:13,class:cls});
+    element(rect,'title',{},`${label}: ${us(b-a)}`);
+  }
+  for (const [id,y] of ys) {
+    const [name,seq] = tracks[id];
+    element(layer,'text',{x:4,y:y+11},name);
+    for (const [a,b,k,why] of seq) if (b>start && a<end) bar(a,b,y,`${k} ${why}`,k);
+  }
+  for (const [ts,s,d] of showEdges) {
+    if (!ys.has(s) || !ys.has(d) || s===d) continue;
+    const pos=x(ts), a=ys.get(s)+7, b=ys.get(d)+7;
+    const edge=element(svg,'line',{x1:pos,x2:pos,y1:a,y2:b,'stroke-opacity':.5});
+    element(edge,'title',{},`${tracks[s][0]} woke ${tracks[d][0]} at +${us(ts-start)}`);
+    element(svg,'text',{x:pos-3,y:b+3},b>a?'▼':'▲');
+  }
+  for (let i=0;i<=4;i++) {
+    const at=start+(end-start)*i/4, pos=x(at);
+    element(layer,'line',{x1:pos,x2:pos,y1:26,y2:87+24*ys.size,class:'tick'});
+    element(layer,'text',{x:pos,y:19,'text-anchor':'middle'},us(at-start));
+  }
+  const y=65+24*ys.size;
+  element(layer,'text',{x:4,y:y+11},'Transaction boundaries');
+  for (const [a,b,label] of phases) {
+    const tr=$('phases').insertRow();
+    tr.insertCell().textContent=label;
+    tr.insertCell().textContent=t[a] === undefined || t[b] === undefined ? 'unknown' : us(t[b]-t[a]);
+    if (t[a] !== undefined && t[b] !== undefined) bar(t[a],t[b],y,label,'phase');
+  }
+}
+
+function filter() {
+  const q = $('query').value.trim().toLowerCase();
+  $('choice').replaceChildren();
+  for (const [i,r] of rows.entries()) if (r.request.startsWith(q)) {
+    $('choice').add(new Option(`${r.request.slice(0,12)} · ${us(r.reply-r.send)}`, i));
+  }
+  if (!q) {
+    const order=rows.map((r,i)=>[r.reply-r.send,i]).sort((a,b)=>a[0]-b[0]);
+    $('choice').value=order[Math.floor(order.length/2)][1];
+  }
+  draw();
+}
+$('query').addEventListener('input',filter);
+$('choice').addEventListener('change',draw);
+$('slowest').addEventListener('click', () => {
+  let slowest = -1, duration = -1;
+  for (const o of $('choice').options) {
+    const r = rows[Number(o.value)], elapsed = r.reply - r.send;
+    if (elapsed > duration) { slowest = o.value; duration = elapsed; }
+  }
+  if (slowest !== -1) {
+    $('choice').value = slowest;
+    draw();
+  }
+});
+filter();
+</script>
