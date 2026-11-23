@@ -23,12 +23,28 @@ class TraceJoinTest(unittest.TestCase):
             self.assertEqual(states.get(21, []), want)
 
     def test_final_sync_without_clock_measurement_ends_window(self):
-        offset, drift, anchors, _, _, bounds = txtrace.read_go([
+        offset, drift, anchors, _, _, bounds, _ = txtrace.read_go([
             'M=-1 P=-1 G=-1 Sync Time=100 N=1 Trace=110 Mono=127 Wall=ignored',
             'M=-1 P=-1 G=-1 Sync Time=200 N=2',
         ])
         self.assertEqual([bounds[0] + offset, bounds[-1] + offset], [117, 217])
         self.assertEqual((anchors, drift), (1, 0))
+
+    def test_receive_dispatch_requires_an_unambiguous_wake_on_the_waiter(self):
+        frame = '\tgoogle.golang.org/grpc/internal/transport.(*http2Client).handleData @ 0x1234'
+        offset, _, _, _, _, _, wakes = txtrace.read_go([
+            'M=-1 P=-1 G=-1 Sync Time=100 N=1 Trace=110 Mono=127',
+            'M=200 P=0 G=2 StateTransition Time=120 GoID=3 Waiting->Runnable Reason=""',
+            frame,
+            'M=200 P=0 G=2 StateTransition Time=130 GoID=4 Waiting->Runnable Reason=""',
+            '\truntime.netpoll @ 0x1234',
+            'M=200 P=0 G=2 StateTransition Time=140 GoID=3 Waiting->Runnable Reason=""',
+            frame,
+        ])
+        rows = [dict(grpc_g=g, reply=reply, points={'write_enter': 130})
+                for g, reply in [(3, 142), (4, 161), (3, 161)]]
+        txtrace.mark_receive_dispatch(rows, wakes, offset)
+        self.assertEqual([r.get('receive_dispatch') for r in rows], [137, None, None])
 
     def test_interleaved_frames_keep_each_batch_slot(self):
         a, b, c = ('%032x' % i for i in (1, 2, 3))
