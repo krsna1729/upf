@@ -116,11 +116,14 @@ struct Store {
       r->staged->Abort();
       return {.error = prepared.error()};
     }
+    // The engine moves the bytes out of the staged operation before
+    // publication begins; the test does the same.
+    std::string observed = std::move(r->staged->observed);
     dp::Retirer retirer;
     r->staged->Publish(retirer);
     end.reset();
     Finish(retirer);
-    return {.references = std::move(r->references), .observed = std::move(r->observed)};
+    return {.references = std::move(r->references), .observed = std::move(observed)};
   }
   void Finish(dp::Retirer &retirer) {
     const bess::rcu::GracePeriod token = domain.StartGracePeriod();

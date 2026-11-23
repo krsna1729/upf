@@ -694,7 +694,7 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
     if (!counts.SerializeToString(&observed)) {
       return std::unexpected("the session's counters did not serialize");
     }
-    r.observed = std::move(observed);
+    staged->observed = std::move(observed);
     r.staged = std::move(staged);
     return r;
   }
