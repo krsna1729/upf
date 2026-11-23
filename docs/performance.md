@@ -3857,8 +3857,8 @@ apply median is 17.6 µs against 408 µs of mean commit wait, so the erase's
 `readBatch` sends one `get_counts` per round, and the round's first member
 sends it; the other members wait on the round's channels. The marker
 therefore counts rounds, not readers: 2,324 sends/s against 6,398
-deletions/s, so most deletions join another worker's round and wait without a
-marker of their own.
+deletions/s. [INFERENCE] Most deletions join another worker's round and wait
+without a marker of their own.
 
 Consequences:
 
@@ -3876,3 +3876,13 @@ Evidence: `.scratch/evidence/transaction-timeline/358706b/delete/`
 (`transactions/quality.json`, `transactions.go.trace`), and
 `go tool trace -pprof=sync transactions.go.trace`.
 `.scratch/evidence/workers-probe/findings.md` holds the apply-probe numbers.
+
+**Bound on removing the read.** A throwaway binary that skips
+`terminationReports` (its answers then carry no usage — diagnostic only, not
+a candidate) ran delete at 20K offered, ABBA, the same 1M stage: goodput
+7,306 → 14,376/s (+96.8%), p99 205.8 → 103.7 ms, median peak 1,673.9 →
+1,667.8 MiB, no timeouts or refusals. That is an upper bound: the skip also
+drops the usage IEs from the PFCP answer, which a real change keeps. Removing
+the read alone is therefore worth about twice the delete goodput, and the
+erase reply becomes the limit. Evidence: `.scratch/evidence/read-skip/`
+(`run.sh`, `churn-*/run/campaign.json`).
