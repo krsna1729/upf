@@ -34,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 
 	"github.com/krsna1729/upf/internal/bess"
@@ -1939,17 +1940,53 @@ func (c *Compiler) contextOf(s *Session, down bool, endpointID, teid uint32) (ct
 // record whose resources are gone (the engine's own reference checks are the
 // backstop, docs/design.md).
 func (c *Compiler) remove(ctx context.Context, s *Session) error {
+	_, err := c.removeWithUsage(ctx, s, false)
+	return err
+}
+
+// removeWithUsage is remove; report also asks for the session's termination
+// usage, built from what the erase reported.
+func (c *Compiler) removeWithUsage(ctx context.Context, s *Session, report bool) ([]*ie.IE, error) {
 	changes, err := c.removal(s)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var usage []*ie.IE
 	if len(changes) != 0 {
-		if err := c.ap.Apply(ctx, changes...); err != nil {
-			return err
+		observed, err := c.applyRemoval(ctx, changes)
+		if err != nil {
+			return nil, err
+		}
+		if report {
+			// The session is still in the model: the same windows a reading
+			// before the erase would have produced (BESS D-210).
+			usage = c.terminationReportsFrom(s, time.Now(), observed,
+				c.cfg.Appliance+"/sessions")
 		}
 	}
 	c.forget(s)
-	return nil
+	return usage, nil
+}
+
+// applyRemoval applies a removal transaction, returning what its operations
+// observed when the client's daemon reports it.
+func (c *Compiler) applyRemoval(ctx context.Context, changes []bess.Change) ([]bess.Observed, error) {
+	if oa, ok := c.ap.(bess.ObservedApplier); ok {
+		return oa.ApplyObserved(ctx, changes...)
+	}
+	return nil, c.ap.Apply(ctx, changes...)
+}
+
+// erasesWithCounts reports whether a deletion's erase returns the session's
+// counters, so it needs no get_counts call before it. Only the native session
+// layout erases the session as one entry, and only a daemon that reports an
+// operation's bytes answers with them (BESS D-210).
+func (c *Compiler) erasesWithCounts() bool {
+	if _, native := c.target.(sessionTarget); !native {
+		return false
+	}
+	o, ok := c.ap.(interface{ ObservesEraseCounts() bool })
+	return ok && o.ObservesEraseCounts()
 }
 
 // forget drops a session whose records the dataplane no longer holds, and

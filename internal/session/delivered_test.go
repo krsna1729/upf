@@ -13,11 +13,13 @@ package session
 import (
 	"context"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
+	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/krsna1729/upf/internal/bess"
 )
@@ -71,6 +73,89 @@ func terminationWindows(t *testing.T, out *message.SessionDeletionResponse) map[
 		got[uid] = use
 	}
 	return got
+}
+
+// eraseCounts is what the daemon sends with a session's entry erase (BESS
+// D-210): a SessionEraseCounts with the counts in the uplink reading. A count
+// names a session's own action id, and the controller reads both directions
+// into one table.
+func eraseCounts(counts map[string][]bess.RuleCount) []byte {
+	var reply []byte
+	for _, module := range counts {
+		for _, c := range module {
+			var rc []byte
+			rc = protowire.AppendVarint(protowire.AppendTag(rc, 1, protowire.VarintType), uint64(c.ActionID))
+			rc = protowire.AppendVarint(protowire.AppendTag(rc, 2, protowire.VarintType), c.Packets)
+			rc = protowire.AppendVarint(protowire.AppendTag(rc, 3, protowire.VarintType), c.Octets)
+			reply = protowire.AppendBytes(protowire.AppendTag(reply, 1, protowire.BytesType), rc)
+		}
+	}
+	return protowire.AppendBytes(protowire.AppendTag(nil, 1, protowire.BytesType), reply)
+}
+
+// A termination report built from the erase's own reading says exactly what a
+// get_counts call before the erase says, and makes no call.
+func TestTheTerminationReportFromAnEraseMatchesOneFromAReading(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(twoURREstablishment(0x4011, 1000)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	rule := ruleCarrying(t, rec.last(), fieldSrcIP, []byte{10, 45, 0, 2})
+	module := testConfig().Up.Counters
+	set := func(o, p uint64) {
+		rec.counts = map[string][]bess.RuleCount{module: {{ActionID: rule.actionID(), Packets: p, Octets: o}}}
+	}
+	set(10000, 100)
+	if reports := evaluate(t, c, seid); len(reports) != 0 {
+		t.Fatalf("the baseline reading reported %+v", reports)
+	}
+	set(10000+2052, 109)
+	reports := evaluate(t, c, seid)
+	if len(reports) != 2 {
+		t.Fatalf("%d reports from one tick, want one per URR (7 and 8)", len(reports))
+	}
+	for _, r := range reports {
+		if r.URRID == 7 {
+			c.ConfirmReport(context.Background(), r)
+		}
+	}
+	set(10000+4560, 120)
+
+	c.mu.Lock()
+	s := c.sessions[seid]
+	c.mu.Unlock()
+	now := time.Now()
+	const sessions = "upf/sessions"
+	reads := len(rec.calls)
+	fromErase := c.terminationReportsFrom(s, now, []bess.Observed{{Resource: sessions, Bytes: eraseCounts(rec.counts)}}, sessions)
+	if len(rec.calls) != reads {
+		t.Fatalf("the erase report made %d counter reads, want none", len(rec.calls)-reads)
+	}
+	fromRead := c.terminationReports(context.Background(), s, now)
+
+	if len(fromErase) != len(fromRead) {
+		t.Fatalf("the erase report has %d IEs, the reading %d", len(fromErase), len(fromRead))
+	}
+	for i := range fromErase {
+		want, got := fromRead[i], fromErase[i]
+		if got.Type != want.Type {
+			t.Fatalf("IE %d is type %d, want %d", i, got.Type, want.Type)
+		}
+		w, err := want.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, err := got.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(g, w) {
+			t.Errorf("IE %d differs: erase %x, reading %x", i, g, w)
+		}
+	}
 }
 
 func TestTheTerminationReportCarriesWhatADecidedReportStillHolds(t *testing.T) {

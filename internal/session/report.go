@@ -1139,6 +1139,13 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 	if err != nil {
 		return nil, err
 	}
+	return c.windowsFrom(s, uids, now, base, counts), nil
+}
+
+// windowsFrom is windowsOf with the reading already in hand: a deletion whose
+// erase reported the counters (BESS D-210) builds the same windows with no
+// get_counts call.
+func (c *Compiler) windowsFrom(s *Session, uids []uint32, now time.Time, base windowBase, counts readings) []urrWindow {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []urrWindow
@@ -1175,7 +1182,7 @@ func (c *Compiler) windowsOf(ctx context.Context, s *Session, uids []uint32, now
 		}
 	}
 	slices.SortFunc(out, func(a, b urrWindow) int { return cmp.Compare(a.uid, b.uid) })
-	return out, nil
+	return out
 }
 
 // usageReports is the windows as Usage Report IEs of the message type typ,
@@ -1296,5 +1303,41 @@ func (c *Compiler) terminationReports(ctx context.Context, s *Session, now time.
 		c.log.Warn("session: no termination usage report", "seid", s.LocalSEID, "error", err)
 		return nil
 	}
+	return usageReports(ie.UsageReportWithinSessionDeletionResponse, TriggerTermination, windows)
+}
+
+// terminationReportsFrom builds the deletion's usage report from what the
+// erase reported (BESS D-210), instead of reading the counters before it. The
+// caller calls it for a session with a URR, after the erase applied: the
+// session is still in the model, so the windows are the ones terminationReports
+// builds from a read at the same moment.
+func (c *Compiler) terminationReportsFrom(s *Session, now time.Time, observed []bess.Observed, resource string) []*ie.IE {
+	var up, down []bess.RuleCount
+	found := false
+	for _, o := range observed {
+		if o.Resource != resource {
+			continue
+		}
+		found = true
+		var err error
+		up, down, err = bess.SessionEraseCounts(o.Bytes)
+		if err != nil {
+			c.log.Warn("session: no termination usage report", "seid", s.LocalSEID, "error", err)
+			return nil
+		}
+		break
+	}
+	if !found {
+		c.log.Warn("session: the erase reported no counters", "seid", s.LocalSEID)
+		return nil
+	}
+	cells := make(map[uint32]reading, len(up)+len(down))
+	for _, r := range up {
+		cells[r.ActionID] = readingOf(r)
+	}
+	for _, r := range down {
+		cells[r.ActionID] = readingOf(r)
+	}
+	windows := c.windowsFrom(s, nil, now, sinceDelivery, func(id uint32) reading { return cells[id] })
 	return usageReports(ie.UsageReportWithinSessionDeletionResponse, TriggerTermination, windows)
 }

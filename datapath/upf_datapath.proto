@@ -320,6 +320,17 @@ message UrrCountCommandGetCountsResponse {
   uint32 next_after = 4;
 }
 
+// SessionEraseCounts is what erasing a session reports: the reading each
+// counter direction would have answered at the erase, so a controller that
+// needs the session's last usage does not need a get_counts call before the
+// deletion. Each side is exactly a UrrCountCommandGetCountsResponse read with
+// restart_window false, so one decoder serves both. The URR cells disappear
+// with the session, so this is the last reading there is.
+message SessionEraseCounts {
+  UrrCountCommandGetCountsResponse uplink = 1;
+  UrrCountCommandGetCountsResponse downlink = 2;
+}
+
 // One controller consumes a counter bank's traffic notifications. Replies are
 // replayable until acknowledged; acknowledgements are sent only after every
 // page's ids have been queued for evaluation. Counter reads are independent.
