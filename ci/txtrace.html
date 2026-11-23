@@ -37,7 +37,8 @@ const phases = [
   ['apply_enter', 'apply_leave', 'This slot: BESS apply'],
   ['apply_leave', 'lock_release', 'Other slots / before final unlock'],
   ['lock_release', 'write_enter', 'Before BESS Write'],
-  ['write_enter', 'reply', 'BESS Write entry → UPF decoded reply (may overlap BESS Write)'],
+  ['write_enter', 'receive_dispatch', 'BESS Write entry → Go HTTP/2 receive-queue wake'],
+  ['receive_dispatch', 'reply', 'Go receive-queue wake → decoded reply'],
   ['reply', 'leave', 'UPF acknowledgement → Commit return'],
 ];
 const {info, rows, tracks, edges} = data;
@@ -75,7 +76,7 @@ function draw() {
   const neighbours = new Set(showEdges.flatMap(([,s,d]) => [s,d]));
   const ys = new Map();
   [...selected, ...[...neighbours].filter(id => !selected.has(id))].forEach((id,i) => ys.set(id,60+24*i));
-  svg.setAttribute('viewBox', `0 0 1030 ${112+24*ys.size}`);
+  svg.setAttribute('viewBox', `0 0 1030 ${128+24*ys.size}`);
   $('identity').textContent = `Request ${r.request} · frame ${r.lead}/${r.attempt} · slot ${r.slot} · send → reply ${us(r.reply-r.send)}`;
   const layer = element(svg, 'g', {});
   function bar(a,b,y,label,cls) {
@@ -103,6 +104,13 @@ function draw() {
   }
   const y=65+24*ys.size;
   element(layer,'text',{x:4,y:y+11},'Transaction boundaries');
+  const writeY = y + 20;
+  element(layer,'text',{x:4,y:writeY+11},'BESS synchronous Write');
+  const write = $('phases').insertRow();
+  write.insertCell().textContent = 'BESS Write duration (can overlap the Go receive path)';
+  write.insertCell().textContent = t.write_leave === undefined ? 'unknown' : us(t.write_leave-t.write_enter);
+  if (t.write_leave !== undefined) bar(t.write_enter,t.write_leave,writeY,'BESS synchronous Write','phase');
+  if (t.receive_dispatch === undefined) bar(t.write_enter,t.reply,y,'Write entry → decoded reply (wake unknown)','phase');
   for (const [a,b,label] of phases) {
     const tr=$('phases').insertRow();
     tr.insertCell().textContent=label;

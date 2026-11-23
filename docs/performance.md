@@ -47,6 +47,13 @@ the diagnostic build or recorder; only matching plain runs qualify a change.
 Keep raw traces local: they contain request IDs, processes, thread names
 and stacks.
 
+The reply view draws synchronous BESS `Write` separately because it can
+overlap client receive. The Go receive-queue boundary requires exactly one
+`http2Client.handleData` wake on the SDK goroutine between BESS Write entry
+and the decoded reply. A missing or ambiguous wake leaves this boundary
+unknown; it does not mean there was no dispatch. The capture-quality file
+reports how many joined requests had a receive-queue boundary.
+
 ## Power qualification correction — 2026-11-06
 
 The laptop's power source changed during earlier work. The journal does not

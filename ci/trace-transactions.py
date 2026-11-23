@@ -27,10 +27,17 @@ def output(command):
 
 def read_go(lines):
     marks, states, anchors, bounds = [], [], [], []
+    receive_wakes = defaultdict(list)
+    wake = None
     for line in lines:
         m = GO_LINE.match(line)
         if not m:
+            if wake is not None and 'google.golang.org/grpc/internal/transport.(*http2Client).handleData @' in line:
+                t, waiter = wake
+                receive_wakes[waiter].append(t)
+                wake = None
             continue
+        wake = None
         thread, _, g, kind, ns, fields = m.groups()
         t = int(ns)
         if kind == 'Sync':
@@ -46,13 +53,15 @@ def read_go(lines):
             state = GO_STATE.match(fields)
             if state:
                 states.append((t, int(thread), int(g), int(state[1]), state[2], state[3], state[4]))
+                if state[2] == 'Waiting' and state[3] == 'Runnable':
+                    wake = (t, int(state[1]))
     if not anchors:
         raise ValueError('Go trace lacks a monotonic clock anchor; use the pinned Go version')
     offset = anchors[0][1]
     drift = max(abs(o - offset) for _, o in anchors)
     if drift > 50_000:
         raise ValueError(f'Go and perf clocks disagree by {drift} ns')
-    return offset, drift, len(anchors), marks, states, bounds
+    return offset, drift, len(anchors), marks, states, bounds, receive_wakes
 
 
 def read_perf(lines, meta):
@@ -169,6 +178,8 @@ def join(go, bess, begin, end):
         if not all(k in points for k in order) or len({tid for _, tid in points.values()}) != 1:
             skipped['duplicate or incomplete server attempt'] += 1
             continue
+        if 'write_leave' in points and not points['write_enter'][0] <= points['write_leave'][0] <= end:
+            del points['write_leave']
         clocks = [send, *(points[k][0] for k in order), reply]
         if req != returned or grpc_g != reply_g or not begin <= send <= reply <= end or clocks != sorted(clocks):
             skipped['identity, clock, or window mismatch'] += 1
@@ -199,11 +210,20 @@ def clip(seq, lo, hi):
     return [(max(a, lo), min(b, hi), k, why) for a, b, k, why in seq if a < hi and b > lo]
 
 
+def mark_receive_dispatch(rows, wakes, offset):
+    for r in rows:
+        times = wakes.get(r['grpc_g'], ())
+        start = bisect_right(times, r['points']['write_enter'] - offset - 1)
+        end = bisect_right(times, r['reply'] - offset)
+        if end == start + 1:
+            r['receive_dispatch'] = times[start] + offset
+
+
 def render(evidence, go_binary, template):
     directory = evidence / 'transactions'
     meta = json.loads((directory / 'capture.json').read_text())
     with output([go_binary, 'tool', 'trace', '-d=parsed', str(evidence / 'transactions.go.trace')]) as lines:
-        offset, drift, anchor_count, go, states, bounds = read_go(lines)
+        offset, drift, anchor_count, go, states, bounds, receive_wakes = read_go(lines)
     with output(['perf', 'script', '--ns', '--show-lost-events', '-i', str(directory / 'perf.data'),
                  '-F', 'trace:comm,pid,tid,cpu,time,event,trace,ip,sym']) as lines:
         bess, switches, wakes, names, loss = read_perf(lines, meta)
@@ -218,6 +238,7 @@ def render(evidence, go_binary, template):
     rows, skipped, frame_count, server_count = join(go, bess, lo, hi)
     if not rows:
         raise ValueError(f'no complete attempts joined: {dict(skipped)}')
+    mark_receive_dispatch(rows, receive_wakes, offset)
     ks = kernel_intervals(switches, wakes, names, loss)
     gs = intervals((t, g, state.lower().replace('waiting', 'blocked'), why)
                    for t, _, _, g, _, state, why in states
@@ -258,6 +279,9 @@ def render(evidence, go_binary, template):
     edge_id = len(edges)
     for r in rows:
         client, server = gids.get(r['grpc_g']), tids.get(r['server_tid'])
+        if client is not None and 'receive_dispatch' in r:
+            trace.append(dict(ph='i', s='t', name='Go HTTP/2 receive-queue wake', pid=1, tid=client,
+                              ts=(r['receive_dispatch']-lo)/1000, args={'request_id': r['request']}))
         if client is None or server is None:
             continue
         for name, start, src, end, dst in (
@@ -283,6 +307,12 @@ def render(evidence, go_binary, template):
         'wait_for_control_lock': p50_us(r['points']['lock_acquired'] - r['points']['lock_request'] for r in rows),
         'apply': p50_us(r['points']['apply_leave'] - r['points']['apply_enter'] for r in rows),
         'bess_write_to_reply': p50_us(r['reply'] - r['points']['write_enter'] for r in rows),
+        'bess_write': p50_us(r['points']['write_leave'] - r['points']['write_enter']
+                             for r in rows if 'write_leave' in r['points']),
+        'write_to_receive_dispatch': p50_us(r['receive_dispatch'] - r['points']['write_enter']
+                                           for r in rows if 'receive_dispatch' in r),
+        'receive_dispatch_to_reply': p50_us(r['reply'] - r['receive_dispatch']
+                                           for r in rows if 'receive_dispatch' in r),
     }
     frame_sizes = Counter(value for t, _, stage, _, _, value in bess if stage == 'frame_read' and lo <= t <= hi)
     log = (directory / 'perf.log').read_text()
@@ -295,6 +325,7 @@ def render(evidence, go_binary, template):
                 commit_returns_per_s=round(returned * 1e9/(hi-lo)),
                 counts_rpc_returns=counts, encode_samples=len(encoding),
                 pfcp_samples=sum('pfcp_enter' in r for r in rows),
+                receive_dispatch_samples=sum('receive_dispatch' in r for r in rows),
                 frame_sizes=dict(frame_sizes), median_us=phases)
     (directory / 'perfetto.json').write_text(json.dumps({'traceEvents': trace}))
     payload = json.dumps(dict(info=info, rows=rows, tracks=tracks, edges=edges)).replace('<', '\\u003c')
