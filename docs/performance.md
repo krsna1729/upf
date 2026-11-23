@@ -318,6 +318,38 @@ The combined score is the predeclared verdict. Evidence:
 `.scratch/evidence/coalesce-counter-reads/` and
 `coalesce-counter-reads-r2/combined-score.txt`.
 
+**One round trip for a counted deletion (2026-11-23):** A deletion must report
+the counters measured before the session's rules go away, so it sent
+`get_counts` before the erase: two round trips into bessd for one N4 message.
+At 1M sessions the read was 62% of a delete worker's blocking (49% waiting for
+a shared read round, 13% the call) and the erase's reply 38% (`go tool trace
+-pprof=sync` over the delete trace of `358706b`). The session resource now
+reads the session's own counter cells inside the entry erase's reservation,
+bounded by `kMaxActions` per direction, and returns them as the operation's
+`observed` bytes (BESS D-210, `krsna1729/bess#158`); upfd builds the same
+termination windows from those bytes and sends no reading. A daemon that does
+not report an operation's bytes, or a non-native layout, keeps the old read.
+
+Clean ABBA and BAAB against `358706b` (eight runs per arm, collector-firing-free
+cells), combined medians:
+
+| Mode | 10K/s goodput | 10K/s upfd µs/accepted | 1K/s p99 |
+|---|---:|---:|---:|
+| FAR | −1.0% | +1.9% | −7.0% |
+| Establish | −1.4% | +0.2% | +2.2% |
+| Replace | +53.3% | −22.1% | −36.8% |
+| Delete | +8.3% | −25.8% | −48.8% |
+
+Delete and replace met both gates, and no 1K/s tail gate rose by more than 10%
+(establish +2.2% is the largest). Median `upfd` cgroup peak fell 1,773.0 →
+1,756.5 MiB, the heap fixture stays at 1,194.6 B/session, and all 64 cells
+reconciled with no timeouts or uncertain outcomes; the over-offered rate is
+answered with cause 75 as before. Replace gains most because its rotation
+removes and re-establishes a session each cycle; FAR and establish do not read
+counters and stay within noise. Evidence: `.scratch/evidence/erase-counts/`
+(`forward`, `reverse`, `combined.score.txt`), and the live lane passes against
+the pinned stage.
+
 ### Review with the transaction timeline (2026-11-22)
 
 Historical builds use the same diagnostic overlay, plugin and trace-enabled
