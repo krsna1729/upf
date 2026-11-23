@@ -3829,3 +3829,50 @@ covers the spill into the next cell. Evidence:
 
 [INFERENCE] The mechanism is CPU or memory-bandwidth contention from the
 collector on the shared cores. No scheduler trace was taken.
+
+## Deletion worker time: the counter read is the largest wait (2026-11-23)
+
+The transaction timeline above splits the reply path. The same trace of commit
+`358706b`'s delete mode, read with Go's blocking profile
+(`go tool trace -pprof=sync`), shows where a session worker's time goes. It is
+a diagnostic build: its markers add CPU, so the shares transfer and the
+absolute times do not.
+
+Window: 1,000.7 ms, 6,399 joined requests, 6,398 commit returns/s, 6,405
+server frames. The eight session workers spent 6.871 s of their 8.006 s of
+wall time blocked inside `sessionWorker` → `answerSession`; the rest is their
+own CPU work and the worker loop. Inside that handler:
+
+| Wait | s | Share of the 6.871 s |
+|---|---:|---:|
+| `terminationReports` → `windowsOf` → `readBatch.read` | 4.262 | 62.0% |
+| — waiting for a round (`<-start`, `<-done`) | 3.379 | 49.2% |
+| — its own `get_counts` RPC (`InvokeAction`) | 0.882 | 12.8% |
+| `remove` → `Apply` → `Transaction.Commit` → gRPC `RecvMsg` | 2.609 | 38.0% |
+
+The daemon's apply is inside the second row, not beside it: the timeline's
+apply median is 17.6 µs against 408 µs of mean commit wait, so the erase's
+38% is almost all the reply crossing the transport.
+
+`readBatch` sends one `get_counts` per round, and the round's first member
+sends it; the other members wait on the round's channels. The marker
+therefore counts rounds, not readers: 2,324 sends/s against 6,398
+deletions/s, so most deletions join another worker's round and wait without a
+marker of their own.
+
+Consequences:
+
+- At eight workers a deletion is blocked about 62% on its usage read and 38%
+  on the erase reply. Both are round trips to bessd.
+- A change that only moves CPU does not move this ceiling; one that removes a
+  round trip does. Removing the read would leave the erase reply as the only
+  wait, and the apply probe already measured a delete commit ceiling of
+  13.2K/s at higher concurrency, so the transport reply would then bind.
+- The round barrier belongs to `readBatch` (one round in flight per module),
+  not to the datapath read. `Counts` takes one bounded hold
+  (`kEntriesPerHold`) and reports at most the session's own action cells.
+
+Evidence: `.scratch/evidence/transaction-timeline/358706b/delete/`
+(`transactions/quality.json`, `transactions.go.trace`), and
+`go tool trace -pprof=sync transactions.go.trace`.
+`.scratch/evidence/workers-probe/findings.md` holds the apply-probe numbers.
