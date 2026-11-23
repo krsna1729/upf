@@ -331,24 +331,27 @@ termination windows from those bytes and sends no reading. A daemon that does
 not report an operation's bytes, or a non-native layout, keeps the old read.
 
 Clean ABBA and BAAB against `358706b` (eight runs per arm, collector-firing-free
-cells), combined medians:
+cells), combined medians. Both arms are release trees, the perf build
+`docs/benchmarking.md` prescribes: `--buildtype=release -Dcpu=x86-64-v3`
+(`-O3 -DNDEBUG -march=x86-64-v3`); the datapath plugin is `-O3` as before.
 
 | Mode | 10K/s goodput | 10K/s upfd µs/accepted | 1K/s p99 |
 |---|---:|---:|---:|
-| FAR | −1.0% | +1.9% | −7.0% |
-| Establish | −1.4% | +0.2% | +2.2% |
-| Replace | +53.3% | −22.1% | −36.8% |
-| Delete | +8.3% | −25.8% | −48.8% |
+| FAR | −0.2% | +0.3% | −0.3% |
+| Establish | −0.7% | +1.0% | −1.1% |
+| Replace | +63.1% | −23.6% | −38.1% |
+| Delete | +8.2% | −24.8% | −23.5% |
 
-Delete and replace met both gates, and no 1K/s tail gate rose by more than 10%
-(establish +2.2% is the largest). Median `upfd` cgroup peak fell 1,773.0 →
-1,756.5 MiB, the heap fixture stays at 1,194.6 B/session, and all 64 cells
-reconciled with no timeouts or uncertain outcomes; the over-offered rate is
-answered with cause 75 as before. Replace gains most because its rotation
-removes and re-establishes a session each cycle; FAR and establish do not read
-counters and stay within noise. Evidence: `.scratch/evidence/erase-counts/`
-(`forward`, `reverse`, `combined.score.txt`), and the live lane passes against
-the pinned stage.
+Delete and replace met both gates, and no 1K/s cell rose at all (the fast tree's
+`-O1` run, taken before the release build, had one FAR 1K/s candidate run at
+4.74 ms and is archived with the same shape: delete +8.3%, replace +53.3%).
+Median `upfd` cgroup peak fell 1,775.8 → 1,762.1 MiB, the heap fixture stays at
+1,194.6 B/session, and all 64 cells reconciled with no timeouts or uncertain
+outcomes; the over-offered rate is answered with cause 75 as before. Replace
+gains most because its rotation removes and re-establishes a session each
+cycle; FAR and establish do not read counters and stay within noise. Evidence:
+`.scratch/evidence/erase-counts/` (`forward-o3`, `reverse-o3`,
+`combined-o3.score.txt`), and the live lane passes against both release stages.
 
 ### Review with the transaction timeline (2026-11-22)
 
