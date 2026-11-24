@@ -348,6 +348,63 @@ message UrrCountCommandGetChangesResponse {
   uint64 next_after = 3;          // 0 completes this snapshot
 }
 
+// PacketRateKey keys one packet-rate quota in "<module>/rates": the
+// controller's globally allocated id for one QER direction (TS 29.244
+// 8.2.63).
+message PacketRateKey {
+  uint32 id = 1; // nonzero
+}
+
+// PacketRateValue is one quota (TS 29.244 8.2.63). The primary and the
+// additional maximum each carry their own time unit in the IE (octets m/p and
+// q/r), so both are exact windows here, not one token-bucket rate. `epoch`
+// changes whenever the controller reprograms the quota; the datapath restarts
+// the windows then.
+message PacketRateValue {
+  uint32 allowed = 1;                   // packets per primary period; 0 = none
+  uint32 period_seconds = 2;            // 60, 360, 3600, 86400 or 604800
+  uint32 additional = 3;                // packets per additional period
+  uint32 additional_period_seconds = 4; // its own unit (8.2.63 octets q/r)
+  uint64 epoch = 5;
+  // The CP's Packet Rate Status (8.2.139), when the QER carried one: the UP
+  // enforces these remaining counts first, until they are spent or the
+  // validity time passes (5.4.15.2 rule 4). Absolute Unix ns; 0 = no seed.
+  uint32 seed_remaining = 6;
+  uint32 seed_remaining_additional = 7;
+  uint64 seed_validity_unix_ns = 8;
+}
+
+message PacketRateArg {
+  uint32 capacity = 1; // 0 means 65536
+}
+
+// PacketRateCommandGetStatusArg selects the quotas to read; empty means every
+// live quota.
+message PacketRateCommandGetStatusArg {
+  repeated uint32 ids = 1;
+}
+
+// PacketRateStatus is one quota's remaining allowance: what a Query Packet
+// Rate Status answer (7.5.5.4) and a release report (5.4.15.2 rule 3) carry.
+message PacketRateStatus {
+  uint32 id = 1;
+  uint32 remaining = 2;
+  uint32 remaining_additional = 3;
+  // The absolute time the counts are valid until (Unix ns); 0 when the quota
+  // has no live window.
+  uint64 validity_unix_ns = 4;
+  uint32 used = 5;            // packets charged in the reported phase
+  uint32 used_additional = 6; // additional packets charged
+}
+
+message PacketRateCommandGetStatusResponse {
+  // The clock the validity times were computed against, so a controller can
+  // place them on the absolute clock a PFCP timestamp carries.
+  uint64 read_wall_unix_ns = 1;
+  uint64 read_monotonic_ns = 2;
+  repeated PacketRateStatus rates = 3;
+}
+
 // TunnelKey selects a per-action GtpuEncap tunnel record.
 message TunnelKey {
   uint32 action_id = 1;
