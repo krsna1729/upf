@@ -185,7 +185,7 @@ as CI runs it, each test binary under its row.
 
 ## Status
 
-The last full evidence run: **50 claims — 47 ok, 1 gap, 2 skip, 0 fail**.
+The last full evidence run: **56 claims — 53 ok, 1 gap, 2 skip, 0 fail**.
 
 - Open: Packet Rate (QER packet caps and their query). MAR/ATSSS-LL is
   implemented for active/standby; the other Steering Modes and MPTCP remain
