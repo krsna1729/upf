@@ -572,9 +572,10 @@ func graphFor(cfg layout, eps []endpoint, p plan, ifaces []string) (map[string]a
 			{"attr_name": "meter_id", "value_offset": 4, "num_bytes": 8, "reference": meters + "/meters", "reference_key": "BE32", "reference_count": 2},
 			{"attr_name": "next_hop_id", "value_offset": 12, "num_bytes": 4, "reference": "rt/next_hops", "reference_key": "BE32"},
 			{"attr_name": "route_domain", "value_offset": 16, "num_bytes": 4},
+			{"attr_name": "packet_rate_id", "value_offset": 20, "num_bytes": 4},
 		}
 		if steering {
-			r = append(r, map[string]any{"attr_name": "steering_policy_id", "value_offset": 20, "num_bytes": 4})
+			r = append(r, map[string]any{"attr_name": "steering_policy_id", "value_offset": 24, "num_bytes": 4})
 		}
 		return r
 	}

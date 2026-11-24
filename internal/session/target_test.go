@@ -18,6 +18,7 @@ import (
 // Independent graph spellings used by the pre-target session tests.
 func rulesRes(d Direction) string           { return d.PDRTable + "/rules" }
 func metersRes(d Direction) string          { return d.Meters + "/meters" }
+func ratesRes(d Direction) string           { return d.PacketRates + "/rates" }
 func tunnelsRes(d Direction) string         { return d.Tunnels + "/tunnels" }
 func countersRes(d Direction) string        { return d.Counters + "/counters" }
 func bufferCountersRes(b *Buffering) string { return b.Counter + "/counters" }

@@ -73,14 +73,12 @@ CommandResponse PacketRate::Init(const upf::pb::PacketRateArg &arg) {
           },
           [](const upf::pb::PacketRateValue &value)
               -> std::expected<std::any, std::string> {
-            if (value.allowed() == 0 && value.additional() == 0) {
+            // A maximum of zero with a period is a quota that passes nothing:
+            // the SMF said so with a present flag, and the record must enforce
+            // it rather than being read as "no rate".
+            if (value.period_seconds() == 0 &&
+                value.additional_period_seconds() == 0) {
               return std::unexpected("a quota with no packet rate");
-            }
-            // 8.2.63's APRC bits add a rate beyond a maximum; there is no
-            // maximum here for it to extend.
-            if (value.additional() > 0 && value.allowed() == 0) {
-              return std::unexpected(
-                  "an additional rate without a maximum packet rate");
             }
             if (value.allowed() > 0 && value.period_seconds() == 0) {
               return std::unexpected("a packet rate without a time unit");

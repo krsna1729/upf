@@ -37,7 +37,10 @@ func liveConfig() Config {
 		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, FTEIDContext, QFI},
 		Meters:    "mt_ul",
 		Counters:  "cnt_ul",
-		NextHop:   1,
+		// deploy/session-path.yaml carries the quota modules; a session with
+		// no Packet Rate never writes to them.
+		PacketRates: "pr_ul",
+		NextHop:     1,
 		// The deployed daemon names the encap module for both directions
 		// (upfd -tunnels/-tunnels-ul default to one module): an uplink forward
 		// that adds an outer header writes its record there too.
@@ -47,10 +50,11 @@ func liveConfig() Config {
 		PDRTable: "pdr_dl",
 		PDRFields: []Field{SrcIP, DstIP, Proto, SrcPort, DstPort, RouteDomain,
 			FTEIDContext, QFI},
-		Meters:   "mt_dl",
-		Counters: "cnt_dl",
-		NextHop:  2,
-		Tunnels:  "enc",
+		Meters:      "mt_dl",
+		Counters:    "cnt_dl",
+		PacketRates: "pr_dl",
+		NextHop:     2,
+		Tunnels:     "enc",
 	}
 	// UPF_ROUTE_MODE=destination is the routed lab (deploy/route-path.yaml):
 	// the Router's own FIB decides each packet's egress, so the compiler names

@@ -22,6 +22,10 @@ const (
 	// MeterPolicyValue.
 	MetersUplink
 	MetersDownlink
+	// PacketRatesUplink and PacketRatesDownlink are the QER packet-rate
+	// quotas: PacketRateKey -> PacketRateValue.
+	PacketRatesUplink
+	PacketRatesDownlink
 	// CountersUplink and CountersDownlink are the URR counters: CounterKey ->
 	// CounterEntry, read back by get_counts.
 	CountersUplink
@@ -65,6 +69,7 @@ const (
 var tableNames = [tableCount]string{
 	FTEIDs: "fteids", PDRUplink: "pdr_ul", PDRDownlink: "pdr_dl",
 	MetersUplink: "meters_ul", MetersDownlink: "meters_dl",
+	PacketRatesUplink: "packet_rates_ul", PacketRatesDownlink: "packet_rates_dl",
 	CountersUplink: "counters_ul", CountersDownlink: "counters_dl",
 	BufferCounters: "buffer_counters",
 	TunnelsUplink:  "tunnels_ul", TunnelsDownlink: "tunnels_dl",
@@ -86,6 +91,7 @@ func (t Table) String() string {
 // pdrTable, meterTable, counterTable and tunnelTable are a direction's table.
 func pdrTable(down bool) Table     { return pick(down, PDRDownlink, PDRUplink) }
 func meterTable(down bool) Table   { return pick(down, MetersDownlink, MetersUplink) }
+func rateTable(down bool) Table    { return pick(down, PacketRatesDownlink, PacketRatesUplink) }
 func counterTable(down bool) Table { return pick(down, CountersDownlink, CountersUplink) }
 func tunnelTable(down bool) Table  { return pick(down, TunnelsDownlink, TunnelsUplink) }
 
@@ -148,6 +154,10 @@ func newTarget(cfg Config) Target {
 		}
 		a.names[t] = cfg.Appliance + "/" + name
 	}
+	// The appliance's store carries no packet-rate quota: a Session
+	// Modification whose QER names a Packet Rate is refused at resolve rather
+	// than written to a resource the module does not have.
+	a.names[PacketRatesUplink], a.names[PacketRatesDownlink] = "", ""
 	if cfg.Sessions != nil {
 		return sessionTarget{a}
 	}
@@ -198,6 +208,10 @@ func (g graphTarget) resourceName(t Table) string {
 		return graphResource(c.Up.Meters, "meters")
 	case MetersDownlink:
 		return graphResource(c.Down.Meters, "meters")
+	case PacketRatesUplink:
+		return graphResource(c.Up.PacketRates, "rates")
+	case PacketRatesDownlink:
+		return graphResource(c.Down.PacketRates, "rates")
 	case CountersUplink:
 		return graphResource(c.Up.Counters, "counters")
 	case CountersDownlink:

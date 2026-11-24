@@ -352,6 +352,101 @@ func (c *Client) PeekRuleCounts(ctx context.Context, counters string, actionIDs 
 	return c.ruleCounts(ctx, nil, counters, false, actionIDs...)
 }
 
+// PacketRateStatus is one quota's reading from a PacketRate module's
+// get_status (upf_datapath.proto's PacketRateStatus): the counts still allowed
+// in the primary and additional windows, the absolute time those counts are
+// valid until, and what each window has charged.
+type PacketRateStatus struct {
+	ID                  uint32
+	Remaining           uint32
+	RemainingAdditional uint32
+	ValidityUnixNS      uint64
+	Used                uint32
+	UsedAdditional      uint32
+}
+
+// PacketRateStatuses reads the quotas the ids name from a PacketRate module.
+// The argument names the ids in one packed field, and the reply is read
+// straight off the wire by its field numbers: a status query is a PFCP
+// exchange, not the packet path, but it names every QER the SMF asked about in
+// one round trip. An empty ids asks for every live quota.
+func (c *Client) PacketRateStatuses(ctx context.Context, module string, ids ...uint32) ([]PacketRateStatus, error) {
+	arg, _, err := c.wire(nil, "upf.pb.PacketRateCommandGetStatusArg", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	m := arg.ProtoReflect()
+	fd := m.Descriptor().Fields().ByName("ids")
+	if fd == nil {
+		return nil, errors.New("bess: upf.pb.PacketRateCommandGetStatusArg has no ids")
+	}
+	if len(ids) > 0 {
+		size := 0
+		for _, id := range ids {
+			size += protowire.SizeVarint(uint64(id))
+		}
+		head := m.GetUnknown()
+		raw := make([]byte, 0, len(head)+protowire.SizeTag(fd.Number())+protowire.SizeBytes(size))
+		raw = append(raw, head...)
+		raw = protowire.AppendTag(raw, fd.Number(), protowire.BytesType)
+		raw = protowire.AppendVarint(raw, uint64(size))
+		for _, id := range ids {
+			raw = protowire.AppendVarint(raw, uint64(id))
+		}
+		m.SetUnknown(raw)
+	}
+	result, err := c.sdk.InvokeAction(ctx, module, "get_status", arg)
+	if err != nil {
+		return nil, fmt.Errorf("bess: %s get_status: %w", module, err)
+	}
+	if result.MessageName() != "upf.pb.PacketRateCommandGetStatusResponse" {
+		return nil, fmt.Errorf("bess: %s get_status answered %s", module, result.GetTypeUrl())
+	}
+	return appendPacketRates(nil, result.GetValue())
+}
+
+// appendPacketRates reads PacketRateCommandGetStatusResponse's repeated
+// `rates` (field 3) by upf_datapath.proto's field numbers.
+func appendPacketRates(dst []PacketRateStatus, b []byte) ([]PacketRateStatus, error) {
+	for rest := b; len(rest) > 0; {
+		num, typ, _, sub, n := consumeField(rest)
+		if n < 0 {
+			return nil, protowire.ParseError(n)
+		}
+		rest = rest[n:]
+		if num != 3 || typ != protowire.BytesType {
+			continue
+		}
+		var s PacketRateStatus
+		for f := sub; len(f) > 0; {
+			fnum, ftyp, fv, _, fn := consumeField(f)
+			if fn < 0 {
+				return nil, protowire.ParseError(fn)
+			}
+			f = f[fn:]
+			if ftyp != protowire.VarintType {
+				continue
+			}
+			switch fnum {
+			case 1:
+				s.ID = uint32(fv)
+			case 2:
+				s.Remaining = uint32(fv)
+			case 3:
+				s.RemainingAdditional = uint32(fv)
+			case 4:
+				s.ValidityUnixNS = fv
+			case 5:
+				s.Used = uint32(fv)
+			case 6:
+				s.UsedAdditional = uint32(fv)
+			}
+		}
+		dst = append(dst, s)
+	}
+	return dst, nil
+}
+
 // countRequest builds the command's module and argument. Graph requests omit
 // table entirely so their wire encoding and old daemon schemas stay unchanged.
 func (c *Client) countRequest(counters string, restart bool, actionIDs []uint32) (string, proto.Message, error) {

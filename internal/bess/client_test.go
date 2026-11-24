@@ -240,6 +240,47 @@ func TestACountRequestDoesNotAllocatePerRule(t *testing.T) {
 	}, [2]int{64, 8000}, 0)
 }
 
+// TestAPacketRateReplyDecodesIntoTheSliceItIsGiven: a get_status reply is read
+// off the wire by upf_datapath.proto's field numbers and appended to the
+// caller's slice; a query that names several QERs reuses one slice.
+func TestAPacketRateReplyDecodesIntoTheSliceItIsGiven(t *testing.T) {
+	states := []PacketRateStatus{
+		{ID: 7, Remaining: 3, RemainingAdditional: 1,
+			ValidityUnixNS: 1_900_000_000_000_000_000, Used: 2, UsedAdditional: 1},
+		{ID: 9, Remaining: 0, ValidityUnixNS: 1_900_000_000_000_000_000, Used: 10},
+	}
+	var reply []byte
+	for _, s := range states {
+		var msg []byte
+		for field, v := range []uint64{uint64(s.ID), uint64(s.Remaining),
+			uint64(s.RemainingAdditional), s.ValidityUnixNS,
+			uint64(s.Used), uint64(s.UsedAdditional)} {
+			msg = protowire.AppendTag(msg, protowire.Number(field+1), protowire.VarintType)
+			msg = protowire.AppendVarint(msg, v)
+		}
+		reply = protowire.AppendTag(reply, 3, protowire.BytesType)
+		reply = protowire.AppendBytes(reply, msg)
+	}
+	prior := PacketRateStatus{ID: 1, Remaining: 5}
+	got, err := appendPacketRates([]PacketRateStatus{prior}, reply)
+	if err != nil || len(got) != 1+len(states) {
+		t.Fatalf("decoded %d quotas after the one held (%v), want %d",
+			len(got)-1, err, len(states))
+	}
+	if got[0] != prior {
+		t.Errorf("appending replaced the quota held before: %+v", got[0])
+	}
+	for i, want := range states {
+		if got[1+i] != want {
+			t.Errorf("quota %d decoded as %+v, want %+v", i, got[1+i], want)
+		}
+	}
+	if allocs := testing.AllocsPerRun(10, func() { got, _ = appendPacketRates(got[:0], reply) }); allocs > 0 {
+		t.Errorf("a reply of %d quotas into the caller's slice made %.0f allocations, want 0",
+			len(states), allocs)
+	}
+}
+
 // TestACountReplyDecodesIntoTheSliceItIsGiven: a get_counts reply is read off
 // the wire and appended to the caller's slice -- every field of every rule,
 // each stamp placed on the wall clock by the reading's own clock pair, which
