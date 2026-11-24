@@ -69,6 +69,21 @@ type MeterProfile struct {
 type MeterEntry struct {
 	TrTCM MeterProfile `json:"tr_tcm"`
 }
+
+// PacketRateEntry is one QER direction's packet-rate quota (TS 29.244 8.2.63,
+// 8.2.139) as the PacketRate module's value: packets per period, the
+// additional packet allowance and its own period, and the seed the CP
+// function last enforced.
+type PacketRateEntry struct {
+	Allowed                 uint32 `json:"allowed,omitempty"`
+	PeriodSeconds           uint32 `json:"period_seconds,omitempty"`
+	Additional              uint32 `json:"additional,omitempty"`
+	AdditionalPeriodSeconds uint32 `json:"additional_period_seconds,omitempty"`
+	Epoch                   uint64 `json:"epoch,omitempty"`
+	SeedRemaining           uint32 `json:"seed_remaining,omitempty"`
+	SeedRemainingAdditional uint32 `json:"seed_remaining_additional,omitempty"`
+	SeedValidityUnixNS      uint64 `json:"seed_validity_unix_ns,omitempty"`
+}
 type PolicyAccess struct {
 	NextHopID    uint32 `json:"next_hop_id"`
 	TunnelID     uint32 `json:"tunnel_id"`

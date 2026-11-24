@@ -191,6 +191,48 @@ func (c *Compiler) sharedRateQER(s *Session) (uint32, bool) {
 	return best, found
 }
 
+// sharedPacketRateQER is the one packet-rate QER a PDR's quotas are read from,
+// chosen the way sharedRateQER chooses the meter: the most-referenced QER that
+// carries a Packet Rate. The packet-rate profile is a session cap in 5.2.1's
+// terms, and one rule carries one quota id, so the same deterministic choice
+// applies. A direction the chosen QER does not cap reads 0, and the PDR's own
+// QER for that direction stands.
+func (c *Compiler) sharedPacketRateQER(s *Session) (uint32, bool) {
+	capped := false
+	for _, q := range qersInOrder(s) {
+		pol := c.policy(q)
+		if pol.hasPacketRate && (pol.pktULSet || pol.pktDLSet) {
+			capped = true
+			break
+		}
+	}
+	if !capped {
+		return 0, false
+	}
+	refs := make(map[uint32]int, s.QERs().len())
+	for _, p := range pdrsInOrder(s) {
+		seen := make(map[uint32]bool, p.qerIDs.len())
+		for _, qid := range c.st.ids(&p.qerIDs) {
+			if seen[qid] {
+				continue
+			}
+			seen[qid] = true
+			refs[qid]++
+		}
+	}
+	best, bestRefs, found := uint32(0), 0, false
+	for _, q := range qersInOrder(s) {
+		pol := c.policy(q)
+		if !pol.hasPacketRate || (!pol.pktULSet && !pol.pktDLSet) {
+			continue
+		}
+		if refs[q.id] > bestRefs || !found {
+			best, bestRefs, found = q.id, refs[q.id], true
+		}
+	}
+	return best, found
+}
+
 // pdrReq is a Create PDR or an Update PDR, as the SMF sent it.
 type pdrReq struct {
 	// create says the IE was a Create PDR. An Update PDR carries only the IEs
@@ -386,6 +428,36 @@ type qerReq struct {
 	// -- so an Update QER that leaves it out keeps the flow the session holds.
 	hasQFI bool
 	qfi    uint8
+
+	// Packet Rate (8.2.63). hasPacketRate says the IE was present: it replaces
+	// both directions' rates, and an Update QER without it keeps the
+	// session's. The IE's own flags say which directions it names; a unit is
+	// Table 8.2.63.1's period in seconds. pktULSet/pktDLSet say the flag was
+	// there, so a maximum of zero -- no packets at all -- is still a quota to
+	// enforce rather than an absent one.
+	hasPacketRate              bool
+	pktULSet                   bool
+	pktDLSet                   bool
+	pktAddSet                  bool
+	pktUL, pktDL               uint32
+	pktUnitUL, pktUnitDL       uint32
+	pktAddUL, pktAddDL         uint32
+	pktAddUnitUL, pktAddUnitDL uint32
+
+	// Packet Rate Status the CP seeded (8.2.139): the remaining counts and
+	// the absolute validity (Unix ns; 0 when the IE named none). An Update
+	// QER without the IE keeps the seed.
+	hasSeed      bool
+	seedUL       uint32
+	seedDL       uint32
+	seedAddUL    uint32
+	seedAddDL    uint32
+	seedValidity int64
+
+	// QER Control Indications' RCSR bit (8.2.71): report the packet rate
+	// status when the session is released (5.4.15.2 rule 3).
+	hasRCSR bool
+	rcsr    bool
 }
 
 type urrReq struct {
@@ -684,6 +756,16 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		return modifyResponse(req, hdr, parseCause(err), nil)
 	}
 	rm := parseRemovals(ies)
+	// A Query Packet Rate Status names QERs the session holds; an unknown one
+	// is refused before anything is applied, the way a Query URR naming an
+	// unknown URR is.
+	var queriedRates []uint32
+	if len(req.QueryPacketRateStatus) > 0 {
+		if queriedRates, err = c.queriedPacketRates(req, s); err != nil {
+			c.log.Warn("session: cannot read the packet-rate query", "seid", seid, "error", err)
+			return modifyResponse(req, hdr, compileCause(err), nil)
+		}
+	}
 
 	// Table 7.5.5.1-1: a Created PDR rides on a Modification Response only for
 	// a PDI that asked the UP function to choose its F-TEID. An establishment
@@ -856,6 +938,19 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	c.advanceAfter(s, queried, reportAt)
 	usage := usageReports(ie.UsageReportWithinSessionModificationResponse, TriggerImmediate, queried)
 	usage = append(usage, usageReports(ie.UsageReportWithinSessionModificationResponse, TriggerTermination, removed)...)
+	// The queried quotas, read once the transaction has landed: the reading is
+	// of the state this request leaves, which is what the SMF asked for. A
+	// read that fails does not refuse a change already in force; the answer
+	// carries the usage reports it has, and the log names the gap.
+	if len(queriedRates) > 0 && !c.restoring {
+		reports, err := c.packetRateReports(context.Background(), s, queriedRates,
+			ie.NewPacketRateStatusReportWithinSessionModificationResponse)
+		if err != nil {
+			c.log.Warn("session: no packet-rate status for the query", "seid", seid, "error", err)
+		} else {
+			usage = append(usage, reports...)
+		}
+	}
 	return modifyResponse(req, hdr, ie.CauseRequestAccepted, created, usage...)
 }
 
@@ -905,6 +1000,21 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	if !c.restoring && counted && !fromErase {
 		usage = c.terminationReports(context.Background(), s, time.Now())
 	}
+	// A QER that asked for its packet-rate status on release (RCSR) is read
+	// before the erase takes its quota records: the answer carries what the
+	// session still allowed when the SMF released it.
+	var rateReports []*ie.IE
+	if !c.restoring {
+		if qids := c.releaseReports(s); len(qids) > 0 {
+			reports, err := c.packetRateReports(context.Background(), s, qids,
+				ie.NewPacketRateStatusReport)
+			if err != nil {
+				c.log.Warn("session: no packet-rate release report", "seid", seid, "error", err)
+			} else {
+				rateReports = reports
+			}
+		}
+	}
 	usageFromErase, err := c.removeWithUsage(context.Background(), s, fromErase)
 	if err != nil {
 		c.log.Warn("session: the dataplane refused the deletion", "seid", seid, "error", err)
@@ -918,7 +1028,7 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	}
 	c.log.Info("session: deleted", "seid", seid)
 	c.checkpoint(kindDelete, seid, req)
-	return deleteResponse(req, hdr, ie.CauseRequestAccepted, usage...)
+	return deleteResponse(req, hdr, ie.CauseRequestAccepted, append(usage, rateReports...)...)
 }
 
 // mergeBars folds a message's Create BAR / Update BAR parameters into the
@@ -1011,7 +1121,33 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 		if q.hasRate {
 			p.mbUL, p.mbDL, p.hasRate = q.mbUL, q.mbDL, true
 		}
+		if q.hasPacketRate {
+			p.hasPacketRate = true
+			p.pktULSet, p.pktDLSet = q.pktULSet, q.pktDLSet
+			p.pktAddSet = q.pktAddSet
+			p.pktUL, p.pktUnitUL = q.pktUL, q.pktUnitUL
+			p.pktDL, p.pktUnitDL = q.pktDL, q.pktUnitDL
+			p.pktAddUL, p.pktAddUnitUL = q.pktAddUL, q.pktAddUnitUL
+			p.pktAddDL, p.pktAddUnitDL = q.pktAddDL, q.pktAddUnitDL
+		}
+		if q.hasSeed {
+			p.hasSeed = true
+			p.seedUL, p.seedDL = q.seedUL, q.seedDL
+			p.seedAddUL, p.seedAddDL = q.seedAddUL, q.seedAddDL
+			p.seedValidity = q.seedValidity
+		}
+		if q.hasRCSR {
+			p.rcsr = q.rcsr
+		}
+		before := *c.policy(entry)
 		entry.policy = c.st.ownPolicy(s, p)
+		// A Packet Rate or seed the message changed restarts the quota's
+		// windows: the new epoch is what tells the dataplane this is a new
+		// configuration, not state to keep counting in.
+		if (q.hasPacketRate || q.hasSeed) && (entry.rateEpoch == 0 || !samePacketRate(&before, &p)) {
+			c.rateEpochs++
+			entry.rateEpoch = c.rateEpochs
+		}
 		if q.hasRate {
 			// Reserve a direction only once it can create a native record.
 			// A zero-rate direction is never written; allocating its id would
@@ -1030,6 +1166,22 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 					c.log.Warn("session: no meter id left for a QER", "qer", q.id)
 				} else {
 					entry.meterDL = id
+				}
+			}
+		}
+		if p.hasPacketRate {
+			if entry.rateUL == 0 && p.pktULSet {
+				if id, err := c.rates.alloc(); err != nil {
+					c.log.Warn("session: no packet-rate id left for a QER", "qer", q.id)
+				} else {
+					entry.rateUL = id
+				}
+			}
+			if entry.rateDL == 0 && p.pktDLSet {
+				if id, err := c.rates.alloc(); err != nil {
+					c.log.Warn("session: no packet-rate id left for a QER", "qer", q.id)
+				} else {
+					entry.rateDL = id
 				}
 			}
 		}
@@ -1764,6 +1916,27 @@ func (c *Compiler) resolve(s *Session) error {
 	// rate-bearing QERs is policed by one of them -- sharedRateQER says which
 	// and why).
 	shared, hasShared := c.sharedRateQER(s)
+	sharedPacket, hasSharedPacket := c.sharedPacketRateQER(s)
+	// A Packet Rate is enforced by a module the deployment names: without it
+	// the chain would carry a quota id no module reads, and the SMF would be
+	// told a cap it does not have. Refused where the flags are missing, the
+	// way a tunnel-less forward is.
+	for _, q := range qersInOrder(s) {
+		pol := c.policy(q)
+		if !pol.hasPacketRate {
+			continue
+		}
+		if pol.pktULSet && c.target.Resource(PacketRatesUplink) == "" {
+			return fmt.Errorf(
+				"%w: QER %d's uplink Packet Rate needs a deployment with -packet-rates-ul",
+				errNotExpressible, q.id)
+		}
+		if pol.pktDLSet && c.target.Resource(PacketRatesDownlink) == "" {
+			return fmt.Errorf(
+				"%w: QER %d's downlink Packet Rate needs a deployment with -packet-rates-dl",
+				errNotExpressible, q.id)
+		}
+	}
 	linkedTo := make(map[uint32]bool, s.URRs().len())
 	for _, uid := range urrIDsInOrder(s) {
 		for _, lid := range c.linked(s.URRs().at(uid)) {
@@ -1894,11 +2067,13 @@ func (c *Compiler) resolve(s *Session) error {
 				errNotExpressible, p.id, far.barID)
 		}
 		p.meterID = 0
+		p.packetRateID = 0
 		p.tunnel = noTunnel
 		p.tunnelEnd = 0
 		p.encapQFI = 0
 		p.hasEncapQFI = false
 		var sharedUL, ownUL, sharedDL, ownDL uint32
+		var sharedRateUL, ownRateUL, sharedRateDL, ownRateDL uint32
 		for _, qid := range c.st.ids(&p.qerIDs) {
 			q := s.QERs().at(qid)
 			if q == nil {
@@ -1933,6 +2108,13 @@ func (c *Compiler) resolve(s *Session) error {
 						ownUL = q.meterUL
 					}
 				}
+				if entry.hasPacketRate && entry.pktULSet {
+					if hasSharedPacket && qid == sharedPacket {
+						sharedRateUL = q.rateUL
+					} else {
+						ownRateUL = q.rateUL
+					}
+				}
 			} else {
 				if entry.gateDL == ie.GateStatusClosed {
 					p.drop, p.buffer = true, false
@@ -1942,6 +2124,13 @@ func (c *Compiler) resolve(s *Session) error {
 						sharedDL = q.meterDL
 					} else {
 						ownDL = q.meterDL
+					}
+				}
+				if entry.hasPacketRate && entry.pktDLSet {
+					if hasSharedPacket && qid == sharedPacket {
+						sharedRateDL = q.rateDL
+					} else {
+						ownRateDL = q.rateDL
 					}
 				}
 				if entry.hasQFI {
@@ -1981,6 +2170,17 @@ func (c *Compiler) resolve(s *Session) error {
 				p.meterID = sharedUL
 			} else {
 				p.meterID = ownUL
+			}
+		}
+		if p.downlink() {
+			p.packetRateID = sharedRateDL
+			if p.packetRateID == 0 {
+				p.packetRateID = ownRateDL
+			}
+		} else {
+			p.packetRateID = sharedRateUL
+			if p.packetRateID == 0 {
+				p.packetRateID = ownRateUL
 			}
 		}
 		if !p.hasMAR && far != nil && far.hasOuter && far.apply&applyForw != 0 && !p.drop {
@@ -2577,6 +2777,7 @@ func samePDRRule(old, p *pdr) bool {
 		old.drop == p.drop && old.buffer == p.buffer &&
 		old.actionID == p.actionID && old.ownMeterID == p.ownMeterID &&
 		old.sharedMeterID == p.sharedMeterID && old.nextHop == p.nextHop &&
+		old.packetRateID == p.packetRateID &&
 		old.resultDomain == p.resultDomain && old.hasMAR == p.hasMAR &&
 		old.policyID == p.policyID
 }
@@ -2619,6 +2820,57 @@ func (c *Compiler) sameQERMeter(before *modelSnapshot, q *qer, down bool) bool {
 		return oldQ.meterDL == q.meterDL && old.mbDL == now.mbDL && old.gbDL == now.gbDL
 	}
 	return oldQ.meterUL == q.meterUL && old.mbUL == now.mbUL && old.gbUL == now.gbUL
+}
+
+// samePacketRate says two provisionings hold the same Packet Rate and seed:
+// what merge compares before restarting a quota's windows.
+func samePacketRate(a, b *qerPolicy) bool {
+	return a.hasPacketRate == b.hasPacketRate &&
+		a.pktULSet == b.pktULSet && a.pktDLSet == b.pktDLSet &&
+		a.pktAddSet == b.pktAddSet &&
+		a.pktUL == b.pktUL && a.pktUnitUL == b.pktUnitUL &&
+		a.pktDL == b.pktDL && a.pktUnitDL == b.pktUnitDL &&
+		a.pktAddUL == b.pktAddUL && a.pktAddUnitUL == b.pktAddUnitUL &&
+		a.pktAddDL == b.pktAddDL && a.pktAddUnitDL == b.pktAddUnitDL &&
+		a.hasSeed == b.hasSeed &&
+		a.seedUL == b.seedUL && a.seedDL == b.seedDL &&
+		a.seedAddUL == b.seedAddUL && a.seedAddDL == b.seedAddDL &&
+		a.seedValidity == b.seedValidity
+}
+
+// sameQERPacketRate says the snapshot's QER held this direction's quota
+// unchanged: the same record id and the same epoch, which merge bumps only
+// when the profile or the seed changes.
+func (c *Compiler) sameQERPacketRate(before *modelSnapshot, q *qer, down bool) bool {
+	if before == nil {
+		return false
+	}
+	oldQ := before.qers().at(q.id)
+	if oldQ == nil || oldQ.rateEpoch != q.rateEpoch {
+		return false
+	}
+	if down {
+		return oldQ.rateDL == q.rateDL
+	}
+	return oldQ.rateUL == q.rateUL
+}
+
+// qerPacketRateDropped says the message stopped naming a direction's Packet
+// Rate: the quota record is erased, while the id stays the QER's for a later
+// profile or the removal.
+func (c *Compiler) qerPacketRateDropped(before *modelSnapshot, q *qer, down bool) bool {
+	if before == nil {
+		return false
+	}
+	oldQ := before.qers().at(q.id)
+	if oldQ == nil {
+		return false
+	}
+	old := c.policy(oldQ)
+	if down {
+		return old.pktDLSet && !c.policy(q).pktDLSet
+	}
+	return old.pktULSet && !c.policy(q).pktULSet
 }
 
 // Admission depends on ingress PDIs and their resolved End Marker relays,
@@ -2998,6 +3250,20 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		bufferCounterErase(p)
 		flowEntryErase(p)
 	}
+	// A QER a modification removed owned its packet-rate quota records; no PDR
+	// names them once it is gone, so the removal erases them here.
+	for _, h := range s.rare().removedQERs {
+		q := c.recs.qers.at(h)
+		if q == nil {
+			continue
+		}
+		if q.rateUL != 0 {
+			erase(bess.Change{Resource: c.res(PacketRatesUplink), Key: bess.Fields(IDKey{ID: q.rateUL})})
+		}
+		if q.rateDL != 0 {
+			erase(bess.Change{Resource: c.res(PacketRatesDownlink), Key: bess.Fields(IDKey{ID: q.rateDL})})
+		}
+	}
 	// A PDR a modification replaced keeps its action and its tunnel, but its
 	// rule key can change under it (a new filter, a new address): the old key
 	// would go on selecting that action for packets the PDR no longer describes.
@@ -3062,6 +3328,32 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		}
 		if q.meterDL != 0 && pol.mbDL != 0 && !c.sameQERMeter(before, q, true) {
 			changes = append(changes, meterChange(c.res(MetersDownlink), q.meterDL, pol.gbDL, pol.mbDL, pol.window))
+		}
+	}
+
+	// Packet-rate quotas after the meters, before the rules whose results name
+	// them: one entry per capped direction, carrying the QER's packet rate and
+	// the seed the SMF last sent. The epoch is the QER's: it changes only when
+	// the profile or the seed does, and the module resets its windows then.
+	for _, q := range qersInOrder(s) {
+		pol := c.policy(q)
+		if !pol.hasPacketRate {
+			continue
+		}
+		if q.rateUL != 0 && pol.pktULSet && !c.sameQERPacketRate(before, q, false) {
+			changes = append(changes, packetRateChange(c.res(PacketRatesUplink), q.rateUL, pol, q.rateEpoch, false))
+		}
+		if q.rateDL != 0 && pol.pktDLSet && !c.sameQERPacketRate(before, q, true) {
+			changes = append(changes, packetRateChange(c.res(PacketRatesDownlink), q.rateDL, pol, q.rateEpoch, true))
+		}
+		// An Update QER that stops naming a direction's Packet Rate leaves no
+		// rule to enforce: the record goes, while the id stays the QER's (it
+		// was allocated once and a later profile writes it again).
+		if q.rateUL != 0 && !pol.pktULSet && c.qerPacketRateDropped(before, q, false) {
+			erase(bess.Change{Resource: c.res(PacketRatesUplink), Key: bess.Fields(IDKey{ID: q.rateUL})})
+		}
+		if q.rateDL != 0 && !pol.pktDLSet && c.qerPacketRateDropped(before, q, true) {
+			erase(bess.Change{Resource: c.res(PacketRatesDownlink), Key: bess.Fields(IDKey{ID: q.rateDL})})
 		}
 	}
 
@@ -4052,7 +4344,173 @@ func parseCreate(ies []*ie.IE, buf *createScratch) ([]pdrReq, []farReq, []barReq
 	return pdrs, fars, bars, qers, urrs, mars, nil
 }
 
-// parseRemovals reads the PDR, FAR, BAR and URR ids a modification removes.
+// queriedPacketRates reads a Session Modification Request's Query Packet Rate
+// Status IEs into the QER ids it asks about. Each grouped IE names one QER the
+// session holds; an unknown one is the SMF's error, refused before anything is
+// applied.
+func (c *Compiler) queriedPacketRates(req *message.SessionModificationRequest, s *Session) ([]uint32, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var ids []uint32
+	for _, grouped := range req.QueryPacketRateStatus {
+		children, err := grouped.QueryPacketRateStatus()
+		if err != nil {
+			return nil, fmt.Errorf("%w: Query Packet Rate Status: %v", errNotExpressible, err)
+		}
+		found := false
+		for _, child := range children {
+			if child.Type != ie.QERID {
+				continue
+			}
+			id, err := child.QERID()
+			if err != nil {
+				return nil, fmt.Errorf("%w: Query Packet Rate Status: %v", errNotExpressible, err)
+			}
+			if s.QERs().at(id) == nil {
+				return nil, fmt.Errorf(
+					"%w: Query Packet Rate Status names QER %d, which the session does not hold",
+					errNotExpressible, id)
+			}
+			ids = append(ids, id)
+			found = true
+		}
+		if !found {
+			return nil, fmt.Errorf("%w: Query Packet Rate Status without a QER ID", errNotExpressible)
+		}
+	}
+	return ids, nil
+}
+
+// releaseReports is the QERs whose release report the SMF asked for (RCSR,
+// 8.2.71; 5.4.15.2 rule 3), in id order.
+func (c *Compiler) releaseReports(s *Session) []uint32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var ids []uint32
+	for _, q := range qersInOrder(s) {
+		if c.policy(q).rcsr {
+			ids = append(ids, q.id)
+		}
+	}
+	return ids
+}
+
+// packetRateReports reads the named QERs' quotas and builds one grouped IE per
+// QER, of the type group constructs (the Modification Response's 7.5.5.4 or
+// the Deletion Response's 7.5.7.1-2). A QER with no Packet Rate has no status
+// to report and is left out; a quota whose reading is missing is left out too
+// rather than answered as a zero allowance. The caller holds no lock.
+func (c *Compiler) packetRateReports(ctx context.Context, s *Session, qids []uint32,
+	group func(...*ie.IE) *ie.IE) ([]*ie.IE, error) {
+	if c.quotas == nil || len(qids) == 0 {
+		return nil, nil
+	}
+	type want struct {
+		id     uint32
+		ul, dl uint32
+		add    bool
+	}
+	wants := make([]want, 0, len(qids))
+	ulIDs := make([]uint32, 0, len(qids))
+	dlIDs := make([]uint32, 0, len(qids))
+	c.mu.Lock()
+	for _, qid := range qids {
+		q := s.QERs().at(qid)
+		if q == nil {
+			continue
+		}
+		pol := c.policy(q)
+		if !pol.hasPacketRate {
+			continue
+		}
+		w := want{id: qid, add: pol.pktAddSet}
+		if pol.pktULSet && q.rateUL != 0 {
+			w.ul = q.rateUL
+			ulIDs = append(ulIDs, q.rateUL)
+		}
+		if pol.pktDLSet && q.rateDL != 0 {
+			w.dl = q.rateDL
+			dlIDs = append(dlIDs, q.rateDL)
+		}
+		if w.ul != 0 || w.dl != 0 {
+			wants = append(wants, w)
+		}
+	}
+	c.mu.Unlock()
+
+	read := func(module string, ids []uint32) (map[uint32]bess.PacketRateStatus, error) {
+		if len(ids) == 0 {
+			return nil, nil
+		}
+		reading, err := c.quotas.PacketRateStatuses(ctx, module, ids...)
+		if err != nil {
+			return nil, err
+		}
+		byID := make(map[uint32]bess.PacketRateStatus, len(reading))
+		for _, status := range reading {
+			byID[status.ID] = status
+		}
+		return byID, nil
+	}
+	ul, err := read(c.cfg.Up.PacketRates, ulIDs)
+	if err != nil {
+		return nil, err
+	}
+	dl, err := read(c.cfg.Down.PacketRates, dlIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]*ie.IE, 0, len(wants))
+	for _, w := range wants {
+		var flags uint8
+		var ulN, ulAdd, dlN, dlAdd uint16
+		var validity uint64
+		if w.ul != 0 {
+			if status, ok := ul[w.ul]; ok {
+				flags |= 0x01
+				ulN, ulAdd = count16(status.Remaining), count16(status.RemainingAdditional)
+				validity = earlierValidity(validity, status.ValidityUnixNS)
+			}
+		}
+		if w.dl != 0 {
+			if status, ok := dl[w.dl]; ok {
+				flags |= 0x02
+				dlN, dlAdd = count16(status.Remaining), count16(status.RemainingAdditional)
+				validity = earlierValidity(validity, status.ValidityUnixNS)
+			}
+		}
+		if flags == 0 || validity == 0 {
+			continue
+		}
+		if w.add {
+			flags |= 0x04
+		}
+		out = append(out, group(ie.NewQERID(w.id),
+			ie.NewPacketRateStatus(flags, ulN, ulAdd, dlN, dlAdd, time.Unix(0, int64(validity)))))
+	}
+	return out, nil
+}
+
+// count16 is an 8.2.139 count, which the IE carries in two octets.
+func count16(v uint32) uint16 {
+	if v > 0xffff {
+		return 0xffff
+	}
+	return uint16(v)
+}
+
+// earlierValidity is the earlier of two absolute times, 0 when neither is set.
+func earlierValidity(a, b uint64) uint64 {
+	if a == 0 {
+		return b
+	}
+	if b == 0 || a < b {
+		return a
+	}
+	return b
+}
+
 // requestedWindows is the windows of the URRs a modification asks the usage of:
 // the ones a Query URR IE names, or all of them for the QAURR flag, and the
 // ones the request removes (a URR "removed" that the session never held is the
@@ -4138,6 +4596,7 @@ type removals struct {
 	mars []uint16 // Remove MAR (7.5.4.7)
 }
 
+// parseRemovals reads the PDR, FAR, BAR and URR ids a modification removes.
 func parseRemovals(ies []*ie.IE) removals {
 	var rm removals
 	for _, i := range ies {
@@ -5149,12 +5608,126 @@ func parseQER(i *ie.IE) (qerReq, error) {
 			if v, err := c.AveragingWindow(); err == nil && v > 0 {
 				q.window, q.hasWindow = time.Duration(v)*time.Millisecond, true
 			}
+		case ie.PacketRate:
+			if err := parsePacketRate(c, &q); err != nil {
+				return qerReq{}, err
+			}
+		case ie.PacketRateStatus:
+			f, err := c.PacketRateStatus()
+			if err != nil {
+				return qerReq{}, fmt.Errorf("Packet Rate Status: %w", err)
+			}
+			q.hasSeed = true
+			if f.HasUL() {
+				q.seedUL = uint32(f.NumberOfRemainingUplinkPacketsAllowed)
+			}
+			if f.HasDL() {
+				q.seedDL = uint32(f.NumberOfRemainingDownlinkPacketsAllowed)
+			}
+			if f.HasAPR() {
+				if f.HasUL() {
+					q.seedAddUL = uint32(f.NumberOfRemainingAdditionalUplinkPacketsAllowed)
+				}
+				if f.HasDL() {
+					q.seedAddDL = uint32(f.NumberOfRemainingAdditionalDownlinkPacketsAllowed)
+				}
+			}
+			if v := f.RateControlStatusValidityTime; !v.IsZero() {
+				q.seedValidity = v.UnixNano()
+			}
+			if q.seedValidity == 0 &&
+				(q.seedUL > 0 || q.seedDL > 0 || q.seedAddUL > 0 || q.seedAddDL > 0) {
+				return qerReq{}, errors.New("Packet Rate Status: remaining counts without a validity time")
+			}
+		case ie.QERControlIndications:
+			q.hasRCSR = true
+			q.rcsr = c.HasRCSR()
 		}
 	}
 	if !seenID {
 		return qerReq{}, errors.New("QER without a QER ID")
 	}
 	return q, nil
+}
+
+// parsePacketRate reads 8.2.63's Packet Rate IE: the ULPR/DLPR/APRC flags and
+// the octets each gates. go-pfcp's PacketRateFields parses the two primary
+// rates only (its UnmarshalBinary stops after them), so the payload is read
+// here to keep the additional rates 8.2.63 gives their own time units.
+func parsePacketRate(i *ie.IE, q *qerReq) error {
+	b := i.Payload
+	if len(b) < 1 {
+		return errors.New("Packet Rate: malformed")
+	}
+	flags := b[0]
+	if flags&^0x07 != 0 {
+		return errors.New("Packet Rate: spare flags set")
+	}
+	off := 1
+	read := func(what string) (uint8, uint32, error) {
+		if len(b) < off+3 {
+			return 0, 0, fmt.Errorf("Packet Rate: %s is truncated", what)
+		}
+		unit := b[off]
+		value := uint32(binary.BigEndian.Uint16(b[off+1 : off+3]))
+		off += 3
+		return unit, value, nil
+	}
+	if flags&0x01 != 0 {
+		unit, value, err := read("the uplink rate")
+		if err != nil {
+			return err
+		}
+		q.pktULSet = true
+		q.pktUL, q.pktUnitUL = value, packetRateUnit(unit)
+	}
+	if flags&0x02 != 0 {
+		unit, value, err := read("the downlink rate")
+		if err != nil {
+			return err
+		}
+		q.pktDLSet = true
+		q.pktDL, q.pktUnitDL = value, packetRateUnit(unit)
+	}
+	if flags&0x04 != 0 {
+		q.pktAddSet = true
+		if flags&0x01 != 0 {
+			unit, value, err := read("the additional uplink rate")
+			if err != nil {
+				return err
+			}
+			q.pktAddUL, q.pktAddUnitUL = value, packetRateUnit(unit)
+		}
+		if flags&0x02 != 0 {
+			unit, value, err := read("the additional downlink rate")
+			if err != nil {
+				return err
+			}
+			q.pktAddDL, q.pktAddUnitDL = value, packetRateUnit(unit)
+		}
+	}
+	if flags == 0 {
+		return errors.New("Packet Rate: no rate flag set")
+	}
+	q.hasPacketRate = true
+	return nil
+}
+
+// packetRateUnit is Table 8.2.63.1's time unit in seconds. Codes above the
+// four defined values are read as minute, as the table says.
+func packetRateUnit(code uint8) uint32 {
+	switch code & 0x07 {
+	case 1:
+		return 360 // 6 minutes
+	case 2:
+		return 3600
+	case 3:
+		return 86400
+	case 4:
+		return 604800
+	default:
+		return 60
+	}
 }
 
 // meterChange is the resource for one policed direction: a two-rate
@@ -5185,6 +5758,30 @@ func meterChange(resource string, id uint32, committed, peak uint64, window time
 		Resource: resource,
 		Key:      bess.Fields(IDKey{ID: id}),
 		Value:    bess.Fields(MeterEntry{TrTCM: MeterProfile{CommittedRate: committed, CommittedBurst: burst(committed), PeakRate: peak, PeakBurst: burst(peak)}}),
+	}
+}
+
+// packetRateChange is one direction's packet-rate quota. The seed's validity
+// is Unix ns, 0 when the SMF named none; the epoch changes only with the
+// profile or the seed, which is the module's cue to restart its windows.
+func packetRateChange(resource string, id uint32, pol *qerPolicy, epoch uint64, down bool) bess.Change {
+	e := PacketRateEntry{Epoch: epoch}
+	if down {
+		e.Allowed, e.PeriodSeconds = pol.pktDL, pol.pktUnitDL
+		e.Additional, e.AdditionalPeriodSeconds = pol.pktAddDL, pol.pktAddUnitDL
+		e.SeedRemaining, e.SeedRemainingAdditional = pol.seedDL, pol.seedAddDL
+	} else {
+		e.Allowed, e.PeriodSeconds = pol.pktUL, pol.pktUnitUL
+		e.Additional, e.AdditionalPeriodSeconds = pol.pktAddUL, pol.pktAddUnitUL
+		e.SeedRemaining, e.SeedRemainingAdditional = pol.seedUL, pol.seedAddUL
+	}
+	if pol.hasSeed && pol.seedValidity > 0 {
+		e.SeedValidityUnixNS = uint64(pol.seedValidity)
+	}
+	return bess.Change{
+		Resource: resource,
+		Key:      bess.Fields(IDKey{ID: id}),
+		Value:    bess.Fields(e),
 	}
 }
 

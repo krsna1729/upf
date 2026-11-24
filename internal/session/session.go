@@ -75,6 +75,16 @@ type WindowReader interface {
 	PeekRuleCounts(ctx context.Context, counters string, actionIDs ...uint32) ([]bess.RuleCount, error)
 }
 
+// PacketRateReader is the dataplane's packet-rate quota reading: the remaining
+// primary and additional counts, the validity time, and what each window has
+// charged so far, for the quotas the ids name in one PacketRate module. It is
+// a capability of its own for the same reason CounterReader is -- a graph with
+// no PacketRate module never asks, and only a Query Packet Rate Status or a
+// release that asked for the status (RCSR) does.
+type PacketRateReader interface {
+	PacketRateStatuses(ctx context.Context, module string, ids ...uint32) ([]bess.PacketRateStatus, error)
+}
+
 // ErrorReader is the GTP-U responder's Error Indication log as a dataplane
 // capability: the indications the peer sent this UPF since the previous drain,
 // by the TEID each named, each returned once (TS 29.244 5.10), and the running
@@ -252,6 +262,12 @@ type Direction struct {
 	// rate-bearing QER first and the session's shared one second, so a packet
 	// the flow's bucket drops is not charged to the session's.
 	Meters string
+	// PacketRates is the PacketRate module its QERs' packet-rate quotas live
+	// in ("pr_ul", "pr_dl"; empty for a deployment without one, which refuses
+	// a Session Modification whose QER names a Packet Rate). One entry per
+	// policed direction, keyed by the id the QER holds; the PDR result names
+	// it, so the chain reads one id for the rule.
+	PacketRates string
 	// NextHop is the Router next hop a forward leaves by, for either
 	// direction: the uplink's is the N6 route, the downlink's the N3 one. The
 	// classifier's result writes it into the packet's `next_hop_id` attribute,
@@ -486,6 +502,10 @@ type Compiler struct {
 	// peek is the same counter reader without the window restart, when the
 	// dataplane offers it (WindowReader): the DDN path's reading.
 	peek WindowReader
+	// quotas is the dataplane's packet-rate reading, when it offers one: a
+	// Query Packet Rate Status and a release the QER asked to report (5.4.15.2
+	// rule 3). A graph with no PacketRate module leaves it nil.
+	quotas PacketRateReader
 	// store is the same dataplane as a command sender, when it can be one: the
 	// release and drop of a buffering flow's held packets (5.2.4.1). A graph
 	// with no store never asks, and a dataplane that cannot send commands
@@ -530,8 +550,12 @@ type Compiler struct {
 	actions  *idPool
 	policies *idPool
 	meters   *idPool
+	rates    *idPool
 	teids    *idPool
 	contexts *idPool
+	// rateEpochs numbers each packet-rate configuration under mu, so a QER
+	// whose Packet Rate or seed changes restarts its quota's windows.
+	rateEpochs uint64
 	// sessionIDs are the "<module>/sessions" keys (cfg.Sessions), aged like
 	// the action ids: an erased session's id retires for a grace period.
 	sessionIDs *idPool
@@ -669,7 +693,11 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		policies: newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		meters:   newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
-		teids:    newIDPool(cfg.MaxTEIDs, teidReuseDelay),
+		// The quotas share the meter space: one id per policed QER direction,
+		// and the deployment's PacketRate modules are built with the same
+		// capacity as its Meter modules (-capacity).
+		rates: newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
+		teids: newIDPool(cfg.MaxTEIDs, teidReuseDelay),
 		// A context never reaches the wire (GtpuDecap writes it, the PDR key
 		// matches it), so it may be reused at once -- and over a 2^31 space a
 		// grace would hold every release until a walk that never ends.
@@ -689,6 +717,9 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 	}
 	if peek, ok := ap.(WindowReader); ok {
 		c.peek = peek
+	}
+	if reader, ok := ap.(PacketRateReader); ok {
+		c.quotas = reader
 	}
 	c.recs.attach(&c.mu)
 	return c
@@ -1036,14 +1067,22 @@ func (c *Compiler) rollback(s *Session, snap modelSnapshot) {
 		c.releaseFTEIDClaim(s, p, false)
 	}
 	meters := map[uint32]bool{}
+	rates := map[uint32]bool{}
 	for _, q := range qersInOrder(s) {
 		meters[q.meterUL], meters[q.meterDL] = true, true
+		rates[q.rateUL], rates[q.rateDL] = true, true
 	}
 	for _, q := range failedQERs {
 		for _, m := range []uint32{q.meterUL, q.meterDL} {
 			if m != 0 && !meters[m] {
 				meters[m] = true
 				c.meters.release(m)
+			}
+		}
+		for _, r := range []uint32{q.rateUL, q.rateDL} {
+			if r != 0 && !rates[r] {
+				rates[r] = true
+				c.rates.release(r)
 			}
 		}
 	}
@@ -1116,6 +1155,10 @@ type pdr struct {
 	// session meter ID second, as the direction's `Meter(levels: 2)` consumes them.
 	ownMeterID    uint32
 	sharedMeterID uint32
+	// packetRateID is the packet-rate quota record the rule's chain reads
+	// after the meters: the session's shared packet-rate QER when the PDR
+	// names it, else the PDR's own last one. 0 when no QER caps packets.
+	packetRateID uint32
 
 	id    uint16
 	marID uint16
@@ -1446,6 +1489,12 @@ type qer struct {
 	// released with it. Each lives in that direction's chain.
 	meterUL uint32
 	meterDL uint32
+	// One packet-rate quota per direction, allocated with the QER and released
+	// with it. rateEpoch changes when the Packet Rate profile or its seed
+	// changes, which restarts the quota's windows.
+	rateUL    uint32
+	rateDL    uint32
+	rateEpoch uint64
 }
 
 // policy is q's provisioning.
@@ -1483,6 +1532,32 @@ type qerPolicy struct {
 	// without one polices the session's flows and marks none of them.
 	hasQFI bool
 	qfi    uint8
+
+	// hasPacketRate, pktUL/pktDL and their units are 8.2.63's Packet Rate:
+	// packets per Table 8.2.63.1's period, in seconds. The additional maximum
+	// carries its own period (the IE's q/r octets). pktULSet/pktDLSet say the
+	// direction's flag was present: a maximum of zero still is a quota that
+	// passes nothing. The seed is 8.2.139's Packet Rate Status, enforced first
+	// (5.4.15.2 rule 4); rcsr asks for it on release (rule 3).
+	hasPacketRate bool
+	pktULSet      bool
+	pktDLSet      bool
+	pktAddSet     bool
+	pktUL         uint32
+	pktUnitUL     uint32
+	pktDL         uint32
+	pktUnitDL     uint32
+	pktAddUL      uint32
+	pktAddUnitUL  uint32
+	pktAddDL      uint32
+	pktAddUnitDL  uint32
+	hasSeed       bool
+	seedUL        uint32
+	seedDL        uint32
+	seedAddUL     uint32
+	seedAddDL     uint32
+	seedValidity  int64
+	rcsr          bool
 }
 
 // volumeLimit is one volume-valued IE of a URR: the Volume Threshold (8.2.13)
@@ -1749,23 +1824,26 @@ func (k fteidKey) entry() bess.Payload {
 
 // The classifier's result record, as every deployed graph declares it:
 // action_id (4), meter_id for the meter stack (8: the PDR's own QER, then the
-// session's, big-endian), next_hop_id (4), route_domain (4), and -- on the
-// downlink -- steering_policy_id (4, 0 without a MAR). BESS writes the record
-// into metadata (`result_fields`); no action table is in the chain.
+// session's, big-endian), next_hop_id (4), route_domain (4), the packet-rate
+// quota id (4), and -- on the downlink -- steering_policy_id (4, 0 without a
+// MAR). BESS writes the record into metadata (`result_fields`); no action table
+// is in the chain.
 const (
 	resultActionID    = 0
 	resultMeterID     = 4
 	resultNextHopID   = 12
 	resultRouteDomain = 16
-	resultSize        = 20
-	resultSteeringID  = 20
+	resultPacketRate  = 20
+	resultSteeringID  = 24
+	resultSize        = 24
 )
 
 // pdrResult is one PDR rule's result record. The meter stack has two levels in
 // every deployment: the second is 0 when the PDR names no shared QER, which
 // the Meter skips. The selected PDI Network Instance is written to
 // route_domain after the classifier; on a downlink MAR PDR, AtsssSteer reads
-// the final policy id and selects the access.
+// the final policy id and selects the access. The packet-rate quota id is 0
+// when the PDR's QERs name no rate.
 func pdrResult(p *pdr) []byte {
 	b := make([]byte, p.resultSize())
 	binary.BigEndian.PutUint32(b[resultActionID:], p.actionID)
@@ -1774,6 +1852,7 @@ func pdrResult(p *pdr) []byte {
 	binary.BigEndian.PutUint32(b[resultMeterID+4:], shared)
 	binary.BigEndian.PutUint32(b[resultNextHopID:], p.nextHop)
 	binary.BigEndian.PutUint32(b[resultRouteDomain:], p.resultDomain)
+	binary.BigEndian.PutUint32(b[resultPacketRate:], p.packetRateID)
 	if p.downlink() {
 		steering := uint32(0)
 		if p.hasMAR && !p.drop && !p.buffer {
@@ -1784,8 +1863,8 @@ func pdrResult(p *pdr) []byte {
 	return b
 }
 
-// resultSize is the base record width (action, meters, next hop and domain),
-// plus the downlink's optional steering-policy id.
+// resultSize is the base record width (action, meters, next hop, domain and
+// packet rate), plus the downlink's optional steering-policy id.
 func (p *pdr) resultSize() int {
 	if p.downlink() {
 		return resultSize + 4
@@ -2149,18 +2228,25 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 				Key: bess.Fields(SessionKey{SessionID: s.sessionID})})
 		}
 	} else {
-		// Meters belong to QERs, not to PDRs. Include removed QERs whose
-		// meters can still exist after a refused modification.
+		// Meters and packet-rate quotas belong to QERs, not to PDRs. Include
+		// removed QERs whose records can still exist after a refused
+		// modification.
 		var qbuf [4]*qer
 		for _, q := range s.removedQERList(s.QERs().appendTo(qbuf[:0])) {
-			if !c.policy(q).hasRate {
-				continue
+			pol := c.policy(q)
+			if pol.hasRate {
+				if q.meterUL != 0 {
+					add(bess.Change{Resource: c.res(MetersUplink), Key: bess.Fields(IDKey{ID: q.meterUL})})
+				}
+				if q.meterDL != 0 {
+					add(bess.Change{Resource: c.res(MetersDownlink), Key: bess.Fields(IDKey{ID: q.meterDL})})
+				}
 			}
-			if q.meterUL != 0 {
-				add(bess.Change{Resource: c.res(MetersUplink), Key: bess.Fields(IDKey{ID: q.meterUL})})
+			if q.rateUL != 0 {
+				add(bess.Change{Resource: c.res(PacketRatesUplink), Key: bess.Fields(IDKey{ID: q.rateUL})})
 			}
-			if q.meterDL != 0 {
-				add(bess.Change{Resource: c.res(MetersDownlink), Key: bess.Fields(IDKey{ID: q.meterDL})})
+			if q.rateDL != 0 {
+				add(bess.Change{Resource: c.res(PacketRatesDownlink), Key: bess.Fields(IDKey{ID: q.rateDL})})
 			}
 		}
 	}
@@ -2315,6 +2401,7 @@ func (c *Compiler) releaseSession(s *Session) {
 	actions := map[uint32]bool{}
 	policies := map[uint32]bool{}
 	meters := map[uint32]bool{}
+	rates := map[uint32]bool{}
 	var buf [8]*pdr // the usual session's PDRs, on the stack
 	all := s.PDRs().appendTo(buf[:0])
 	// A PDR a modification removed still holds ids, and a replaced PDR's old
@@ -2369,6 +2456,14 @@ func (c *Compiler) releaseSession(s *Session) {
 		if q.meterDL != 0 && !meters[q.meterDL] {
 			meters[q.meterDL] = true
 			c.meters.release(q.meterDL)
+		}
+		if q.rateUL != 0 && !rates[q.rateUL] {
+			rates[q.rateUL] = true
+			c.rates.release(q.rateUL)
+		}
+		if q.rateDL != 0 && !rates[q.rateDL] {
+			rates[q.rateDL] = true
+			c.rates.release(q.rateDL)
 		}
 	}
 	// And the store handles its records name, and the records themselves:

@@ -99,6 +99,10 @@ func run() error {
 	pdrTableDL := flag.String("pdr-table-dl", "pdr_dl",
 		"the WildcardMatch module holding the downlink PDR rules")
 	metersDL := flag.String("meters-dl", "mt_dl", "the downlink Meter module")
+	packetRatesUL := flag.String("packet-rates-ul", "pr_ul",
+		"the uplink PacketRate module (QER packet-rate quotas); empty: a QER naming a Packet Rate is refused")
+	packetRatesDL := flag.String("packet-rates-dl", "pr_dl",
+		"the downlink PacketRate module; empty: a QER naming a downlink Packet Rate is refused")
 	countersUL := flag.String("counters-ul", "cnt_ul",
 		"the uplink UrrCount module (per-rule usage counters); empty: the graph charges nothing")
 	countersDL := flag.String("counters-dl", "cnt_dl",
@@ -309,7 +313,9 @@ func run() error {
 			gtpuEndMarkers: *gtpuEndMarkers,
 			endMarker:      *endMarker,
 			metersUL:       *metersUL,
-			metersDL:       *metersDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
+			metersDL:       *metersDL,
+			packetRatesUL:  *packetRatesUL,
+			packetRatesDL:  *packetRatesDL, tunnels: *tunnels, tunnelsUL: *tunnelsUL,
 			countersUL: *countersUL, countersDL: *countersDL,
 			bufferStore: *bufferStore, bufferCounter: *bufferCounter, bufferGate: uint32(*bufferGate),
 		})
@@ -842,6 +848,8 @@ type graphArgs struct {
 	gtpuEndMarkers string
 	metersUL       string
 	metersDL       string
+	packetRatesUL  string
+	packetRatesDL  string
 	countersUL     string
 	bufferStore    string
 	bufferCounter  string
@@ -949,10 +957,11 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		// tunnel toward N3. Each chain has its own rule table, so every rule's
 		// ActionId is in the resource its table declares.
 		Up: session.Direction{
-			PDRTable:  a.pdrTableUL,
-			PDRFields: upFields,
-			Meters:    a.metersUL,
-			Counters:  a.countersUL,
+			PDRTable:    a.pdrTableUL,
+			PDRFields:   upFields,
+			Meters:      a.metersUL,
+			PacketRates: a.packetRatesUL,
+			Counters:    a.countersUL,
 			// An uplink forward can add an outer header of its own: indirect
 			// data forwarding (Destination Interface Access) and the uplink of
 			// an N9 tunnel (Destination Interface Core with an Outer Header
@@ -963,12 +972,13 @@ func graphConfig(a graphArgs) (session.Config, error) {
 			NextHop: a.n6NextHop,
 		},
 		Down: session.Direction{
-			PDRTable:  a.pdrTableDL,
-			PDRFields: downFields,
-			Meters:    a.metersDL,
-			Counters:  a.countersDL,
-			NextHop:   a.n3NextHop,
-			Tunnels:   a.tunnels,
+			PDRTable:    a.pdrTableDL,
+			PDRFields:   downFields,
+			Meters:      a.metersDL,
+			PacketRates: a.packetRatesDL,
+			Counters:    a.countersDL,
+			NextHop:     a.n3NextHop,
+			Tunnels:     a.tunnels,
 		},
 		Instances:      domains,
 		FTEIDEndpoints: fteidEndpoints,

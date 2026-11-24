@@ -70,6 +70,12 @@ type recorder struct {
 	// forget keeps no transactions, for a scale test that reads none: there
 	// the thousands kept would be the test's heap, not the compiler's.
 	forget bool
+	// rates is the fake PacketRate modules' quotas, by module name: what
+	// PacketRateStatuses answers. The fake forgets a quota when the compiler
+	// erases it, so a deletion whose reading came after the erase would find
+	// nothing. rateFail is the refusal a test wants the reader to answer with.
+	rates    map[string][]bess.PacketRateStatus
+	rateFail error
 }
 
 // ReleaseFlow and DropFlow are the packet store's commands (StoreCommands): the
@@ -138,11 +144,53 @@ func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 		}
 		r.entries[key] = true
 	}
+	// A quota record the transaction erases is gone from its module: a read
+	// after the erase answers nothing, which is what makes the deletion's
+	// report-before-erase order observable.
+	for _, ch := range changes {
+		if !strings.HasSuffix(ch.Resource, "/rates") || ch.Value != nil || r.rates == nil {
+			continue
+		}
+		module, _, _ := strings.Cut(ch.Resource, "/")
+		key, _ := bess.Get[IDKey](ch.Key)
+		kept := r.rates[module][:0]
+		for _, status := range r.rates[module] {
+			if status.ID != key.ID {
+				kept = append(kept, status)
+			}
+		}
+		r.rates[module] = kept
+	}
 	if !r.forget {
 		r.txns = append(r.txns, changes)
 	}
 	r.ops.Add("Apply")
 	return nil
+}
+
+// PacketRateStatuses answers a PacketRate module's get_status from the
+// statuses the test seeded, one per id it was asked for. A status the fake
+// does not hold reads zero, which is what a module with no record says.
+func (r *recorder) PacketRateStatuses(_ context.Context, module string, ids ...uint32) ([]bess.PacketRateStatus, error) {
+	r.calls = append(r.calls, readCall{module: module, rules: len(ids)})
+	r.ops.Add(module)
+	if r.rateFail != nil {
+		return nil, r.rateFail
+	}
+	if len(ids) == 0 {
+		return append([]bess.PacketRateStatus(nil), r.rates[module]...), nil
+	}
+	held := map[uint32]bess.PacketRateStatus{}
+	for _, status := range r.rates[module] {
+		held[status.ID] = status
+	}
+	out := make([]bess.PacketRateStatus, 0, len(ids))
+	for _, id := range ids {
+		status := held[id]
+		status.ID = id
+		out = append(out, status)
+	}
+	return out, nil
 }
 
 // errEraseMissing is what the fake dataplane answers for an erase of a key it
@@ -344,14 +392,24 @@ func (r rule) nextHop() uint32 {
 	return binary.BigEndian.Uint32(b[12:])
 }
 
+// packetRateID is the packet-rate quota id a rule's result carries (0 without
+// a Packet Rate).
+func (r rule) packetRateID() uint32 {
+	b := r.result()
+	if len(b) < resultPacketRate+4 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b[resultPacketRate:])
+}
+
 // steeringID is the MAR steering policy id a downlink rule's result carries
 // (0 without a MAR).
 func (r rule) steeringID() uint32 {
 	b := r.result()
-	if len(b) < 24 {
+	if len(b) < resultSteeringID+4 {
 		return 0
 	}
-	return binary.BigEndian.Uint32(b[20:])
+	return binary.BigEndian.Uint32(b[resultSteeringID:])
 }
 
 // gate is the gate the rule delivers.

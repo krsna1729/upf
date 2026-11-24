@@ -5,7 +5,7 @@ requirement, the evidence it cites and the last run's verdict are one record.
 Edit the JSON and re-run; never this file. Named tests and the narrative sit in
 the JSON, not here.
 
-**56 claims · 53 ok · 1 gap · 2 skip · 0 fail**
+**56 claims · 54 ok · 0 gap · 2 skip · 0 fail**
 
 `ok` proved by the evidence named · `gap` a documented missing capability ·
 `skip` needs an environment this run lacks · `FAIL` a regression.
@@ -13,18 +13,6 @@ the JSON, not here.
 Specs are pinned to 3GPP Release 16: every
 claim below names the specification, release version and clause it reads.
 The reference texts are in `docs/spec/`, with their official source URLs.
-
-## Open
-
-### status-36 · TS 29.244 V16.9.1 §5.4.15 · gap
-
-Packet Rate: a QER capping packets per time unit, and its queryable status
-
-Packet Rate is a procedure of its own: a QER that caps packets per time unit, plus a status the CP function can query and the UP reports. None of it is read here -- go-pfcp does carry the IEs, so this is the tree's gap and not the library's -- and the substrate is now in the fork: a Meter's `cost: PACKETS` charges one a packet through the same buckets, bursts and colouring (BESS fork PR #45), and the ordered-id action (PR #44) lets a flow's packet rate and the session's bit rate share one lookup. The meter's rates are per second, so the per-minute/hour/day/week quotas 5.4.15.2 states -- Serving PLMN rate control and Small Data Rate Control -- are below one packet per second in their common shapes and have no windowed equivalent yet
-
-a serving-PLMN or APN rate control the SMF provisions is invisible to this UPF: a UE can exceed a packet rate the CP asked to cap. The remaining work is the compiler reading the QER's Packet Rate IEs, a windowed packet quota for the per-period rates, and the Query Packet Rate Status exchange on the reporting side
-
-No evidence in this tree.
 
 ## Not run here
 
@@ -53,12 +41,12 @@ The code is not in question.
 - **status-41** · TS 29.244 V16.9.1 §7.5.2.3 — post-encap transport routes both outer families by resolved neighbor and never invents a MAC · lane
 - **status-38** · TS 29.244 V16.9.1 §7.5.2.8 — a MAR's two access actions are compiled to one steering policy and selected by health · test ×7 · lane
 
-### Session Modification · TS 29.244 V16.9.1 §7.5.4 · 7 claims (1 gap, 6 ok)
+### Session Modification · TS 29.244 V16.9.1 §7.5.4 · 7 claims (7 ok)
 
 - **status-15** · TS 29.244 V16.9.1 §5.2.1A — an uplink SDF filter is left as provisioned, not swapped · test
 - **status-18** · TS 29.244 V16.9.1 §5.2.1A — an SDF Filter IE with no Flow Description is refused (cause 64) · test ×2
 - **status-43** · TS 29.244 V16.9.1 §5.2.2.3.1 — Remove URR / Remove QER is applied while a PDR names the rule, with the URR's termination report · test ×2
-- **status-36** · TS 29.244 V16.9.1 §5.4.15 — Packet Rate: a QER capping packets per time unit, and its queryable status · **gap**
+- **status-36** · TS 29.244 V16.9.1 §5.4.15 — Packet Rate: a QER capping packets per time unit, and its queryable status · test ×7 · live test · lane
 - **status-33** · TS 29.244 V16.9.1 §7.5.4 — Remove QER is applied; rule IDs may number from 0 · test ×2
 - **status-42** · TS 29.244 V16.9.1 §7.5.4.2 — an Update PDR keeps the precedence, PDI, FAR, URR and QER it leaves out · test ×2
 - **status-31** · TS 29.244 V16.9.1 · no clause — a refused modification leaves the session exactly as it was · test ×2

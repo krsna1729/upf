@@ -85,9 +85,9 @@ func TestPDRResultCarriesResolvedRouteDomain(t *testing.T) {
 		p    *pdr
 		size int
 	}{
-		{name: "uplink", p: &pdr{domain: 7, resultDomain: 7}, size: 20},
-		{name: "downlink", p: &pdr{down: true, domain: 9, resultDomain: 9}, size: 24},
-		{name: "5G VN forward", p: &pdr{domain: 3, resultDomain: 11}, size: 20},
+		{name: "uplink", p: &pdr{domain: 7, resultDomain: 7}, size: 24},
+		{name: "downlink", p: &pdr{down: true, domain: 9, resultDomain: 9}, size: 28},
+		{name: "5G VN forward", p: &pdr{domain: 3, resultDomain: 11}, size: 24},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := pdrResult(tc.p)

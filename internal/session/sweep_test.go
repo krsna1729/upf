@@ -99,6 +99,7 @@ func TestSweepNamesTheGraphsResources(t *testing.T) {
 	want := map[string]bool{
 		"decap0/fteids": true, "pdr_ul/rules": true, "pdr_dl/rules": true,
 		"mt_ul/meters": true, "mt_dl/meters": true,
+		"pr_ul/rates": true, "pr_dl/rates": true,
 		"cnt_ul/counters": true, "cnt_dl/counters": true, "enc/tunnels": true,
 	}
 	got := map[string]bool{}

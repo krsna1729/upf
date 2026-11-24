@@ -11,7 +11,7 @@ namespace upf::datapath {
 
 // One packet-rate quota's configuration (TS 29.244 8.2.63): a primary
 // maximum and an additional maximum, each with its own period -- the IE gives
-// the additional rates their own time unit (octets q/r) -- plus the CP's
+// the additional maximum its own time unit (its q/r octets) -- plus the CP's
 // seeded Packet Rate Status (8.2.139) when the QER carried one.
 struct PacketRateConfig {
   uint32_t allowed = 0;                // packets per primary period

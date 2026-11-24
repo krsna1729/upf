@@ -1762,27 +1762,62 @@
   {
    "id": "status-36",
    "scope": "status",
-   "evidence": [],
+   "evidence": [
+    "TestPacketRateQuotaCompiles",
+    "TestPacketRateZeroMaximumStillCaps",
+    "TestPacketRateWithoutItsModuleIsRefused",
+    "TestPacketRateQueryAnswersInTheModificationResponse",
+    "TestPacketRateReleaseReportPrecedesTheErase",
+    "TestPacketRateSharedChangeRewritesTheRule",
+    "TestAPacketRateReplyDecodesIntoTheSliceItIsGiven",
+    "TestLivePacketRateStopsTheTraffic",
+    "ci/session-path.sh"
+   ],
    "result": {
-    "state": "gap",
-    "evidence": {}
+    "state": "ok",
+    "evidence": {
+     "TestPacketRateQuotaCompiles": {
+      "state": "ok"
+     },
+     "TestPacketRateZeroMaximumStillCaps": {
+      "state": "ok"
+     },
+     "TestPacketRateWithoutItsModuleIsRefused": {
+      "state": "ok"
+     },
+     "TestPacketRateQueryAnswersInTheModificationResponse": {
+      "state": "ok"
+     },
+     "TestPacketRateReleaseReportPrecedesTheErase": {
+      "state": "ok"
+     },
+     "TestAPacketRateReplyDecodesIntoTheSliceItIsGiven": {
+      "state": "ok"
+     },
+     "TestLivePacketRateStopsTheTraffic": {
+      "state": "skip"
+     },
+     "TestPacketRateSharedChangeRewritesTheRule": {
+      "state": "ok"
+     }
+    }
    },
    "clause": "5.4.15",
    "part": "procedures",
-   "title": "Packet Rate is a procedure of its own: a QER that caps packets per time unit, plus a status the CP function can query and the UP reports. None of it is read here -- go-pfcp does carry the IEs, so this is the tree's gap and not the library's -- and the substrate is now in the fork: a Meter's `cost: PACKETS` charges one a packet through the same buckets, bursts and colouring (BESS fork PR #45), and the ordered-id action (PR #44) lets a flow's packet rate and the session's bit rate share one lookup. The meter's rates are per second, so the per-minute/hour/day/week quotas 5.4.15.2 states -- Serving PLMN rate control and Small Data Rate Control -- are below one packet per second in their common shapes and have no windowed equivalent yet",
-   "declared": "",
+   "title": "Packet Rate is a procedure of its own: a QER that caps packets per time unit, plus a status the CP function can query and the UP reports. The compiler reads a QER's Packet Rate (8.2.63) and the CP's Packet Rate Status (8.2.139) into one quota per policed direction in the direction's PacketRate module; the module's fixed windows (minute, 6 minutes, hour, day or week) enforce the small per-period caps a per-second meter cannot, the seed is enforced first (5.4.15.2 rule 4), and the Query Packet Rate Status exchange (7.5.4.22, 7.5.5.4) and the release report a QER's RCSR asks for (7.5.7.1-2) read the module's remaining counts back",
+   "declared": "in: a QER's Packet Rate and Packet Rate Status compile to one quota per policed direction in `<packet-rates>`/rates; the PDR result names it, the PacketRate module enforces the fixed windows and the seed, a Query Packet Rate Status is answered in the Modification Response, and a QER's RCSR is answered in the Deletion Response",
    "spec": "TS 29.244",
    "messages": [
     "Session Modification"
    ],
    "message": "Session Modification",
    "statement": "5.4.15, 8.2.63, and the Query Packet Rate Status exchange (7.5.4.22, 7.5.5.4, 8.2.139)",
-   "detail": "Packet Rate is a procedure of its own: a QER that caps packets per time unit, plus a status the CP function can query and the UP reports. None of it is read here -- go-pfcp does carry the IEs, so this is the tree's gap and not the library's -- and the substrate is now in the fork: a Meter's `cost: PACKETS` charges one a packet through the same buckets, bursts and colouring (BESS fork PR #45), and the ordered-id action (PR #44) lets a flow's packet rate and the session's bit rate share one lookup. The meter's rates are per second, so the per-minute/hour/day/week quotas 5.4.15.2 states -- Serving PLMN rate control and Small Data Rate Control -- are below one packet per second in their common shapes and have no windowed equivalent yet",
-   "effect": "a serving-PLMN or APN rate control the SMF provisions is invisible to this UPF: a UE can exceed a packet rate the CP asked to cap. The remaining work is the compiler reading the QER's Packet Rate IEs, a windowed packet quota for the per-period rates, and the Query Packet Rate Status exchange on the reporting side",
+   "detail": "in: the compiler reads a QER's Packet Rate (8.2.63) and the CP's Packet Rate Status (8.2.139) into one quota record per policed direction in the direction's PacketRate module, allocates its id with the QER, and names it in the PDR result; a profile or seed change bumps the quota's epoch, and a direction the QER stops naming erases its record. The module enforces the seed first (5.4.15.2 rule 4), then the primary and additional fixed windows (minute, 6 minutes, hour, day or week), so the small per-period caps 5.4.15.2 serves are exact. A zero maximum is a quota that passes nothing. The module reports the remaining counts and validity for a Query Packet Rate Status (7.5.4.22, 7.5.5.4), answered in the Modification Response after the transaction lands, and for a QER with RCSR (8.2.71) in the Session Deletion Response (7.5.7.1-2), read before the erase",
+   "effect": "",
    "extra": [
     {
      "name": "evidence",
-     "value": "code (grep: none in the tree)"
+     "value": "`internal/session`: TestPacketRateQuotaCompiles, TestPacketRateZeroMaximumStillCaps, TestPacketRateWithoutItsModuleIsRefused, TestPacketRateQueryAnswersInTheModificationResponse, TestPacketRateReleaseReportPrecedesTheErase; `internal/bess`: TestAPacketRateReplyDecodesIntoTheSliceItIsGiven; `datapath/packet_rate_test.cc`; `ci/session-path.sh` (TestLivePacketRateStopsTheTraffic)"
     }
    ],
    "kind": "conformance",

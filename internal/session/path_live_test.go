@@ -62,6 +62,18 @@ func pathEstablishmentWithSDF(cpSEID uint64, ueIP string, sdf string) *message.S
 // the filter stay fixed, so a test varies exactly what it is about.
 func pathEstablishmentWith(cpSEID uint64, ueIP, sdf string,
 	downFAR *ie.IE, extra ...*ie.IE) *message.SessionEstablishmentRequest {
+	return pathEstablishmentWithQER(cpSEID, ueIP, sdf, downFAR,
+		ie.NewCreateQER(
+			ie.NewQERID(1),
+			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			ie.NewMBR(1000, 2000),
+		), extra...)
+}
+
+// pathEstablishmentWithQER is pathEstablishmentWith with the QER supplied by
+// the caller: a packet-rate arm replaces the MBR with its own quota.
+func pathEstablishmentWithQER(cpSEID uint64, ueIP, sdf string,
+	downFAR, qer *ie.IE, extra ...*ie.IE) *message.SessionEstablishmentRequest {
 	ies := []*ie.IE{
 		ie.NewNodeID("", "", "smf"),
 		ie.NewFSEID(cpSEID, nil, nil),
@@ -92,11 +104,7 @@ func pathEstablishmentWith(cpSEID uint64, ueIP, sdf string,
 			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
 		),
 		downFAR,
-		ie.NewCreateQER(
-			ie.NewQERID(1),
-			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
-			ie.NewMBR(1000, 2000),
-		),
+		qer,
 	}
 	return message.NewSessionEstablishmentRequest(0, 0, cpSEID, 1, 0, append(ies, extra...)...)
 }
@@ -960,5 +968,130 @@ func TestLiveTwoInstancesRouteIndependently(t *testing.T) {
 	if ratio := winN6 / winN9; ratio < 6 || ratio > 10 {
 		t.Errorf("the exits carried %v and %v packets (ratio %.2f), want the streams' own 8: one exit per stream",
 			winN6, winN9, ratio)
+	}
+}
+
+// TestLivePacketRateStopsTheTraffic is the packet-rate arm on a real daemon: a
+// QER's Packet Rate is programmed into the graph's module, the source's packets
+// spend the allowance, and the quota then drops the rest while the classifier
+// still receives them. The Query Packet Rate Status and the release report read
+// the same zero back (5.4.15.2, 7.5.4.22, 7.5.5.4, 7.5.7.1-2).
+func TestLivePacketRateStopsTheTraffic(t *testing.T) {
+	target := os.Getenv("UPF_BESS_TARGET")
+	if target == "" {
+		t.Skip("set UPF_BESS_TARGET (ci/session-path.sh does) to run against a live bessd")
+	}
+	if liveAppliance() {
+		t.Skip("the appliance target carries no PacketRate module")
+	}
+	ctx := context.Background()
+	client, err := bess.Dial(ctx, target)
+	if err != nil {
+		t.Fatalf("dialing %s: %v", target, err)
+	}
+	defer client.Close()
+	if err := client.Refresh(ctx); err != nil {
+		t.Fatalf("reading the daemon's schema: %v", err)
+	}
+	c := New(liveConfig(), client, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	// Twenty packets in the hour: the source spends them at once, and the
+	// window cannot roll over during the measurement.
+	const allowed = 20
+	resp := c.Establish(pathEstablishmentWithQER(0x6666, "10.45.0.2",
+		"permit out udp from any to assigned 53",
+		ie.NewCreateFAR(
+			ie.NewFARID(2),
+			ie.NewApplyAction(applyForw),
+			ie.NewForwardingParameters(
+				ie.NewDestinationInterface(ie.DstInterfaceAccess),
+				ie.NewOuterHeaderCreation(0x0100, pathDownTEID, "10.20.30.2", "", 0, 0, 0),
+			),
+		),
+		ie.NewCreateQER(
+			ie.NewQERID(1),
+			ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			packetRateIE(0x01, 2, allowed, 0, 0, 0, 0, 0, 0),
+			ie.NewQERControlIndications(0, 0, 1),
+		),
+	)).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the daemon refused the establishment with cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+
+	// The module's own reading is the evidence the allowance is spent.
+	waitUntil(t, func() bool {
+		statuses, err := client.PacketRateStatuses(ctx, "pr_ul")
+		if err != nil {
+			t.Fatalf("reading pr_ul: %v", err)
+		}
+		for _, status := range statuses {
+			if status.Remaining == 0 && status.ValidityUnixNS != 0 {
+				return true
+			}
+		}
+		return false
+	}, func() string { return "the source did not spend the packet-rate allowance" })
+
+	// Wait for the module's output to settle: the packets allowed before the
+	// last one passed may still be in a worker's batch.
+	last := gatePackets(t, ctx, client, "pr_ul")
+	waitUntil(t, func() bool {
+		time.Sleep(10 * time.Millisecond)
+		now := gatePackets(t, ctx, client, "pr_ul")
+		settled := now == last
+		last = now
+		return settled
+	}, func() string { return "pr_ul's output never settled after the allowance was spent" })
+	beforeIn := gatePackets(t, ctx, client, "pdr_ul")
+	beforeOut := last
+	waitForSource(t, ctx, client, "src_up")
+	if got := gatePackets(t, ctx, client, "pdr_ul") - beforeIn; got < sourceWindow/2 {
+		t.Errorf("the classifier saw %v of the source's %d packets; the arm proves nothing without its input",
+			got, sourceWindow)
+	}
+	if got := gatePackets(t, ctx, client, "pr_ul"); got != beforeOut {
+		t.Errorf("the spent quota passed %v more packets (from %v to %v)", got-beforeOut, beforeOut, got)
+	}
+
+	// The query reads the module back into the Modification Response.
+	answer := c.Modify(message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+		ie.NewQueryPacketRateStatusWithinSessionModificationRequest(ie.NewQERID(1)))).(*message.SessionModificationResponse)
+	if got := cause(t, answer); got != ie.CauseRequestAccepted {
+		t.Fatalf("the query answered cause %d", got)
+	}
+	report := packetRateReport(t, answer.IEs, ie.PacketRateStatusReportWithinSessionModificationResponse)
+	children, err := report.PacketRateStatusReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err := children[1].PacketRateStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fields.HasUL() || fields.NumberOfRemainingUplinkPacketsAllowed != 0 {
+		t.Errorf("the query reports %d uplink packets left, want 0", fields.NumberOfRemainingUplinkPacketsAllowed)
+	}
+	if fields.RateControlStatusValidityTime.IsZero() {
+		t.Error("the query reports no validity time")
+	}
+
+	// RCSR asked for the same reading on release.
+	deleted := c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 3, 0)).(*message.SessionDeletionResponse)
+	if got := cause(t, deleted); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	release := packetRateReport(t, deleted.IEs, ie.PacketRateStatusReport)
+	released, err := release.PacketRateStatusReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	onRelease, err := released[1].PacketRateStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !onRelease.HasUL() || onRelease.NumberOfRemainingUplinkPacketsAllowed != 0 {
+		t.Errorf("the release report says %d uplink packets left, want 0", onRelease.NumberOfRemainingUplinkPacketsAllowed)
 	}
 }

@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <string>
 
@@ -20,6 +21,9 @@
 
 struct PacketRateIdTag;
 using PacketRateId = bess::dataplane::StrongId<PacketRateIdTag, uint32_t>;
+
+// 8.2.63's longest time unit is a week.
+inline constexpr uint32_t kMaxPacketRatePeriodSeconds = 604800;
 
 // Enforces a QER's Packet Rate (TS 29.244 8.2.63): the primary maximum and
 // the additional maximum, each over its own time unit, plus the CP's seeded
@@ -74,5 +78,46 @@ class PacketRate final : public Module {
   bess::framework::MemoryLease states_lease_;
   bess::utils::DpdkArray<upf::datapath::PacketRateQuota> states_;
 };
+
+// ParsePacketRateValue is the resource codec's validation and conversion of
+// one quota: what the controller writes must be a profile the module can
+// enforce. A maximum of zero with a period is a quota that passes nothing;
+// a quota with no period at all names no rate and is refused, because a
+// present Packet Rate flag always carries a time unit (8.2.63).
+inline std::expected<PacketRate::Entry, std::string> ParsePacketRateValue(
+    const upf::pb::PacketRateValue &value) {
+  if (value.period_seconds() == 0 &&
+      value.additional_period_seconds() == 0) {
+    return std::unexpected("a quota with no packet rate");
+  }
+  if (value.allowed() > 0 && value.period_seconds() == 0) {
+    return std::unexpected("a packet rate without a time unit");
+  }
+  if (value.additional() > 0 &&
+      value.additional_period_seconds() == 0) {
+    return std::unexpected("an additional rate without its time unit");
+  }
+  if (value.period_seconds() > kMaxPacketRatePeriodSeconds ||
+      value.additional_period_seconds() > kMaxPacketRatePeriodSeconds) {
+    return std::unexpected("a time unit longer than a week");
+  }
+  if (value.seed_remaining() + value.seed_remaining_additional() > 0 &&
+      value.seed_validity_unix_ns() == 0) {
+    return std::unexpected("a status seed without a validity time");
+  }
+  PacketRate::Entry entry;
+  entry.config.allowed = value.allowed();
+  entry.config.primary_period_ns =
+      static_cast<uint64_t>(value.period_seconds()) * 1000000000ull;
+  entry.config.additional = value.additional();
+  entry.config.additional_period_ns =
+      static_cast<uint64_t>(value.additional_period_seconds()) * 1000000000ull;
+  entry.config.epoch = value.epoch();
+  entry.config.seed_remaining = value.seed_remaining();
+  entry.config.seed_remaining_additional =
+      value.seed_remaining_additional();
+  entry.config.seed_validity_unix_ns = value.seed_validity_unix_ns();
+  return entry;
+}
 
 #endif  // UPF_DATAPATH_PACKET_RATE_H_
