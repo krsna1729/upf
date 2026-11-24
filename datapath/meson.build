@@ -52,7 +52,7 @@ upf_datapath = shared_module(
   'upf_datapath',
   (bench ? ['bench/bench_gen.cc'] : []) +
   ['arp_responder.cc', 'atsss_steer.cc', 'gtpu_decap.cc', 'gtpu_responder.cc', 'gtpu_encap.cc',
-   'urr_count.cc',
+   'urr_count.cc', 'packet_rate.cc',
    # UpfAppliance: the whole user plane in one module; UpfSessionAppliance: the
    # same module with the session-major layout (upf_appliance_sessions.cc).
    'upf_appliance.cc', 'upf_appliance_resources.cc', 'upf_appliance_path.cc',
@@ -107,7 +107,7 @@ if gtest_dep.found() and bess_static_dep.found()
     'gtpu_datapath_test',
     ['gtpu_datapath_test.cc', 'packet_helpers_test.cc', 'upf_appliance_frame_test.cc',
      'arp_responder_resource_test.cc', 'upf_appliance_test.cc', 'bench_sizing_test.cc',
-     'counter_changes_test.cc',
+     'counter_changes_test.cc', 'packet_rate_test.cc',
      upf_proto[0], upf_proto[1]],
     include_directories: include_directories('.'),
     dependencies: [bess_static_dep, protobuf_dep, gtest_dep],
