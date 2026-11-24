@@ -5,12 +5,14 @@
 #include <cstring>
 #include <format>
 #include <limits>
+#include <sys/time.h>
 #include <utility>
 
 #include "dataplane/action_id.h"
 #include "gate.h"
 #include "fteid_codec.h"
 #include "utils/logging.h"
+#include "utils/time.h"
 
 namespace upf::appliance {
 namespace {
@@ -665,6 +667,34 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
         return std::unexpected(ok.error());
     r.footprint.removals += static_cast<uint32_t>(m.rules.size()) + 1;
     tx_sessions_.insert(session);
+    // The deletion's last usage, read here so the controller does not need a
+    // get_counts round trip before the erase: each direction's own reply, as a
+    // non-restarting read (the cells vanish with the session, so no window
+    // opens). It is the read a get_counts with these action ids would answer,
+    // under the lock this reservation already holds.
+    // scale: kMaxActions (16) cells per direction, a compile-time bound.
+    upf::pb::SessionEraseCounts counts;
+    struct timeval wall {};
+    gettimeofday(&wall, nullptr);
+    const uint64_t read_monotonic_ns = tsc_to_ns(rdtsc());
+    const uint64_t read_wall_unix_ns =
+        static_cast<uint64_t>(wall.tv_sec) * 1000000000ull +
+        static_cast<uint64_t>(wall.tv_usec) * 1000ull;
+    for (const bool dl : {false, true}) {
+      auto *out = dl ? counts.mutable_downlink() : counts.mutable_uplink();
+      out->set_read_monotonic_ns(read_monotonic_ns);
+      out->set_read_wall_unix_ns(read_wall_unix_ns);
+      for (uint8_t i = 0; i < m.actions; ++i) {
+        const uint32_t action_id = Config(session, m.active, i).action_id;
+        if (action_id == 0) continue;
+        Report(action_id, actions_[action_id], dl, /*restart=*/false, out);
+      }
+    }
+    std::string observed;
+    if (!counts.SerializeToString(&observed)) {
+      return std::unexpected("the session's counters did not serialize");
+    }
+    staged->observed = std::move(observed);
     r.staged = std::move(staged);
     return r;
   }

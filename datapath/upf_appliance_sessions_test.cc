@@ -73,11 +73,13 @@ struct Expose {
 template struct Expose<&dp::Retirer::removals_, RemovalsTag>;
 template struct Expose<&dp::Retirer::after_, AfterTag>;
 
-// What the engine reports for one op: the refusal, or the references the
-// new value holds (the engine's ledger checks them; the test checks them).
+// What the engine reports for one op: the refusal, the references the new
+// value holds (the engine's ledger checks them; the test checks them), and
+// what the operation returned (Reservation::observed).
 struct Result {
   std::string error;
   std::vector<Reference> references;
+  std::string observed;
 };
 
 struct Store {
@@ -114,11 +116,14 @@ struct Store {
       r->staged->Abort();
       return {.error = prepared.error()};
     }
+    // The engine moves the bytes out of the staged operation before
+    // publication begins; the test does the same.
+    std::string observed = std::move(r->staged->observed);
     dp::Retirer retirer;
     r->staged->Publish(retirer);
     end.reset();
     Finish(retirer);
-    return {.references = std::move(r->references)};
+    return {.references = std::move(r->references), .observed = std::move(observed)};
   }
   void Finish(dp::Retirer &retirer) {
     const bess::rcu::GracePeriod token = domain.StartGracePeriod();
@@ -338,6 +343,46 @@ TEST(SessionStore, InsertUpdateEraseDriveTheTablesAndVersions) {
   EXPECT_FALSE(s.fteids->Contains(dp::EncodeKey(Image(false).fteids[0].id)));
   EXPECT_EQ(s.sessions->Active(kSession), SessionResource::kGone);
   EXPECT_FALSE(s.sessions->Contains(dp::EncodeKey(kSession)));
+}
+
+// The erase reports the counters a get_counts call just before it would
+// answer, both directions, so a controller's termination report needs no
+// second round trip (BESS D-210).
+TEST(SessionStore, ErasingReportsTheSessionsCounters) {
+  Store s;
+  ASSERT_TRUE(Applied(s.Put(Image(false))));
+  const uint32_t version = s.sessions->Active(kSession);
+  const ActionConfig &config = s.sessions->Config(kSession, version, s.sessions->Find(kSession, version, kId));
+  ASSERT_EQ(config.action_id, kId);
+  ASSERT_TRUE(config.cell & ActionConfig::kCount);
+  upf::appliance::SessionUrr &bank = s.sessions->Cells(kSession, config.cell & ActionConfig::kCellSlot).urr[0];
+  bank.Add(100, 11);
+  bank.Add(200, 22);
+
+  upf::pb::UrrCountCommandGetCountsResponse want_ul, want_dl;
+  const uint32_t ids[] = {kId};
+  s.sessions->Counts(false, ids, false, 0, SIZE_MAX, &want_ul);
+  s.sessions->Counts(true, ids, false, 0, SIZE_MAX, &want_dl);
+
+  const auto erased = s.Apply(dp::Op::Erase(s.sessions->name(), dp::EncodeKey(kSession)));
+  ASSERT_TRUE(Applied(erased));
+  upf::pb::SessionEraseCounts got;
+  ASSERT_TRUE(got.ParseFromString(erased.observed)) << "the erase reported no counters";
+  auto same = [](const upf::pb::UrrCountCommandGetCountsResponse &want,
+                 const upf::pb::UrrCountCommandGetCountsResponse &have) {
+    EXPECT_EQ(have.counts_size(), want.counts_size());
+    for (int i = 0; i < std::min(have.counts_size(), want.counts_size()); ++i) {
+      EXPECT_EQ(have.counts(i).action_id(), want.counts(i).action_id());
+      EXPECT_EQ(have.counts(i).packets(), want.counts(i).packets());
+      EXPECT_EQ(have.counts(i).octets(), want.counts(i).octets());
+    }
+  };
+  same(want_ul, got.uplink());
+  same(want_dl, got.downlink());
+  EXPECT_EQ(got.uplink().counts(0).packets(), 2u);
+  EXPECT_EQ(got.uplink().counts(0).octets(), 300u);
+  EXPECT_NE(got.uplink().read_monotonic_ns(), 0u);
+  EXPECT_NE(got.uplink().read_wall_unix_ns(), 0u);
 }
 
 // A Mode 4/6 Session Modification moves the tunnels an F-TEID's PDRs forward

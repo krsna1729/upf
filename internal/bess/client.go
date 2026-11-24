@@ -298,6 +298,27 @@ type RuleCount struct {
 	Last     time.Time
 }
 
+// Observed is what one applied change's operation returned, when the daemon
+// reports it. An erase of a session's entry returns the counters its rules
+// measured at the erase (BESS D-210), as SessionEraseCounts decodes them.
+type Observed struct {
+	Resource string
+	Bytes    []byte
+}
+
+// ObservedApplier is a client whose daemon returns an operation's bytes with
+// the applied result. A caller that needs the last reading of an erased entry
+// reads it from this result instead of a separate counter call before the
+// erase.
+type ObservedApplier interface {
+	ApplyObserved(ctx context.Context, changes ...Change) ([]Observed, error)
+}
+
+// ObservesEraseCounts reports that this client's daemon answers an erase with
+// what the erased entry measured (BESS D-210), so a deletion needs no
+// get_counts call before it.
+func (c *Client) ObservesEraseCounts() bool { return true }
+
 // AppendRuleCounts asks a counting module for the counters of the named rules,
 // or of every rule it holds when none are named, through the module's own
 // get_counts action, and for the next window, and appends them to dst: a
@@ -459,6 +480,34 @@ func appendCounts(dst []RuleCount, b []byte) ([]RuleCount, error) {
 	return out, nil
 }
 
+// SessionEraseCounts decodes what a session's erase observed (BESS D-210):
+// each direction's counter reply, as the get_counts call before the erase
+// would have answered it. Either slice is empty when that direction counted
+// nothing.
+func SessionEraseCounts(b []byte) (up, down []RuleCount, err error) {
+	for rest := b; len(rest) > 0; {
+		num, typ, _, sub, n := consumeField(rest)
+		if n < 0 {
+			return nil, nil, protowire.ParseError(n)
+		}
+		rest = rest[n:]
+		if typ != protowire.BytesType {
+			continue
+		}
+		switch num {
+		case 1:
+			if up, err = appendCounts(up, sub); err != nil {
+				return nil, nil, err
+			}
+		case 2:
+			if down, err = appendCounts(down, sub); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	return up, down, nil
+}
+
 // consumeField is the field at the head of b: its number and wire type, its
 // value as a varint or as a length-delimited field's bytes (the two kinds a
 // counts reply carries), and its length on the wire, negative when b is not a
@@ -591,8 +640,24 @@ func (c *Client) ClearStore(ctx context.Context, module string) error {
 // them, applies all or nothing, and a change whose own resource is missing is
 // refused rather than half-applied (control_v2's D-129 semantics). The error is
 // the SDK's typed one, so a caller can tell a refusal from a conflict, a busy
-// dataplane or an unknown outcome.
+// dataplane or an unknown outcome. What the operations returned is dropped; use
+// ApplyObserved when it is needed.
 func (c *Client) Apply(ctx context.Context, changes ...Change) error {
+	return c.apply(ctx, nil, changes...)
+}
+
+// ApplyObserved is Apply that also returns what each applied change's
+// operation returned, in change order and only for the changes that returned
+// bytes. An empty transaction is refused, as Apply refuses it.
+func (c *Client) ApplyObserved(ctx context.Context, changes ...Change) ([]Observed, error) {
+	var out []Observed
+	err := c.apply(ctx, &out, changes...)
+	return out, err
+}
+
+// apply is Apply, appending each change's observed bytes to out when out is
+// not nil.
+func (c *Client) apply(ctx context.Context, out *[]Observed, changes ...Change) error {
 	if len(changes) == 0 {
 		return errors.New("bess: empty transaction")
 	}
@@ -674,8 +739,17 @@ func (c *Client) Apply(ctx context.Context, changes ...Change) error {
 		}
 	}
 	txtrace.Mark(ctx, "bess.encode_leave", tx.RequestID)
-	if _, err := tx.Commit(ctx); err != nil {
+	applied, err := tx.Commit(ctx)
+	if err != nil {
 		return err
+	}
+	if out != nil {
+		for i, op := range applied.Record.GetOps() {
+			if i >= len(changes) || len(op.GetObserved()) == 0 {
+				continue
+			}
+			*out = append(*out, Observed{Resource: changes[i].Resource, Bytes: op.GetObserved()})
+		}
 	}
 	return nil
 }

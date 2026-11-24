@@ -897,14 +897,21 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	counted := s.URRs().len() != 0
 	c.mu.Unlock()
 	// What each URR measured since its last report goes in the answer
-	// (5.2.2.3.1): read now, while the rules that count it still exist.
+	// (5.2.2.3.1): read now, while the rules that count it still exist. The
+	// erase reports the same reading when the daemon does (BESS D-210), so the
+	// deletion then waits for one round trip, not two.
 	var usage []*ie.IE
-	if !c.restoring && counted {
+	fromErase := !c.restoring && counted && c.erasesWithCounts()
+	if !c.restoring && counted && !fromErase {
 		usage = c.terminationReports(context.Background(), s, time.Now())
 	}
-	if err := c.remove(context.Background(), s); err != nil {
+	usageFromErase, err := c.removeWithUsage(context.Background(), s, fromErase)
+	if err != nil {
 		c.log.Warn("session: the dataplane refused the deletion", "seid", seid, "error", err)
 		return deleteResponse(req, hdr, causeOf(err))
+	}
+	if usage == nil {
+		usage = usageFromErase
 	}
 	if !c.restoring {
 		c.dropFlows(context.Background(), seid, held)

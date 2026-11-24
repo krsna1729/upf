@@ -90,6 +90,28 @@ scenario's sessions (Modes 1 to 6 and N19, set up over N4): each scenario's real
 G-PDUs or N6 traffic on every attachment, endpoint-scoped admission and an
 unknown-TEID case.
 
+## Capacity
+
+One instance, 1 million resident sessions, N4 session changes offered at
+10,000/s (16 probe flows, 8 session workers, TCP, one 20-thread host). Release
+builds (`-O3 -DNDEBUG`), BESS `1147c393`, medians of eight 1M runs. The profile,
+the method and the gates are in
+[`docs/performance.md`](docs/performance.md#profile-and-reproduction); every
+figure here is measured, not a rating.
+
+| N4 change (10K/s offered) | Sustained | p99 | CPU per message, upfd + bessd | Cores, upfd + bessd |
+|---|---:|---:|---:|---:|
+| Session deletion | 9,838/s | 67 ms | 43 + 154 µs | 0.42 + 1.51 |
+| Session replacement (erase + establish) | 4,863 cycles/s = 10,910 messages/s | 107 ms | 70 + 151 µs | 0.76 + 1.64 |
+| Session establishment | 8,628/s | 144 ms | 84 + 176 µs | 0.73 + 1.52 |
+| FAR-only modification | 9,343/s | 100 ms | 63 + 168 µs | 0.59 + 1.57 |
+
+Memory per 1M sessions: 1.72 GiB `upfd` cgroup peak (1,848 B/session), 1,194.6 B
+of live session heap. Sizing at this shape: about **2 cores and 1.72 GiB per 1M
+sessions at 10K N4 changes/s**; 19.7 end-to-end cores per 100K deletions/s and
+22.0 per 100K replacements/s. At 1K/s offered the same changes hold p99
+3.5-5.5 ms.
+
 ## The inner loop
 
 ```sh

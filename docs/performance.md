@@ -318,6 +318,103 @@ The combined score is the predeclared verdict. Evidence:
 `.scratch/evidence/coalesce-counter-reads/` and
 `coalesce-counter-reads-r2/combined-score.txt`.
 
+**One round trip for a counted deletion (2026-11-23):** A deletion must report
+the counters measured before the session's rules go away, so it sent
+`get_counts` before the erase: two round trips into bessd for one N4 message.
+At 1M sessions the read was 62% of a delete worker's blocking (49% waiting for
+a shared read round, 13% the call) and the erase's reply 38% (`go tool trace
+-pprof=sync` over the delete trace of `358706b`). The session resource now
+reads the session's own counter cells inside the entry erase's reservation,
+bounded by `kMaxActions` per direction, and returns them as the operation's
+`observed` bytes (BESS D-210, `krsna1729/bess#158`); upfd builds the same
+termination windows from those bytes and sends no reading. A daemon that does
+not report an operation's bytes, or a non-native layout, keeps the old read.
+
+Clean ABBA and BAAB against `358706b` (eight runs per arm, collector-firing-free
+cells), combined medians. Both arms are release trees, the perf build
+`docs/benchmarking.md` prescribes: `--buildtype=release -Dcpu=x86-64-v3`
+(`-O3 -DNDEBUG -march=x86-64-v3`); the datapath plugin is `-O3` as before.
+
+| Mode | 10K/s goodput | 10K/s upfd µs/accepted | 1K/s p99 |
+|---|---:|---:|---:|
+| FAR | −0.2% | +0.3% | −0.3% |
+| Establish | −0.7% | +1.0% | −1.1% |
+| Replace | +63.1% | −23.6% | −38.1% |
+| Delete | +8.2% | −24.8% | −23.5% |
+
+Delete and replace met both gates, and no 1K/s cell rose at all (the fast tree's
+`-O1` run, taken before the release build, had one FAR 1K/s candidate run at
+4.74 ms and is archived with the same shape: delete +8.3%, replace +53.3%).
+Median `upfd` cgroup peak fell 1,775.8 → 1,762.1 MiB, the heap fixture stays at
+1,194.6 B/session, and all 64 cells reconciled with no timeouts or uncertain
+outcomes; the over-offered rate is answered with cause 75 as before. Replace
+gains most because its rotation removes and re-establishes a session each
+cycle; FAR and establish do not read counters and stay within noise. Evidence:
+`.scratch/evidence/erase-counts/` (`forward-o3`, `reverse-o3`,
+`combined-o3.score.txt`), and the live lane passes against both release stages.
+
+### Profile and reproduction
+
+Every number in this file is measured on this profile. It is a control-plane
+stress profile, not a packet-throughput rating: 1M resident sessions are
+probed with 16 flows while N4 session changes are offered at a fixed rate.
+
+**Host.** Intel i9-13900H, 14 cores / 20 threads, 15 GiB, Linux 7.2.15, AC
+power, `no_turbo=1`. Threads are pinned: `bessd` control 6, `upfd` 4, session
+workers 8, clients 10-11, harness 0-3 and 12-19; a guard checks the AC state and
+turbo bit, and every campaign waits for a gap in the desktop agent-usage
+collector that fires every 900 s (a firing stalls `upfd` for seconds; cells
+that overlap one are refused by the scorer, not explained away).
+
+**Builds.** `bessd` from the measured BESS tree (`b2fae109`, merged to
+`develop` as `1147c393`) as a release tree:
+`meson setup build/release --buildtype=release -Dcpu=x86-64-v3
+-Dbuild_benchmarks=false -Dbuild_tests=false -Db_staticpic=false`
+(`-O3 -DNDEBUG -march=x86-64-v3`). The datapath plugin is `-O3
+-march=x86-64-v3`; `upfd` is a default Go build (`GOGC=25`). Both arms of a
+comparison use the same profile; a fast-tree (`-O1`) run is not comparable.
+
+**Population.** `ci/bench-churn.py --sessions 1000000 --cohort 65536
+--probes 16 --transport tcp --rates 1000,10000
+--modes far,replace,establish,delete`, `upfd -session-workers 8
+-target session-major -session-actions 2 -session-qers 2`. The population is
+checked equal to 1,000,000 before any cell, and reconciled after each cell.
+Establish and delete cells offer `min(rate x seconds, cohort)` distinct
+sessions; replace cycles a session (erase plus establish, two N4 messages);
+FAR changes the forwarding action only.
+
+**Metrics.** Sustained N4 messages per measured second (`WireAccepted`
+completed); p99 of the driver's cycle latency; `upfd` and `bessd` CPU from the
+cgroup `cpu.stat` delta per accepted message and per wall second; memory from
+the cgroup `memory.peak`; retained state from `TestASessionHoldsAtMostItsBytes`
+(Go live heap per session, no daemon). Cores are cgroup CPU seconds per wall
+second; per-message costs include the process baseline at low rates, so the
+marginal figure (10K cell minus 1K cell) is reported where it matters.
+
+**Verdict rule.** A change is judged on clean ABBA and BAAB campaigns combined
+(eight runs per arm), with the gates in `docs/engineering-guide.md`: at least
++3% goodput at 10K/s and at most -3% CPU per accepted message in the same mode,
+no 1K/s median p99 increase above 10%, no delete goodput drop, no median peak
+increase, retained state below 1.25 KiB/session, every cell reconciled. A
+single round's failure is recorded; the combined score is the predeclared
+verdict.
+
+**Reproduce.** `ci/bench-churn.py` with the flags above against a staged
+`bessd`, the plugin and `upfd`; the ABBA/BAAB wrapper, the power guard and the
+collector-overlap check used for the shipped numbers are in
+`.scratch/evidence/erase-counts/` (`churn.sh`, `clean.py`). The staged daemon
+must be a release tree; the harness records which stage and binary each arm
+ran.
+
+**Basis.** The dimensions follow 3GPP TS 28.552, clause 5.3.3 ("Performance
+measurement for N4 interface": N4 session establishment/modification counts and
+PDU session numbers), which is what an operator's N4 KPI set is defined from;
+the method (fixed population, offered rate, completed changes, resource use per
+change) follows the published 5G-core stress frameworks such as 5GC-Bench
+(arXiv:2509.18443); the host isolation follows ETSI GS NFV-TST 009 (NFVI
+benchmark and measurement methods). None of them is a certification, and no
+external profile is claimed: this section is the profile the numbers use.
+
 ### Review with the transaction timeline (2026-11-22)
 
 Historical builds use the same diagnostic overlay, plugin and trace-enabled
