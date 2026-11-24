@@ -693,8 +693,11 @@ func New(cfg Config, ap Applier, log *slog.Logger) *Compiler {
 		actions:  newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		policies: newIDPool(cfg.MaxActions, cfg.IDReuseDelay),
 		meters:   newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
-		rates:    newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
-		teids:    newIDPool(cfg.MaxTEIDs, teidReuseDelay),
+		// The quotas share the meter space: one id per policed QER direction,
+		// and the deployment's PacketRate modules are built with the same
+		// capacity as its Meter modules (-capacity).
+		rates: newIDPool(cfg.MaxMeters, cfg.IDReuseDelay),
+		teids: newIDPool(cfg.MaxTEIDs, teidReuseDelay),
 		// A context never reaches the wire (GtpuDecap writes it, the PDR key
 		// matches it), so it may be reused at once -- and over a 2^31 space a
 		// grace would hold every release until a walk that never ends.

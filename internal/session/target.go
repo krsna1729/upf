@@ -372,6 +372,7 @@ func sweepResources(target Target, cfg Config) []string {
 	}{{cfg.Up, false}, {cfg.Down, true}} {
 		add(pdrTable(d.down), d.PDRTable != "")
 		add(meterTable(d.down), d.Meters != "")
+		add(rateTable(d.down), d.PacketRates != "")
 		add(counterTable(d.down), d.Counters != "")
 	}
 	add(TunnelsUplink, cfg.Up.Tunnels != "")

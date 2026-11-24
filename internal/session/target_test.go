@@ -24,6 +24,20 @@ func countersRes(d Direction) string        { return d.Counters + "/counters" }
 func bufferCountersRes(b *Buffering) string { return b.Counter + "/counters" }
 func flowsRes(b *Buffering) string          { return b.Store + "/flows" }
 
+// TestGraphSweepIncludesPacketRateTables: a restart must empty the quota
+// tables with the other session tables. A fresh id could otherwise read a
+// previous run's window and refuse packets the SMF never capped.
+func TestGraphSweepIncludesPacketRateTables(t *testing.T) {
+	cfg := testConfig()
+	cfg.Up.PacketRates, cfg.Down.PacketRates = "pr_ul", "pr_dl"
+	got := newTarget(cfg).SweepResources()
+	for _, want := range []string{"pr_ul/rates", "pr_dl/rates"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("the sweep omits %s: %v", want, got)
+		}
+	}
+}
+
 // A direction-changing PDR keeps its action id. Counter cells outlive their
 // entries, so sharing one counter table would attribute its old-direction
 // totals to the new direction and report usage twice.
