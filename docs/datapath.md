@@ -187,6 +187,17 @@ upfd compiles exactly as for the appliance, then folds the session's writes
 into the entry (`internal/session/sessionmajor.go`); session ids come from an
 aged pool of `-max-sessions`. `get_counts` keeps `table=counters_ul|counters_dl|buffer_counters`.
 
+**Deletion carries the session's counters.** Erasing the entry returns
+`SessionEraseCounts`: each direction's `UrrCountCommandGetCountsResponse`,
+read non-destructively from the session's own cell slots under the lock the
+reservation already holds, bounded by `kMaxActions` per direction and stamped
+with one read time. It travels back as the applied operation's `observed`
+bytes (BESS D-210), so a termination report needs no `get_counts` round trip
+before the erase; the command remains for reads that do not remove the
+session. A client that does not read the bytes is unaffected. Evidence:
+`SessionStore.ErasingReportsTheSessionsCounters` (the erase's bytes equal a
+`Counts` read taken immediately before, both directions).
+
 **Memory.** Session `s` owns a fixed stride of one DPDK array: two versions of
 the action configuration (one 64 B line per action each), `2·max_actions` URR
 cell slots and `2·max_qers` meter slots — `256·A + 128·Q` bytes (768 B at
