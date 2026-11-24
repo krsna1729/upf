@@ -6,7 +6,7 @@ It is not the complete specification. Clause headings and body text are
 from the official archive converted to UTF-8; page breaks, tables of
 contents and uncited clauses are omitted.
 
-Clauses: 5.2.1, 5.2.1A, 5.2.2.2.1, 5.2.2.3.1, 5.4.15, 5.10, 7.5.2.2, 7.5.2.3, 7.5.2.8, 7.5.4, 8.2.3, 8.2.5, 8.2.26, 8.2.41, 8.2.62
+Clauses: 5.2.1, 5.2.1A, 5.2.2.2.1, 5.2.2.3.1, 5.4.15, 5.10, 7.5.2.2, 7.5.2.3, 7.5.2.8, 7.5.4, 7.5.4.22, 7.5.5.4, 8.2.3, 8.2.5, 8.2.26, 8.2.41, 8.2.62, 8.2.63, 8.2.139
 
 5.2.1	General
 The packet forwarding scenarios supported over the Sxa, Sxb and Sxc reference points are specified in 3GPP TS 23.214 [2].
@@ -1149,6 +1149,16 @@ Information elements	P	Condition / Comment	Appl.	IE Type
 			Sxa	Sxb	Sxc	N4	
 QER ID	M	This IE shall identify the QER being queried for its Packet Rate Status	-	X	-	X	QER ID
 
+7.5.5.4	Packet Rate Status Report IE within PFCP Session Modification Response
+The Packet Rate Status Report grouped IE shall be encoded as shown in Table 7.5.5.4-1.
+Table 7.5.5.4-1: Packet Rate Status Report IE within PFCP Session Modification Response message
+Octet 1 and 2		Packet Rate Status Report IE Type = 264 (decimal)
+Octets 3 and 4		Length = n
+Information elements	P	Condition / Comment	Appl.	IE Type
+			Sxa	Sxb	Sxc	N4	
+QER ID	M	This IE shall uniquely identify a QER in a PFCP session.	-	X	-	X	QER ID
+Packet Rate Status	M	This IE shall indicate the remaining validity time and the remaining number of UL/DL packets that still can be sent.	-	X	-	X	Packet Rate Status
+
 
 8.2.2	Source Interface
 The Source Interface IE type shall be encoded as shown in Figure 8.2.2-1. It indicates the type of the interface from which an incoming packet is received.
@@ -1365,6 +1375,55 @@ Octets "m to (m+3)" or "p to (p+15)" (IPv4 address / IPv6 address fields), if pr
 Octet r, if present, shall contain the number of bits allocated for IPv6 prefix delegation (relative to the default /64 IPv6 prefix), e.g. if /60 IPv6 prefix is used, the value shall be set to "4". When using UE IP address IE in a PDI to match packets, the UP function shall only use the IPv6 prefix part and ignore the interface identifier part. When the field is set to "0", the UP function shall determine a value based on the local configuration.
 The IPv6 Prefix Length in octet s, when present, shall be encoded as an 8 bits binary integer, e.g. if /72 prefix is used, the value shall be set to to (decimal) 72, or if /56 prefix is used, the value shall be set to (decimal) 56. The prefix length value "128" indicates an individual /128 IPv6 address. When the field is set to "0", the UP function shall determine a value based on the local configuration.
 
+8.2.63	Packet Rate
+The Packet Rate IE contains the packet rate thresholds to be enforced by the UP function. It shall be encoded as shown in Figure 8.2.63-1.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 94 (decimal)	
+	3 to 4	Length = n	
+	5	Spare
+	APRC	DLPR	ULPR	
+	m	Spare	Uplink Time Unit	
+	(m+1) to (m+2)	Maximum Uplink Packet Rate 	
+	p	Spare	Downlink Time Unit	
+	(p+1) to (p+2)	Maximum Downlink Packet Rate	
+	q	Spare	Additional Uplink Time Unit	
+	(q+1) to (q+2)	Additional Maximum Uplink Packet Rate 	
+	r	Spare	Additional Downlink Time Unit	
+	(r+1) to (r+2)	Additional Maximum Downlink Packet Rate 	
+	s to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.63-1: Packet Rate
+The following flags are coded within Octet 5:
+-	Bit 1 – ULPR (Uplink Packet Rate): If this bit is set to "1", then octets m to (m+2) shall be present, otherwise these octets shall not be present.
+-	Bit 2 – DLPR (Downlink Packet Rate): If this bit is set to "1", then octets p to (p+2) shall be present, otherwise these octets shall not be present.
+-	Bit 3 – APRC (Additional Packet Rate Control): If this bit is set to "1", then the presence of octets q to (r+2) is determined as follows:
+-	If bit 1 (ULPR) is set to "1", then octets q to (q+2), the Additional Maximum Uplink Packet Rate shall be present. Otherwise, octets q to (q+2) shall not be present;
+-	If bit 2 (DLPR) is set to "1", then octets r to (r+2), the Additional Maximum Downlink Packet Rate shall be present. Otherwise, octets r to (r+2) shall not be present;
+-	Bits 4 to 8: Spare, for future use and set to "0".
+At least one bit in Octet 5 shall be set to "1". Several bits may be set to "1".
+When present, octets m to (m+2) indicate the maximum number of uplink packets allowed to be sent within the uplink time unit.
+When present, octets p to (p+2) indicate the maximum number of downlink packets allowed to be sent within the downlink time unit.
+When present, octets q to (q+2) indicate the additional maximum number of uplink packets allowed to be sent within the additional uplink time unit.
+When present, octets r to (r+2) indicate the additional maximum number of downlink packets allowed to be sent within the additional downlink time unit.
+The Additional Uplink/Downlink Time Unit shall be encoded as the Uplink/Downlink Time Unit, see Table 8.2.63.1.
+Table 8.2.63.1: Uplink/Downlink Time Unit
+Uplink/Downlink Time unit
+Bits 1 to 3 define the time unit as follows:
+Bits
+3 2 1
+0 0 0  minute
+0 0 1  6 minutes
+0 1 0  hour
+0 1 1  day
+1 0 0  week
+
+Other values shall be interpreted as 000 in this version of the protocol.
+
+The Maximum Uplink/Downlink Packet Rate shall be encoded as an Unsigned16 binary integer value. They shall indicate the maximum number of uplink/downlink packets allowed to be sent in the indicated uplink/downlink time unit respectively.
+The Additional Maximum Uplink/Downlink Packet Rate shall be encoded as an Unsigned16 binary integer value. They shall indicate the additional maximum number of uplink/downlink packets allowed to be sent in the indicated Additional uplink/downlink time unit respectively.
+NOTE:	The Serving PLMN rate control is only applicable to downlink packets with the value of Maximum Downlink Packet Rate set to equal to or higher than 10 and with the Downlink Time Unit set to 6 minutes. The Small Data Rate Control/APN rate control is applicable to both uplink/downlink packets with the Time Unit set to minute/hour/day/week.
+
 8.2.64	Outer Header Removal
 The Outer Header Removal IE type shall be encoded as shown in Figure 8.2.64-1. It contains the instructions to remove an Outer Header.
 
@@ -1449,3 +1508,32 @@ Spare	29 to 64
 NOTE 1:	If separation of roaming and non-roaming traffic is desired this value should only be used for the S5-U interface and "S8-U" (decimal 19) should be used for the S8-U interface.
 NOTE 2:	If separation of roaming and non-roaming traffic is desired this value should only be used for the Gn-U interface and "Gp-U" (decimal 20) should be used for the Gp-U interface.
 NOTE 3: If separation of roaming and non-roaming traffic is desired, this value should only be used for N9 non-roaming interfaces and (decimal value "21") should be used for N9 roaming interfaces.
+
+8.2.139	Packet Rate Status
+Packet Rate Status shall be encoded as shown in Figure 8.2.139-1.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 193 (decimal)	
+	3 to 4	Length = n	
+	5	Spare	APR	DL	UL	
+	a to (a+1)	Number of Remaining Uplink Packets Allowed	
+	b to (b+1)	Number of Remaining Additional Uplink Packets Allowed	
+	c to (c+1)	Number of Remaining Downlink Packets Allowed	
+	d to (d+1)	Number of Remaining Additional Downlink Packets Allowed	
+	e to (e+7)	Rate Control Status Validity Time	
+	m to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.139-1: Packet Rate Status
+The following flags are coded within Octet 5:
+-	Bit 1 – UL (remaining uplink packet limit): If this bit is set to "1", then octets 'a' to (a+1), the Number of Remaining Uplink Packets Allowed shall be present, otherwise these octets shall not present.
+-	Bit 2 – DL (remaining downlink packet limit): If this bit is set to "1", then octets 'c' to (c+1), the Number of Remaining Downlink Packets Allowed shall be present, otherwise these octets shall not present.
+-	Bit 3 – APR (Additional Packet Rates, i.e. remaining additional packet limit): If this bit is set to "1", then the presence of Number of Remaining Additional Uplink/Downlink Packets Allowed is determined as follows:
+-	If bit 1 (UL) is set to "1", then octets b to (b+1), the Number of Remaining Additional Uplink Packets Allowed shall be present. Otherwise, octets b to (b+1) shall not be present;
+-	If bit 2 (DL) is set to "1", then octets d to (d+1), the Number of Remaining Additional Downlink Packets Allowed shall be present. Otherwise, octets d to (d+1) shall not be present;
+-	Bits 4 to 8: Spare, for future use and set to "0".
+If either bit 1 or bit 2 is set to '1', then octets 'e' to (e+7), the Rate Control Status Validity Time shall be present.
+If present, the Number of Remaining Uplink Packets Allowed in octets 'a' to (a+1) shall indicate the number of uplink packets that are still allowed to be sent within the Rate Control Status Validity Time.
+If present, the Number of Remaining Additional Uplink Packets Allowed in octets 'b' to (b+1) shall indicate the number of additional uplink packets that are still allowed to be sent within the Rate Control Status Validity Time.
+If present, the Number of Remaining Downlink Packets Allowed in octets 'c' to (c+1) shall indicate the number of downlink packets that are still allowed to be sent within the Rate Control Status Validity Time.
+If present, the Number of Remaining Additional Downlink Packets Allowed in octets 'd' to (d+1) indicate the number of additional downlink packets that are still allowed to be sent within the Rate Control Status Validity Time.
+If present, the Rate Control Status Validity Time shall be coded as the time in seconds relative to 00:00:00 on 1 January 1900 (calculated as continuous time without leap seconds and traceable to a common time reference) where binary encoding of the integer part is in the 32 most significant bits and binary encoding of the fraction part in the 32 least significant bits. The fraction part is expressed with a granularity of 1 /2**32 second (see clause 8.135 in 3GPP TS 29.274 [9]).

@@ -25,7 +25,7 @@ The archive and excerpt hashes make the copies checkable:
 
 | Specification | Archive SHA-256 | Excerpt SHA-256 |
 |---|---|---|
-| TS 29.244 V16.9.1 | `88c0e4d30643bb49403214c09c749bd4c70da0ecbd32f6c9eb182b995da4dac7` | `a060a85dad12af322fd129ab583f09495dee0f5ef45ce2bdcef8a8b58e413a42` |
+| TS 29.244 V16.9.1 | `88c0e4d30643bb49403214c09c749bd4c70da0ecbd32f6c9eb182b995da4dac7` | `fcef1a10914546e95cb7f85b885d2f6917450ec8a6a0aa17019f5465ab75c9df` |
 | TS 29.281 V16.2.0 | `1cd5d70ebbe60393c215cf259196e7ac18622bea540c8c12d80fefceb10fdece` | `83849f824e84a8c4aa513fdfd43e3b64d7f123b678b496eb60840d45179d0edc` |
 | TS 38.415 V16.6.0 | `0a54fa84efb85eb7c377160e4458cb8cf90f91cce57f5598fd5f06da4c7c9f6f` | `e81aac78132d777a6c3d58f8648a3012ea382917c361bd1789101be5780a3d84` |
 | TS 23.501 V16.9.0 | `c88a8dbc0d7cfb36b9c77140a5133649fcd02834c7b91a6943e5b58a7c086052` | `5c1cb69106a95154fa6d94ae7f6a21a12aec338389c865d90bac731cf7c2ae51` |
@@ -55,7 +55,9 @@ decap writes, and a downlink PDR is keyed by the session's UE address (see
 their latest Release 16 revision, so there is no later revision in the
 released baseline to audit. The TS 29.244 clauses excerpted later for the
 N9, N19 and indirect-forwarding scenarios (5.23, 8.2.2, 8.2.24, 8.2.64 and
-8.2.118) are cited from V16.9.1 only and were not part of that comparison.
+8.2.118), and the Packet Rate clauses excerpted for `status-36` (7.5.4.22,
+7.5.5.4, 8.2.63 and 8.2.139), are cited from V16.9.1 only and were not part
+of that comparison.
 
 **Newer releases, not claimed.** The newest published revisions on 2026-10-20
 are TS 29.244 V20.1.0, TS 29.281 V19.2.0, TS 38.415 V19.1.0, TS 23.501
