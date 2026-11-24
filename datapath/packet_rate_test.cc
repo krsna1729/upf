@@ -10,6 +10,8 @@
 #include <thread>
 #include <vector>
 
+#include "packet_rate.h"
+
 namespace {
 
 using upf::datapath::PacketRateConfig;
@@ -195,4 +197,27 @@ TEST(PacketRateQuota, ConcurrentChecksNeverExceedTheLimit) {
     worker.join();
   }
   EXPECT_EQ(passes.load(), 10);
+}
+
+TEST(PacketRateCodec, ZeroMaximumStillProgramsAQuota) {
+  upf::pb::PacketRateValue value;
+  value.set_allowed(0);
+  value.set_period_seconds(60);
+  value.set_epoch(7);
+
+  auto entry = ParsePacketRateValue(value);
+  ASSERT_TRUE(entry.has_value()) << entry.error();
+  EXPECT_EQ(entry->config.allowed, 0u);
+  EXPECT_EQ(entry->config.primary_period_ns, kMinute);
+  EXPECT_EQ(entry->config.epoch, 7u);
+}
+
+TEST(PacketRateCodec, RefusesAQuotaWithNoPeriodOrTooLong) {
+  upf::pb::PacketRateValue none;
+  EXPECT_FALSE(ParsePacketRateValue(none).has_value());
+
+  upf::pb::PacketRateValue too_long;
+  too_long.set_allowed(1);
+  too_long.set_period_seconds(kMaxPacketRatePeriodSeconds + 1);
+  EXPECT_FALSE(ParsePacketRateValue(too_long).has_value());
 }

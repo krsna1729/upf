@@ -32,7 +32,6 @@ enum {
 constexpr size_t kDefaultCapacity = 65536;
 
 // 8.2.63's longest time unit is a week.
-constexpr uint32_t kMaxPeriodSeconds = 604800;
 constexpr uint64_t kNsPerSecond = 1000000000ull;
 
 const ResourceTables PacketRate::resource_tables = {
@@ -73,46 +72,11 @@ CommandResponse PacketRate::Init(const upf::pb::PacketRateArg &arg) {
           },
           [](const upf::pb::PacketRateValue &value)
               -> std::expected<std::any, std::string> {
-            // A maximum of zero with a period is a quota that passes nothing:
-            // the SMF said so with a present flag, and the record must enforce
-            // it rather than being read as "no rate".
-            if (value.period_seconds() == 0 &&
-                value.additional_period_seconds() == 0) {
-              return std::unexpected("a quota with no packet rate");
+            auto entry = ParsePacketRateValue(value);
+            if (!entry) {
+              return std::unexpected(entry.error());
             }
-            if (value.allowed() > 0 && value.period_seconds() == 0) {
-              return std::unexpected("a packet rate without a time unit");
-            }
-            if (value.additional() > 0 &&
-                value.additional_period_seconds() == 0) {
-              return std::unexpected(
-                  "an additional rate without its time unit");
-            }
-            if (value.period_seconds() > kMaxPeriodSeconds ||
-                value.additional_period_seconds() > kMaxPeriodSeconds) {
-              return std::unexpected("a time unit longer than a week");
-            }
-            if (value.seed_remaining() + value.seed_remaining_additional() >
-                    0 &&
-                value.seed_validity_unix_ns() == 0) {
-              return std::unexpected(
-                  "a status seed without a validity time");
-            }
-            Entry entry;
-            entry.config.allowed = value.allowed();
-            entry.config.primary_period_ns =
-                static_cast<uint64_t>(value.period_seconds()) * kNsPerSecond;
-            entry.config.additional = value.additional();
-            entry.config.additional_period_ns =
-                static_cast<uint64_t>(value.additional_period_seconds()) *
-                kNsPerSecond;
-            entry.config.epoch = value.epoch();
-            entry.config.seed_remaining = value.seed_remaining();
-            entry.config.seed_remaining_additional =
-                value.seed_remaining_additional();
-            entry.config.seed_validity_unix_ns =
-                value.seed_validity_unix_ns();
-            return std::any(entry);
+            return std::any(*entry);
           },
           // Every live quota, as its key names it.
           [this](const auto &visit) {
