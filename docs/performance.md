@@ -3983,3 +3983,54 @@ drops the usage IEs from the PFCP answer, which a real change keeps. Removing
 the read alone is therefore worth about twice the delete goodput, and the
 erase reply becomes the limit. Evidence: `.scratch/evidence/read-skip/`
 (`run.sh`, `churn-*/run/campaign.json`).
+
+## Deletion worker time after the counted erase (2026-11-25)
+
+#104 removed the usage read: the erase returns the session's counters as its
+operation's observed bytes (BESS D-210), so one N4 delete makes one round
+trip. The same transaction-timeline capture, one cell at 1M resident sessions
+and 10K/s offered deletes, shows the new split. Diagnostic build: shares
+transfer, absolute times do not.
+
+Window: 1,003.4 ms, 9,446 joined requests, 9,421 commit returns/s, 9,461
+client frames, 9,454 server frames; no perf loss, clock drift 30 ns. The
+eight session workers spent 6.666 s of their 8.027 s (83.0%) blocked inside
+`sessionWorker` → `answerSession`, all of it in `removeWithUsage` →
+`ApplyObserved` → `Transaction.Commit` → gRPC `RecvMsg`. The window recorded
+one `get_counts` return: the usage read is gone (2,328/s before), and the
+erase reply is the only round trip left in the handler.
+
+| Timeline edge (median) | µs |
+|---|---:|
+| PFCP decode to encode | 2.62 |
+| encode | 1.34 |
+| send to the daemon's frame read | 280.54 |
+| control lock | 0.97 |
+| apply | 18.4 |
+| daemon `Write` (the reply) | 205.41 |
+| `Write` to the Go receive dispatch | 160.58 |
+| receive dispatch to the decoded reply | 94.02 |
+| `Write` to the decoded reply | 291.32 |
+
+The edges overlap: the daemon's write and the Go receive cross in the
+transport, so the rows are not added. The reply's daemon write is the largest
+single interval. The cell completed 61,114 deletes in 6.57 s (9,302/s) at
+the same 10K offer where the 2026-11-22 capture completed 50,891 (7,669/s);
+the higher completed rate also means its transport medians are not a
+before/after comparison with the table above.
+
+**Chosen next cut: a second control connection, not batching.** The SDK
+keeps up to 32 persistent transaction streams on one HTTP/2 connection; in
+this window every frame carried one transaction (`frame_sizes {1: 9454}`),
+and a commit waits on its own stream's reply. Filling frames would need a
+batching delay, which the 2026-11-22 review already refused and which adds
+latency to the wait being removed. The remaining wait is the reply crossing
+one transport, so the candidate is a second gRPC connection carrying half
+the streams: a second HTTP/2 transport, reader and flow-control window, with
+no daemon change. Screen it first at the documented CPU allocation on delete
+alone; only a clean ABBA/BAAB campaign above can ship it, and a screen with
+no lower delete wait drops it.
+
+Evidence: `.scratch/evidence/transaction-timeline/main-trace/delete/`
+(`campaign.json`, `transactions/quality.json`, `transactions.go.trace`), and
+`go tool trace -pprof=sync transactions.go.trace`.
