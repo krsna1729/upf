@@ -703,13 +703,15 @@ func (c *Compiler) foldEnforcement(e *enforcement) ([]bess.Change, error) {
 func (c *Compiler) applyEnforcement(ctx context.Context, e *enforcement) error {
 	changes, err := c.foldEnforcement(e)
 	if err != nil {
-		c.finishEnforcement(e, err)
+		c.finishEnforcement(e, err, false)
 		return err
 	}
-	if len(changes) > 0 {
-		err = c.ap.Apply(ctx, changes...)
+	if len(changes) == 0 {
+		c.finishEnforcement(e, nil, false)
+		return nil
 	}
-	c.finishEnforcement(e, err)
+	err = c.ap.Apply(ctx, changes...)
+	c.finishEnforcement(e, err, true)
 	return err
 }
 
@@ -719,25 +721,30 @@ func (c *Compiler) applyEnforcement(ctx context.Context, e *enforcement) error {
 // apply. The returned error is the transaction's, shared by every session
 // that reached it.
 func (c *Compiler) applyEnforcements(ctx context.Context, batch []*enforcement) error {
+	type foldedEnforcement struct {
+		e    *enforcement
+		sent bool // its changes were in the transaction
+	}
 	changes := make([]bess.Change, 0, len(batch))
-	folded := make([]*enforcement, 0, len(batch))
+	folded := make([]foldedEnforcement, 0, len(batch))
 	for _, e := range batch {
 		ch, err := c.foldEnforcement(e)
 		if err != nil {
-			c.finishEnforcement(e, err)
+			c.finishEnforcement(e, err, false)
 			c.log.Warn("session: usage evaluation", "seid", e.s.LocalSEID,
 				"error", fmt.Errorf("compiling the enforcement: %w", err))
 			continue
 		}
 		changes = append(changes, ch...)
-		folded = append(folded, e)
+		folded = append(folded, foldedEnforcement{e: e, sent: len(ch) > 0})
 	}
 	var err error
 	if len(changes) > 0 {
 		err = c.ap.Apply(ctx, changes...)
 	}
-	for _, e := range folded {
-		c.finishEnforcement(e, err)
+	applied := len(changes) > 0
+	for _, f := range folded {
+		c.finishEnforcement(f.e, err, f.sent && applied)
 	}
 	return err
 }
@@ -760,14 +767,18 @@ func (c *Compiler) flushEnforcements(ctx context.Context, batch *[]*enforcement,
 
 // finishEnforcement completes one compiled enforcement: the same inflight,
 // overlap and rewrite bookkeeping a modification's apply does, then either
-// settle what landed or keep the session in the tick's set for a retry.
-func (c *Compiler) finishEnforcement(e *enforcement, err error) {
+// settle what landed or keep the session in the tick's set for a retry. sent
+// says the session's changes reached the Apply call: a fold refusal, or an
+// empty write, sent nothing and must not mark the session live.
+func (c *Compiler) finishEnforcement(e *enforcement, err error, sent bool) {
 	s := e.s
 	c.mu.Lock()
-	if _, ok := c.target.(sessionTarget); ok && (err == nil || !definiteRefusal(err)) {
-		// What may now be in the dataplane: an unanswered write may have
-		// committed, so the deletion erases the entry.
-		s.sessionLive = true
+	if sent {
+		if _, ok := c.target.(sessionTarget); ok && (err == nil || !definiteRefusal(err)) {
+			// What may now be in the dataplane: an unanswered write may have
+			// committed, so the deletion erases the entry.
+			s.sessionLive = true
+		}
 	}
 	s.inflight--
 	if err != nil {
