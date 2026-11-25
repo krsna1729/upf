@@ -44,7 +44,11 @@ Each miss below passed every unit test and lane, and showed only at
    twice per PDR were 29% of bytes allocated (190d996). A JSON → protojson
    round trip per change was 30% (744837d). `fmt.Sprint` ownership keys held
    37% of the live heap at 100K sessions (b7a02ae). The dedupe keys are
-   canonical bytes now (116c947); the deep clone per modify remains (UG-R6).
+   canonical bytes now (116c947). The deep clone per modify is kept
+   deliberately (UG-R6): `-session-actions` and `-session-qers` cap a
+   session's records at 16 each, and a copy-on-write snapshot would need a
+   three-way handle-ownership ledger (model, snapshot, pending lists) for a
+   bound that is constant per session.
 3. **A tick reads in bulk, and a bulk read is paged.** One RPC per session
    per tick was 1-2M round trips (645488a). One read per module is the fix,
    but one `get_counts` reply passes the 64 MiB message limit at about 2M
