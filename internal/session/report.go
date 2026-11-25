@@ -489,6 +489,8 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	ids := c.usage.ids
 	counts := readings(c.usage.reading)
 	var out []Report
+	var enforce []*enforcement
+	pendingChanges := 0
 	for start := 0; start < len(seids); {
 		for module, rules := range ids {
 			ids[module] = rules[:0]
@@ -563,11 +565,18 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 			if unread != nil {
 				c.log.Warn("session: usage evaluation", "seid", seid, "error", unread)
 			} else {
-				reports, err := c.judge(ctx, seid, s, counts, markers, now)
+				reports, pending, err := c.judge(seid, s, counts, markers, now)
 				if err != nil {
 					c.log.Warn("session: usage evaluation", "seid", seid, "error", err)
 				}
 				out = append(out, reports...)
+				if pending != nil {
+					if pendingChanges > 0 && pendingChanges+len(pending.write.resources)+1 > sweepBatch {
+						c.flushEnforcements(ctx, &enforce, &pendingChanges)
+					}
+					enforce = append(enforce, pending)
+					pendingChanges += len(pending.write.resources) + 1
+				}
 			}
 			if len(indications) > 0 {
 				out = append(out, c.errorReports(seid, s, indications)...)
@@ -575,6 +584,7 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 		}
 		start = end
 	}
+	c.flushEnforcements(ctx, &enforce, &pendingChanges)
 	c.clearUsageRead()
 	slices.SortStableFunc(out, func(a, b Report) int { return cmp.Compare(a.SEID, b.SEID) })
 	return out
@@ -625,22 +635,33 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 	if err != nil {
 		return nil, err
 	}
-	return c.judge(ctx, seid, s, counts, nil, now)
+	reports, pending, err := c.judge(seid, s, counts, nil, now)
+	if err != nil {
+		return reports, err
+	}
+	if pending != nil {
+		if err := c.applyEnforcement(ctx, pending); err != nil {
+			return reports, fmt.Errorf("the dataplane refused the enforcement: %w", err)
+		}
+	}
+	return reports, nil
 }
 
 // judge is the half of an evaluation that runs with the counters in hand:
-// decide what this session's URRs owe from them, and, when a quota is spent,
-// compile and apply the enforcement that stops its traffic -- one transaction,
-// the same way a modification writes them. The read is the caller's: Evaluate
-// reads one session's rules, EvaluateAll reads each counter module once for
-// every session of the tick.
-func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts readings, markers map[endMarkerKey]bool, now time.Time) (out []Report, result error) {
+// decide what this session's URRs owe from them and, when a quota is spent or
+// an earlier enforcement must be retried, compile the enforcement that stops
+// its traffic. It does not apply it: Evaluate applies one session's
+// enforcement at once, and EvaluateAll applies a tick's compiled enforcements
+// in bounded transactions (UG-R9). The read is the caller's: Evaluate reads
+// one session's rules, EvaluateAll reads each counter module once for every
+// session of the tick.
+func (c *Compiler) judge(seid uint64, s *Session, counts readings, markers map[endMarkerKey]bool, now time.Time) (out []Report, pending *enforcement, result error) {
 	c.mu.Lock()
 	if c.sessions[seid] != s {
 		c.mu.Unlock()
 		// The session went away while its counters were being read: the usage
 		// belongs to a session the SMF no longer has.
-		return nil, nil
+		return nil, nil, nil
 	}
 	reports, stopped := c.decide(s, counts, markers, now)
 	retry := c.usage.enforce.has(s.slot)
@@ -648,33 +669,148 @@ func (c *Compiler) judge(ctx context.Context, seid uint64, s *Session, counts re
 	c.mu.Unlock()
 
 	if !stopped && !retry {
-		return reports, nil
+		return reports, nil, nil
 	}
-	defer func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if result != nil && c.sessions[seid] == s {
-			c.usage.enforce.add(c.slotOf(s))
-			c.queueUsage(s)
-		} else if s.slot != 0 {
-			// A released session has no slot: its bit went with it.
-			c.usage.enforce.remove(s.slot)
-		}
-	}()
 	// The enforcement is a dataplane change, and it is compiled the way a
 	// modification compiles one: the PDRs that name the URR come out as drops.
 	changes, _, err := c.compile(s)
 	if err != nil {
-		return reports, fmt.Errorf("compiling the enforcement: %w", err)
+		c.retryEnforcement(seid, s)
+		return reports, nil, fmt.Errorf("compiling the enforcement: %w", err)
 	}
-	if err := c.apply(ctx, s, changes); err != nil {
-		// The flag stays in the model, so the next evaluation compiles the same
-		// enforcement again; until it lands the traffic keeps flowing over a
-		// quota, which the report says.
-		return reports, fmt.Errorf("the dataplane refused the enforcement: %w", err)
+	return reports, &enforcement{s: s, write: changes}, nil
+}
+
+// enforcement is one session's compiled quota enforcement, waiting for the
+// transaction that lands it with its batch.
+type enforcement struct {
+	s     *Session
+	write modelWrite
+}
+
+// foldEnforcement folds a compiled enforcement into its session-major entry,
+// the same way a modification's apply folds one.
+func (c *Compiler) foldEnforcement(e *enforcement) ([]bess.Change, error) {
+	changes := e.write.resources
+	if _, ok := c.target.(sessionTarget); !ok {
+		return changes, nil
 	}
-	c.settle(s, nil)
-	return reports, nil
+	return c.foldSession(e.s, changes, e.write.entry)
+}
+
+// applyEnforcement lands one session's enforcement at once: the
+// single-session path of Evaluate.
+func (c *Compiler) applyEnforcement(ctx context.Context, e *enforcement) error {
+	changes, err := c.foldEnforcement(e)
+	if err != nil {
+		c.finishEnforcement(e, err)
+		return err
+	}
+	if len(changes) > 0 {
+		err = c.ap.Apply(ctx, changes...)
+	}
+	c.finishEnforcement(e, err)
+	return err
+}
+
+// applyEnforcements folds a batch's compiled enforcements into one
+// transaction and settles what landed. A session whose fold refuses is
+// completed with that error and stays in the tick's set; the others still
+// apply. The returned error is the transaction's, shared by every session
+// that reached it.
+func (c *Compiler) applyEnforcements(ctx context.Context, batch []*enforcement) error {
+	changes := make([]bess.Change, 0, len(batch))
+	folded := make([]*enforcement, 0, len(batch))
+	for _, e := range batch {
+		ch, err := c.foldEnforcement(e)
+		if err != nil {
+			c.finishEnforcement(e, err)
+			c.log.Warn("session: usage evaluation", "seid", e.s.LocalSEID,
+				"error", fmt.Errorf("compiling the enforcement: %w", err))
+			continue
+		}
+		changes = append(changes, ch...)
+		folded = append(folded, e)
+	}
+	var err error
+	if len(changes) > 0 {
+		err = c.ap.Apply(ctx, changes...)
+	}
+	for _, e := range folded {
+		c.finishEnforcement(e, err)
+	}
+	return err
+}
+
+// flushEnforcements applies the enforcements collected so far in one
+// transaction and releases the batch. A refused transaction leaves every
+// session of the batch in the tick's set (finishEnforcement), so the next
+// tick retries.
+func (c *Compiler) flushEnforcements(ctx context.Context, batch *[]*enforcement, changes *int) {
+	if len(*batch) == 0 {
+		return
+	}
+	if err := c.applyEnforcements(ctx, *batch); err != nil {
+		c.log.Warn("session: usage evaluation", "sessions", len(*batch),
+			"error", fmt.Errorf("the dataplane refused the enforcement: %w", err))
+	}
+	*batch = nil
+	*changes = 0
+}
+
+// finishEnforcement completes one compiled enforcement: the same inflight,
+// overlap and rewrite bookkeeping a modification's apply does, then either
+// settle what landed or keep the session in the tick's set for a retry.
+func (c *Compiler) finishEnforcement(e *enforcement, err error) {
+	s := e.s
+	c.mu.Lock()
+	if _, ok := c.target.(sessionTarget); ok && (err == nil || !definiteRefusal(err)) {
+		// What may now be in the dataplane: an unanswered write may have
+		// committed, so the deletion erases the entry.
+		s.sessionLive = true
+	}
+	s.inflight--
+	if err != nil {
+		s.rewrite = true
+	} else if !s.overlap {
+		s.rewrite = false
+	}
+	if s.inflight == 0 {
+		s.overlap = false
+	}
+	live := c.sessions[s.LocalSEID] == s
+	switch {
+	case !live:
+		// A released session has no slot: its bit went with it.
+		if s.slot != 0 {
+			c.usage.enforce.remove(s.slot)
+		}
+	case err != nil:
+		// The flag stays in the model, so the next evaluation compiles the
+		// same enforcement again; until it lands the traffic keeps flowing
+		// over a quota, which the report says.
+		c.usage.enforce.add(c.slotOf(s))
+		c.queueUsage(s)
+	default:
+		c.usage.enforce.remove(s.slot)
+	}
+	c.mu.Unlock()
+	if err == nil {
+		c.settle(s, nil)
+	}
+}
+
+// retryEnforcement keeps a session whose enforcement could not even compile
+// in the tick's set. The caller does not hold the lock.
+func (c *Compiler) retryEnforcement(seid uint64, s *Session) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sessions[seid] == s {
+		c.usage.enforce.add(c.slotOf(s))
+		c.queueUsage(s)
+	} else if s.slot != 0 {
+		c.usage.enforce.remove(s.slot)
+	}
 }
 
 // readingOf is one rule's answer from a counting module as the decision reads

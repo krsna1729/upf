@@ -78,6 +78,9 @@ func TestBatchAndSingleSessionEnforceTheSameQuotas(t *testing.T) {
 	bulkRec.counts = map[string][]bess.RuleCount{testConfig().Up.Counters: measuredRules(t, bulk, seids)}
 	eachRec.counts = map[string][]bess.RuleCount{testConfig().Up.Counters: measuredRules(t, each, seids)}
 
+	// The eight enforcements land in one transaction, not one per session:
+	// a tick's quota enforcement is a bounded batch (UG-R9).
+	bulkRec.ops.Reset()
 	bulkReports := bulk.EvaluateAll(ctx, traffic)
 
 	var eachReports []Report
@@ -103,6 +106,7 @@ func TestBatchAndSingleSessionEnforceTheSameQuotas(t *testing.T) {
 		t.Errorf("the tick's reports are not the per-session path's:\n tick: %+v\n each: %+v",
 			bulkReports, eachReports)
 	}
+	scaletest.RPCsAtMost(t, &bulkRec.ops, "Apply", 1)
 }
 
 // urrSession is urrEstablishment with the session's own complete F-TEID key
