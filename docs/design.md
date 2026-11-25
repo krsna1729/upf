@@ -1603,8 +1603,10 @@ it. Unresolved neighbors fail closed in the UPF graph.
   provides the FIB, not a RIB. `rt_transport/routes` is static graph
   configuration.
 - No automatic connected or local route is derived from a Vif. The deployment
-  writes prefixes explicitly; BESS has an IPv4 `ConnectedRouteFor` helper but
-  does not synthesize IPv6 connected routes.
+  writes prefixes explicitly. BESS derives an interface address's connected
+  and local routes in both families (`ConnectedRouteFor`, `DerivedRoutes`,
+  `DerivedRoutesV6`; D-164, D-178, D-212), but a graph must use those helpers:
+  a Vif still adds no route by itself.
 - Destination mode uses the packet's current route domain. A FAR that forwards
   into a different Network Instance requires a policy next hop; the compiler
   refuses that cross-instance FAR in destination mode.
