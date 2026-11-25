@@ -63,8 +63,9 @@ Each miss below passed every unit test and lane, and showed only at
    and stop at the first refused batch (9bee0ab, b7a02ae); one transaction
    of every entry breaks the 2048 retire budget and the 64 MiB limit
    (D-148). Empty a table on the daemon side; never read it back to erase it
-   (a2d16c1, D-171). Quota enforcement inside a tick is still one
-   transaction per session (UG-R9).
+   (a2d16c1, D-171). Quota enforcement inside a tick was one transaction per
+   session (UG-R9); the tick now lands a bounded batch of sessions in one
+   transaction, bounded by the same `sweepBatch` changes.
 6. **Bound concurrency where the engine is serial.** 256 concurrent applies
    stalled for 30 s at a time; the client holds 32 tokens (31cb745). The
    N4 rate is set by the server's serial loop: 522/s at one in flight, 534/s
