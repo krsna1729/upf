@@ -46,9 +46,12 @@ Each miss below passed every unit test and lane, and showed only at
    37% of the live heap at 100K sessions (b7a02ae). The dedupe keys are
    canonical bytes now (116c947). The deep clone per modify is kept
    deliberately (UG-R6): `-session-actions` and `-session-qers` cap a
-   session's records at 16 each, and a copy-on-write snapshot would need a
-   three-way handle-ownership ledger (model, snapshot, pending lists) for a
-   bound that is constant per session.
+   session's action-bearing and rate-bearing records at 16 each, so the copy
+   those bounds cover is constant per session. A drop PDR takes no action
+   (`compile.go`, "A drop needs no action record"), so a session's drop PDRs
+   are bounded only by the SMF's message (UG-R10) and the clone is linear in
+   them. A copy-on-write snapshot would need a three-way handle-ownership
+   ledger (model, snapshot, pending lists) either way.
 3. **A tick reads in bulk, and a bulk read is paged.** One RPC per session
    per tick was 1-2M round trips (645488a). One read per module is the fix,
    but one `get_counts` reply passes the 64 MiB message limit at about 2M
