@@ -85,7 +85,10 @@ Each miss below passed every unit test and lane, and showed only at
    now compacts to the live sessions and shares its fsyncs (2d709bb). Go
    maps do not shrink after a mass teardown (UG-R5).
 8. **Cap what the peer controls.** An uncapped PDR count per session gives
-   O(P²) work under the shared lock (UG-R10).
+   O(P²) work under the shared lock (UG-R10). The compiler refuses an
+   establishment, or a modification that would grow a session, past
+   `-max-pdrs` (default 64); a drop PDR takes no action id, so the action
+   space does not bound the count.
 9. **Garbage is memory.** upfd sets GOMEMLIMIT to the smallest cgroup
    `memory.max` on its path, less max(32 MiB, 10%), unless GOMEMLIMIT is set
    (f28b7ac). Watch allocations per operation: `BenchmarkEstablish` reports

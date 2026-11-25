@@ -613,6 +613,15 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 		c.log.Warn("session: cannot read the establishment request", "error", err)
 		return c.establishResponse(req, cpSEID, 0, parseCause(err), nil)
 	}
+	// UG-R10: a peer controls how many PDRs a session holds, and a drop PDR
+	// takes no action id, so nothing else bounds the count. Refuse before the
+	// merge allocates the model the compile would then copy. A checkpoint
+	// replay is the SMF's existing session, so it keeps what it had.
+	if admit && c.pdrCapRefuses(nil, pdrs, removals{}) {
+		c.log.Warn("session: the establishment names more PDRs than one session may hold",
+			"cp_seid", cpSEID, "pdrs", len(pdrs), "max_pdrs", c.cfg.MaxPDRs)
+		return c.establishResponse(req, cpSEID, 0, ie.CauseNoResourcesAvailable, nil)
+	}
 
 	c.mu.Lock()
 	// A retransmission of an establishment we already applied: answer as
@@ -756,6 +765,18 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		return modifyResponse(req, hdr, parseCause(err), nil)
 	}
 	rm := parseRemovals(ies)
+	// UG-R10: the merged model's PDR count is what the compile walks and the
+	// snapshot copies. Refuse growth past the cap before the snapshot stages
+	// the model, and before the merge takes the request's PDRs; a session
+	// already over it may still change without growing.
+	c.mu.Lock()
+	overCap := c.pdrCapRefuses(s, pdrs, rm)
+	c.mu.Unlock()
+	if overCap {
+		c.log.Warn("session: the modification would grow past the PDR cap",
+			"seid", seid, "pdrs", len(pdrs), "max_pdrs", c.cfg.MaxPDRs)
+		return modifyResponse(req, hdr, ie.CauseNoResourcesAvailable, nil)
+	}
 	// A Query Packet Rate Status names QERs the session holds; an unknown one
 	// is refused before anything is applied, the way a Query URR naming an
 	// unknown URR is.
@@ -2926,6 +2947,28 @@ func qerHoldsMeter(s *Session, id uint32) bool {
 	return false
 }
 
+// pdrCapRefuses reports whether a request would take the session past
+// Config.MaxPDRs (UG-R10). adds are the request's PDRs and rm the ids it
+// removes; a restated id counts once. A session already over the cap (a
+// checkpoint written before the cap) may change as long as the change does not
+// grow it, so it can still be modified down.
+func (c *Compiler) pdrCapRefuses(s *Session, adds []pdrReq, rm removals) bool {
+	ids := make(map[uint16]struct{}, len(adds))
+	if s != nil {
+		for id, _ := range s.PDRs().all() {
+			ids[id] = struct{}{}
+		}
+	}
+	current := len(ids)
+	for _, id := range rm.pdrs {
+		delete(ids, id)
+	}
+	for _, p := range adds {
+		ids[p.id] = struct{}{}
+	}
+	return len(ids) > int(c.cfg.MaxPDRs) && len(ids) > current
+}
+
 // modelWrite keeps the native entry decision with the compiled resources.
 // An empty delta must never be folded into an empty replacement session.
 type modelWrite struct {
@@ -2936,6 +2979,7 @@ type modelWrite struct {
 // compile turns a session's model into the resource changes that program it,
 // and the Created PDRs the answer carries. Every action and meter id the
 // session needs is allocated here, once.
+
 func (c *Compiler) compile(s *Session) (modelWrite, []*ie.IE, error) {
 	return c.compileModel(s, nil, false)
 }

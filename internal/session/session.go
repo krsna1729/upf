@@ -392,6 +392,14 @@ type Config struct {
 	MaxMeters  uint32
 	MaxTEIDs   uint32
 
+	// MaxPDRs bounds the PDRs one session may hold (UG-R10). A drop PDR takes
+	// no action id, so the action space does not bound it; a peer could
+	// otherwise make each session's compile and snapshot copy linear in a
+	// number it chooses. Zero uses 64. A session already over the cap (one
+	// restored from a checkpoint written before the cap) may change as long as
+	// the change does not grow it.
+	MaxPDRs uint32
+
 	// MaxSessions bounds established sessions plus in-flight or uncertain
 	// establishments. Zero uses Sessions.MaxSessions for session-major,
 	// otherwise MaxActions, falling back to 65536 when neither is set.
@@ -452,6 +460,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxTEIDs == 0 {
 		c.MaxTEIDs = 1 << 16
+	}
+	if c.MaxPDRs == 0 {
+		c.MaxPDRs = 64
 	}
 	if c.IDReuseDelay == 0 {
 		// A second is orders of magnitude more than the cascade of grace
