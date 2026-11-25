@@ -47,6 +47,10 @@ PLUG=${PLUG:-$ROOT/datapath/build}
 CERT_URL=https://raw.githubusercontent.com/free5gc/free5gc-compose/master/cert
 
 IMSI=${IMSI:-imsi-208930000000001}
+IMSI2=${IMSI2:-imsi-208930000000002}
+# The second UE (ci/interop/ue.sh) is on by default; SECOND_UE=0 runs the
+# original one-UE environment.
+SECOND_UE=${SECOND_UE:-1}
 PLMN=${PLMN:-20893}
 
 # DATAPLANE=1: real packets through bessd. Everything below is fixed -- names,

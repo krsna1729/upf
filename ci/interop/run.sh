@@ -9,7 +9,10 @@
 #   a  PFCP association: the SMF dials upfd, heartbeats follow
 #   b  registration and PDU session establishment: the UE registers, asks for
 #      a session, and the SMF's Session Establishment Request meets upfd
-#   c  PDU session release: the UE releases it, the SMF's Session Deletion
+#   b2 packets through the dataplane (DATAPLANE=1)
+#   b3 the second UE: its registration and PDU session (SECOND_UE=0 skips it);
+#      with DATAPLANE=1, twenty echoes through its own tunnel
+#   c  PDU session release: each UE releases its session, the SMF's Deletion
 #
 # A stage that does not complete stops the run there, with the evidence
 # collected up to it. Environment: LABEL (name of the evidence directory,
@@ -101,13 +104,65 @@ if [ -n "$DATAPLANE" ]; then
   STAGE_REACHED=b2
 fi
 
+# --- b3: the second UE ----------------------------------------------------
+# The second nr-ue shares the gNB and has its own IMSI, subscription and PDU
+# session. The proof is at the UPF: two establishments with distinct UE
+# addresses, then (with a dataplane) packets under the second session.
+if [ "$SECOND_UE" = 1 ]; then
+  log "stage b3: second UE"
+  out2=""
+  for _ in $(seq 1 60); do
+    out2=$(dk logs "$PREFIX-ue2" 2>&1)
+    grep -q "PDU Session establishment is successful" <<<"$out2" && break
+    grep -q "PDU Session Establishment Reject" <<<"$out2" && break
+    sleep 1
+  done
+  if ! grep -q "PDU Session establishment is successful" <<<"$out2"; then
+    log "stage b3 FAILED: the second UE has no PDU session ($(grep -c 'PDU Session Establishment Reject' <<<"$out2") rejects)"
+    RC=1; finish
+  fi
+  established=$(grep -c "session: established" "$LOGS/upfd.log")
+  ue_ips=$(grep "session: established" "$LOGS/upfd.log" | grep -o 'ue_ip=[^ ]*' | sort -u | wc -l)
+  log "the second UE's PDU session is established; upfd: $established establishments, $ue_ips distinct UE addresses"
+  if [ "$established" -lt 2 ] || [ "$ue_ips" -lt 2 ]; then
+    log "stage b3 FAILED: upfd did not establish two sessions with distinct addresses"
+    RC=1; finish
+  fi
+  if [ -n "$DATAPLANE" ]; then
+    log "stage b3: packets through the second UE's tunnel"
+    ul0=$(dp_pkts ul) && dl0=$(dp_pkts dl) || {
+      log "stage b3 FAILED: reading the UPF's initial counters"; RC=1; finish
+    }
+    "$D/ue.sh" traffic 20 2 >"$LOGS/ping2.out" 2>&1 || true
+    ul1=$(dp_pkts ul) && dl1=$(dp_pkts dl) || {
+      log "stage b3 FAILED: reading the UPF's final counters"; RC=1; finish
+    }
+    loss=$(grep -o '[0-9]*% packet loss' "$LOGS/ping2.out" | tail -1 | tr -dc '0-9')
+    log "ping (second UE): loss=${loss:-?}%, cnt_ul +$((ul1 - ul0)) packets, cnt_dl +$((dl1 - dl0)) packets"
+    printf 'ul_before=%s\nul_after=%s\ndl_before=%s\ndl_after=%s\n' \
+      "$ul0" "$ul1" "$dl0" "$dl1" >"$LOGS/traffic-counters-2.out"
+    if [ "${loss:-100}" != 0 ]; then
+      log "stage b3 FAILED: the second UE's echo did not come back ($(tail -3 "$LOGS/ping2.out" | tr '\n' ' '))"
+      RC=1; finish
+    fi
+    if [ $((ul1 - ul0)) -lt 20 ] || [ $((dl1 - dl0)) -lt 20 ]; then
+      log "stage b3 FAILED: the UPF's counters did not count the second UE's twenty echoes (uplink $((ul1 - ul0)), downlink $((dl1 - dl0)))"
+      RC=1; finish
+    fi
+  fi
+  STAGE_REACHED=b3
+fi
+
 # --- c: release -----------------------------------------------------------
 log "stage c: PDU session release"
 "$D/ue.sh" release || true
 sleep 10
 smflog=$(dk logs "$PREFIX-smf" 2>&1)
-if ! grep -q "Received PFCP Session Deletion Accepted Response" <<<"$smflog"; then
-  log "stage c FAILED: the SMF has no accepted PDU session deletion"; RC=1; finish
+want=1
+[ "$SECOND_UE" = 1 ] && want=2
+got=$(grep -c "Received PFCP Session Deletion Accepted Response" <<<"$smflog")
+if [ "$got" -lt "$want" ]; then
+  log "stage c FAILED: the SMF has $got accepted PDU session deletions, want $want"; RC=1; finish
 fi
 STAGE_REACHED=c
 finish

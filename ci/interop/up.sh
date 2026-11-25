@@ -19,6 +19,7 @@
 #   SMF_NODE_ID_FQDN=1 ci/interop/up.sh   # the SMF's Node ID as its FQDN, as the stock config has it
 #   SHIM=1 ci/interop/up.sh                   # diagnostic: repair upfd's establishment response (n4shim)
 #   SUBSCRIBER=subscriber-flows.json ci/interop/up.sh   # two PCC flow rules: SDF filters and QER/QFI per rule
+#   SUBSCRIBER2=subscriber-2.json ci/interop/up.sh      # the second UE's subscription (IMSI2)
 #   URR_PERIOD=0 URR_THRESHOLD=0 ci/interop/up.sh   # the SMF creates no default URRs
 #   UPFD_BIN=/path/to/upfd ci/interop/up.sh   # skip building upfd
 #   UPF_TARGET=appliance DATAPLANE=1 ci/interop/up.sh  # production owned appliance on the same live veths
@@ -233,6 +234,15 @@ else
   code=$(curl -sS --max-time 10 -o "$LOGS/subscriber.out" -w '%{http_code}' -H "Token: $TOKEN" -H 'Content-Type: application/json' \
     --data-binary @"$ROOT/deploy/interop/${SUBSCRIBER:-subscriber.json}" "$WEB/api/subscriber/$IMSI/$PLMN")
   case "$code" in 200|201) log "subscriber $IMSI provisioned" ;; *) cat "$LOGS/subscriber.out" >&2; die "provisioning the subscriber: HTTP $code" ;; esac
+fi
+# The second UE's subscriber. It uses its own file: SUBSCRIBER=... overrides
+# the first UE's subscription (the flow-rule arm), not this one.
+if curl -fsS --max-time 5 -H "Token: $TOKEN" "$WEB/api/subscriber" 2>/dev/null | grep -q "$IMSI2"; then
+  log "subscriber $IMSI2 already provisioned"
+else
+  code=$(curl -sS --max-time 10 -o "$LOGS/subscriber-2.out" -w '%{http_code}' -H "Token: $TOKEN" -H 'Content-Type: application/json' \
+    --data-binary @"$ROOT/deploy/interop/${SUBSCRIBER2:-subscriber-2.json}" "$WEB/api/subscriber/$IMSI2/$PLMN")
+  case "$code" in 200|201) log "subscriber $IMSI2 provisioned" ;; *) cat "$LOGS/subscriber-2.out" >&2; die "provisioning the second subscriber: HTTP $code" ;; esac
 fi
 
 # The SMF is ready when its N4 side has dialed the UPF: it starts the

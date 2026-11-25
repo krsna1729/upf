@@ -22,6 +22,26 @@ ran, but no packet crossed `bessd` (no N3/N6 ports in this environment), so the
 usage reports of the deletion carry zero volume, and no periodic or threshold
 Session Report Request was seen in the 15 s hold.
 
+**Two UEs (2026-11-26, `upfd` at `20a29b6`, the BESS stage from
+`build/bess`; evidence `runs/two-ue-netns` for N4 and `runs/two-ue-dp3` for
+the dataplane): the stock SMF now drives two sessions from two UEs on the one
+gNB.** Each UE has its own subscription (`subscriber.json`,
+`subscriber-2.json`) and UE config (`uecfg.yaml`, `uecfg2.yaml`). The second UE
+runs in its own network namespace and reaches the gNB's radio link over the
+interop network: two `nr-ue` processes in one namespace collide on UERANSIM's
+per-session routing table, because both PDU sessions are PSI 1. The gNB's
+`linkIp` is `gnb.free5gc.org` for the same reachability.
+
+In `runs/two-ue-dp3` (`DATAPLANE=1`, graph target) the SMF established
+10.60.0.1 and 10.60.0.2, two distinct UE addresses in `upfd`; twenty echoes
+from each UE's tunnel returned with zero loss, and the graph's `cnt_ul` and
+`cnt_dl` counters rose 0→20 for the first UE and 20→40 for the second. Both
+releases were accepted (two PFCP Session Deletion responses). The second UE
+then re-established a session (10.60.0.3): its local release is followed by a
+new establishment, which the environment took down. `ci/interop/run.sh`
+checks the two sessions' distinct addresses and, with `DATAPLANE=1`, both
+echo paths; `SECOND_UE=0` runs the original one-UE environment.
+
 | # | message | what the capture shows |
 |---|---|---|
 | 1 | Association Setup | accepted, heartbeats every 10 s answered |
@@ -115,23 +135,25 @@ flowchart LR
 |---|---|
 | `ci/interop/lib.sh` | names, addresses, helpers; everything is prefixed `upf-interop-` |
 | `ci/interop/up.sh` | network, firewall rule, bessd + graph, upfd, capture, core, subscriber; idempotent |
-| `ci/interop/ue.sh start\|release\|status\|stop` | gNB + UE containers; `release` = `nr-cli … ps-release 1` |
+| `ci/interop/ue.sh start\|release\|status\|traffic [count] [1\|2]\|stop` | gNB + UE containers (the second UE in its own namespace); `release` = each UE's `nr-cli … ps-release 1`; `traffic` selects the UE's tunnel |
 | `ci/interop/down.sh` | removes exactly those, saves container logs, stops upfd/bessd with SIGTERM and fails on a non-zero exit status (as `ci/n4-path.sh` does); idempotent |
 | `ci/interop/report.sh <label>` | evidence into `build/run/interop/runs/<label>/`: pcap, decoded IE tree (`n4.txt`), one-line view (`n4.summary`), every log |
-| `ci/interop/run.sh` | down, up, stage a, b, (b2 with `DATAPLANE=1`), c, report, down; prints `stage reached: x` and exits non-zero unless every stage passed (b2: twenty echoes back and at least twenty packets on each of `cnt_ul`/`cnt_dl`) |
+| `ci/interop/run.sh` | down, up, stage a, b, (b2), b3 (second UE), c, report, down; prints `stage reached: x` and exits non-zero unless every stage passed (b2/b3: twenty echoes back and at least twenty packets on each of `cnt_ul`/`cnt_dl`; b3: two establishments with distinct UE addresses) |
 | `ci/interop/pfcpdump/` | pcap -> PFCP IE tree (tshark is not installed; `go-pfcp` decodes, the common UPF IEs are decoded bit by bit, every leaf also in hex) |
 | `ci/interop/n4shim/` | **diagnostic** relay used only with `SHIM=1` (below) |
 | `deploy/interop/free5gc/*.yaml`, `subscriber*.json` | NF configs, the subscriber |
 
 ```
-ci/interop/run.sh                                         # stock SMF
+ci/interop/run.sh                                         # stock SMF, two UEs
+SECOND_UE=0 ci/interop/run.sh                             # the one-UE baseline
+DATAPLANE=1 ci/interop/run.sh                             # both UEs' data paths
 LABEL=no-urr URR_PERIOD=0 URR_THRESHOLD=0 ci/interop/run.sh
 LABEL=x SHIM=1 URR_PERIOD=0 URR_THRESHOLD=0 ci/interop/run.sh        # diagnostic, reaches (c)
 SUBSCRIBER=subscriber-flows.json ...                      # two PCC rules: SDF filters, per-rule QER/URR
 SMF_NODE_ID_FQDN=1 ...                                    # the SMF's Node ID as its FQDN (stock config)
 ```
 
-A full `run.sh` takes 40 s (100 s with `subscriber-flows.json`: the UE waits out T3580).
+A full `run.sh` takes about 70 s with two UEs (100 s with `subscriber-flows.json`, where the first UE waits out T3580).
 
 Isolation: ports are bessd's picked-free gRPC port (`build/run/interop/state/bess_port`)
 and UDP 8805 on the bridge gateway only (`up.sh` refuses if 8805 is held on a
@@ -508,7 +530,8 @@ Two gaps this arm exposed; the first is closed:
 
 ```
 cd datapath && ninja -C build                    # the plugin, once
-ci/interop/run.sh                                # stage a/b/c with the stock SMF
+ci/interop/run.sh                                # stage a/b/b3/c with the stock SMF, two UEs
+DATAPLANE=1 ci/interop/run.sh                    # and both UEs' data paths
 LABEL=flows SUBSCRIBER=subscriber-flows.json URR_PERIOD=0 URR_THRESHOLD=0 ci/interop/run.sh
 build/run/interop/runs/<label>/n4.summary        # one line per PFCP message; n4.txt: full IE tree
 ```
@@ -516,4 +539,5 @@ build/run/interop/runs/<label>/n4.summary        # one line per PFCP message; n4
 Evidence of the runs quoted here is in `build/run/interop/runs/`:
 `fixes-ccf667c` (the current result), `stock-urr`, `no-urr`, `fqdn-node-id`,
 `shim-no-urr`, `shim-stock-urr`, `shim-no-urr-flows` (gitignored, regenerated
-by `run.sh`).
+by `run.sh`), and `two-ue-netns` / `two-ue-dp3` for the second UE (N4 and the
+dataplane).

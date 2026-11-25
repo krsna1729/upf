@@ -21,6 +21,7 @@ cp "$LOGS/bessd.log" "$OUT/bessd.log" 2>/dev/null || true
 cp "$STATE/target" "$OUT/target.txt" 2>/dev/null || true
 cp "$STATE/graph.yaml" "$OUT/dataplane.yaml" 2>/dev/null || true
 cp "$LOGS/traffic-counters.out" "$OUT/traffic-counters.out" 2>/dev/null || true
+cp "$LOGS/traffic-counters-2.out" "$OUT/traffic-counters-2.out" 2>/dev/null || true
 for c in $(dk ps -a --filter "name=^$PREFIX-" --format '{{.Names}}'); do
   dk logs "$c" >"$OUT/${c#"$PREFIX"-}.docker.log" 2>&1 || true
 done
@@ -44,6 +45,7 @@ if [ -s "$STATE/bess_port" ]; then
   fi
 fi
 cp "$LOGS/ping.out" "$OUT/ping.out" 2>/dev/null || true
+cp "$LOGS/ping2.out" "$OUT/ping2.out" 2>/dev/null || true
 if ip netns list 2>/dev/null | grep -q "^$DN_NS\b"; then
   sudo -n ip netns exec "$DN_NS" ip -s link show eth0 >"$OUT/dn-eth0.txt" 2>/dev/null || true
 fi
