@@ -73,9 +73,10 @@ Each miss below passed every unit test and lane, and showed only at
    session's order (f28b7ac).
 7. **Everything that grows has a reclaim path that runs.** The F-TEID
    context pool's freed list grows forever, because the walk never wraps
-   (UG-B4). The journal grows with message history, not live sessions
-   (UG-B5). Go maps do not shrink after a mass teardown (UG-R5). One fsync
-   per message serialises every worker (UG-R7).
+   (UG-B4). The journal once grew with message history, not live sessions
+   (UG-B5), and one fsync per message serialised every worker (UG-R7); it
+   now compacts to the live sessions and shares its fsyncs (2d709bb). Go
+   maps do not shrink after a mass teardown (UG-R5).
 8. **Cap what the peer controls.** An uncapped PDR count per session gives
    O(P²) work under the shared lock (UG-R10).
 9. **Garbage is memory.** upfd sets GOMEMLIMIT to the smallest cgroup
