@@ -51,13 +51,13 @@ Each miss below passed every unit test and lane, and showed only at
    rules, and then no URR is reported at all (UG-B1). Reading every counted
    rule every tick is still O(N) bytes: the tick now reads only sessions that
    counted traffic (`get_changes`, acknowledged only after it is queued) or
-   whose clock is due. The downlink tick still sends one RPC per idle session
-   (UG-B3).
-4. **No per-tick O(N) under the session lock.** The usage and downlink
-   ticks walk every session under `c.mu`, which stalls every establishment
-   (UG-R1); per-session allocations per tick add about 10M per tick (UG-R2).
-   Keep the set that needs work (the measured sessions) up to date in
-   compile, and walk only that, in pages, outside the lock.
+   whose clock is due. The downlink tick names every owed flow in one reading
+   per count chunk (f5ef52b), not one RPC per idle session (UG-B3).
+4. **No per-tick O(N) under the session lock.** Both ticks once walked every
+   session under `c.mu`, stalling every establishment (UG-R1), and the decide
+   path allocated about four times per measured session per tick (UG-R2).
+   The compiler now keeps the measured and buffering session sets and walks
+   them at most `tickHold` sessions per lock hold (f5ef52b).
 5. **Work over many sessions is bounded batches.** The startup sweep and
    the association end apply `sweepBatch` (1000) changes per transaction
    and stop at the first refused batch (9bee0ab, b7a02ae); one transaction
