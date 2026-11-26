@@ -1191,19 +1191,38 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			}
 		}
 		if p.hasPacketRate {
+			// A direction the message stops capping retires its quota id:
+			// this transaction erases the record (compile) and settle hands
+			// the id back once it lands. Keeping the id would leave the QER
+			// naming a record that is gone, and every later erase of it --
+			// the deletion's included -- would be refused. A later profile
+			// for the direction takes a fresh id below.
+			if entry.rateUL != 0 && !p.pktULSet {
+				s.changes().retiredRates = append(s.changes().retiredRates, retiredRate{id: entry.rateUL})
+				entry.rateUL = 0
+			}
+			if entry.rateDL != 0 && !p.pktDLSet {
+				s.changes().retiredRates = append(s.changes().retiredRates, retiredRate{id: entry.rateDL, down: true})
+				entry.rateDL = 0
+			}
+			// No quota id left is a session this UPF cannot carry as asked
+			// (cause 72, as for an F-TEID): accepting it uncapped would
+			// answer the SMF with a rate control that is not enforced. An
+			// id taken for the other direction is released with the refusal
+			// (releaseSession, rollback).
 			if entry.rateUL == 0 && p.pktULSet {
-				if id, err := c.rates.alloc(); err != nil {
-					c.log.Warn("session: no packet-rate id left for a QER", "qer", q.id)
-				} else {
-					entry.rateUL = id
+				id, err := c.rates.alloc()
+				if err != nil {
+					return fmt.Errorf("%w: QER %d packet-rate id: %v", errNoResources, q.id, err)
 				}
+				entry.rateUL = id
 			}
 			if entry.rateDL == 0 && p.pktDLSet {
-				if id, err := c.rates.alloc(); err != nil {
-					c.log.Warn("session: no packet-rate id left for a QER", "qer", q.id)
-				} else {
-					entry.rateDL = id
+				id, err := c.rates.alloc()
+				if err != nil {
+					return fmt.Errorf("%w: QER %d packet-rate id: %v", errNoResources, q.id, err)
 				}
+				entry.rateDL = id
 			}
 		}
 	}
@@ -1667,11 +1686,12 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 			return err
 		}
 		if h := s.QERs().take(id); h != 0 {
-			// The QER goes, and its meters go with the session's other ids at
-			// teardown (releaseSession): releasing them here would hand an id
-			// back to the pool that a refused modification restores the QER
-			// to -- and that another session would then police with while this
-			// one still names it. Its record moves to the removed QERs.
+			// The QER goes. Its record moves to the removed QERs: the
+			// transaction erases its meter and quota records (compile), and
+			// settle frees it and hands its ids back once that lands.
+			// Releasing them here would hand an id back to the pool that a
+			// refused modification restores the QER to -- and that another
+			// session would then police with while this one still names it.
 			r := s.rareMut()
 			r.removedQERs = append(r.removedQERs, h)
 		}
@@ -2876,24 +2896,6 @@ func (c *Compiler) sameQERPacketRate(before *modelSnapshot, q *qer, down bool) b
 	return oldQ.rateUL == q.rateUL
 }
 
-// qerPacketRateDropped says the message stopped naming a direction's Packet
-// Rate: the quota record is erased, while the id stays the QER's for a later
-// profile or the removal.
-func (c *Compiler) qerPacketRateDropped(before *modelSnapshot, q *qer, down bool) bool {
-	if before == nil {
-		return false
-	}
-	oldQ := before.qers().at(q.id)
-	if oldQ == nil {
-		return false
-	}
-	old := c.policy(oldQ)
-	if down {
-		return old.pktDLSet && !c.policy(q).pktDLSet
-	}
-	return old.pktULSet && !c.policy(q).pktULSet
-}
-
 // Admission depends on ingress PDIs and their resolved End Marker relays,
 // not unrelated plain-N6 PDRs or FARs. Comparing those inputs once avoids
 // constructing identical F-TEID keys, maps and relay lists for every update.
@@ -3294,12 +3296,23 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		bufferCounterErase(p)
 		flowEntryErase(p)
 	}
-	// A QER a modification removed owned its packet-rate quota records; no PDR
-	// names them once it is gone, so the removal erases them here.
+	// A QER a modification removed owned its meter and packet-rate quota
+	// records; no PDR names them once it is gone, so the transaction that
+	// removes it erases them. The list holds only the QERs this transaction
+	// removes: settle frees them once it lands, so no later transaction
+	// erases those keys again (the engine refuses erasing an absent key).
 	for _, h := range s.rare().removedQERs {
 		q := c.recs.qers.at(h)
 		if q == nil {
 			continue
+		}
+		if c.policy(q).hasRate {
+			if q.meterUL != 0 {
+				erase(bess.Change{Resource: c.res(MetersUplink), Key: bess.Fields(IDKey{ID: q.meterUL})})
+			}
+			if q.meterDL != 0 {
+				erase(bess.Change{Resource: c.res(MetersDownlink), Key: bess.Fields(IDKey{ID: q.meterDL})})
+			}
 		}
 		if q.rateUL != 0 {
 			erase(bess.Change{Resource: c.res(PacketRatesUplink), Key: bess.Fields(IDKey{ID: q.rateUL})})
@@ -3307,6 +3320,11 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		if q.rateDL != 0 {
 			erase(bess.Change{Resource: c.res(PacketRatesDownlink), Key: bess.Fields(IDKey{ID: q.rateDL})})
 		}
+	}
+	// A direction an Update QER stopped capping: its quota id was retired in
+	// merge, and its record goes in this transaction.
+	for _, r := range s.pending.retiredQuotas() {
+		erase(bess.Change{Resource: c.res(rateTable(r.down)), Key: bess.Fields(IDKey{ID: r.id})})
 	}
 	// A PDR a modification replaced keeps its action and its tunnel, but its
 	// rule key can change under it (a new filter, a new address): the old key
@@ -3389,15 +3407,6 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 		}
 		if q.rateDL != 0 && pol.pktDLSet && !c.sameQERPacketRate(before, q, true) {
 			changes = append(changes, packetRateChange(c.res(PacketRatesDownlink), q.rateDL, pol, q.rateEpoch, true))
-		}
-		// An Update QER that stops naming a direction's Packet Rate leaves no
-		// rule to enforce: the record goes, while the id stays the QER's (it
-		// was allocated once and a later profile writes it again).
-		if q.rateUL != 0 && !pol.pktULSet && c.qerPacketRateDropped(before, q, false) {
-			erase(bess.Change{Resource: c.res(PacketRatesUplink), Key: bess.Fields(IDKey{ID: q.rateUL})})
-		}
-		if q.rateDL != 0 && !pol.pktDLSet && c.qerPacketRateDropped(before, q, true) {
-			erase(bess.Change{Resource: c.res(PacketRatesDownlink), Key: bess.Fields(IDKey{ID: q.rateDL})})
 		}
 	}
 

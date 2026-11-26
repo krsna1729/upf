@@ -1629,13 +1629,17 @@
    "id": "status-33",
    "scope": "status",
    "evidence": [
-    "TestARemovedQERsMeterReturnsAtTeardown",
+    "TestARemovedQERsMeterReturnsOnceItsRemovalLands",
+    "TestARefusedQERRemovalKeepsItsMeter",
     "TestZeroIsALegalRuleID"
    ],
    "result": {
     "state": "ok",
     "evidence": {
-     "TestARemovedQERsMeterReturnsAtTeardown": {
+     "TestARemovedQERsMeterReturnsOnceItsRemovalLands": {
+      "state": "ok"
+     },
+     "TestARefusedQERRemovalKeepsItsMeter": {
       "state": "ok"
      },
      "TestZeroIsALegalRuleID": {
@@ -1654,7 +1658,7 @@
    "message": "Session Modification",
    "statement": "29.244 7.5.4.x (Update/Remove in a Modification Request), 8.2.74/8.2.75",
    "detail": "two **open** gaps found while reading the parser for finding 18: (a) `parseRemovals` has no `Remove QER` case, so a Remove QER IE is silently ignored (the QER, its meter and the PDRs' links stay); (b) `0` still means \"absent\" for the PDR ID (`parsePDR`), FAR ID (`parseFAR`), BAR ID (`parseBAR`) and URR ID (`parseURR`), though the spec reserves 0 for none of them (the QER ID was fixed in `e5cddf2`)",
-   "effect": "(a) a CP that removes a QER leaves it enforcing; (b) an SMF numbering any of those IDs from 0 is refused. Neither is exercised by free5GC or pfcpsim (both number from 1). **Fixed**: (a) `parseRemovals` reads Remove QER (its return is the `removals` struct now), and `merge` takes the QER out -- unlinking it from any PDR that still names it (`status-43`), and holding the QER's meters until teardown (`removedQERs`, released in `releaseSession`), because a meter handed back at the removal would be one a refused modification restores the QER to (`TestARemovedQERsMeterReturnsAtTeardown`); (b) each parser tracks the IE with a `hasID` flag (`hasFarID` for a PDR's FAR reference, which is mandatory in a Create PDR and was read as \\u201cno FAR\\u201d at 0), and `TestZeroIsALegalRuleID` establishes a session whose five rules are all numbered 0, then pins a PDR with no FAR ID as a missing mandatory IE (cause 69)",
+   "effect": "(a) a CP that removes a QER leaves it enforcing; (b) an SMF numbering any of those IDs from 0 is refused. Neither is exercised by free5GC or pfcpsim (both number from 1). **Fixed**: (a) `parseRemovals` reads Remove QER (its return is the `removals` struct now), and `merge` takes the QER out -- unlinking it from any PDR that still names it (`status-43`). The transaction that removes it erases its meter and quota records, and once that transaction lands `settle` frees the QER and returns its ids (`TestARemovedQERsMeterReturnsOnceItsRemovalLands`). A refused modification restores the QER with its ids, because a meter handed back at the removal would be one the restored QER still names (`TestARefusedQERRemovalKeepsItsMeter`); (b) each parser tracks the IE with a `hasID` flag (`hasFarID` for a PDR's FAR reference, which is mandatory in a Create PDR and was read as \\u201cno FAR\\u201d at 0), and `TestZeroIsALegalRuleID` establishes a session whose five rules are all numbered 0, then pins a PDR with no FAR ID as a missing mandatory IE (cause 69)",
    "extra": [
     {
      "name": "evidence",

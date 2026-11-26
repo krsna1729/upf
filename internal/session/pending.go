@@ -10,6 +10,15 @@ type sessionChanges struct {
 	removed, stale         []uint32
 	removedMARs            []*mar
 	retiredTunnels, ending []uint32
+	// retiredRates are the quota ids of directions an Update QER stopped
+	// capping: the transaction erases their records, and settle releases them.
+	retiredRates []retiredRate
+}
+
+// retiredRate is one packet-rate quota id and the direction's module it is in.
+type retiredRate struct {
+	id   uint32
+	down bool
 }
 
 func (s *Session) changes() *sessionChanges {
@@ -45,6 +54,13 @@ func (p *sessionChanges) retiredIDs() []uint32 {
 		return nil
 	}
 	return p.retiredTunnels
+}
+
+func (p *sessionChanges) retiredQuotas() []retiredRate {
+	if p == nil {
+		return nil
+	}
+	return p.retiredRates
 }
 
 func (p *sessionChanges) endingFlows() []uint32 {
