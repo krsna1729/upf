@@ -242,6 +242,15 @@ Correlation ID in the compiler, so upfd never emits shared meters although
 the module supports them; a per-session stride size; the `iface-path` and
 `veth-layouts` lanes, which only know graph compositions.
 
+**Replacement scope.** The session resource is the session-major appliance's
+atomic unit, and no generic `ReplaceScope` wraps it. Its two-version stride
+already gives the per-session old-or-new action configuration; the rule set's
+overlapping changes are make-before-break and are not claimed atomic (above),
+and a scope version would add a second version mechanism without closing that
+gap. The generic scope-snapshot primitive's shipped consumer is the vSwitch
+(BESS D-197); the graph target's table-major session writes stay a referential
+transaction. The primitive itself is D-050.
+
 Evidence: `upf_appliance_sessions_test` (the store driven through
 Reserve/Publish while a reader thread classifies: no mixed version, no miss,
 no lost count or refilled bucket across 2000 rewrites; built only when the
