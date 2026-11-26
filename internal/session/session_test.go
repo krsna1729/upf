@@ -107,42 +107,53 @@ func (r *recorder) DropFlow(_ context.Context, module string, id uint32) error {
 	return nil
 }
 
+// modelledResource says the fake keeps per-key state for a resource: the
+// counting modules, the meters and the packet-rate quotas.
+func modelledResource(res string) bool {
+	return strings.Contains(res, "counters") || strings.HasSuffix(res, "/meters") ||
+		strings.HasSuffix(res, "/rates")
+}
+
 func (r *recorder) Apply(_ context.Context, changes ...bess.Change) error {
 	if r.fail != nil {
 		return r.fail
 	}
-	// The counting modules are modelled, because their entries are the one
-	// resource family where a transaction can erase something that is not
-	// there: the engine refuses that outright (bess's erase_missing), and a
-	// fake that accepts it cannot see the bug that leaves a session neither
-	// modifiable nor deletable.
+	// The counting modules, the meters and the packet-rate quotas are
+	// modelled, because their entries are the resource families where a
+	// transaction can erase something that is not there: the engine refuses
+	// that outright (bess's erase_missing; SlotResource answers "not found"),
+	// and a fake that accepts it cannot see the bug that leaves a session
+	// neither modifiable nor deletable.
 	if r.entries == nil {
 		r.entries = map[string]bool{}
 	}
 	// A second operation on one (resource, key) in one transaction is what the
 	// engine rejects (the compiler works around it for rules, actions and
-	// counters); the counting modules are where the fake models it, because
-	// their erases are the ones a session's lifetime walks.
-	touched := map[string]bool{}
+	// counters); the modelled families are where the fake checks it, because
+	// their erases are the ones a session's lifetime walks. A refused
+	// transaction changes nothing, as in the engine.
+	staged := map[string]bool{}
 	for i, ch := range changes {
-		if !strings.Contains(ch.Resource, "counters") {
+		if !modelledResource(ch.Resource) {
 			continue
 		}
 		key := changeID(ch.Resource, ch.Key)
-		if touched[key] {
+		if _, twice := staged[key]; twice {
 			return fmt.Errorf("change %d touches %s twice in one transaction: %w",
 				i, key, errRepeatedOperation)
 		}
-		touched[key] = true
-		if ch.Value == nil {
-			if !r.entries[key] {
-				return fmt.Errorf("change %d erases %s, which is not there: %w",
-					i, key, errEraseMissing)
-			}
-			delete(r.entries, key)
-			continue
+		if ch.Value == nil && !r.entries[key] {
+			return fmt.Errorf("change %d erases %s, which is not there: %w",
+				i, key, errEraseMissing)
 		}
-		r.entries[key] = true
+		staged[key] = ch.Value != nil
+	}
+	for key, live := range staged {
+		if live {
+			r.entries[key] = true
+		} else {
+			delete(r.entries, key)
+		}
 	}
 	// A quota record the transaction erases is gone from its module: a read
 	// after the erase answers nothing, which is what makes the deletion's
@@ -2134,8 +2145,14 @@ func TestAnUpdatePDRKeepsWhatItLeavesOut(t *testing.T) {
 
 	// The URR the update left out still measures the PDR: its counter entry
 	// stays in the dataplane.
-	if n := len(rec.entries); n != 1 {
-		t.Errorf("%d counter entries after the update, want the one URR 7 measures by", n)
+	counters := 0
+	for key := range rec.entries {
+		if strings.Contains(key, "counters") {
+			counters++
+		}
+	}
+	if counters != 1 {
+		t.Errorf("%d counter entries after the update, want the one URR 7 measures by", counters)
 	}
 
 	// An Update PDR for a PDR the session does not hold has nothing to keep.
@@ -5024,7 +5041,7 @@ func TestZeroIsALegalRuleID(t *testing.T) {
 	}
 }
 
-func TestARemovedQERsMeterReturnsAtTeardown(t *testing.T) {
+func TestARemovedQERsMeterReturnsOnceItsRemovalLands(t *testing.T) {
 	// 7.5.4.6: a Remove QER takes the QER out of the session, and a PDR's QER
 	// ID is a reference to it. Here the SMF re-points the PDR first (an Update
 	// PDR whose QER ID list leaves it out), and the removal then takes the QER
@@ -5061,6 +5078,22 @@ func TestARemovedQERsMeterReturnsAtTeardown(t *testing.T) {
 	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the modification that re-pointed the PDR answered cause %d", got)
 	}
+	// The transaction that removed the QER erased its meter: once it landed
+	// the id goes back to the pool (aged by its grace), and no later
+	// transaction names the record again -- the fake, like the engine,
+	// refuses erasing a key that is gone.
+	erased := false
+	for _, ch := range rec.last() {
+		if strings.HasSuffix(ch.Resource, "/meters") && ch.Value == nil {
+			erased = true
+		}
+	}
+	if !erased {
+		t.Error("the transaction that removed the QER left its meter programmed")
+	}
+	if !c.meters.queued(meter) {
+		t.Error("the removed QER's meter was not returned once its removal landed")
+	}
 	if qerCopy(t, c, seid, 1) != nil {
 		t.Error("the removed QER is still in the session")
 	}
@@ -5075,20 +5108,41 @@ func TestARemovedQERsMeterReturnsAtTeardown(t *testing.T) {
 		t.Errorf("removing a QER the session never held answered cause %d", got)
 	}
 
-	// The QER's meter is the session's until the session is gone: a
-	// modification that is refused puts the QER back, so an id returned at the
-	// removal would be one another session could meter with while this one
-	// still names it. The deletion is where the pool gets it back, which is
-	// what releaseSession does for every id the session holds.
-	if c.meters.queued(meter) {
-		t.Error("the removed QER's meter was returned to the pool while the session lives")
-	}
 	del := message.NewSessionDeletionRequest(0, 0, seid, 5, 0)
 	if got := cause(t, c.Delete(del)); got != ie.CauseRequestAccepted {
 		t.Fatalf("the deletion answered cause %d", got)
 	}
+}
+
+// TestARefusedQERRemovalKeepsItsMeter: a modification the dataplane refuses
+// puts the QER back, so its meter must not be in the pool: another session
+// would police with an id this one still names (engineering guide §4.3).
+func TestARefusedQERRemovalKeepsItsMeter(t *testing.T) {
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(establishment(0x5f1f, "10.45.0.8")).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	meter := qerCopy(t, c, seid, 1).meterUL
+	rec.fail = &bess.RejectedError{}
+	mod := message.NewSessionModificationRequest(0, 0, seid, 3, 0, ie.NewRemoveQER(ie.NewQERID(1)))
+	if got := cause(t, c.Modify(mod)); got == ie.CauseRequestAccepted {
+		t.Fatal("the refused removal was accepted")
+	}
+	if qerCopy(t, c, seid, 1) == nil || c.meters.queued(meter) {
+		t.Error("a refused removal lost the QER or returned its meter")
+	}
+	rec.fail = nil
+	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the retried removal answered cause %d", got)
+	}
 	if !c.meters.queued(meter) {
-		t.Error("the removed QER's meter was not returned to the pool with the session")
+		t.Error("the retried removal did not return the meter")
+	}
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 4, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion after the removal answered cause %d", got)
 	}
 }
 

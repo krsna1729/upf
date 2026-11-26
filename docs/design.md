@@ -1141,8 +1141,9 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
 - **Session-model layout.** The controller keeps small rule sets in sorted
   slices, promoting to maps after 16 entries; unused BAR/MAR/CHOOSE-ID maps
   stay nil. PDRs derive endpoint addresses and tunnel resources rather than
-  retaining copies; transaction-removal lists exist only while pending.
-  Removed QER ownership still lasts until deletion. A URR's four times are
+  retaining copies; transaction-removal lists exist only while pending,
+  removed QERs included (`settle` frees them and returns their meter and
+  quota ids once the removing transaction lands). A URR's four times are
   8-byte stamps on a monotonic base: durations stay monotonic, and after a
   wall-clock step a stamp's wall time does not follow the step.
   `TestASessionHoldsAtMostItsBytes` bounds the whole retained model at

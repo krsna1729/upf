@@ -851,9 +851,9 @@ type sessionExt struct {
 	chids map[uint8]chosenFTEID
 
 	// removedQERs holds the QERs a modification took out of the model, by
-	// handle (the session's model owns them). Their meters were allocated
-	// with the QER (one per policed direction) and are released with the
-	// session's other ids (releaseSession) rather than at the removal: a
+	// handle (the session's model owns them), until the transaction that
+	// erases their meter and quota records lands: settle then frees them and
+	// releases their ids. Releasing the ids at the removal would be wrong: a
 	// refused modification puts the QER back, and a meter already returned
 	// to the pool would be one another session may police with while this
 	// one still names it.
@@ -986,6 +986,7 @@ func (s *Session) snapshot() (modelSnapshot, error) {
 		snap.pending = &sessionChanges{
 			removedMARs:    slices.Clone(p.removedMARs),
 			retiredTunnels: slices.Clone(p.retiredTunnels), ending: slices.Clone(p.ending),
+			retiredRates: slices.Clone(p.retiredRates),
 		}
 		if snap.pending.removed, err = s.rs.pdrs.copyAll(p.removed); err == nil {
 			snap.pending.stale, err = s.rs.pdrs.copyAll(p.stale)
@@ -2260,6 +2261,9 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 				add(bess.Change{Resource: c.res(PacketRatesDownlink), Key: bess.Fields(IDKey{ID: q.rateDL})})
 			}
 		}
+		for _, r := range s.pending.retiredQuotas() {
+			add(bess.Change{Resource: c.res(rateTable(r.down)), Key: bess.Fields(IDKey{ID: r.id})})
+		}
 	}
 	return changes, nil
 }
@@ -2277,6 +2281,17 @@ func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 func (c *Compiler) settle(s *Session, snap *modelSnapshot) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if s.released {
+		// The session went while the transaction was in flight: releaseSession
+		// gave back its ids and records, pending ones included. Settling now
+		// would release the removed MARs' policies and the retired tunnels and
+		// quotas a second time, and track a dead session.
+		if snap != nil {
+			snap.release()
+			s.copies--
+		}
+		return
+	}
 	gones := s.gonePDRs(nil)
 	for _, p := range gones {
 		c.releaseFTEIDClaim(s, p, false)
@@ -2368,6 +2383,25 @@ func (c *Compiler) settle(s *Session, snap *modelSnapshot) {
 			c.actions.release(id)
 		}
 	}
+	// A quota id a direction stopped using, and a removed QER's meters and
+	// quotas: this transaction erased their records, so the ids go back (aged
+	// by the pools' grace) and the removed QERs are freed. Keeping them until
+	// the session ends grew every later snapshot with the session's history
+	// and held its ids for good.
+	for _, r := range s.pending.retiredQuotas() {
+		c.rates.release(r.id)
+	}
+	if removed := s.rare().removedQERs; len(removed) > 0 {
+		var qbuf [4]*qer
+		for _, q := range s.rs.qers.resolve(qbuf[:0], removed) {
+			c.meters.release(q.meterUL)
+			c.meters.release(q.meterDL)
+			c.rates.release(q.rateUL)
+			c.rates.release(q.rateDL)
+		}
+		s.rs.qers.releaseAll(removed)
+		s.ext.removedQERs = nil
+	}
 	if p := s.pending; p != nil {
 		c.recs.pdrs.releaseAll(p.removed)
 		c.recs.pdrs.releaseAll(p.stale)
@@ -2456,6 +2490,12 @@ func (c *Compiler) releaseSession(s *Session) {
 		if id != 0 && !actions[id] {
 			actions[id] = true
 			c.actions.release(id)
+		}
+	}
+	for _, r := range s.pending.retiredQuotas() {
+		if !rates[r.id] {
+			rates[r.id] = true
+			c.rates.release(r.id)
 		}
 	}
 	var qbuf [4]*qer // the usual session's QERs, on the stack
