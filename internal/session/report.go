@@ -691,20 +691,30 @@ type enforcement struct {
 	write modelWrite
 }
 
-// foldEnforcement folds a compiled enforcement into its session-major entry,
-// the same way a modification's apply folds one.
-func (c *Compiler) foldEnforcement(e *enforcement) ([]bess.Change, error) {
+// foldEnforcementLocked folds a compiled enforcement into its session-major
+// entry, the same way a modification's apply folds one. The caller holds the
+// lock, and has checked that the session was not released: a released
+// session's write would put back the records its deletion erased, and the
+// session-major fold would allocate it a session id nothing frees.
+func (c *Compiler) foldEnforcementLocked(e *enforcement) ([]bess.Change, error) {
 	changes := e.write.resources
 	if _, ok := c.target.(sessionTarget); !ok {
 		return changes, nil
 	}
-	return c.foldSession(e.s, changes, e.write.entry)
+	return c.foldSessionLocked(e.s, changes, e.write.entry)
 }
 
 // applyEnforcement lands one session's enforcement at once: the
 // single-session path of Evaluate.
 func (c *Compiler) applyEnforcement(ctx context.Context, e *enforcement) error {
-	changes, err := c.foldEnforcement(e)
+	c.mu.Lock()
+	if e.s.released {
+		c.mu.Unlock()
+		c.finishEnforcement(e, nil, false)
+		return nil
+	}
+	changes, err := c.foldEnforcementLocked(e)
+	c.mu.Unlock()
 	if err != nil {
 		c.finishEnforcement(e, err, false)
 		return err
@@ -719,37 +729,91 @@ func (c *Compiler) applyEnforcement(ctx context.Context, e *enforcement) error {
 }
 
 // applyEnforcements folds a batch's compiled enforcements into one
-// transaction and settles what landed. A session whose fold refuses is
-// completed with that error and stays in the tick's set; the others still
-// apply. The returned error is the transaction's, shared by every session
-// that reached it.
+// transaction and settles what landed. Under the one lock hold that folds, a
+// session released since its compile is dropped (its deletion already erased
+// what the write would put back). A session whose fold refuses is completed
+// with that error and stays in the tick's set; one whose fold has nothing to
+// write is completed as landed. A definite refusal of a transaction that holds
+// more than one session is retried one session at a time, the way the
+// association end retries a refused batch: one session's refused key must not
+// keep every other session of the batch past its spent quota tick after tick
+// (TS 29.244 5.2.2.2.1). The returned error is the first one a session's
+// changes met.
 func (c *Compiler) applyEnforcements(ctx context.Context, batch []*enforcement) error {
 	type foldedEnforcement struct {
-		e    *enforcement
-		sent bool // its changes were in the transaction
+		e       *enforcement
+		changes []bess.Change
 	}
-	changes := make([]bess.Change, 0, len(batch))
+	type refusedFold struct {
+		e   *enforcement
+		err error
+	}
+	var done []*enforcement // released, or nothing to write
+	var refused []refusedFold
 	folded := make([]foldedEnforcement, 0, len(batch))
+	total := 0
+	c.mu.Lock()
 	for _, e := range batch {
-		ch, err := c.foldEnforcement(e)
-		if err != nil {
-			c.finishEnforcement(e, err, false)
-			c.log.Warn("session: usage evaluation", "seid", e.s.LocalSEID,
-				"error", fmt.Errorf("compiling the enforcement: %w", err))
+		if e.s.released {
+			done = append(done, e)
 			continue
 		}
-		changes = append(changes, ch...)
-		folded = append(folded, foldedEnforcement{e: e, sent: len(ch) > 0})
+		ch, err := c.foldEnforcementLocked(e)
+		switch {
+		case err != nil:
+			refused = append(refused, refusedFold{e, err})
+		case len(ch) == 0:
+			done = append(done, e)
+		default:
+			folded = append(folded, foldedEnforcement{e, ch})
+			total += len(ch)
+		}
 	}
-	var err error
-	if len(changes) > 0 {
-		err = c.ap.Apply(ctx, changes...)
+	c.mu.Unlock()
+	for _, e := range done {
+		c.finishEnforcement(e, nil, false)
 	}
-	applied := len(changes) > 0
+	for _, r := range refused {
+		c.finishEnforcement(r.e, r.err, false)
+		c.log.Warn("session: usage evaluation", "seid", r.e.s.LocalSEID,
+			"error", fmt.Errorf("compiling the enforcement: %w", r.err))
+	}
+	if len(folded) == 0 {
+		return nil
+	}
+	changes := make([]bess.Change, 0, total)
 	for _, f := range folded {
-		c.finishEnforcement(f.e, err, f.sent && applied)
+		changes = append(changes, f.changes...)
 	}
-	return err
+	err := c.ap.Apply(ctx, changes...)
+	var busy *bess.BusyError
+	if err == nil || len(folded) == 1 || !definiteRefusal(err) || errors.As(err, &busy) {
+		// Landed, one session's own refusal, an unknown outcome (the write
+		// may have committed, so it is not sent again here), or a busy engine
+		// that refuses every transaction alike.
+		for _, f := range folded {
+			c.finishEnforcement(f.e, err, true)
+		}
+		return err
+	}
+	// scale: one transaction per session of a refused batch, at most
+	// sweepBatch changes in all (TestARefusedEnforcementBatchSettlesTheOthers).
+	var first error
+	for _, f := range folded {
+		c.mu.Lock()
+		gone := f.e.s.released
+		c.mu.Unlock()
+		if gone {
+			c.finishEnforcement(f.e, nil, false)
+			continue
+		}
+		one := c.ap.Apply(ctx, f.changes...)
+		c.finishEnforcement(f.e, one, true)
+		if one != nil && first == nil {
+			first = one
+		}
+	}
+	return first
 }
 
 // flushEnforcements applies the enforcements collected so far in one
@@ -809,7 +873,9 @@ func (c *Compiler) finishEnforcement(e *enforcement, err error, sent bool) {
 		c.usage.enforce.remove(s.slot)
 	}
 	c.mu.Unlock()
-	if err == nil {
+	// A session that went while its write was in flight has nothing left to
+	// settle: its release gave back every id and record.
+	if err == nil && live {
 		c.settle(s, nil)
 	}
 }
