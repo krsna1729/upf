@@ -371,6 +371,9 @@ class SessionResource final : public bess::dataplane::Resource {
   // The removal step of an erase: every slot, the active version gone.
   void Free(uint32_t session) noexcept;
   upf::pb::UpfSession Read(uint32_t session) const;
+  // Whether the action at index value `at` (0 if absent) is counted in
+  // direction dl: its session's bank bit for that direction is set.
+  bool Counted(uint32_t at, bool dl) const;
   // One get_counts entry; `at` is the action's index value, 0 if absent.
   void Report(uint32_t action_id, uint32_t at, bool dl, bool restart,
               upf::pb::UrrCountCommandGetCountsResponse *out) const;

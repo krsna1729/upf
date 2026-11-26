@@ -327,8 +327,14 @@ a shared read round, 13% the call) and the erase's reply 38% (`go tool trace
 reads the session's own counter cells inside the entry erase's reservation,
 bounded by `kMaxActions` per direction, and returns them as the operation's
 `observed` bytes (BESS D-210, `krsna1729/bess#158`); upfd builds the same
-termination windows from those bytes and sends no reading. A daemon that does
-not report an operation's bytes, or a non-native layout, keeps the old read.
+termination windows from those bytes and sends no reading. A non-native layout
+keeps the old read. upfd does not detect a daemon older than the pin: its
+erase reports no bytes, and the deletion answers without a usage report, so
+the native layout requires the pinned BESS. Until the fix that followed
+(`a2c3916`'s review), the erase reply's downlink half named uplink actions
+with zero counts and upfd folded both halves into one table, so this path
+reported zero uplink usage; each half is now read for its own direction's
+rules, and the plugin reports an action only in the direction it counts.
 
 Clean ABBA and BAAB against `358706b` (eight runs per arm, collector-firing-free
 cells), combined medians. Both arms are release trees, the perf build

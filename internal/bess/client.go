@@ -314,11 +314,6 @@ type ObservedApplier interface {
 	ApplyObserved(ctx context.Context, changes ...Change) ([]Observed, error)
 }
 
-// ObservesEraseCounts reports that this client's daemon answers an erase with
-// what the erased entry measured (BESS D-210), so a deletion needs no
-// get_counts call before it.
-func (c *Client) ObservesEraseCounts() bool { return true }
-
 // AppendRuleCounts asks a counting module for the counters of the named rules,
 // or of every rule it holds when none are named, through the module's own
 // get_counts action, and for the next window, and appends them to dst: a

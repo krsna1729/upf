@@ -76,21 +76,26 @@ func terminationWindows(t *testing.T, out *message.SessionDeletionResponse) map[
 }
 
 // eraseCounts is what the daemon sends with a session's entry erase (BESS
-// D-210): a SessionEraseCounts with the counts in the uplink reading. A count
-// names a session's own action id, and the controller reads both directions
-// into one table.
+// D-210): a SessionEraseCounts with the counts in the uplink reading, and a
+// downlink reading that names the same actions with nothing counted -- the
+// shape a daemon that reports every action in both directions answers. The
+// controller must read each direction's entries for that direction's rules
+// only: folded into one table, the zero downlink entries overwrote the uplink
+// usage.
 func eraseCounts(counts map[string][]bess.RuleCount) []byte {
-	var reply []byte
+	var up, down []byte
 	for _, module := range counts {
 		for _, c := range module {
 			var rc []byte
 			rc = protowire.AppendVarint(protowire.AppendTag(rc, 1, protowire.VarintType), uint64(c.ActionID))
+			down = protowire.AppendBytes(protowire.AppendTag(down, 1, protowire.BytesType), rc)
 			rc = protowire.AppendVarint(protowire.AppendTag(rc, 2, protowire.VarintType), c.Packets)
 			rc = protowire.AppendVarint(protowire.AppendTag(rc, 3, protowire.VarintType), c.Octets)
-			reply = protowire.AppendBytes(protowire.AppendTag(reply, 1, protowire.BytesType), rc)
+			up = protowire.AppendBytes(protowire.AppendTag(up, 1, protowire.BytesType), rc)
 		}
 	}
-	return protowire.AppendBytes(protowire.AppendTag(nil, 1, protowire.BytesType), reply)
+	reply := protowire.AppendBytes(protowire.AppendTag(nil, 1, protowire.BytesType), up)
+	return protowire.AppendBytes(protowire.AppendTag(reply, 2, protowire.BytesType), down)
 }
 
 // A termination report built from the erase's own reading says exactly what a
