@@ -3,6 +3,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
@@ -150,6 +151,114 @@ func measuredRules(t *testing.T, c *Compiler, seids []uint64) []bess.RuleCount {
 		}
 	}
 	return out
+}
+
+// refuseSubscriber is the dataplane refusing every transaction that writes a
+// rule for one subscriber address -- the way the engine refuses a whole
+// transaction one of whose keys it will not take -- and taking the rest.
+type refuseSubscriber struct {
+	*recorder
+	ip    []byte
+	armed bool
+}
+
+func (r *refuseSubscriber) Apply(ctx context.Context, changes ...bess.Change) error {
+	for _, ru := range rules(changes) {
+		if r.armed && len(ru.values) > fieldSrcIP && bytes.Equal(ru.value(fieldSrcIP), r.ip) {
+			r.ops.Add("Apply")
+			return &bess.RejectedError{}
+		}
+	}
+	return r.recorder.Apply(ctx, changes...)
+}
+
+// TestARefusedEnforcementBatchSettlesTheOthers: one session whose
+// enforcement the dataplane refuses must not keep the batch's other sessions
+// forwarding past their spent quotas (TS 29.244 5.2.2.2.1). The refused
+// batch is retried one session at a time: the others settle, and only the
+// refused one stays in the tick's set.
+func TestARefusedEnforcementBatchSettlesTheOthers(t *testing.T) {
+	const (
+		sessions = 4
+		urrID    = 7
+		victim   = 1
+	)
+	ctx := context.Background()
+	baseline, traffic := time.Unix(1_700_000_000, 0), time.Unix(1_700_000_001, 0)
+	rec := &recorder{}
+	ap := &refuseSubscriber{recorder: rec, ip: []byte{10, 45, 0, victim + 1}}
+	c := New(testConfig(), ap, quietLogger())
+	seids := make([]uint64, 0, sessions)
+	for i := range sessions {
+		cp := uint64(0x5110 + i)
+		ue := fmt.Sprintf("10.45.0.%d", i+1)
+		resp := c.Establish(urrSession(cp, uint32(0x2100+i), ue, urrID, quotaURR(urrID, 100))).(*message.SessionEstablishmentResponse)
+		if got := cause(t, resp); got != ie.CauseRequestAccepted {
+			t.Fatalf("session %d answered cause %d", i, got)
+		}
+		seids = append(seids, upFSEID(t, resp))
+	}
+	if reports := c.EvaluateAll(ctx, baseline); len(reports) != 0 {
+		t.Fatalf("the baseline tick returned %d reports, want none", len(reports))
+	}
+	rec.counts = map[string][]bess.RuleCount{testConfig().Up.Counters: measuredRules(t, c, seids)}
+	rec.ops.Reset()
+	ap.armed = true
+	c.EvaluateAll(ctx, traffic)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, seid := range seids {
+		s := c.sessions[seid]
+		pending := s.slot != 0 && c.usage.enforce.has(s.slot)
+		if i == victim {
+			if !pending || !s.rewrite {
+				t.Errorf("the refused session %d left the tick's set", i)
+			}
+			continue
+		}
+		if pending || s.rewrite {
+			t.Errorf("session %d did not settle: a refused neighbour kept its enforcement out", i)
+		}
+	}
+	// The batch, then one transaction per session of it.
+	scaletest.RPCsAtMost(t, &rec.ops, "Apply", 1+sessions)
+}
+
+// TestAReleasedSessionsEnforcementIsDropped: a deletion that lands while a
+// session's compiled enforcement waits for its batch leaves nothing for that
+// write to do. Sent anyway, it put back the rules and F-TEIDs the deletion
+// erased, naming action ids already released.
+func TestAReleasedSessionsEnforcementIsDropped(t *testing.T) {
+	ctx := context.Background()
+	baseline, traffic := time.Unix(1_700_000_000, 0), time.Unix(1_700_000_001, 0)
+	rec := &recorder{}
+	c := New(testConfig(), rec, quietLogger())
+	resp := c.Establish(urrSession(0x5120, 0x2200, "10.45.1.1", 7, quotaURR(7, 100))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	seid := upFSEID(t, resp)
+	c.EvaluateAll(ctx, baseline)
+	cells := map[uint32]reading{}
+	for _, r := range measuredRules(t, c, []uint64{seid}) {
+		cells[r.ActionID] = readingOf(r)
+	}
+	c.mu.Lock()
+	s := c.sessions[seid]
+	c.mu.Unlock()
+	_, pending, err := c.judge(seid, s, func(id uint32, _ bool) reading { return cells[id] }, nil, traffic)
+	if err != nil || pending == nil {
+		t.Fatalf("the spent quota compiled no enforcement (%v)", err)
+	}
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 2, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion answered cause %d", got)
+	}
+	rec.ops.Reset()
+	if err := c.applyEnforcements(ctx, []*enforcement{pending}); err != nil {
+		t.Errorf("the dropped enforcement answered %v", err)
+	}
+	scaletest.RPCsAtMost(t, &rec.ops, "Apply", 0)
 }
 
 // A counted rule is 34 B of a get_counts reply on the wire (UG-B1).
