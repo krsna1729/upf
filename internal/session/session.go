@@ -2070,14 +2070,16 @@ func (c *Compiler) applyRemoval(ctx context.Context, changes []bess.Change) ([]b
 
 // erasesWithCounts reports whether a deletion's erase returns the session's
 // counters, so it needs no get_counts call before it. Only the native session
-// layout erases the session as one entry, and only a daemon that reports an
-// operation's bytes answers with them (BESS D-210).
+// layout erases the session as one entry, and only an applier that returns an
+// operation's bytes passes them on. The daemon must be at the pinned BESS
+// (D-210): upfd does not detect an older one, whose erase reports nothing,
+// and the deletion then answers without its usage report.
 func (c *Compiler) erasesWithCounts() bool {
 	if _, native := c.target.(sessionTarget); !native {
 		return false
 	}
-	o, ok := c.ap.(interface{ ObservesEraseCounts() bool })
-	return ok && o.ObservesEraseCounts()
+	_, ok := c.ap.(bess.ObservedApplier)
+	return ok
 }
 
 // forget drops a session whose records the dataplane no longer holds, and

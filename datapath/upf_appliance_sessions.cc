@@ -686,7 +686,10 @@ std::expected<dp::Resource::Reservation, std::string> SessionResource::Reserve(c
       out->set_read_wall_unix_ns(read_wall_unix_ns);
       for (uint8_t i = 0; i < m.actions; ++i) {
         const uint32_t action_id = Config(session, m.active, i).action_id;
-        if (action_id == 0) continue;
+        // Only the actions this direction counts: an uplink action has no
+        // downlink bank, and a zero entry for it would overwrite its uplink
+        // reading in a controller that keys the reply by action id.
+        if (action_id == 0 || !Counted(actions_[action_id], dl)) continue;
         Report(action_id, actions_[action_id], dl, /*restart=*/false, out);
       }
     }
@@ -1001,15 +1004,19 @@ void SessionResource::ForEachLive(const std::function<void(uint32_t, const upf::
   }
 }
 
+bool SessionResource::Counted(uint32_t at, bool dl) const {
+  if (at == 0) return false;
+  const uint8_t slot = static_cast<uint8_t>(at & ((uint32_t{1} << (kActionBits + 1)) - 1));
+  return mirrors_[SessionOf(at) - 1].banks[dl] >> slot & 1;
+}
+
 void SessionResource::Report(uint32_t action_id, uint32_t at, bool dl, bool restart,
                              upf::pb::UrrCountCommandGetCountsResponse *out) const {
   auto *count = out->add_counts();
   count->set_action_id(action_id);
-  if (at == 0) return;
-  const uint32_t session = SessionOf(at);
+  if (!Counted(at, dl)) return;
   const uint8_t slot = static_cast<uint8_t>(at & ((uint32_t{1} << (kActionBits + 1)) - 1));
-  if (!(mirrors_[session - 1].banks[dl] >> slot & 1)) return;
-  SessionUrr &bank = Cells(session, slot).urr[dl];
+  SessionUrr &bank = Cells(SessionOf(at), slot).urr[dl];
   count->set_packets(bank.packets.load(std::memory_order_relaxed));
   count->set_octets(bank.octets.load(std::memory_order_relaxed));
   count->set_first_packet_ns(restart ? bank.first_ns.exchange(0, std::memory_order_relaxed)

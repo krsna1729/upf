@@ -346,8 +346,10 @@ TEST(SessionStore, InsertUpdateEraseDriveTheTablesAndVersions) {
 }
 
 // The erase reports the counters a get_counts call just before it would
-// answer, both directions, so a controller's termination report needs no
-// second round trip (BESS D-210).
+// answer, for the actions each direction counts, so a controller's
+// termination report needs no second round trip (BESS D-210). An action is
+// reported only in the direction whose bank holds it: a zero downlink entry
+// for an uplink action would overwrite its uplink reading.
 TEST(SessionStore, ErasingReportsTheSessionsCounters) {
   Store s;
   ASSERT_TRUE(Applied(s.Put(Image(false))));
@@ -359,10 +361,9 @@ TEST(SessionStore, ErasingReportsTheSessionsCounters) {
   bank.Add(100, 11);
   bank.Add(200, 22);
 
-  upf::pb::UrrCountCommandGetCountsResponse want_ul, want_dl;
+  upf::pb::UrrCountCommandGetCountsResponse want_ul;
   const uint32_t ids[] = {kId};
   s.sessions->Counts(false, ids, false, 0, SIZE_MAX, &want_ul);
-  s.sessions->Counts(true, ids, false, 0, SIZE_MAX, &want_dl);
 
   const auto erased = s.Apply(dp::Op::Erase(s.sessions->name(), dp::EncodeKey(kSession)));
   ASSERT_TRUE(Applied(erased));
@@ -378,7 +379,7 @@ TEST(SessionStore, ErasingReportsTheSessionsCounters) {
     }
   };
   same(want_ul, got.uplink());
-  same(want_dl, got.downlink());
+  EXPECT_EQ(got.downlink().counts_size(), 0) << "the uplink action was reported in the downlink reply";
   EXPECT_EQ(got.uplink().counts(0).packets(), 2u);
   EXPECT_EQ(got.uplink().counts(0).octets(), 300u);
   EXPECT_NE(got.uplink().read_monotonic_ns(), 0u);

@@ -133,9 +133,12 @@ type reading struct {
 }
 
 // readings is a reading's answers as a decision looks them up: by the ActionId
-// of the rule each belongs to. An ActionId is one PDR's and a PDR is counted by
-// one module, so the modules' answers share the one index.
-type readings func(actionID uint32) reading
+// of the rule each belongs to and the rule's direction. An ActionId is one
+// PDR's and a PDR is counted by one module, so a reading taken per module may
+// ignore the direction; one reply that carries both directions (the session
+// erase's, BESS D-210) must not let one direction's entry stand for the
+// other's.
+type readings func(actionID uint32, down bool) reading
 
 // countChunk is the most rules one get_counts names. The daemon refuses a
 // message over 64 MiB, and one reading of every counted rule passes that at
@@ -487,7 +490,7 @@ func (c *Compiler) EvaluateAll(ctx context.Context, now time.Time) []Report {
 	}
 	c.usage.seids, c.usage.slots = seids, slots
 	ids := c.usage.ids
-	counts := readings(c.usage.reading)
+	counts := func(id uint32, _ bool) reading { return c.usage.reading(id) }
 	var out []Report
 	var enforce []*enforcement
 	pendingChanges := 0
@@ -850,7 +853,7 @@ func readRules(ctx context.Context, read func(ctx context.Context, module string
 			cells[rule.ActionID] = readingOf(rule)
 		}
 	}
-	return func(id uint32) reading { return cells[id] }, nil
+	return func(id uint32, _ bool) reading { return cells[id] }, nil
 }
 
 // countedModule is where this PDR's counters are read (Target.Counts), when the
@@ -1165,7 +1168,7 @@ func (c *Compiler) countsOf(s *Session, uid uint32, counts readings) (up, down U
 		if dir.Counters == "" {
 			continue
 		}
-		cell := counts(p.actionID)
+		cell := counts(p.actionID, p.downlink())
 		if !p.downlink() {
 			up = up.add(cell.Usage)
 		} else {
@@ -1478,13 +1481,22 @@ func (c *Compiler) terminationReportsFrom(s *Session, now time.Time, observed []
 		c.log.Warn("session: the erase reported no counters", "seid", s.LocalSEID)
 		return nil
 	}
-	cells := make(map[uint32]reading, len(up)+len(down))
+	// Each direction's reply is its own index: an action the reply lists in
+	// both (a daemon that reports a zero entry for a direction the action is
+	// not counted in) must not have its uplink reading overwritten.
+	upCells := make(map[uint32]reading, len(up))
 	for _, r := range up {
-		cells[r.ActionID] = readingOf(r)
+		upCells[r.ActionID] = readingOf(r)
 	}
+	downCells := make(map[uint32]reading, len(down))
 	for _, r := range down {
-		cells[r.ActionID] = readingOf(r)
+		downCells[r.ActionID] = readingOf(r)
 	}
-	windows := c.windowsFrom(s, nil, now, sinceDelivery, func(id uint32) reading { return cells[id] })
+	windows := c.windowsFrom(s, nil, now, sinceDelivery, func(id uint32, down bool) reading {
+		if down {
+			return downCells[id]
+		}
+		return upCells[id]
+	})
 	return usageReports(ie.UsageReportWithinSessionDeletionResponse, TriggerTermination, windows)
 }
