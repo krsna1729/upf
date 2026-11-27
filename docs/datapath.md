@@ -271,7 +271,7 @@ is the id everything downstream is keyed by.
 ```mermaid
 flowchart TB
     in["n3_in → vif_n3n9 → tag_n3 / tag_n9<br/>endpoint_id + transport domain"] --> decap["decap0 · GtpuDecap<br/>exact endpoint/F-TEID admission"]
-    decap -->|"gate 0 · known UL"| ul["pdr_ul · WCM: inner tuple + fteid_context + QFI<br/>→ mt_ul (gates 0, 1) → cnt_ul → rt → n6_out"]
+    decap -->|"gate 0 · known UL"| ul["pdr_ul · WCM: inner tuple + fteid_context + QFI<br/>→ mt_ul (gates 0, 1) → pr_ul → cnt_ul → rt → n6_out"]
     decap -->|"gate 1 · known DL/N9"| pdrdl["pdr_dl · downlink, below"]
     decap -->|"gate 2 · unknown G-PDU/control"| responder["echo0 · GtpuResponder<br/>→ rt_transport → N3/N9 egress"]
     decap -->|"malformed"| drop(("drop"))
@@ -297,7 +297,7 @@ flowchart TB
     n6in -->|"IP"| vif["vif_n6 · Vif"]
     vif -->|"IPv4/IPv6"| pdr["pdr_dl · WCM<br/>inner tuple + route domain + fteid_context + QFI"]
     decap["decap0 gate 1 · admitted DL/N9"] --> pdr
-    pdr --> chain["mt_dl (gates 0, 1) → cnt_dl → atsss → rt · inner Router"]
+    pdr --> chain["mt_dl (gates 0, 1) → pr_dl → cnt_dl → atsss → rt · inner Router"]
     pdr -->|"gate 1 · BUFF in buffer-path"| buf["cnt_buf → buf · PacketStore<br/>key_attrs: [action_id]"]
     buf -->|"release"| chain
     chain -->|"gates 1, 2 · tunnel next hop"| enc["enc · GtpuEncap → rt_transport<br/>per-domain FIB, ARP/ND → N3/N9 egress"]

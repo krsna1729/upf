@@ -6,7 +6,7 @@ It is not the complete specification. Clause headings and body text are
 from the official archive converted to UTF-8; page breaks, tables of
 contents and uncited clauses are omitted.
 
-Clauses: 5.2.1, 5.2.1A, 5.2.2.2.1, 5.2.2.3.1, 5.4.15, 5.10, 7.5.2.2, 7.5.2.3, 7.5.2.8, 7.5.4, 7.5.4.22, 7.5.5.4, 8.2.3, 8.2.5, 8.2.26, 8.2.41, 8.2.62, 8.2.63, 8.2.139
+Clauses: 5.2.1, 5.2.1A, 5.2.2.2.1, 5.2.2.3.1, 5.4.5, 5.4.15, 5.10, 5.23, 7.5.2.2, 7.5.2.3, 7.5.2.8, 7.5.4, 7.5.4.22, 7.5.5.4, 8.2.2, 8.2.3, 8.2.5, 8.2.24, 8.2.26, 8.2.41, 8.2.62, 8.2.63, 8.2.64, 8.2.68, 8.2.118, 8.2.139
 
 5.2.1	General
 The packet forwarding scenarios supported over the Sxa, Sxb and Sxc reference points are specified in 3GPP TS 23.214 [2].
@@ -1461,6 +1461,25 @@ Table 8.2.64-2: GTP-U Extension Header Deletion
 Octet / Bit	GTP-U Extension Header to be deleted from incoming packet
 6/1	PDU Session Container (NOTE)
 NOTE:	This value shall be used for data forwarding during a 5GS to EPS handover for a UPF that supports EPS-5GS interworking (see clause 5.17.3).
+
+8.2.68	Measurement Information
+The Measurement Information IE shall be encoded as shown in Figure 8.2.68-1. It provides information on the requested measurement information.
+
+		Bits	
+	Octets	8	7	6	5	4	3	2	1	
+	1 to 2	Type = 100 (decimal)	
+	3 to 4	Length = n	
+	5	Spare	MNOP	ISTM	RADI	INAM	MBQE	
+	6 to (n+4)	These octet(s) is/are present only if explicitly specified	
+Figure 8.2.68-1: Measurement Information
+Octet 5 shall be encoded as follows:
+-	Bit 1 – MBQE (Measurement Before QoS Enforcement): when set to "1", this indicates a request to measure the traffic usage before QoS enforcement.
+-	Bit 2 – INAM (Inactive Measurement): when set to "1", this indicates that the measurement shall be paused (inactive).
+-	Bit 3 – RADI (Reduced Application Detection Information): when set to "1", this indicates that the Application Detection Information reported to the CP function, upon detecting the start or stop of an application, shall only contain the Application ID.
+-	Bit 4 – ISTM (Immediate Start Time Metering): when set to "1", this indicates that time metering shall start immediately when the flag is received.
+-	Bit 5 – MNOP (Measurement of Number of Packets): when set to "1", this indicate a request to measure the number of packets transferred in UL/DL/Total in addition to the measurement in octets when Volume based measurement applies.
+-	Bits 6 to 8: Spare, for future use and set to "0".
+At least one bit shall be set to "1". Several bits may be set to "1", e.g. both MBQE and MNOP bits are set to "1".
 
 8.2.118	3GPP Interface Type
 The 3GPP Interface Type IE shall be encoded as shown in Figure 8.2.118-1. It indicates the 3GPP interface type of the Source Interface within the PDR IE, or the 3GPP interface type of the Destination Interface within the FAR IE.

@@ -5413,9 +5413,12 @@ func parseURR(i *ie.IE) (urrReq, error) {
 			// a duration that starts when the URR is created (ISTM), so those
 			// ask for what is already done, and 0 asks for nothing. MBQE asks
 			// to count before QoS enforcement, which no graph can: the
-			// counter sits after the meter, so a throttled flow's usage is the
-			// forwarded part (docs/claims.md). Real SMFs set it on every
-			// URR (free5GC does), so refusing it refuses every real session.
+			// counter sits after the meter and the packet rate, so a
+			// throttled flow's usage is the forwarded part (5.2.2.3.1: "the
+			// UP function shall report the traffic usage after any QoS
+			// enforcement"; docs/claims.md).
+			// Real SMFs set it on every URR (free5GC does), so refusing it
+			// refuses every real session.
 			// INAM (a paused URR) and RADI (application detection) are not
 			// built and are refused.
 			if len(c.Payload) == 0 {

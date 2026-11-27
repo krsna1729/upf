@@ -1046,6 +1046,9 @@ func TestLivePacketRateStopsTheTraffic(t *testing.T) {
 	}, func() string { return "pr_ul's output never settled after the allowance was spent" })
 	beforeIn := gatePackets(t, ctx, client, "pdr_ul")
 	beforeOut := last
+	// The counter measures after the packet rate (5.2.2.3.1: usage "after any
+	// QoS enforcement"), so the packets the spent quota drops are not usage.
+	beforeCounted := gatePackets(t, ctx, client, "cnt_ul")
 	waitForSource(t, ctx, client, "src_up")
 	if got := gatePackets(t, ctx, client, "pdr_ul") - beforeIn; got < sourceWindow/2 {
 		t.Errorf("the classifier saw %v of the source's %d packets; the arm proves nothing without its input",
@@ -1053,6 +1056,10 @@ func TestLivePacketRateStopsTheTraffic(t *testing.T) {
 	}
 	if got := gatePackets(t, ctx, client, "pr_ul"); got != beforeOut {
 		t.Errorf("the spent quota passed %v more packets (from %v to %v)", got-beforeOut, beforeOut, got)
+	}
+	if got := gatePackets(t, ctx, client, "cnt_ul"); got != beforeCounted {
+		t.Errorf("the counter took %v packets the spent quota dropped (from %v to %v)",
+			got-beforeCounted, beforeCounted, got)
 	}
 
 	// The query reads the module back into the Modification Response.
