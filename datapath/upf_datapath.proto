@@ -358,8 +358,11 @@ message PacketRateKey {
 // PacketRateValue is one quota (TS 29.244 8.2.63). The primary and the
 // additional maximum each carry their own time unit in the IE (octets m/p and
 // q/r), so both are exact windows here, not one token-bucket rate. `epoch`
-// changes whenever the controller reprograms the quota; the datapath restarts
-// the windows then.
+// changes whenever the controller reprograms the profile; the datapath
+// restarts the windows then. `seed_epoch` changes only when the CP sends a new
+// Packet Rate Status; the datapath restarts the seed then, so a profile
+// change does not grant a spent seed again. A quota published into an id that
+// held none starts from nothing, whatever its epochs.
 message PacketRateValue {
   uint32 allowed = 1;                   // packets per primary period; 0 = none
   uint32 period_seconds = 2;            // 60, 360, 3600, 86400 or 604800
@@ -372,6 +375,7 @@ message PacketRateValue {
   uint32 seed_remaining = 6;
   uint32 seed_remaining_additional = 7;
   uint64 seed_validity_unix_ns = 8;
+  uint64 seed_epoch = 9;
 }
 
 message PacketRateArg {
@@ -390,8 +394,10 @@ message PacketRateStatus {
   uint32 id = 1;
   uint32 remaining = 2;
   uint32 remaining_additional = 3;
-  // The absolute time the counts are valid until (Unix ns); 0 when the quota
-  // has no live window.
+  // The absolute time the counts are valid until (Unix ns): the seed's
+  // validity while the seed is enforced, else the end of the earliest live
+  // window, or one period from the reading for a window that has not started.
+  // 0 only for an id that holds no quota.
   uint64 validity_unix_ns = 4;
   uint32 used = 5;            // packets charged in the reported phase
   uint32 used_additional = 6; // additional packets charged

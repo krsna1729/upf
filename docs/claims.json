@@ -1772,7 +1772,8 @@
     "TestPacketRateWithoutItsModuleIsRefused",
     "TestPacketRateQueryAnswersInTheModificationResponse",
     "TestPacketRateReleaseReportPrecedesTheErase",
-    "TestPacketRateSharedChangeRewritesTheRule",
+    "TestPacketRateTwoCapsOnOnePDRAreRefused",
+    "TestPacketRateQueryReadsBeforeTheOverwrite",
     "TestAPacketRateReplyDecodesIntoTheSliceItIsGiven",
     "TestLivePacketRateStopsTheTraffic",
     "ci/session-path.sh"
@@ -1801,7 +1802,10 @@
      "TestLivePacketRateStopsTheTraffic": {
       "state": "skip"
      },
-     "TestPacketRateSharedChangeRewritesTheRule": {
+     "TestPacketRateTwoCapsOnOnePDRAreRefused": {
+      "state": "ok"
+     },
+     "TestPacketRateQueryReadsBeforeTheOverwrite": {
       "state": "ok"
      }
     }

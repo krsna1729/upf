@@ -46,7 +46,7 @@ The code is not in question.
 - **status-15** · TS 29.244 V16.9.1 §5.2.1A — an uplink SDF filter is left as provisioned, not swapped · test
 - **status-18** · TS 29.244 V16.9.1 §5.2.1A — an SDF Filter IE with no Flow Description is refused (cause 64) · test ×2
 - **status-43** · TS 29.244 V16.9.1 §5.2.2.3.1 — Remove URR / Remove QER is applied while a PDR names the rule, with the URR's termination report · test ×2
-- **status-36** · TS 29.244 V16.9.1 §5.4.15 — Packet Rate: a QER capping packets per time unit, and its queryable status · test ×7 · live test · lane
+- **status-36** · TS 29.244 V16.9.1 §5.4.15 — Packet Rate: a QER capping packets per time unit, and its queryable status · test ×8 · live test · lane
 - **status-33** · TS 29.244 V16.9.1 §7.5.4 — Remove QER is applied; rule IDs may number from 0 · test ×3
 - **status-42** · TS 29.244 V16.9.1 §7.5.4.2 — an Update PDR keeps the precedence, PDI, FAR, URR and QER it leaves out · test ×2
 - **status-31** · TS 29.244 V16.9.1 · no clause — a refused modification leaves the session exactly as it was · test ×2

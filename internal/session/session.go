@@ -1503,10 +1503,14 @@ type qer struct {
 	meterDL uint32
 	// One packet-rate quota per direction, allocated with the QER and released
 	// with it. rateEpoch changes when the Packet Rate profile or its seed
-	// changes, which restarts the quota's windows.
+	// changes, which restarts the quota's windows; seedEpoch changes each time
+	// the SMF sends a Packet Rate Status, which restarts the seed -- and only
+	// then, so a profile change does not grant a spent seed again (5.4.15.2
+	// rule 4).
 	rateUL    uint32
 	rateDL    uint32
 	rateEpoch uint64
+	seedEpoch uint64
 }
 
 // policy is q's provisioning.

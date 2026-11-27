@@ -83,6 +83,7 @@ type PacketRateEntry struct {
 	SeedRemaining           uint32 `json:"seed_remaining,omitempty"`
 	SeedRemainingAdditional uint32 `json:"seed_remaining_additional,omitempty"`
 	SeedValidityUnixNS      uint64 `json:"seed_validity_unix_ns,omitempty"`
+	SeedEpoch               uint64 `json:"seed_epoch,omitempty"`
 }
 type PolicyAccess struct {
 	NextHopID    uint32 `json:"next_hop_id"`

@@ -31,7 +31,7 @@ enum {
 // bound as the meter tables, since a quota id is one QER direction's.
 constexpr size_t kDefaultCapacity = 65536;
 
-// 8.2.63's longest time unit is a week.
+// The wire carries whole seconds; the module keeps nanoseconds.
 constexpr uint64_t kNsPerSecond = 1000000000ull;
 
 const ResourceTables PacketRate::resource_tables = {
@@ -54,8 +54,7 @@ CommandResponse PacketRate::Init(const upf::pb::PacketRateArg &arg) {
   entries_ =
       memory.Create<dataplane::SlotTable<PacketRateId, Entry>>("rates",
                                                                 capacity_);
-  resource_ = std::make_unique<dataplane::SlotResource<PacketRateId, Entry>>(
-      name() + "/rates", *entries_);
+  resource_ = std::make_unique<QuotaResource>(name() + "/rates", *entries_);
 
   binding_ = init_context().codecs().Bind(
       *resource_,
@@ -102,6 +101,7 @@ CommandResponse PacketRate::Init(const upf::pb::PacketRateArg &arg) {
                   entry->config.seed_remaining_additional);
               value.set_seed_validity_unix_ns(
                   entry->config.seed_validity_unix_ns);
+              value.set_seed_epoch(entry->config.seed_epoch);
               visit(key, value);
             }
           }));
@@ -145,6 +145,31 @@ void PacketRate::DeInit() {
   auto unregistered = init_context().resources().Unregister(name);
   CHECK(unregistered) << unregistered.error();
   resource_.reset();
+}
+
+auto PacketRate::QuotaResource::Reserve(const dataplane::Op &op)
+    -> std::expected<Reservation, std::string> {
+  if (op.kind != dataplane::OpKind::kUpsert) {
+    return SlotResource::Reserve(op);
+  }
+  const Entry *value = std::any_cast<Entry>(&op.value);
+  PacketRateId id;
+  if (value == nullptr || !dataplane::DecodeKey(op.key, &id) ||
+      !table_.ValidId(id)) {
+    return SlotResource::Reserve(op);  // refused there, as it names
+  }
+  Entry stamped = *value;
+  if (const Entry *previous = table_.Current(id); previous != nullptr) {
+    stamped.config.instance = previous->config.instance;
+  } else {
+    if (++next_instance_ == 0) {
+      ++next_instance_;  // 0 is the state of an id never published
+    }
+    stamped.config.instance = next_instance_;
+  }
+  dataplane::Op staged = op;  // control path: one quota per op
+  staged.value = std::any(stamped);
+  return SlotResource::Reserve(staged);
 }
 
 void PacketRate::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {

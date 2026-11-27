@@ -18,10 +18,16 @@ struct PacketRateConfig {
   uint64_t primary_period_ns = 0;
   uint32_t additional = 0;             // packets per additional period
   uint64_t additional_period_ns = 0;
-  uint64_t epoch = 0;                  // changes when the quota is reprogrammed
+  uint64_t epoch = 0;                  // changes when the profile is reprogrammed
   uint32_t seed_remaining = 0;         // 8.2.139 remaining primary packets
   uint32_t seed_remaining_additional = 0;
   uint64_t seed_validity_unix_ns = 0;  // absolute; 0 = no seed
+  uint64_t seed_epoch = 0;             // changes when the CP sends a new seed
+  // Set by the module, not the controller: a fresh value each time a quota is
+  // published into an id that held none, kept by updates. State left by an
+  // erased quota is never inherited by the next one published at its id,
+  // whatever epochs the controller's next incarnation chooses.
+  uint32_t instance = 0;
 };
 
 // The mutable half of one quota: two independently rolling fixed windows and
@@ -48,11 +54,23 @@ class PacketRateQuota {
 
   // Charges one packet to the quota. The seed the CP provided is enforced
   // first, until its counts are spent or its validity time passes
-  // (5.4.15.2 rule 4); then the primary window, then the additional one.
+  // (5.4.15.2 rule 4); then the primary window, then the additional one. A
+  // new profile (epoch) restarts the windows only; the seed restarts only
+  // when the CP sends a new one (seed_epoch), so a profile change does not
+  // grant a spent seed again.
   Verdict Check(const PacketRateConfig &config, uint64_t now_ns) {
     Lock();
-    if (epoch_ != config.epoch) {
-      Init(config, now_ns);
+    if (instance_ != config.instance) {
+      instance_ = config.instance;
+      InitWindows(config, now_ns);
+      InitSeed(config, now_ns);
+    } else {
+      if (epoch_ != config.epoch) {
+        InitWindows(config, now_ns);
+      }
+      if (seed_epoch_ != config.seed_epoch) {
+        InitSeed(config, now_ns);
+      }
     }
     Verdict verdict = Charge(config, now_ns);
     Unlock();
@@ -116,29 +134,18 @@ class PacketRateQuota {
   Reading Read(const PacketRateConfig &config, uint64_t now_ns,
                uint64_t wall_unix_ns) const {
     Reading reading;
-    if (epoch_ != config.epoch) {
-      // No packet has run under this config: report what the first packet
-      // would find, without starting a window from a control read.
+    // State no packet has run under yet (a new quota at this id, a new seed,
+    // a new profile) is reported as what the first packet would find,
+    // without starting a window from a control read.
+    const bool fresh = instance_ != config.instance;
+    if (fresh || seed_epoch_ != config.seed_epoch) {
       if (config.seed_validity_unix_ns > wall_unix_ns) {
         reading.remaining = config.seed_remaining;
         reading.remaining_additional = config.seed_remaining_additional;
         reading.validity_unix_ns = config.seed_validity_unix_ns;
-      } else {
-        uint32_t used = 0;
-        uint64_t primary_validity = 0;
-        uint64_t additional_validity = 0;
-        ReadWindow(config.allowed, 0, 0, config.primary_period_ns, now_ns,
-                   wall_unix_ns, &reading.remaining, &used,
-                   &primary_validity);
-        ReadWindow(config.additional, 0, 0, config.additional_period_ns,
-                   now_ns, wall_unix_ns, &reading.remaining_additional, &used,
-                   &additional_validity);
-        reading.validity_unix_ns =
-            Earliest(primary_validity, additional_validity);
+        return reading;
       }
-      return reading;
-    }
-    if (seed_end_ != 0 && now_ns < seed_end_) {
+    } else if (seed_end_ != 0 && now_ns < seed_end_) {
       reading.remaining =
           config.seed_remaining > seed_used_ ? config.seed_remaining - seed_used_ : 0;
       reading.remaining_additional =
@@ -151,16 +158,15 @@ class PacketRateQuota {
       return reading;
     }
 
-    reading.remaining = 0;
-    reading.remaining_additional = 0;
-    reading.used = 0;
-    reading.used_additional = 0;
+    const bool windows_fresh = fresh || epoch_ != config.epoch;
     uint64_t primary_validity = 0;
     uint64_t additional_validity = 0;
-    ReadWindow(config.allowed, primary_end_, primary_used_,
-               config.primary_period_ns, now_ns, wall_unix_ns,
-               &reading.remaining, &reading.used, &primary_validity);
-    ReadWindow(config.additional, additional_end_, additional_used_,
+    ReadWindow(config.allowed, windows_fresh ? 0 : primary_end_,
+               windows_fresh ? 0 : primary_used_, config.primary_period_ns,
+               now_ns, wall_unix_ns, &reading.remaining, &reading.used,
+               &primary_validity);
+    ReadWindow(config.additional, windows_fresh ? 0 : additional_end_,
+               windows_fresh ? 0 : additional_used_,
                config.additional_period_ns, now_ns, wall_unix_ns,
                &reading.remaining_additional, &reading.used_additional,
                &additional_validity);
@@ -170,12 +176,14 @@ class PacketRateQuota {
 
   // One window's reading. A window that has not started or has rolled over
   // reports its full allowance for one period; a live one reports what is
-  // left and the end of the window it is in.
+  // left and the end of the window it is in. A maximum of zero is a window
+  // like any other: nothing remains, until the period's end (7.5.5.4 makes
+  // the status mandatory in a report).
   static void ReadWindow(uint32_t limit, uint64_t end, uint64_t used,
                          uint64_t period_ns, uint64_t now_ns,
                          uint64_t wall_unix_ns, uint32_t *remaining,
                          uint32_t *used_out, uint64_t *validity) {
-    if (limit == 0 || period_ns == 0) {
+    if (period_ns == 0) {
       *remaining = 0;
       *used_out = 0;
       *validity = 0;
@@ -202,10 +210,8 @@ class PacketRateQuota {
     return a < b ? a : b;
   }
 
-  void Init(const PacketRateConfig &config, uint64_t now_ns) {
+  void InitWindows(const PacketRateConfig &config, uint64_t now_ns) {
     epoch_ = config.epoch;
-    seed_used_ = 0;
-    seed_used_additional_ = 0;
     primary_used_ = 0;
     additional_used_ = 0;
     primary_end_ =
@@ -213,6 +219,12 @@ class PacketRateQuota {
     additional_end_ = config.additional_period_ns == 0
                           ? 0
                           : now_ns + config.additional_period_ns;
+  }
+
+  void InitSeed(const PacketRateConfig &config, uint64_t now_ns) {
+    seed_epoch_ = config.seed_epoch;
+    seed_used_ = 0;
+    seed_used_additional_ = 0;
     seed_end_ = 0;
     if (config.seed_validity_unix_ns != 0) {
       const uint64_t wall = WallNowNs();
@@ -236,7 +248,9 @@ class PacketRateQuota {
   void Unlock() const { lock_.clear(std::memory_order_release); }
 
   mutable std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
+  uint32_t instance_ = 0;  // shares the flag's word: no growth
   uint64_t epoch_ = 0;
+  uint64_t seed_epoch_ = 0;
   uint64_t seed_end_ = 0;
   uint64_t seed_used_ = 0;
   uint64_t seed_used_additional_ = 0;
