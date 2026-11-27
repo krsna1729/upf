@@ -438,11 +438,13 @@ connections:
   - {upstream: pdr_ul, downstream: mt_ul}
   # The meter's yellow gate (its ogate 1) is the band between a QER's GBR and
   # its MBR (8.2.7, 8.2.8): forwarded beside green, and the policy a deployment
-  # changes when that band should be marked or shed rather than passed.
-  - {upstream: mt_ul, downstream: cnt_ul}
-  - {upstream: mt_ul, downstream: cnt_ul, ogate: 1}
-  - {upstream: cnt_ul, downstream: pr_ul}
-  - {upstream: pr_ul, downstream: rt}
+  # changes when that band should be marked or shed rather than passed. The
+  # packet rate is QoS enforcement too (a QER's), so it runs before the
+  # counter: usage is measured after any QoS enforcement (TS 29.244 5.2.2.3.1).
+  - {upstream: mt_ul, downstream: pr_ul}
+  - {upstream: mt_ul, downstream: pr_ul, ogate: 1}
+  - {upstream: pr_ul, downstream: cnt_ul}
+  - {upstream: cnt_ul, downstream: rt}
   - {upstream: rt, downstream: n6_out}
 
   - {upstream: n6_in, downstream: tag_n6}
@@ -463,10 +465,10 @@ connections:
   - {upstream: n6_nd_sender_sort, downstream: rt, ogate: 1}
 
   - {upstream: pdr_dl, downstream: mt_dl}
-  - {upstream: mt_dl, downstream: cnt_dl}
-  - {upstream: mt_dl, downstream: cnt_dl, ogate: 1}
-  - {upstream: cnt_dl, downstream: pr_dl}
-  - {upstream: pr_dl, downstream: atsss}
+  - {upstream: mt_dl, downstream: pr_dl}
+  - {upstream: mt_dl, downstream: pr_dl, ogate: 1}
+  - {upstream: pr_dl, downstream: cnt_dl}
+  - {upstream: cnt_dl, downstream: atsss}
   - {upstream: atsss, downstream: rt}
   - {upstream: rt, downstream: enc, ogate: 1}
   - {upstream: rt, downstream: enc, ogate: 2}
