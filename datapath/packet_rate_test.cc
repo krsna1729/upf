@@ -34,6 +34,7 @@ PacketRateConfig Primary(uint32_t allowed, uint64_t period_ns,
   config.allowed = allowed;
   config.primary_period_ns = period_ns;
   config.epoch = epoch;
+  config.instance = 1;  // what the module stamps on the first publish
   return config;
 }
 
@@ -127,6 +128,55 @@ TEST(PacketRateQuota, EpochChangeRestartsTheWindows) {
   config.epoch = 2;
   EXPECT_EQ(quota.Check(config, 0), Verdict::kPass);
   EXPECT_EQ(quota.Check(config, 0), Verdict::kDrop);
+}
+
+// A new profile restarts the windows, not the seed: 5.4.15.2 rule 4 enforces
+// the seed "until either the packet rate limits are reached, or the validity
+// time expires", once. Restarting it with the windows granted it again on
+// every profile change.
+TEST(PacketRateQuota, ProfileChangeKeepsASpentSeed) {
+  PacketRateQuota quota;
+  PacketRateConfig config = Primary(1, kMinute);
+  config.seed_remaining = 1;
+  config.seed_validity_unix_ns = WallNowNs() + 10 * kSecond;
+  config.seed_epoch = 1;
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kPass);  // seed
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kPass);  // window
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kDrop);
+
+  config.epoch = 2;
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kPass);  // the new window
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kDrop) << "the spent seed was granted again";
+
+  // A seed the CP sends again is a new one.
+  config.seed_epoch = 2;
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kPass);
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kDrop);
+}
+
+// A quota published into an id that held none starts from nothing, even when
+// its epochs equal the ones the id's last quota had -- what a controller
+// restarted from epoch 1 writes.
+TEST(PacketRateQuota, ANewInstanceStartsFromNothing) {
+  PacketRateQuota quota;
+  PacketRateConfig config = Primary(1, kMinute);
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kPass);
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kDrop);
+
+  config.instance = 2;
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kPass) << "a new quota inherited a spent window";
+}
+
+// A maximum of zero is reported like any other window: nothing remains until
+// the period's end. 7.5.5.4 makes the Packet Rate Status mandatory in the
+// report, so a validity of 0 (which the controller drops) lost the QER.
+TEST(PacketRateQuota, ZeroMaximumReportsItsPeriod) {
+  PacketRateQuota quota;
+  const PacketRateConfig config = Primary(0, kMinute);
+  EXPECT_EQ(quota.Check(config, 0), Verdict::kDrop);
+  const auto reading = quota.Status(config, 5 * kSecond, 1000);
+  EXPECT_EQ(reading.remaining, 0);
+  EXPECT_EQ(reading.validity_unix_ns, 1000 + (kMinute - 5 * kSecond));
 }
 
 TEST(PacketRateQuota, StatusReportsRemainingAndWindowEnd) {

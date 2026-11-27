@@ -95,6 +95,7 @@ func TestPacketRateQuotaCompiles(t *testing.T) {
 		Epoch:         1,
 		SeedRemaining: 40, SeedRemainingAdditional: 4,
 		SeedValidityUnixNS: uint64(validity.UnixNano()),
+		SeedEpoch:          2,
 	}
 	if got := payload[PacketRateEntry](ulChange.Value); got != want {
 		t.Errorf("uplink quota = %+v, want %+v", got, want)
@@ -110,6 +111,7 @@ func TestPacketRateQuotaCompiles(t *testing.T) {
 		Epoch:         1,
 		SeedRemaining: 50, SeedRemainingAdditional: 5,
 		SeedValidityUnixNS: uint64(validity.UnixNano()),
+		SeedEpoch:          2,
 	}
 	if got := payload[PacketRateEntry](dl[0].Value); got != wantDL {
 		t.Errorf("downlink quota = %+v, want %+v", got, wantDL)
@@ -129,7 +131,9 @@ func TestPacketRateQuotaCompiles(t *testing.T) {
 	}
 
 	// A new uplink profile names only ULPR: the uplink quota is rewritten with
-	// a new epoch (the seed the SMF last sent stays), the downlink one goes.
+	// a new epoch, while the seed keeps its epoch -- the module restarts the
+	// windows, not a seed already used (5.4.15.2 rule 4) -- and the downlink
+	// one goes.
 	changed := message.NewSessionModificationRequest(0, 0, seid, 3, 0,
 		ie.NewUpdateQER(ie.NewQERID(1), packetRateIE(0x01, 0, 150, 0, 0, 0, 0, 0, 0)))
 	if got := cause(t, c.Modify(changed)); got != ie.CauseRequestAccepted {
@@ -137,9 +141,10 @@ func TestPacketRateQuotaCompiles(t *testing.T) {
 	}
 	ulChange = find(t, rec.last(), ratesRes(cfg.Up), "id", rateID)
 	want = PacketRateEntry{
-		Allowed: 150, PeriodSeconds: 60, Epoch: 2,
+		Allowed: 150, PeriodSeconds: 60, Epoch: 3,
 		SeedRemaining: 40, SeedRemainingAdditional: 4,
 		SeedValidityUnixNS: uint64(validity.UnixNano()),
+		SeedEpoch:          2,
 	}
 	if got := payload[PacketRateEntry](ulChange.Value); got != want {
 		t.Errorf("the changed uplink quota = %+v, want %+v", got, want)
@@ -366,28 +371,37 @@ func rulePort(r rule) uint16 {
 	return binary.BigEndian.Uint16(r.values[4])
 }
 
-// TestPacketRateSharedChangeRewritesTheRule: a modification that changes which
-// QER's quota the session shares leaves every rule's result naming the new
-// quota, even when the PDR's action, meters and next hop are unchanged
-// (samePDRRule's packetRateID). Without it the dataplane keeps the old id --
-// or, when the old direction's profile was dropped, a record that no longer
-// exists.
-func TestPacketRateSharedChangeRewritesTheRule(t *testing.T) {
+// TestPacketRateTwoCapsOnOnePDRAreRefused: 5.4.15.3 lets an SMF associate
+// DL PDRs to both a Serving PLMN rate control QER and a Small Data Rate
+// Control QER, and each caps the traffic. One rule carries one quota id, so
+// a PDR naming two QERs that cap its direction is refused rather than
+// accepted with one of the two caps silently dropped -- at the establishment,
+// and at a modification that would make it so, which leaves the session as it
+// was.
+func TestPacketRateTwoCapsOnOnePDRAreRefused(t *testing.T) {
 	cfg := testConfig()
 	cfg.Up.PacketRates = "pr_ul"
 	rec := &recorder{}
 	c := New(cfg, rec, quietLogger())
-	resp := c.Establish(message.NewSessionEstablishmentRequest(0, 0, 0x7810, 1, 0,
-		ie.NewNodeID("", "", "smf"),
-		ie.NewFSEID(0x7810, nil, nil),
-		// PDR 1 names both QERs and PDR 2 only QER 2: the shared quota is
-		// QER 2's by reference count.
-		pdrWithQERs(1, 1000, 1, 2),
-		pdrWithQERs(2, 2000, 2),
-		ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
-			ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
-		packetRateQER(1), packetRateQER(2),
-	)).(*message.SessionEstablishmentResponse)
+	establish := func(cp uint64, first ...uint32) message.Message {
+		return c.Establish(message.NewSessionEstablishmentRequest(0, 0, cp, 1, 0,
+			ie.NewNodeID("", "", "smf"),
+			ie.NewFSEID(cp, nil, nil),
+			pdrWithQERs(1, 1000, first...),
+			pdrWithQERs(2, 2000, 2),
+			ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(applyForw),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore))),
+			packetRateQER(1), packetRateQER(2),
+		))
+	}
+	if got := cause(t, establish(0x7810, 1, 2)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("a PDR under two uplink packet rates answered cause %d, want 73", got)
+	}
+	if len(rec.txns) != 0 {
+		t.Error("the refused session wrote to the dataplane")
+	}
+
+	resp := establish(0x7811, 1).(*message.SessionEstablishmentResponse)
 	if got := cause(t, resp); got != ie.CauseRequestAccepted {
 		t.Fatalf("the establishment answered cause %d", got)
 	}
@@ -406,18 +420,75 @@ func TestPacketRateSharedChangeRewritesTheRule(t *testing.T) {
 		}
 		return byPort
 	}
-	if got := ports(rec.last()); got[1000] != q2 || got[2000] != q2 {
-		t.Fatalf("the rules name quotas %v, want the shared QER 2's %d for both", got, q2)
+	if got := ports(rec.last()); got[1000] != q1 || got[2000] != q2 {
+		t.Fatalf("the rules name quotas %v, want each PDR its own QER's (%d, %d)", got, q1, q2)
+	}
+	seid := upFSEID(t, resp)
+	written := len(rec.txns)
+	both := message.NewSessionModificationRequest(0, 0, seid, 2, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewQERID(1), ie.NewQERID(2)))
+	if got := cause(t, c.Modify(both)); got != ie.CauseRuleCreationModificationFailure {
+		t.Errorf("an update putting PDR 2 under two packet rates answered cause %d, want 73", got)
+	}
+	if len(rec.txns) != written {
+		t.Error("the refused update wrote to the dataplane")
 	}
 
-	// PDR 2 now names both QERs too: the tie falls to the lower id, so the
-	// shared quota becomes QER 1's.
-	mod := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
-		ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewQERID(1), ie.NewQERID(2)))
-	if got := cause(t, c.Modify(mod)); got != ie.CauseRequestAccepted {
-		t.Fatalf("the update answered cause %d", got)
+	// Moving PDR 2 to the other QER rewrites its rule with that quota even
+	// though its action, meters and next hop are unchanged (samePDRRule's
+	// packetRateID).
+	move := message.NewSessionModificationRequest(0, 0, seid, 3, 0,
+		ie.NewUpdatePDR(ie.NewPDRID(2), ie.NewQERID(1)))
+	if got := cause(t, c.Modify(move)); got != ie.CauseRequestAccepted {
+		t.Fatalf("the move answered cause %d", got)
 	}
-	if got := ports(rec.last()); got[1000] != q1 || got[2000] != q1 {
-		t.Errorf("after the shared quota moved the rules name %v, want QER 1's %d for both", got, q1)
+	if got := ports(rec.last()); got[2000] != q1 {
+		t.Errorf("after the move PDR 2's rule names quotas %v, want QER 1's %d", got, q1)
+	}
+}
+
+// TestPacketRateQueryReadsBeforeTheOverwrite: 5.4.15.3 NOTE 2 -- the query
+// retrieves "the current rate status applicable to the source system before
+// the UPF/PGW-U overwrites the QER parameters". A message that queries QER 1
+// and drops its downlink rate answers the downlink status as it stood; read
+// after the transaction, the record was gone (the fake forgets an erased
+// quota, as the module does).
+func TestPacketRateQueryReadsBeforeTheOverwrite(t *testing.T) {
+	cfg := testConfig()
+	cfg.Up.PacketRates = "pr_ul"
+	cfg.Down.PacketRates = "pr_dl"
+	rec := &recorder{}
+	c := New(cfg, rec, quietLogger())
+	validity := time.Unix(2000000000, 0)
+	resp := c.Establish(packetRateEstablishment(0x7812,
+		ie.NewCreateQER(ie.NewQERID(1), ie.NewGateStatus(ie.GateStatusOpen, ie.GateStatusOpen),
+			packetRateIE(0x03, 0, 10, 0, 20, 0, 0, 0, 0)))).(*message.SessionEstablishmentResponse)
+	if got := cause(t, resp); got != ie.CauseRequestAccepted {
+		t.Fatalf("the establishment answered cause %d", got)
+	}
+	ulID, dlID := quotaIDs(t, rec.last(), cfg)
+	rec.rates = map[string][]bess.PacketRateStatus{
+		"pr_ul": {{ID: ulID, Remaining: 7, ValidityUnixNS: uint64(validity.UnixNano())}},
+		"pr_dl": {{ID: dlID, Remaining: 9, ValidityUnixNS: uint64(validity.UnixNano())}},
+	}
+	query := message.NewSessionModificationRequest(0, 0, upFSEID(t, resp), 2, 0,
+		ie.NewUpdateQER(ie.NewQERID(1), packetRateIE(0x01, 0, 10, 0, 0, 0, 0, 0, 0)),
+		ie.NewQueryPacketRateStatusWithinSessionModificationRequest(ie.NewQERID(1)))
+	answer := c.Modify(query).(*message.SessionModificationResponse)
+	if got := cause(t, answer); got != ie.CauseRequestAccepted {
+		t.Fatalf("the query answered cause %d", got)
+	}
+	report := packetRateReport(t, answer.IEs, ie.PacketRateStatusReportWithinSessionModificationResponse)
+	children, err := report.PacketRateStatusReport()
+	if err != nil || len(children) != 2 {
+		t.Fatalf("the report holds %d IEs (%v), want QER ID and Packet Rate Status", len(children), err)
+	}
+	fields, err := children[1].PacketRateStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fields.HasDL() || fields.NumberOfRemainingDownlinkPacketsAllowed != 9 {
+		t.Errorf("the report's downlink status is flags %#x, remaining %d; want the 9 that stood before the overwrite",
+			fields.Flags, fields.NumberOfRemainingDownlinkPacketsAllowed)
 	}
 }

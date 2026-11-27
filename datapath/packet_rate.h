@@ -64,12 +64,31 @@ class PacketRate final : public Module {
   std::string GetDesc() const override;
 
  private:
+  // The quota resource: a SlotResource that stamps a quota published into an
+  // id holding none with a fresh instance, and carries an update's instance
+  // over from the quota it replaces. The window state (states_) outlives an
+  // erase, and the next quota at the id -- another QER, or the same id after
+  // upfd restarts and numbers its epochs from 1 again -- must start from
+  // nothing rather than inherit a spent window or a used seed.
+  class QuotaResource final
+      : public bess::dataplane::SlotResource<PacketRateId, Entry> {
+   public:
+    QuotaResource(std::string name,
+                  bess::dataplane::SlotTable<PacketRateId, Entry> &table)
+        : SlotResource(std::move(name), table), table_(table) {}
+    std::expected<Reservation, std::string> Reserve(
+        const bess::dataplane::Op &op) override;
+
+   private:
+    bess::dataplane::SlotTable<PacketRateId, Entry> &table_;
+    uint32_t next_instance_ = 0;
+  };
+
   size_t capacity_ = 0;
 
   bess::framework::Sized<bess::dataplane::SlotTable<PacketRateId, Entry>>
       entries_;
-  std::unique_ptr<bess::dataplane::SlotResource<PacketRateId, Entry>>
-      resource_;
+  std::unique_ptr<QuotaResource> resource_;
   bess::framework::ResourceBinding binding_;  // after resource_ (D-044)
   int rate_attr_ = -1;                        // "packet_rate_id"
 
@@ -117,6 +136,7 @@ inline std::expected<PacketRate::Entry, std::string> ParsePacketRateValue(
   entry.config.seed_remaining_additional =
       value.seed_remaining_additional();
   entry.config.seed_validity_unix_ns = value.seed_validity_unix_ns();
+  entry.config.seed_epoch = value.seed_epoch();
   return entry;
 }
 
