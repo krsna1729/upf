@@ -658,6 +658,8 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 		// transaction may have committed, and handing those ids to the next
 		// session would let it overwrite records this request's rules still
 		// select -- so they stay allocated, and the leak is the safe failure.
+		// Store references, slab records and rule claims are retained too:
+		// the same unanswered establishment may still own those keys.
 		if definiteRefusal(err) {
 			c.mu.Lock()
 			c.releaseSession(s)
@@ -670,6 +672,8 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 		return c.establishResponse(req, cpSEID, local, causeOf(err), nil)
 	}
 
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	c.mu.Lock()
 	c.sessions[local] = s
 	c.reservedSessions--
@@ -716,6 +720,11 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 		hdr = s.CPSEID
 	}
 	if s == nil {
+		return modifyResponse(req, hdr, ie.CauseSessionContextNotFound, nil)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.released {
 		return modifyResponse(req, hdr, ie.CauseSessionContextNotFound, nil)
 	}
 
@@ -975,6 +984,11 @@ func (c *Compiler) delete(req *message.SessionDeletionRequest) message.Message {
 	if s == nil {
 		// Already gone: the SMF gets the answer it wanted (a retransmitted
 		// deletion must not be an error).
+		return deleteResponse(req, hdr, ie.CauseSessionContextNotFound)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.released {
 		return deleteResponse(req, hdr, ie.CauseSessionContextNotFound)
 	}
 	// The held packets go with the session: 5.2.4.1 has them "either dropped or

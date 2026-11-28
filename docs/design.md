@@ -35,6 +35,11 @@ retries, and no other writer exists to race. A model-only modification can
 need no dataplane write; it must not split a dataplane change across
 transactions.
 
+Modification, deletion, usage-quota enforcement and BAR writes serialize
+per session through settlement. The usage tick does not wait for a busy
+session while it holds an enforcement batch: it queues that session for
+the next tick. The compiler does not hold its shared lock during an RPC.
+
 Resource changes carry compact typed Go structs (`bess.Fields`) rather than
 per-record field maps. JSON tags name fields in the daemon's current descriptor;
 the transaction encoder validates field types, oneofs and required-field

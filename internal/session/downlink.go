@@ -310,6 +310,14 @@ func (c *Compiler) ApplyUpdateBAR(_ context.Context, seid uint64, update *ie.IE)
 			"seid", seid, "bar", b.id)
 		return
 	}
+	c.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	c.mu.Lock()
+	if c.sessions[seid] != s {
+		c.mu.Unlock()
+		return
+	}
 	if s.rare().BARs[b.id] == nil {
 		// The SMF named a BAR this session does not hold. Applying it would
 		// create one under numbers nobody provisioned -- the guess a FAR naming
