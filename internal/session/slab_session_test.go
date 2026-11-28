@@ -123,9 +123,8 @@ func TestARefusedModificationRestoresItsRecords(t *testing.T) {
 	}
 }
 
-// TestSessionChurnGivesBackEverySlabSlot: rounds of establishment,
-// modification and deletion hold the same records each round and give every
-// one back at its end, reusing the slots rather than adding segments.
+// Establish, modify and delete several rounds. Full rounds hold the same
+// model; teardown returns empty segments and keeps only warm segments.
 func TestSessionChurnGivesBackEverySlabSlot(t *testing.T) {
 	const n = 3000
 	c := New(testConfig(), &discardApplier{}, quietLogger())
@@ -153,8 +152,10 @@ func TestSessionChurnGivesBackEverySlabSlot(t *testing.T) {
 				t.Fatalf("round %d: deleting session %d answered cause %d", round, i, got)
 			}
 		}
-		if live, _ := liveRecords(c); live != [recKinds]int{} {
-			t.Fatalf("round %d: deleted sessions left %v records", round, live)
+		live, segs = liveRecords(c)
+		if live != [recKinds]int{} || segs != int(recKinds) {
+			t.Fatalf("round %d: teardown left %v records in %d segments, want only %d warm segments",
+				round, live, segs, recKinds)
 		}
 	}
 }

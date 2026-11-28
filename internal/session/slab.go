@@ -21,8 +21,9 @@ import (
 // never moves once made, with a parallel array of one-byte generations. A
 // handle is the slot's index (low recIndexBits bits; index 0 is never used, so
 // handle 0 names nothing) and the slot's generation when it was handed out
-// (the top byte). Freed slots are reused last-in first-out; segments are
-// kept for reuse, never given back (like the store's tables).
+// (the top byte). Freed slots are reused last-in first-out. An empty segment
+// gives back its records, except segment zero, which stays warm for churn.
+// Its generation bytes stay so reuse cannot revive an old handle.
 //
 // Ownership. Every handle has exactly one owner, which frees it:
 //   - the session's model: its index, its pending removals and replaced forms
@@ -63,15 +64,21 @@ var slabLockCheck bool
 // not a crash.
 var errRecordsExhausted = fmt.Errorf("%w: session records", errNoResources)
 
+type slabMetadata struct {
+	generation [slabSeg]uint8
+	used       uint16
+}
+
 // slab is the storage of one record kind. Every method runs under the
 // compiler's lock (mu).
 type slab[T any] struct {
-	mu   *sync.Mutex
-	recs []*[slabSeg]T
-	gens []*[slabSeg]uint8
-	next uint32   // the first never-used index; 0 is reserved
-	free []uint32 // freed indexes, reused last first
-	live int
+	mu     *sync.Mutex
+	recs   []*[slabSeg]T
+	gens   []*slabMetadata
+	next   uint32   // the first never-used index; 0 is reserved
+	free   []uint32 // freed indexes, reused last first
+	live   int
+	mapped int
 }
 
 func (sl *slab[T]) checkLocked() {
@@ -97,21 +104,28 @@ func (sl *slab[T]) alloc(v T) (uint32, *T, error) {
 		i = sl.next
 		sl.next++
 		if int(i>>slabShift) == len(sl.recs) {
-			sl.recs = append(sl.recs, new([slabSeg]T))
-			sl.gens = append(sl.gens, new([slabSeg]uint8))
+			sl.recs = append(sl.recs, nil)
+			sl.gens = append(sl.gens, new(slabMetadata))
 		}
 	}
+	seg := i >> slabShift
+	if sl.recs[seg] == nil {
+		sl.recs[seg] = new([slabSeg]T)
+		sl.mapped++
+	}
+	meta := sl.gens[seg]
+	meta.used++
 	sl.live++
-	p := &sl.recs[i>>slabShift][i&(slabSeg-1)]
+	p := &sl.recs[seg][i&(slabSeg-1)]
 	*p = v
-	return uint32(sl.gens[i>>slabShift][i&(slabSeg-1)])<<recIndexBits | i, p, nil
+	return uint32(meta.generation[i&(slabSeg-1)])<<recIndexBits | i, p, nil
 }
 
 // slot is h's index, after checking h names a live record: its slot is in
 // use and holds the generation h was handed out with.
 func (sl *slab[T]) slot(h uint32) uint32 {
 	i := h & recIndexMask
-	if i == 0 || i >= sl.next || sl.gens[i>>slabShift][i&(slabSeg-1)] != uint8(h>>recIndexBits) {
+	if i == 0 || i >= sl.next || sl.gens[i>>slabShift].generation[i&(slabSeg-1)] != uint8(h>>recIndexBits) {
 		panic(fmt.Sprintf("session: record handle %#x used after it was freed", h))
 	}
 	return i
@@ -133,9 +147,16 @@ func (sl *slab[T]) release(h uint32) {
 	i := sl.slot(h)
 	var zero T
 	sl.recs[i>>slabShift][i&(slabSeg-1)] = zero
-	sl.gens[i>>slabShift][i&(slabSeg-1)]++
+	seg := i >> slabShift
+	meta := sl.gens[seg]
+	meta.generation[i&(slabSeg-1)]++
 	sl.free = append(sl.free, i)
 	sl.live--
+	meta.used--
+	if seg != 0 && meta.used == 0 {
+		sl.recs[seg] = nil
+		sl.mapped--
+	}
 }
 
 func (sl *slab[T]) releaseAll(hs []uint32) {
@@ -190,7 +211,7 @@ func (rs *records) live() [recKinds]int {
 }
 
 func (rs *records) segments() int {
-	return len(rs.pdrs.recs) + len(rs.fars.recs) + len(rs.qers.recs) + len(rs.urrs.recs)
+	return rs.pdrs.mapped + rs.fars.mapped + rs.qers.mapped + rs.urrs.mapped
 }
 
 // recKind is which slab a handle of a recIndex names.

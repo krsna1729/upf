@@ -52,6 +52,10 @@ Each miss below passed every unit test and lane, and showed only at
    three-way ownership ledger (model, snapshot, pending lists).
    The merge and compile each intern at most one ownership list for their
    new record handles. They do not rebuild the list for each acquired handle.
+   An empty record slab segment returns its backing array, with one warm
+   segment per kind. A store table or blob store that used multiple segments
+   returns its backing on complete drain; shared blob holes are reused by
+   size while any blob remains live.
 3. **A tick reads in bulk, and a bulk read is paged.** One RPC per session
    per tick was 1-2M round trips (645488a). One read per module is the fix,
    but one `get_counts` reply passes the 64 MiB message limit at about 2M
