@@ -109,6 +109,22 @@ func TestHeapAdmissionHysteresisHoldsTheBand(t *testing.T) {
 	}
 }
 
+func TestHeapAdmissionSmallShareKeepsHysteresis(t *testing.T) {
+	r := heapReading{live: 41, limit: 1000}
+	h := newHeapAdmission(0.04, 0, func() heapReading { return r }, nil)
+	if h.admit() || h.admit() {
+		t.Fatal("admission reopened above the configured share")
+	}
+	r.live = 30
+	if h.admit() {
+		t.Fatal("admission reopened inside the hysteresis band")
+	}
+	r.live = 20
+	if !h.admit() {
+		t.Fatal("admission did not reopen at half the small configured share")
+	}
+}
+
 // The clock only advances when a test permits the next deletion/sample check;
 // deadlines below detect deadlocks, not the passage of a collection interval.
 type heapRecoveryClock struct {
