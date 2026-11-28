@@ -835,6 +835,10 @@ type Session struct {
 	// enforcement interleaved between a modification's snapshot and merge.
 	// Never rolled back: a refused later request cannot unwrite that history.
 	writes uint64
+
+	// writeMu owns this session from a model change through its dataplane
+	// outcome and settlement. Acquire it without Compiler.mu.
+	writeMu sync.Mutex
 }
 
 // sessionExt is what a session holds only once the SMF uses buffering, ATSSS
@@ -1754,12 +1758,25 @@ func (c *Compiler) AssociationEnded(reason string) {
 		var changes []bess.Change
 		for ; next < len(sessions); next++ {
 			s := sessions[next]
+			if len(batch) == 0 {
+				s.writeMu.Lock()
+			} else if !s.writeMu.TryLock() {
+				// Drain our current batch rather than wait with other
+				// sessions locked.
+				break
+			}
+			if s.released {
+				s.writeMu.Unlock()
+				continue
+			}
 			ch, err := c.removal(s)
 			if err != nil {
+				s.writeMu.Unlock()
 				c.endedWith(s, reason, err)
 				continue
 			}
 			if len(batch) > 0 && len(changes)+len(ch) > sweepBatch {
+				s.writeMu.Unlock()
 				break
 			}
 			batch, changes = append(batch, s), append(changes, ch...)
@@ -1768,12 +1785,14 @@ func (c *Compiler) AssociationEnded(reason string) {
 			if err := c.ap.Apply(ctx, changes...); err != nil {
 				for _, s := range batch {
 					c.endedWith(s, reason, c.remove(ctx, s))
+					s.writeMu.Unlock()
 				}
 				continue
 			}
 		}
 		for _, s := range batch {
 			c.forget(s)
+			s.writeMu.Unlock()
 			c.endedWith(s, reason, nil)
 		}
 	}
@@ -2128,10 +2147,8 @@ func (c *Compiler) track(s *Session) {
 	}
 }
 
-// removal is the transaction that erases a session's records (remove). It
-// reads them under the lock: a tick's enforcement may settle (and free) a
-// replaced form while the deletion is in flight. It costs the session's own
-// records.
+// removal builds the transaction that erases a session's records. It costs
+// the session's own records. Callers own the session's write order.
 func (c *Compiler) removal(s *Session) ([]bess.Change, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

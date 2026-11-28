@@ -225,11 +225,9 @@ func TestARefusedEnforcementBatchSettlesTheOthers(t *testing.T) {
 	scaletest.RPCsAtMost(t, &rec.ops, "Apply", 1+sessions)
 }
 
-// TestAReleasedSessionsEnforcementIsDropped: a deletion that lands while a
-// session's compiled enforcement waits for its batch leaves nothing for that
-// write to do. Sent anyway, it put back the rules and F-TEIDs the deletion
-// erased, naming action ids already released.
-func TestAReleasedSessionsEnforcementIsDropped(t *testing.T) {
+// An enforcement holds its session through settlement. No second write can
+// take the model while the first is queued, and deletion follows the batch.
+func TestAnEnforcementSettlesBeforeDeletion(t *testing.T) {
 	ctx := context.Background()
 	baseline, traffic := time.Unix(1_700_000_000, 0), time.Unix(1_700_000_001, 0)
 	rec := &recorder{}
@@ -251,14 +249,19 @@ func TestAReleasedSessionsEnforcementIsDropped(t *testing.T) {
 	if err != nil || pending == nil {
 		t.Fatalf("the spent quota compiled no enforcement (%v)", err)
 	}
-	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 2, 0))); got != ie.CauseRequestAccepted {
-		t.Fatalf("the deletion answered cause %d", got)
+	if s.writeMu.TryLock() {
+		s.writeMu.Unlock()
+		t.Error("queued enforcement did not reserve the session's write order")
 	}
-	rec.ops.Reset()
 	if err := c.applyEnforcements(ctx, []*enforcement{pending}); err != nil {
-		t.Errorf("the dropped enforcement answered %v", err)
+		t.Fatalf("the queued enforcement answered %v", err)
 	}
-	scaletest.RPCsAtMost(t, &rec.ops, "Apply", 0)
+	if got := cause(t, c.Delete(message.NewSessionDeletionRequest(0, 0, seid, 2, 0))); got != ie.CauseRequestAccepted {
+		t.Fatalf("the deletion after settlement answered cause %d", got)
+	}
+	if len(rec.entries) != 0 {
+		t.Fatalf("the session left %d meter or counter records", len(rec.entries))
+	}
 }
 
 // A counted rule is 34 B of a get_counts reply on the wire (UG-B1).
@@ -318,10 +321,7 @@ func boundedTick(t *testing.T, sessions, perSession int) (*Compiler, *boundedRea
 	reader.held = make([]uint32, 0, rules)
 	reader.named = make([]uint8, rules+1)
 	for i := range sessions {
-		s := *model
-		s.LocalSEID = seid + 1 + uint64(i)
-		s.slot = 0 // a copy is another session: it takes a slot of its own
-		s.ix = recIndex{}
+		s := Session{rs: model.rs, LocalSEID: seid + 1 + uint64(i), CPSEID: model.CPSEID}
 		for j := range perSession {
 			p := *measured
 			p.id = uint16(j + 1)

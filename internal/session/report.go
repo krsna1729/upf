@@ -659,6 +659,21 @@ func (c *Compiler) Evaluate(ctx context.Context, seid uint64, now time.Time) ([]
 // one session's rules, EvaluateAll reads each counter module once for every
 // session of the tick.
 func (c *Compiler) judge(seid uint64, s *Session, counts readings, markers map[endMarkerKey]bool, now time.Time) (out []Report, pending *enforcement, result error) {
+	// Do not wait here: a tick can already own other sessions awaiting
+	// its batch. Leave this session queued for a fresh read next tick.
+	if !s.writeMu.TryLock() {
+		c.mu.Lock()
+		if c.sessions[seid] == s {
+			c.queueUsage(s)
+		}
+		c.mu.Unlock()
+		return nil, nil, nil
+	}
+	defer func() {
+		if pending == nil {
+			s.writeMu.Unlock()
+		}
+	}()
 	c.mu.Lock()
 	if c.sessions[seid] != s {
 		c.mu.Unlock()
@@ -839,6 +854,7 @@ func (c *Compiler) flushEnforcements(ctx context.Context, batch *[]*enforcement,
 // empty write, sent nothing and must not mark the session live.
 func (c *Compiler) finishEnforcement(e *enforcement, err error, sent bool) {
 	s := e.s
+	defer s.writeMu.Unlock()
 	c.mu.Lock()
 	if sent {
 		if _, ok := c.target.(sessionTarget); ok && (err == nil || !definiteRefusal(err)) {
