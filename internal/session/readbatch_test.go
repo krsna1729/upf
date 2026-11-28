@@ -4,9 +4,12 @@ package session
 
 import (
 	"context"
+	"errors"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/krsna1729/upf/internal/bess"
 	"github.com/krsna1729/upf/internal/scaletest"
@@ -22,7 +25,7 @@ type gatedCounts struct {
 	gate    chan struct{}
 }
 
-func (g *gatedCounts) AppendRuleCounts(_ context.Context, dst []bess.RuleCount, _ string, ids ...uint32) ([]bess.RuleCount, error) {
+func (g *gatedCounts) AppendRuleCounts(ctx context.Context, dst []bess.RuleCount, _ string, ids ...uint32) ([]bess.RuleCount, error) {
 	g.mu.Lock()
 	g.calls = append(g.calls, slices.Clone(ids))
 	first := len(g.calls) == 1
@@ -31,6 +34,9 @@ func (g *gatedCounts) AppendRuleCounts(_ context.Context, dst []bess.RuleCount, 
 	if first {
 		close(g.entered)
 		<-g.gate
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	for _, id := range ids {
 		dst = append(dst, bess.RuleCount{ActionID: id, Packets: uint64(id)})
@@ -95,5 +101,63 @@ func TestConcurrentSessionReadingsShareOneRoundTrip(t *testing.T) {
 	}
 	if last := reader.calls[len(reader.calls)-1]; !slices.Equal(last, []uint32{7}) {
 		t.Errorf("an idle module's reading named %v, want only its own rule", last)
+	}
+}
+
+func TestCanceledRoundLeaderDoesNotCancelOtherReadings(t *testing.T) {
+	const module = "upf/counters_ul"
+	reader := &gatedCounts{entered: make(chan struct{}), gate: make(chan struct{})}
+	var b readBatch
+	go b.read(t.Context(), reader, module, []uint32{1})
+	<-reader.entered
+	open := sync.OnceFunc(func() { close(reader.gate) })
+	defer open()
+
+	canceled, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	leader := make(chan error, 1)
+	go func() {
+		_, err := b.read(canceled, reader, module, []uint32{2})
+		leader <- err
+	}()
+	waitFor := func(n int) {
+		t.Helper()
+		end := time.Now().Add(time.Second)
+		for time.Now().Before(end) {
+			b.mu.Lock()
+			next := b.modules[module].next
+			joined := next != nil && len(next.ids) == n
+			b.mu.Unlock()
+			if joined {
+				return
+			}
+			runtime.Gosched()
+		}
+		t.Fatalf("%d readings did not join the round", n)
+	}
+	waitFor(1)
+	survives := make(chan []bess.RuleCount, 1)
+	go func() {
+		rules, _ := b.read(t.Context(), reader, module, []uint32{3})
+		survives <- rules
+	}()
+	waitFor(2)
+	cancel()
+	select {
+	case err := <-leader:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("leader returned %v, want canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("leader waited for the previous read after cancellation")
+	}
+	open()
+	select {
+	case rules := <-survives:
+		if !slices.ContainsFunc(rules, func(r bess.RuleCount) bool { return r.ActionID == 3 && r.Packets == 3 }) {
+			t.Fatalf("live member lost its reading: %v", rules)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled leader stranded its round")
 	}
 }

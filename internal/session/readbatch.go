@@ -21,6 +21,8 @@ import (
 // round names is a different session's (an action id belongs to one session),
 // and the module restarts each named rule's window once, as the separate
 // readings did.
+// Once queued, a reading belongs to the round. A caller may stop waiting,
+// but its cancellation does not cancel the read for the other members.
 //
 // scale: a round holds at most one reading per session worker
 // (n4.MaxSessionWorkers) and at most countChunk rules; a reading that would
@@ -50,6 +52,9 @@ type readRound struct {
 // read is the reading of ids in module, through reader. The result may hold
 // other sessions' rules as well; the caller looks up its own.
 func (b *readBatch) read(ctx context.Context, reader CounterReader, module string, ids []uint32) ([]bess.RuleCount, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	b.mu.Lock()
 	if b.modules == nil {
 		b.modules = map[string]*moduleReads{}
@@ -77,12 +82,23 @@ func (b *readBatch) read(ctx context.Context, reader CounterReader, module strin
 	r.ids = append(r.ids, ids...)
 	b.mu.Unlock()
 	if first {
-		<-r.start
-		b.send(ctx, reader, m, r)
-	} else {
-		<-r.done
+		if ctx.Done() == nil {
+			b.runRound(ctx, reader, m, r)
+		} else {
+			go b.runRound(context.WithoutCancel(ctx), reader, m, r)
+		}
 	}
-	return r.counts, r.err
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-r.done:
+		return r.counts, r.err
+	}
+}
+
+func (b *readBatch) runRound(ctx context.Context, reader CounterReader, m *moduleReads, r *readRound) {
+	<-r.start
+	b.send(ctx, reader, m, r)
 }
 
 // send reads r, then hands the module to the round that gathered meanwhile,
