@@ -45,13 +45,11 @@ Each miss below passed every unit test and lane, and showed only at
    round trip per change was 30% (744837d). `fmt.Sprint` ownership keys held
    37% of the live heap at 100K sessions (b7a02ae). The dedupe keys are
    canonical bytes now (116c947). The deep clone per modify is kept
-   deliberately (UG-R6): `-session-actions` and `-session-qers` cap a
-   session's action-bearing and rate-bearing records at 16 each, so the copy
-   those bounds cover is constant per session. A drop PDR takes no action
-   (`compile.go`, "A drop needs no action record"), so a session's drop PDRs
-   are bounded only by the SMF's message (UG-R10) and the clone is linear in
-   them. A copy-on-write snapshot would need a three-way handle-ownership
-   ledger (model, snapshot, pending lists) either way.
+   deliberately (UG-R6). `-max-pdrs` bounds live PDRs and `-max-records`
+   bounds FARs, QERs, URRs, BARs and MARs separately. The QER and MAR caps
+   include records pending removal. Session-major also caps the compiled
+   action and rate records. A copy-on-write snapshot would still need a
+   three-way ownership ledger (model, snapshot, pending lists).
 3. **A tick reads in bulk, and a bulk read is paged.** One RPC per session
    per tick was 1-2M round trips (645488a). One read per module is the fix,
    but one `get_counts` reply passes the 64 MiB message limit at about 2M
@@ -93,6 +91,8 @@ Each miss below passed every unit test and lane, and showed only at
    establishment, or a modification that would grow a session, past
    `-max-pdrs` (default 64); a drop PDR takes no action id, so the action
    space does not bound the count.
+   `-max-records` applies the same rule to each other PFCP record kind
+   (default 64 per kind). Both checks run before taking the snapshot.
 9. **Garbage is memory.** upfd sets GOMEMLIMIT to the smallest cgroup
    `memory.max` on its path, less max(32 MiB, 10%), unless GOMEMLIMIT is set
    (f28b7ac). Watch allocations per operation: `BenchmarkEstablish` reports

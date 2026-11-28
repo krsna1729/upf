@@ -400,6 +400,16 @@ type Config struct {
 	// the change does not grow it.
 	MaxPDRs uint32
 
+	// MaxRecords bounds the FARs, QERs, URRs, BARs and MARs one session may
+	// hold, each kind on its own (UG-R10): the SMF chooses every one of those
+	// counts, and the merge adds a record slot, a store blob and a copied
+	// snapshot entry for each. A removed QER sits in the session's removed
+	// list until the transaction that erases its meter lands, so the QER cap
+	// bounds that list too. Zero leaves those kinds uncapped; upfd's
+	// -max-records defaults to 64. As with the PDRs, a session already over a
+	// cap may change as long as the change does not grow that kind.
+	MaxRecords uint32
+
 	// MaxSessions bounds established sessions plus in-flight or uncertain
 	// establishments. Zero uses Sessions.MaxSessions for session-major,
 	// otherwise MaxActions, falling back to 65536 when neither is set.

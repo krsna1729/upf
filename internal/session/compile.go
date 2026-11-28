@@ -574,10 +574,14 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 	// UG-R10: a peer controls how many PDRs a session holds, and a drop PDR
 	// takes no action id, so nothing else bounds the count. Refuse before the
 	// merge allocates the model the compile would then copy. A checkpoint
-	// replay is the SMF's existing session, so it keeps what it had.
-	if admit && c.pdrCapRefuses(nil, pdrs, removals{}) {
-		c.log.Warn("session: the establishment names more PDRs than one session may hold",
-			"cp_seid", cpSEID, "pdrs", len(pdrs), "max_pdrs", c.cfg.MaxPDRs)
+	// replay is the SMF's existing session, so it keeps what it had. The
+	// session's other record kinds -- FARs, QERs, URRs, BARs, MARs -- are the
+	// peer's counts too, so -max-records caps each kind at the same point.
+	if admit && (c.pdrCapRefuses(nil, pdrs, removals{}) ||
+		c.recordCapRefuses(nil, fars, bars, qers, urrs, mars, removals{}) != "") {
+		c.log.Warn("session: the establishment names more records than one session may hold",
+			"cp_seid", cpSEID, "pdrs", len(pdrs), "max_pdrs", c.cfg.MaxPDRs,
+			"max_records", c.cfg.MaxRecords)
 		return c.establishResponse(req, cpSEID, 0, ie.CauseNoResourcesAvailable, nil)
 	}
 
@@ -724,15 +728,21 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	}
 	rm := parseRemovals(ies)
 	// UG-R10: the merged model's PDR count is what the compile walks and the
-	// snapshot copies. Refuse growth past the cap before the snapshot stages
-	// the model, and before the merge takes the request's PDRs; a session
-	// already over it may still change without growing.
+	// snapshot copies, and so are its FAR, QER, URR, BAR and MAR records --
+	// each one a slab slot, a store blob and a copied snapshot entry. Refuse
+	// growth past either cap before the snapshot stages the model, and before
+	// the merge takes the request's records; a session already over a cap may
+	// still change without growing.
 	c.mu.Lock()
-	overCap := c.pdrCapRefuses(s, pdrs, rm)
+	kind := "PDR"
+	if !c.pdrCapRefuses(s, pdrs, rm) {
+		kind = c.recordCapRefuses(s, fars, bars, qers, urrs, mars, rm)
+	}
 	c.mu.Unlock()
-	if overCap {
-		c.log.Warn("session: the modification would grow past the PDR cap",
-			"seid", seid, "pdrs", len(pdrs), "max_pdrs", c.cfg.MaxPDRs)
+	if kind != "" {
+		c.log.Warn("session: the modification would grow past the record cap",
+			"seid", seid, "kind", kind, "pdrs", len(pdrs), "max_pdrs", c.cfg.MaxPDRs,
+			"max_records", c.cfg.MaxRecords)
 		return modifyResponse(req, hdr, ie.CauseNoResourcesAvailable, nil)
 	}
 	// A Query Packet Rate Status names QERs the session holds; an unknown one
@@ -2940,6 +2950,73 @@ func (c *Compiler) pdrCapRefuses(s *Session, adds []pdrReq, rm removals) bool {
 		ids[p.id] = struct{}{}
 	}
 	return len(ids) > int(c.cfg.MaxPDRs) && len(ids) > current
+}
+
+// recordCapRefuses tests the peer-controlled kinds before snapshot or merge.
+// A removed QER or MAR still occupies a record until its erase settles.
+// The caller holds c.mu when s is not nil.
+func (c *Compiler) recordCapRefuses(s *Session, fars []farReq, bars []barReq, qers []qerReq,
+	urrs []urrReq, mars []marReq, rm removals) string {
+	limit := int(c.cfg.MaxRecords)
+	if limit == 0 {
+		return ""
+	}
+	var nf, nb, nq, nu, nm int
+	if s != nil {
+		r := s.rare()
+		nf, nb, nu = s.FARs().len(), len(r.BARs), s.URRs().len()
+		nq = s.QERs().len() + len(r.removedQERs)
+		nm = len(r.MARs) + len(s.pending.removedPolicies())
+	}
+	if recordGrowthRefused(limit, nf, fars, rm.fars, func(f farReq) uint32 { return f.id },
+		func(id uint32) bool { return s != nil && s.FARs().at(id) != nil }) {
+		return "FAR"
+	}
+	if recordGrowthRefused(limit, nb, bars, rm.bars, func(b barReq) uint8 { return b.id },
+		func(id uint8) bool { return s != nil && s.rare().BARs[id] != nil }) {
+		return "BAR"
+	}
+	if recordGrowthRefused(limit, nq, qers, nil, func(q qerReq) uint32 { return q.id },
+		func(id uint32) bool { return s != nil && s.QERs().at(id) != nil }) {
+		return "QER"
+	}
+	if recordGrowthRefused(limit, nu, urrs, rm.urrs, func(u urrReq) uint32 { return u.id },
+		func(id uint32) bool { return s != nil && s.URRs().at(id) != nil }) {
+		return "URR"
+	}
+	if recordGrowthRefused(limit, nm, mars, nil, func(m marReq) uint16 { return m.id },
+		func(id uint16) bool { return s != nil && s.rare().MARs[id] != nil }) {
+		return "MAR"
+	}
+	return ""
+}
+
+// recordGrowthRefused counts the net change, allowing an oversized restored
+// session to shrink. For kinds freed by merge, removals run after additions.
+// For QERs and MARs the caller passes no removals: those records remain held.
+func recordGrowthRefused[R any, K comparable](limit, current int, adds []R, removes []K,
+	idOf func(R) K, held func(K) bool) bool {
+	ceiling := max(limit, current)
+	if len(adds) <= ceiling-current {
+		return false
+	}
+	// scale: one map entry per distinct record id named in this PFCP message;
+	// no scan of existing records, and no allocation on the in-limit path.
+	changes := make(map[K]bool, len(adds)+len(removes))
+	for _, record := range adds {
+		changes[idOf(record)] = true
+	}
+	for _, id := range removes {
+		changes[id] = false
+	}
+	for id, present := range changes {
+		if existed := held(id); present && !existed {
+			current++
+		} else if !present && existed {
+			current--
+		}
+	}
+	return current > ceiling
 }
 
 // modelWrite keeps the native entry decision with the compiled resources.

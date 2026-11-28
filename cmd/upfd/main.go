@@ -56,7 +56,14 @@ func run() error {
 	maxPDRs := flag.Uint("max-pdrs", 64,
 		"the most PDRs one session may hold: an establishment or a modification "+
 			"that would grow past it is refused; a drop PDR takes no action id, so "+
-			"this is what bounds a session's records (UG-R10)")
+			"the action space does not bound the count (UG-R10)")
+	maxRecords := flag.Uint("max-records", 64,
+		"the most records of each other kind one session may hold -- FARs, QERs, "+
+			"URRs, BARs and MARs, each kind counted on its own: a request that "+
+			"would grow a kind past it is refused. Every one of these is a slab "+
+			"slot, a store blob and a snapshot copy, and the SMF chooses the count; "+
+			"a removed QER or MAR counts against its kind until the transaction "+
+			"that erases it lands (UG-R10)")
 	n6NextHop := flag.Uint("n6-next-hop", 1, "the Router next hop an uplink forward leaves by")
 	n3NextHop := flag.Uint("n3-next-hop", 2,
 		"the Router next hop a downlink forward leaves by: the encap's gate "+
@@ -306,6 +313,7 @@ func run() error {
 			fteidAddresses: fteidAddresses,
 			capacity:       uint32(*capacity),
 			maxPDRs:        uint32(*maxPDRs),
+			maxRecords:     uint32(*maxRecords),
 			n6NextHop:      uint32(*n6NextHop), n3NextHop: uint32(*n3NextHop),
 			accessNextHop: uint32(*accessNextHop),
 			atsss:         *atsss,
@@ -838,6 +846,7 @@ type graphArgs struct {
 	fteidAddresses entryList
 	capacity       uint32
 	maxPDRs        uint32
+	maxRecords     uint32
 	n6NextHop      uint32
 	n3NextHop      uint32
 	accessNextHop  uint32
@@ -961,6 +970,8 @@ func graphConfig(a graphArgs) (session.Config, error) {
 		// A session's PDRs are the peer's count, not the graph's capacity:
 		// the compiler refuses a request that would grow past it (UG-R10).
 		MaxPDRs: a.maxPDRs,
+		// So are its other records: each kind is capped the same way.
+		MaxRecords: a.maxRecords,
 		// Two chains, because a module has one output gate per path: the
 		// uplink's meter feeds the router toward N6, the downlink's feeds the
 		// tunnel toward N3. Each chain has its own rule table, so every rule's
