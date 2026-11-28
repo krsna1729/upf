@@ -28,10 +28,8 @@ import (
 // check cannot replace hard capacity reservations or account for non-Go memory.
 const defaultHeapAdmission = 0.7
 
-// heapReopenGap is the hysteresis band: closed at the share, admission reopens
-// only once the estimate is this share of the limit below it. Without it a
-// node at the boundary opens and closes on every collection. Thresholded
-// load shedding with a release band is the usual overload-manager shape.
+// heapReopenGap is the largest hysteresis band. For small positive shares
+// use at most half the share so the reopen threshold stays positive.
 const heapReopenGap = 0.05
 
 // admittedSessionBytes is the live heap one session adds, counted above the
@@ -145,7 +143,7 @@ func (h *heapAdmissionRecovery) decide(r heapReading, admitting bool) bool {
 	}
 	share := h.fraction
 	if h.closed {
-		share = max(0, h.fraction-heapReopenGap)
+		share -= min(heapReopenGap, share/2)
 	}
 	ok := heapAdmits(estimate, r.limit, share)
 	if ok && admitting {
