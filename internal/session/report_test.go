@@ -321,10 +321,7 @@ func boundedTick(t *testing.T, sessions, perSession int) (*Compiler, *boundedRea
 	reader.held = make([]uint32, 0, rules)
 	reader.named = make([]uint8, rules+1)
 	for i := range sessions {
-		s := *model
-		s.LocalSEID = seid + 1 + uint64(i)
-		s.slot = 0 // a copy is another session: it takes a slot of its own
-		s.ix = recIndex{}
+		s := Session{rs: model.rs, LocalSEID: seid + 1 + uint64(i), CPSEID: model.CPSEID}
 		for j := range perSession {
 			p := *measured
 			p.id = uint16(j + 1)
