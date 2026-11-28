@@ -27,10 +27,8 @@ import (
 // (s.copies), so a rollback never restores a record naming a freed handle.
 // The session's end gives back everything it holds (drop).
 //
-// Writes (acquire, own, trim, drop) run under Compiler.mu. Reads (get) take no
-// lock: storage is segmented, a segment never moves, and the segment directory
-// is published atomically; an entry is written once, before its handle is
-// published, and is rewritten only after its last reference went.
+// Compiler.mu protects both reads and writes. An entry is written before its
+// handle is published and can be reused only after its last reference goes.
 
 // ipAddr is a netip.Addr without the zone pointer: the 16 address bytes and
 // the family (4, 6, or 0 for none). A PFCP address carries no zone.
@@ -501,6 +499,8 @@ type store struct {
 
 	scratch  []uint32 // trim's handle list, reused
 	refBuf   []uint32 // own's new handle list, reused
+	refAdds  []uint32 // acquisitions in the current merge or compile
+	refOwner *Session // nil outside that lock hold
 	claimBuf []uint32 // a compile's new claims, then a settle's given-up ones
 	liveBuf  []uint32 // the rule keys a session's PDRs name, sorted
 	keyBuf   []byte   // a rule key's bytes, built before they are interned
@@ -542,10 +542,51 @@ func (st *store) own(s *Session, kind, h uint32) uint32 {
 		st.release(typed)
 		return h
 	}
+	if st.refOwner == s {
+		st.refAdds = append(st.refAdds, typed)
+		return h
+	}
 	list := append(append(append(st.refBuf[:0], held[:i]...), typed), held[i:]...)
 	st.setRefs(s, list)
 	st.refBuf = list[:0]
 	return h
+}
+
+func (st *store) beginRefs(s *Session) {
+	st.refOwner = s
+}
+
+// finishRefs folds this lock hold's acquisitions into the sorted ownership
+// list once. Even on failure, the caller's rollback or trim must see them.
+func (st *store) finishRefs() {
+	s, adds := st.refOwner, st.refAdds
+	st.refOwner, st.refAdds = nil, adds[:0]
+	if len(adds) == 0 {
+		return
+	}
+	// scale: sort the handles acquired by this change and merge with this
+	// session's existing list; intern at most one ownership blob.
+	slices.Sort(adds)
+	held := st.refsOf(s)
+	out := st.refBuf[:0]
+	changed := false
+	for _, typed := range adds {
+		for len(held) != 0 && held[0] < typed {
+			out = append(out, held[0])
+			held = held[1:]
+		}
+		if len(held) != 0 && held[0] == typed || len(out) != 0 && out[len(out)-1] == typed {
+			st.release(typed)
+			continue
+		}
+		out = append(out, typed)
+		changed = true
+	}
+	if changed {
+		out = append(out, held...)
+		st.setRefs(s, out)
+	}
+	st.refBuf = out[:0]
 }
 
 // refsOf is the handles s holds, read in place.

@@ -138,6 +138,29 @@ func TestASessionHoldsEachHandleOnceAndTrimGivesBackTheRest(t *testing.T) {
 	}
 }
 
+func TestAStoreBatchInternsOneOwnershipList(t *testing.T) {
+	for _, n := range []int{16, 64} {
+		var st store
+		s := &Session{}
+		st.ownPolicy(s, qerPolicy{mbUL: 1})
+		before := st.blobs.tail
+		st.beginRefs(s)
+		for i := n; i > 0; i-- {
+			policy := qerPolicy{mbUL: uint64(i)}
+			st.ownPolicy(s, policy)
+			st.ownPolicy(s, policy)
+		}
+		st.finishRefs()
+		if got := st.blobs.tail - before; got != blobClass(4*uint32(n)) {
+			t.Errorf("%d handles took %d bytes in ownership lists, want one list", n, got)
+		}
+		st.drop(s)
+		if st.policies.live != 0 || st.blobs.live != 0 {
+			t.Fatalf("%d handles: drop left %d policies and %d blobs", n, st.policies.live, st.blobs.live)
+		}
+	}
+}
+
 // TestAClaimIsFoundByItsWholeKeyAndTheIndexShrinks: a claim is found by its
 // bytes, interned or not, with its owner; a slot whose fingerprint matches but
 // whose key differs is not the claim; claims given up are not found, and an

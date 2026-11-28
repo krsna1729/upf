@@ -1065,6 +1065,8 @@ func (c *Compiler) merge(s *Session, pdrs []pdrReq, fars []farReq, bars []barReq
 	if s.released {
 		return errSessionGone
 	}
+	c.st.beginRefs(s)
+	defer c.st.finishRefs()
 	for _, q := range qers {
 		entry := s.QERs().at(q.id)
 		// A GBR above the MBR is not a policy this side can hold: the committed
@@ -3061,6 +3063,8 @@ func (c *Compiler) compileModel(s *Session, before *modelSnapshot, wantCreated b
 	if s.released {
 		return modelWrite{}, nil, errSessionGone
 	}
+	c.st.beginRefs(s)
+	defer c.st.finishRefs()
 
 	// The rule keys this compile is the first to claim, and whether it got as
 	// far as writing them: a compile that returns an error wrote nothing (its
@@ -3990,7 +3994,7 @@ func (c *Compiler) ruleKeyOf(p *pdr, h uint32) RuleKey {
 }
 
 // materializeRuleKeys decodes every rule key the PDR's derived identities
-// name, in order. It reads the store without the lock.
+// name, in order. The caller holds c.mu.
 func (c *Compiler) materializeRuleKeys(p *pdr) []RuleKey {
 	ids := c.st.ids(&p.rules)
 	keys := make([]RuleKey, 0, len(ids))
@@ -4001,8 +4005,7 @@ func (c *Compiler) materializeRuleKeys(p *pdr) []RuleKey {
 }
 
 // pdrRuleKeys is the PDR's rule keys: decoded from its identities, or derived
-// from its PDI where none were. It interns nothing, so a deletion, which runs
-// without the lock, may call it.
+// from its PDI where none were. The caller holds c.mu.
 func (c *Compiler) pdrRuleKeys(p *pdr) ([]RuleKey, error) {
 	if p.rules.n != 0 {
 		return c.materializeRuleKeys(p), nil
