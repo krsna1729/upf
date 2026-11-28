@@ -291,8 +291,10 @@ the baseline arm, the cgroup file charge varies 44–69 MiB at the delete phase
 edges. Evidence: `combined-main-r4/combined16-score.txt` and
 `combined-main-r2/peak-composition.md`.
 
-**Shared session counter readings (2026-11-22):** A deletion reads its last
-usage window with its own `get_counts` round trip. In the profile of
+**Shared session counter readings (2026-11-22):** Before #104, native-layout
+deletion read its last usage window with a `get_counts` round trip. It now
+gets those counters with its erase, so the deletion measurements below apply
+to the earlier path, not to current native-layout deletion. In the profile of
 `b8b8b23`, that unary call was 20.6% of upfd CPU in the 10K/s delete window
 and 9.6% in replace (`AppendRuleCounts`, inclusive). `windowsOf` now sends
 a reading at once when no reading of that module is in flight. Readings that
