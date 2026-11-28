@@ -578,7 +578,7 @@ func (c *Compiler) establish(req *message.SessionEstablishmentRequest, admit boo
 	// session's other record kinds -- FARs, QERs, URRs, BARs, MARs -- are the
 	// peer's counts too, so -max-records caps each kind at the same point.
 	if admit && (c.pdrCapRefuses(nil, pdrs, removals{}) ||
-		c.recordCapRefuses(nil, fars, bars, qers, urrs, mars, removals{}) != "") {
+		c.recordCapRefuses(nil, fars, bars, qers, urrs, mars, removals{}) != noRecord) {
 		c.log.Warn("session: the establishment names more records than one session may hold",
 			"cp_seid", cpSEID, "pdrs", len(pdrs), "max_pdrs", c.cfg.MaxPDRs,
 			"max_records", c.cfg.MaxRecords)
@@ -734,14 +734,14 @@ func (c *Compiler) modify(req *message.SessionModificationRequest) message.Messa
 	// the merge takes the request's records; a session already over a cap may
 	// still change without growing.
 	c.mu.Lock()
-	kind := "PDR"
+	kind := pdrRecord
 	if !c.pdrCapRefuses(s, pdrs, rm) {
 		kind = c.recordCapRefuses(s, fars, bars, qers, urrs, mars, rm)
 	}
 	c.mu.Unlock()
-	if kind != "" {
+	if kind != noRecord {
 		c.log.Warn("session: the modification would grow past the record cap",
-			"seid", seid, "kind", kind, "pdrs", len(pdrs), "max_pdrs", c.cfg.MaxPDRs,
+			"seid", seid, "kind", kind.String(), "pdrs", len(pdrs), "max_pdrs", c.cfg.MaxPDRs,
 			"max_records", c.cfg.MaxRecords)
 		return modifyResponse(req, hdr, ie.CauseNoResourcesAvailable, nil)
 	}
@@ -2952,14 +2952,31 @@ func (c *Compiler) pdrCapRefuses(s *Session, adds []pdrReq, rm removals) bool {
 	return len(ids) > int(c.cfg.MaxPDRs) && len(ids) > current
 }
 
+type recordKind uint8
+
+const (
+	noRecord recordKind = iota
+	pdrRecord
+	farRecord
+	barRecord
+	qerRecord
+	urrRecord
+	marRecord
+)
+
+func (k recordKind) String() string {
+	return [...]string{noRecord: "", pdrRecord: "PDR", farRecord: "FAR",
+		barRecord: "BAR", qerRecord: "QER", urrRecord: "URR", marRecord: "MAR"}[k]
+}
+
 // recordCapRefuses tests the peer-controlled kinds before snapshot or merge.
 // A removed QER or MAR still occupies a record until its erase settles.
 // The caller holds c.mu when s is not nil.
 func (c *Compiler) recordCapRefuses(s *Session, fars []farReq, bars []barReq, qers []qerReq,
-	urrs []urrReq, mars []marReq, rm removals) string {
+	urrs []urrReq, mars []marReq, rm removals) recordKind {
 	limit := int(c.cfg.MaxRecords)
 	if limit == 0 {
-		return ""
+		return noRecord
 	}
 	var nf, nb, nq, nu, nm int
 	if s != nil {
@@ -2970,25 +2987,25 @@ func (c *Compiler) recordCapRefuses(s *Session, fars []farReq, bars []barReq, qe
 	}
 	if recordGrowthRefused(limit, nf, fars, rm.fars, func(f farReq) uint32 { return f.id },
 		func(id uint32) bool { return s != nil && s.FARs().at(id) != nil }) {
-		return "FAR"
+		return farRecord
 	}
 	if recordGrowthRefused(limit, nb, bars, rm.bars, func(b barReq) uint8 { return b.id },
 		func(id uint8) bool { return s != nil && s.rare().BARs[id] != nil }) {
-		return "BAR"
+		return barRecord
 	}
 	if recordGrowthRefused(limit, nq, qers, nil, func(q qerReq) uint32 { return q.id },
 		func(id uint32) bool { return s != nil && s.QERs().at(id) != nil }) {
-		return "QER"
+		return qerRecord
 	}
 	if recordGrowthRefused(limit, nu, urrs, rm.urrs, func(u urrReq) uint32 { return u.id },
 		func(id uint32) bool { return s != nil && s.URRs().at(id) != nil }) {
-		return "URR"
+		return urrRecord
 	}
 	if recordGrowthRefused(limit, nm, mars, nil, func(m marReq) uint16 { return m.id },
 		func(id uint16) bool { return s != nil && s.rare().MARs[id] != nil }) {
-		return "MAR"
+		return marRecord
 	}
-	return ""
+	return noRecord
 }
 
 // recordGrowthRefused counts the net change, allowing an oversized restored
