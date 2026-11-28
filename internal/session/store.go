@@ -212,6 +212,15 @@ func (t *table[V]) release(h uint32) {
 	e.v = t.zero
 	t.live--
 	t.free = append(t.free, h)
+	if t.live == 0 && len(*t.dir.Load()) > 1 {
+		t.resetStorage()
+	}
+}
+
+// resetStorage releases an empty table without scanning its old slots.
+func (t *table[V]) resetStorage() {
+	t.dir.Store(nil)
+	t.next, t.free, t.index = 0, nil, nil
 }
 
 // indexInsert puts h into an open-addressing index, growing it past 3/4.
@@ -455,6 +464,13 @@ func (b *blobs) release(h uint32) {
 	}
 	indexDelete(b.index, h, e.hash, func(h uint32) uint32 { return b.entries.entry(h).hash })
 	b.live--
+	if b.live == 0 && len(*b.segs.Load()) > 1 {
+		b.segs.Store(nil)
+		b.entries.resetStorage()
+		b.shared, b.tail = -1, 0
+		b.freeSegs, b.holes, b.index = nil, nil, nil
+		return
+	}
 	if class := blobClass(e.v.n); class > blobSeg/4 {
 		segs := slices.Clone(*b.segs.Load())
 		segs[e.v.seg] = nil

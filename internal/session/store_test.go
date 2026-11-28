@@ -109,6 +109,29 @@ func TestBlobsShareBytesAndReuseFreedSpace(t *testing.T) {
 	}
 }
 
+func TestAnEmptiedStoreGivesBackMultiSegmentBacking(t *testing.T) {
+	var st store
+	var a, b Session
+	for i := uint64(1); i <= segSize+1; i++ {
+		st.ownPolicy(&a, qerPolicy{mbUL: i})
+	}
+	st.ownBlob(&b, bytes.Repeat([]byte{7}, blobSeg))
+	st.drop(&a)
+	if st.policies.dir.Load() != nil {
+		t.Fatal("the empty policy table kept its segments")
+	}
+	st.drop(&b)
+	if st.blobs.segs.Load() != nil {
+		t.Fatal("the empty blob store kept its segments")
+	}
+	want := []byte("refill")
+	h := st.ownBlob(&a, want)
+	if got := st.blobs.bytes(h); !bytes.Equal(got, want) {
+		t.Fatalf("refill: got %q, want %q", got, want)
+	}
+	st.drop(&a)
+}
+
 // TestASessionHoldsEachHandleOnceAndTrimGivesBackTheRest: own keeps one
 // reference per handle per session, trim gives back what no record names,
 // a snapshot holds trim off, and drop gives back everything.
