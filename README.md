@@ -187,9 +187,10 @@ as CI runs it, each test binary under its row.
 
 The last evidence run: **56 claims — 53 ok, 1 gap, 2 skip, 0 fail**.
 
-- Open: Packet Rate (QER packet caps and their query). MAR/ATSSS-LL is
-  implemented for active/standby; the other Steering Modes and MPTCP remain
-  open (`status-38`).
+- Packet Rate: the graph target enforces one packet-rate QER per PDR direction
+  and reports its status on query or requested release (`status-36`).
+- MAR/ATSSS-LL implements active/standby; other Steering Modes and MPTCP
+  remain open (`status-38`).
 - Skipped here: two claims whose lanes need environments this host lacks.
 - Real-SMF interop: stock free5GC v4.3.0, unshimmed, through session deletion
   (`docs/interop.md`).

@@ -1107,14 +1107,15 @@ holds 2N+16 entries, and UrrCount holds 64K because the sessions carry no URR.
   (`cmd/upfd/admission.go`). 0.7 is where the collector's share turns: 100K
   sessions, live heap 385 MB, modify spent 12.5%, 40.7% and 78.2% of `upfd`'s
   CPU in GC at 0.64, 0.78 and 0.93 of the limit.
-  The estimate is the heap the last collection kept live plus 1,600 B (above
-  the per-session bound below) for every session admitted since that collection
-  ended (`/gc/cycles/total:gc-cycles` tells when it did). Reading live alone
-  overshot during a fast fill: the sessions admitted between two collections
-  are not in it. Once closed, admission reopens only when the estimate is
-  0.05 of the limit under the share, so a node at the boundary does not open
-  and close on every collection. Under a 380 MiB scope (limit 342 MiB), 250K
-  establishments (`.scratch/evidence/admission-20261120/cap380-250k-*`):
+  The estimate is the heap the last collection kept live plus 1,600 B per
+  session admitted since that collection (`/gc/cycles/total:gc-cycles`).
+  This fixed increment comes from the small counted-session workload. It
+  is not an upper bound for sessions with more PDRs or other records; a
+  fill of larger sessions can overshoot the estimate between collections.
+  Once closed, admission reopens below the configured share by 0.05 of the
+  limit (less for very small shares; see `cmd/upfd/admission.go`). Under a
+  380 MiB scope (limit 342 MiB), 250K establishments
+  (`.scratch/evidence/admission-20261120/cap380-250k-*`):
 
   | | Admitted | Refused (cause 75) | Live / limit at the end | Peak | OOM |
   |---|---:|---:|---:|---:|---:|
